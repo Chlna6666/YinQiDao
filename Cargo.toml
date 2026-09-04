@@ -1,0 +1,86 @@
+[package]
+name = "yin_qi_dao"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "音栖岛：一款基于 GPUI 的音乐播放器"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+cpal = "0.16"
+crossbeam-channel = "0.5"
+directories = "6"
+encoding_rs = "0.8"
+md-5 = "0.10"
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
+lofty = "0.22"
+notify = "8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rfd = "0.17"
+ringbuf = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rusty-chromaprint = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "all-codecs",
+    "all-formats",
+    "all-meta",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+lucide-gpui = { path = "crates/lucide-gpui" }
+
+gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master" }
+souvlaki = "0.8.3"
+gpui-router = "0.3.0"
+rayon = "1.10"
+
+[target.'cfg(windows)'.dependencies]
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master", default-features = false, features = [
+    "windows-manifest",
+    "nova-gfx-dx12",
+    "nova-gfx-vulkan",
+    "build-shader-validation",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master", default-features = false, features = [
+    "nova-gfx-metal",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master", default-features = false, features = [
+    "nova-gfx-vulkan",
+    "wayland",
+    "x11",
+] }
+
+# The GPUI branch's Nova DX12 path uses BMCBL's patched gpu-allocator report API.
+# Keep this local bridge until that patch is published by the upstream branch.
+[patch.crates-io]
+gpu-allocator = { path = "vendor/gpu-allocator" }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master" }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[dev-dependencies]

@@ -1,0 +1,35 @@
+from_latest_tag = false
+ignore_merge_commits = true
+tag_prefix = "v"
+
+[changelog]
+path = "CHANGELOG.md"
+
+[commit_types]
+feat = { changelog_title = "Features", bump_minor = true, order = 1 }
+fix = { changelog_title = "Bug Fixes", bump_patch = true, order = 2 }
+docs = { changelog_title = "Documentation", order = 3 }
+style = { changelog_title = "Style", order = 4 }
+refactor = { changelog_title = "Refactoring", order = 5 }
+perf = { changelog_title = "Performance", order = 6 }
+test = { changelog_title = "Tests", order = 7 }
+build = { changelog_title = "Build", order = 8 }
+ci = { changelog_title = "Continuous Integration", order = 9 }
+chore = { changelog_title = "Chores", order = 10 }
+revert = { changelog_title = "Reverts", order = 11 }
+
+[git_hooks.commit-msg]
+script = """#!/bin/sh
+set -e
+cog verify --file "$1"
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+  if git rev-parse --verify origin/main >/dev/null 2>&1; then
+    check_start="$(git rev-list --reverse origin/main..HEAD | head -n 1)"
+  else
+    check_start="$(git rev-list --reverse HEAD | head -n 1)"
+  fi
+  if [ -n "$check_start" ]; then
+    cog check --ignore-merge-commits "$check_start.."
+  fi
+fi
+"""

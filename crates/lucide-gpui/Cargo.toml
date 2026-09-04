@@ -1,0 +1,20 @@
+[package]
+name = "lucide-gpui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+build = "build.rs"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", branch = "master", default-features = false }
+anyhow = "1.0.100"
+
+[build-dependencies]
+anyhow = "1.0.100"

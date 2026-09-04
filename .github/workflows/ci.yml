@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check compilation
+        run: cargo check --locked
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  commits:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Cocogitto
+        run: cargo install cocogitto --locked
+
+      - name: Check introduced commits
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            RANGE_START="$(git rev-list --reverse "${BASE_SHA}..HEAD" | head -n 1)"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            RANGE_START="$(git rev-list --reverse HEAD | head -n 1)"
+          else
+            RANGE_START="$(git rev-list --reverse "${BEFORE_SHA}..HEAD" | head -n 1)"
+          fi
+          if [[ -n "$RANGE_START" ]]; then
+            cog check --ignore-merge-commits "${RANGE_START}.."
+          else
+            echo "No introduced commits to check."
+          fi

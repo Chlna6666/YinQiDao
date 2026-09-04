@@ -1,0 +1,36 @@
+# Rust build output
+/target/
+
+# IDE and editor metadata
+/.idea/
+/.vscode/
+*.iml
+*.suo
+*.user
+
+# Local runtime data and generated media metadata
+/.yinqidao/
+/data/
+/cache/
+/logs/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+/config.local.toml
+
+# Temporary files and platform build artifacts
+*.tmp
+*.temp
+*.bak
+*.exe
+*.pdb
+**/.cargo-ok
+**/.cargo_vcs_info.json
+.DS_Store
+Thumbs.db
