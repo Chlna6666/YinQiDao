@@ -2,6 +2,7 @@ pub mod components;
 mod enrichment;
 mod home;
 mod library;
+#[allow(dead_code)]
 #[path = "player.rs"]
 mod player_legacy;
 #[rustfmt::skip]
