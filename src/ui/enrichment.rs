@@ -150,7 +150,8 @@ impl MusicApp {
                         // was already playing. Patch the one in-memory Track and refresh exactly one
                         // engine registry entry instead.
                         let mut updated_track = None;
-                        if let Some(track) = this.tracks.iter_mut().find(|track| track.id == track_id)
+                        if let Some(track) =
+                            this.tracks.iter_mut().find(|track| track.id == track_id)
                         {
                             if let Some(metadata) = outcome.result.metadata.as_ref() {
                                 track.title.clone_from(&metadata.title);
