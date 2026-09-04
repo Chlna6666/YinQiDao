@@ -63,16 +63,11 @@ impl SnapshotCache {
         }
     }
 
-    fn store(&self, mut snapshot: PlayerSnapshot) {
+    fn store(&self, snapshot: PlayerSnapshot) {
         self.store_progress(snapshot.state, snapshot.position_ms, snapshot.duration_ms);
 
-        // The application never consumes PlayerSnapshot::queue; queue ownership lives in
-        // MusicApp::config. Keeping the decoder queue in the retained UI snapshot would make every
-        // UI snapshot clone copy the entire library while playback is active.
-        snapshot.queue.clear();
-
-        // Always write the inactive slot. If GPUI is still reading that old slot, only this
-        // background bridge waits; the application thread never waits for the writer.
+        // PlayerSnapshot::queue is Arc-backed, so structural snapshots share the decoder queue
+        // without copying the entire TrackId array on every bridge refresh.
         let current = self.active.load(Ordering::Acquire) & 1;
         let inactive = 1 - current;
         if let Ok(mut slot) = self.slots[inactive].write() {
@@ -227,9 +222,8 @@ impl AudioEngine {
     }
 
     pub fn try_send(&self, command: PlayerCommand) -> bool {
-        // Extract only the tiny optimistic state before moving the command. Cloning PlayerCommand
-        // here used to deep-copy SetQueue(Vec<TrackId>) on the GPUI thread for every play/queue
-        // action, defeating the non-blocking façade for large libraries.
+        // Extract only the tiny optimistic state before moving the command. PlayerCommand queue
+        // payloads are Arc-backed, so cloning/transporting queue state never deep-copies TrackIds.
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         match self.request_tx.try_send(EngineRequest::Command(command)) {
             Ok(()) => {
@@ -407,13 +401,15 @@ mod tests {
     }
 
     #[test]
-    fn ui_snapshot_does_not_copy_decoder_queue() {
+    fn ui_snapshot_shares_decoder_queue() {
+        let queue = Arc::new(vec![1, 2, 3, 4]);
         let source = PlayerSnapshot {
-            queue: vec![1, 2, 3, 4],
+            queue: queue.clone(),
             ..PlayerSnapshot::default()
         };
         let cache = SnapshotCache::new(PlayerSnapshot::default());
         cache.store(source);
-        assert!(cache.snapshot().queue.is_empty());
+        let loaded = cache.snapshot();
+        assert!(Arc::ptr_eq(&loaded.queue, &queue));
     }
 }
