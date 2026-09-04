@@ -132,6 +132,7 @@ impl SnapshotCache {
             .store(encode_state(state), Ordering::Release);
     }
 
+    #[cfg(test)]
     fn optimistic_command(&self, command: &PlayerCommand) {
         if let Some(state) = Self::optimistic_state(command) {
             self.set_optimistic_state(state);
