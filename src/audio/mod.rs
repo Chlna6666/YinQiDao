@@ -1,6 +1,7 @@
 mod command_queue;
 mod decoder;
 mod dsp;
+#[allow(dead_code)]
 mod engine;
 #[rustfmt::skip]
 mod facade;
