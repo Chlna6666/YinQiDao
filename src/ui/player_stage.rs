@@ -4,7 +4,8 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, CompositeLayerExt as _,
+    Context, Easing,
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString,
     StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
     prelude::*, px, radians, relative, rgb,
@@ -64,7 +65,6 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             palette,
             app.config.dynamic_blur,
             app.config.blur_radius,
-            snapshot.state == PlaybackState::Playing,
         ))
         .child(
             div()
@@ -570,10 +570,11 @@ fn ambient_background(
     palette: Option<&ArtworkPalette>,
     dynamic: bool,
     blur_radius: f32,
-    playing: bool,
 ) -> impl IntoElement {
     let id = id.unwrap_or_default();
-    let animate = dynamic && playing;
+    // Keep the Apple Music-style field alive while the immersive stage is open, including
+    // paused playback. Dynamic blur controls whether the field is animated at all.
+    let animate = dynamic;
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
 
     // Keep the expensive Gaussian surface bounded. The motion itself is renderer-owned and only
@@ -604,15 +605,15 @@ fn ambient_background(
             -0.20,
             0.62,
             0.70,
-            0.08,
-            0.13,
-            0.82,
-            0.74,
+            0.02,
+            0.03,
+            0.68,
+            0.58,
             24.0,
             c1,
             0.74,
             sigma,
-            29,
+            17,
             1.0,
             animate,
         ))
@@ -622,15 +623,15 @@ fn ambient_background(
             -0.10,
             0.58,
             0.66,
-            0.12,
-            0.05,
-            0.76,
-            0.82,
+            0.30,
+            0.08,
+            0.62,
+            0.64,
             208.0,
             c2,
             0.70,
             sigma * 0.92,
-            37,
+            23,
             -1.0,
             animate,
         ))
@@ -640,15 +641,15 @@ fn ambient_background(
             0.45,
             0.54,
             0.58,
-            0.04,
             0.10,
-            0.84,
-            0.76,
+            0.32,
+            0.66,
+            0.58,
             301.0,
             c3,
             0.66,
             sigma * 1.06,
-            43,
+            31,
             1.0,
             animate,
         ))
@@ -709,15 +710,16 @@ fn orbit_blob(
         .top(relative(top))
         .w(relative(width))
         .h(relative(height))
-        .child(blob);
+        .child(blob)
+        .composite_layer();
 
     if !animate {
         return orbit.into_any_element();
     }
 
-    // Built-in easing is GPU/scene-driver friendly. The asymmetric child makes local rotation look
-    // like a slow drift while the container's dirty envelope stays local. 29/37/43 are pairwise
-    // coprime, so the composite pattern has a long repeat period without a CPU animation loop.
+    // The child is deliberately off-center, so a retained compositor rotation becomes visible
+    // orbital drift instead of spinning an almost symmetric blob in place. 17/23/31 are pairwise
+    // coprime, keeping a long composite repeat period without a CPU animation loop.
     let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
         .repeat(RepeatMode::Forever)
         .ease(Easing::InOutCubic);

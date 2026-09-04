@@ -30,7 +30,6 @@ fn test_worker(
         paused.clone(),
         AudioWorkerConfig {
             output_rate: 8_000,
-            volume: 1.0,
             eq: EqSettings::default(),
             spatial: SpatialSettings::default(),
         },
@@ -115,7 +114,6 @@ fn full_output_ring_keeps_worker_playing() {
         paused,
         AudioWorkerConfig {
             output_rate: 8_000,
-            volume: 1.0,
             eq: EqSettings::default(),
             spatial: SpatialSettings::default(),
         },

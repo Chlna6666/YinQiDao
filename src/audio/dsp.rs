@@ -212,10 +212,6 @@ impl AudioProcessor {
         }
     }
 
-    pub fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
-    }
-
     #[cfg(test)]
     pub fn process(&mut self, input: &[f32], input_rate: u32, input_channels: u16) -> Vec<f32> {
         let mut output = Vec::new();
@@ -262,7 +258,7 @@ pub fn clamp_spatial(mut settings: SpatialSettings) -> SpatialSettings {
     settings
 }
 
-fn perceptual_volume_gain(volume: f32) -> f32 {
+pub(crate) fn perceptual_volume_gain(volume: f32) -> f32 {
     let volume = volume.clamp(0.0, 1.0);
     volume * volume
 }

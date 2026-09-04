@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -24,7 +24,7 @@ use crate::{
     audio::{
         command_queue::CommandQueue,
         decoder::{DecodeError, DecoderStream},
-        dsp::AudioProcessor,
+        dsp::{AudioProcessor, perceptual_volume_gain},
     },
     model::{
         EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SpatialSettings, Track, TrackId,
@@ -98,6 +98,7 @@ pub struct AudioEngine {
     snapshot: Arc<RwLock<PlayerSnapshot>>,
     paused: Arc<AtomicBool>,
     flush: Arc<AtomicBool>,
+    output_gain: Arc<AtomicU32>,
     _stream: Stream,
     _worker: thread::JoinHandle<()>,
 }
@@ -142,12 +143,14 @@ impl AudioEngine {
         let (producer, consumer) = ring.split();
         let flush = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
+        let output_gain = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
         let stream = build_output_stream(
             &device,
             &supported,
             consumer,
             flush.clone(),
             paused.clone(),
+            output_gain.clone(),
             event_tx.clone(),
         )?;
         stream.play().context("启动音频输出流失败")?;
@@ -170,7 +173,6 @@ impl AudioEngine {
                     worker_paused,
                     AudioWorkerConfig {
                         output_rate,
-                        volume,
                         eq,
                         spatial,
                     },
@@ -186,6 +188,7 @@ impl AudioEngine {
             snapshot,
             paused,
             flush,
+            output_gain,
             _stream: stream,
             _worker: worker,
         })
@@ -218,6 +221,7 @@ impl AudioEngine {
             }
             PlayerCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0.0, 1.0);
+                self.output_gain.store(volume.to_bits(), Ordering::Release);
                 if let Ok(mut snapshot) = self.snapshot.write() {
                     snapshot.volume = volume;
                 }
@@ -311,7 +315,6 @@ struct AudioWorker {
 
 struct AudioWorkerConfig {
     output_rate: u32,
-    volume: f32,
     eq: EqSettings,
     spatial: SpatialSettings,
 }
@@ -336,12 +339,10 @@ impl AudioWorker {
             snapshot,
             flush,
             paused,
-            processor: AudioProcessor::new(
-                config.output_rate,
-                config.eq,
-                config.spatial,
-                config.volume,
-            ),
+            // Main volume is a post-buffer output gain. Keep decoded PCM at unity so
+            // a new volume value can affect the very next device callback instead of waiting for
+            // the ring buffer to drain.
+            processor: AudioProcessor::new(config.output_rate, config.eq, config.spatial, 1.0),
             decoded_samples: Vec::new(),
             processed_samples: Vec::new(),
             decoder: None,
@@ -474,7 +475,6 @@ impl AudioWorker {
             }
             PlayerCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0.0, 1.0);
-                self.processor.set_volume(volume);
                 if let Ok(mut snapshot) = self.snapshot.write() {
                     snapshot.volume = volume;
                 }
@@ -779,6 +779,7 @@ fn build_output_stream(
     mut consumer: ringbuf::HeapCons<f32>,
     flush: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    output_gain: Arc<AtomicU32>,
     event_tx: Sender<PlayerEvent>,
 ) -> Result<Stream> {
     let config: StreamConfig = supported.clone().into();
@@ -789,7 +790,15 @@ fn build_output_stream(
     let stream = match supported.sample_format() {
         SampleFormat::F32 => device.build_output_stream(
             &config,
-            move |data: &mut [f32], _| fill_f32(data, channels, &mut consumer, &flush, &paused),
+            move |data: &mut [f32], _| {
+                fill_f32(data, channels, &mut consumer, &flush, &paused);
+                let gain = current_output_gain(&output_gain);
+                if gain != 1.0 {
+                    for sample in data {
+                        *sample *= gain;
+                    }
+                }
+            },
             move |error: cpal::StreamError| {
                 let _ = f32_events
                     .try_send(PlayerEvent::Error(PlaybackError::Output(error.to_string())));
@@ -798,7 +807,18 @@ fn build_output_stream(
         ),
         SampleFormat::I16 => device.build_output_stream(
             &config,
-            move |data: &mut [i16], _| fill_i16(data, channels, &mut consumer, &flush, &paused),
+            move |data: &mut [i16], _| {
+                fill_i16(data, channels, &mut consumer, &flush, &paused);
+                let gain = current_output_gain(&output_gain);
+                if gain != 1.0 {
+                    for sample in data {
+                        *sample = ((*sample as f32 * gain)
+                            .round()
+                            .clamp(i16::MIN as f32, i16::MAX as f32))
+                            as i16;
+                    }
+                }
+            },
             move |error: cpal::StreamError| {
                 let _ = i16_events
                     .try_send(PlayerEvent::Error(PlaybackError::Output(error.to_string())));
@@ -807,7 +827,19 @@ fn build_output_stream(
         ),
         SampleFormat::U16 => device.build_output_stream(
             &config,
-            move |data: &mut [u16], _| fill_u16(data, channels, &mut consumer, &flush, &paused),
+            move |data: &mut [u16], _| {
+                fill_u16(data, channels, &mut consumer, &flush, &paused);
+                let gain = current_output_gain(&output_gain);
+                if gain != 1.0 {
+                    const CENTER: f32 = 32768.0;
+                    for sample in data {
+                        let centered = *sample as f32 - CENTER;
+                        *sample = (CENTER + centered * gain)
+                            .round()
+                            .clamp(0.0, u16::MAX as f32) as u16;
+                    }
+                }
+            },
             move |error: cpal::StreamError| {
                 let _ = u16_events
                     .try_send(PlayerEvent::Error(PlaybackError::Output(error.to_string())));
@@ -818,6 +850,11 @@ fn build_output_stream(
     }
     .map_err(|error| anyhow!("创建音频输出流失败: {error}"))?;
     Ok(stream)
+}
+
+#[inline]
+fn current_output_gain(output_gain: &AtomicU32) -> f32 {
+    perceptual_volume_gain(f32::from_bits(output_gain.load(Ordering::Acquire)))
 }
 
 fn read_stereo(consumer: &mut ringbuf::HeapCons<f32>) -> (f32, f32) {
