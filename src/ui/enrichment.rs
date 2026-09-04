@@ -143,14 +143,45 @@ impl MusicApp {
                             );
                             this.artwork_missing.remove(&track_id);
                         }
+
+                        // Enrichment only changes one logical track. Re-querying the entire library
+                        // here used to make the GPUI callback clone every Track again before
+                        // register_tracks, producing a visible hitch on large libraries while a song
+                        // was already playing. Patch the one in-memory Track and refresh exactly one
+                        // engine registry entry instead.
+                        let mut updated_track = None;
+                        if let Some(track) = this.tracks.iter_mut().find(|track| track.id == track_id)
+                        {
+                            if let Some(metadata) = outcome.result.metadata.as_ref() {
+                                track.title.clone_from(&metadata.title);
+                                track.artist.clone_from(&metadata.artist);
+                                track.album.clone_from(&metadata.album);
+                            }
+                            if let Some(artwork_key) = outcome.artwork_key.as_ref() {
+                                track.artwork_key = Some(artwork_key.clone());
+                            }
+                            updated_track = Some(track.clone());
+                        }
+
+                        if let Some(track) = updated_track {
+                            if let Some(current) = this
+                                .snapshot
+                                .current_track
+                                .as_mut()
+                                .filter(|current| current.id == track_id)
+                            {
+                                current.clone_from(&track);
+                            }
+                            if let Some(engine) = &this.engine {
+                                engine.register_tracks(std::iter::once(track));
+                            }
+                        }
+
                         if let Some(metadata) = outcome.result.metadata.as_ref() {
                             let source = metadata.source.as_deref().unwrap_or("在线服务");
-                            this.refresh_tracks_async(
-                                cx,
-                                Some(format!("已从{source}更新歌曲信息")),
-                            );
+                            this.status = format!("已从{source}更新歌曲信息");
                         } else if outcome.artwork_key.is_some() {
-                            this.refresh_tracks_async(cx, Some("在线封面已更新".into()));
+                            this.status = "在线封面已更新".into();
                         } else if this.lyrics.contains_key(&track_id) {
                             this.status = "歌词已就绪".into();
                         } else {
