@@ -1,6 +1,7 @@
 pub mod components;
 mod enrichment;
 mod home;
+#[rustfmt::skip]
 mod library;
 #[allow(dead_code)]
 #[path = "player.rs"]
