@@ -9,8 +9,8 @@ use gpui::{
 use lucide_gpui::icons as lucide_icons;
 
 use crate::{
-    audio::AudioEngine,
-    model::{AppPage, LibraryTab, PlaybackState, RepeatMode, Track},
+    audio::{AudioEngine, PlayerCommand},
+    model::{AppPage, LibraryTab, PlaybackState, RepeatMode},
 };
 
 use super::{
@@ -264,7 +264,9 @@ pub(super) fn mini_player(
                     && this.drag_target == Some(DragTarget::Volume)
                 {
                     let ratio = this.mini_volume_ratio(f32::from(event.position.x), window);
-                    this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                    if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
+                        this.send(PlayerCommand::SetVolume(ratio));
+                    }
                 }
             }),
         )
@@ -628,6 +630,7 @@ pub(super) fn mini_player(
                                             gpui::MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
                                                 cx.stop_propagation();
+                                                this.pending_volume_ratio = None;
                                                 this.toggle_mute(cx);
                                             }),
                                         ),
@@ -649,6 +652,7 @@ pub(super) fn mini_player(
                                                     window,
                                                 );
                                                 this.begin_drag(DragTarget::Volume, ratio, cx);
+                                                this.send(PlayerCommand::SetVolume(ratio));
                                             },
                                         ),
                                     )
@@ -661,11 +665,13 @@ pub(super) fn mini_player(
                                                     f32::from(event.position.x),
                                                     window,
                                                 );
-                                                this.update_drag_ratio(
+                                                if this.update_drag_ratio(
                                                     DragTarget::Volume,
                                                     ratio,
                                                     cx,
-                                                );
+                                                ) {
+                                                    this.send(PlayerCommand::SetVolume(ratio));
+                                                }
                                             }
                                         },
                                     ))
