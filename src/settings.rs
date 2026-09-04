@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -23,7 +23,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub shuffle: bool,
     #[serde(default)]
-    pub queue: Vec<TrackId>,
+    pub queue: Arc<Vec<TrackId>>,
     #[serde(default)]
     pub current_track: Option<TrackId>,
     #[serde(default)]
@@ -96,7 +96,7 @@ impl Default for AppConfig {
             spatial: SpatialSettings::default(),
             repeat: RepeatMode::Off,
             shuffle: false,
-            queue: Vec::new(),
+            queue: Arc::new(Vec::new()),
             current_track: None,
             position_ms: 0,
             dynamic_blur: default_dynamic_blur(),
@@ -174,7 +174,7 @@ mod tests {
         };
         let config = AppConfig {
             volume: 0.42,
-            queue: vec![3, 8, 13],
+            queue: Arc::new(vec![3, 8, 13]),
             current_track: Some(8),
             position_ms: 12_345,
             eq,
@@ -184,7 +184,7 @@ mod tests {
 
         let restored = store.load().expect("load");
         assert!((restored.volume - 0.42).abs() < f32::EPSILON);
-        assert_eq!(restored.queue, vec![3, 8, 13]);
+        assert_eq!(restored.queue.as_slice(), &[3, 8, 13]);
         assert_eq!(restored.current_track, Some(8));
         assert_eq!(restored.position_ms, 12_345);
         assert_eq!(restored.eq.bands_db[4], 5.5);
