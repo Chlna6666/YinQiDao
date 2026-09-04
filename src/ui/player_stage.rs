@@ -720,9 +720,10 @@ fn orbit_blob(
     // The child is deliberately off-center, so a retained compositor rotation becomes visible
     // orbital drift instead of spinning an almost symmetric blob in place. 17/23/31 are pairwise
     // coprime, keeping a long composite repeat period without a CPU animation loop.
+    // Linear easing keeps angular velocity constant across revolution boundaries.
     let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
         .repeat(RepeatMode::Forever)
-        .ease(Easing::InOutCubic);
+        .ease(Easing::Linear);
     let rotation = Animation::from_spec(spec).with_property(AnimationProperty::rotation(
         radians(0.0),
         radians(std::f32::consts::TAU * direction),
