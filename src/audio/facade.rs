@@ -257,8 +257,12 @@ fn run_bridge(
 
     while running.load(Ordering::Acquire) {
         match request_rx.recv_timeout(Duration::from_millis(4)) {
-            Ok(request) if !apply_request(&engine, request) => break,
-            Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Ok(request) => {
+                if !apply_request(&engine, request) {
+                    break;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
@@ -330,8 +334,10 @@ mod tests {
         cache.optimistic_command(&PlayerCommand::Play);
         assert_eq!(cache.progress().0, PlaybackState::Playing);
 
-        let mut confirmed = PlayerSnapshot::default();
-        confirmed.state = PlaybackState::Playing;
+        let confirmed = PlayerSnapshot {
+            state: PlaybackState::Playing,
+            ..PlayerSnapshot::default()
+        };
         cache.store(confirmed);
         assert_eq!(cache.progress().0, PlaybackState::Playing);
         assert_eq!(cache.state_override.load(Ordering::Acquire), NO_STATE_OVERRIDE);
@@ -339,9 +345,11 @@ mod tests {
 
     #[test]
     fn snapshot_double_buffer_preserves_metadata() {
-        let mut snapshot = PlayerSnapshot::default();
-        snapshot.position_ms = 1_234;
-        snapshot.duration_ms = 9_876;
+        let snapshot = PlayerSnapshot {
+            position_ms: 1_234,
+            duration_ms: 9_876,
+            ..PlayerSnapshot::default()
+        };
         let cache = SnapshotCache::new(PlayerSnapshot::default());
         cache.store(snapshot);
         let loaded = cache.snapshot();
