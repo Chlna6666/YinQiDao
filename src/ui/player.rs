@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use gpui::{
     Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render,
-    StatefulInteractiveElement as _, Timer, WeakEntity, Window, div, hsla, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    StatefulInteractiveElement as _, Timer, WeakEntity, Window, div, hsla, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
@@ -17,8 +17,8 @@ use super::{
     components::{SliderStyle, smooth_slider},
     shell::{DragTarget, MusicApp},
     theme::{
-        self, ACCENT_RED, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-        TEXT_WHITE, elegant_gradient_for, press_transition, themed_icon,
+        self, ACCENT_RED, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
+        elegant_gradient_for, press_transition, themed_icon,
     },
 };
 
@@ -240,7 +240,9 @@ pub(super) fn mini_player(
     let track = snapshot.current_track.as_ref();
     let track_id = track.map(|track| track.id);
     let title = track.map_or("等待播放", |track| track.title.as_str());
-    let artist = track.map_or("点击曲库开启音乐旅程", |track| track.artist.as_str());
+    let artist = track.map_or("点击曲库开启音乐旅程", |track| {
+        track.artist.as_str()
+    });
     let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
 
     div()
@@ -251,19 +253,21 @@ pub(super) fn mini_player(
         .border_color(BORDER_HAIRLINE)
         .flex()
         .flex_col()
-        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-            if (this.seeking || event.dragging())
-                && this.drag_target == Some(DragTarget::Progress)
-            {
-                let ratio = this.mini_progress_ratio(f32::from(event.position.x), window);
-                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-            } else if (this.volume_dragging || event.dragging())
-                && this.drag_target == Some(DragTarget::Volume)
-            {
-                let ratio = this.mini_volume_ratio(f32::from(event.position.x), window);
-                this.update_drag_ratio(DragTarget::Volume, ratio, cx);
-            }
-        }))
+        .on_mouse_move(
+            cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                if (this.seeking || event.dragging())
+                    && this.drag_target == Some(DragTarget::Progress)
+                {
+                    let ratio = this.mini_progress_ratio(f32::from(event.position.x), window);
+                    this.update_drag_ratio(DragTarget::Progress, ratio, cx);
+                } else if (this.volume_dragging || event.dragging())
+                    && this.drag_target == Some(DragTarget::Volume)
+                {
+                    let ratio = this.mini_volume_ratio(f32::from(event.position.x), window);
+                    this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                }
+            }),
+        )
         .on_mouse_up(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -426,7 +430,11 @@ pub(super) fn mini_player(
                                         .justify_center()
                                         .rounded_full()
                                         .cursor_pointer()
-                                        .bg(if is_playing { ACCENT_RED } else { rgb(0x1d_1d_1f) })
+                                        .bg(if is_playing {
+                                            ACCENT_RED
+                                        } else {
+                                            rgb(0x1d_1d_1f)
+                                        })
                                         .hover(|style| style.opacity(0.90))
                                         .transition(press_transition())
                                         .active(|style| style.scale(0.94))
@@ -565,13 +573,15 @@ pub(super) fn mini_player(
                                 .justify_center()
                                 .rounded_full()
                                 .cursor_pointer()
-                                .bg(if app.page == AppPage::Library
-                                    && app.library_tab == LibraryTab::Playlists
-                                {
-                                    theme::accent_red_muted()
-                                } else {
-                                    hsla(0.0, 0.0, 0.0, 0.0)
-                                })
+                                .bg(
+                                    if app.page == AppPage::Library
+                                        && app.library_tab == LibraryTab::Playlists
+                                    {
+                                        theme::accent_red_muted()
+                                    } else {
+                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                    },
+                                )
                                 .hover(|style| style.bg(theme::bg_hover()))
                                 .transition(press_transition())
                                 .active(|style| style.scale(0.92))
@@ -736,9 +746,11 @@ impl Render for NowPlaying {
                     Timer::after(NOW_PLAYING_REFRESH_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
-                            if this.engine.as_ref().is_some_and(|engine| {
-                                engine.progress().0 == PlaybackState::Playing
-                            }) {
+                            if this
+                                .engine
+                                .as_ref()
+                                .is_some_and(|engine| engine.progress().0 == PlaybackState::Playing)
+                            {
                                 cx.notify();
                             }
                         })
@@ -755,10 +767,14 @@ impl Render for NowPlaying {
         let snapshot = self
             .engine
             .as_ref()
-            .map_or_else(crate::model::PlayerSnapshot::default, |engine| engine.snapshot());
+            .map_or_else(crate::model::PlayerSnapshot::default, |engine| {
+                engine.snapshot()
+            });
         let track = snapshot.current_track.as_ref();
         let title = track.map_or("等待播放", |track| track.title.as_str());
-        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| track.artist.as_str());
+        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| {
+            track.artist.as_str()
+        });
         let artwork = self.artwork.clone();
         let bg = if self.dynamic_blur {
             rgb(0x11131c)
