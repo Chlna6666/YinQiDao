@@ -18,15 +18,17 @@ use super::engine::{
 
 const REQUEST_QUEUE_CAPACITY: usize = 128;
 const EVENT_QUEUE_CAPACITY: usize = 256;
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(25);
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
+const STRUCTURAL_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 
 /// UI-facing audio facade.
 ///
 /// The decoder/output engine owns blocking locks internally. None of those locks are ever touched
-/// from GPUI after construction: commands cross a bounded non-blocking mailbox and snapshots are
-/// double-buffered by a dedicated bridge thread. A stalled decoder therefore cannot stall input,
-/// hover, layout or paint on the application thread.
+/// from GPUI after construction: commands cross a bounded non-blocking mailbox, hot playback
+/// progress is published through atomics, and structural snapshots are double-buffered by a
+/// dedicated bridge thread. A stalled decoder therefore cannot stall input, hover, layout or paint
+/// on the application thread.
 pub struct AudioEngine {
     request_tx: Sender<EngineRequest>,
     event_rx: Receiver<PlayerEvent>,
@@ -61,19 +63,13 @@ impl SnapshotCache {
         }
     }
 
-    fn store(&self, snapshot: PlayerSnapshot) {
-        let raw_state = encode_state(snapshot.state);
-        self.state.store(raw_state, Ordering::Release);
-        self.position_ms
-            .store(snapshot.position_ms, Ordering::Release);
-        self.duration_ms
-            .store(snapshot.duration_ms, Ordering::Release);
+    fn store(&self, mut snapshot: PlayerSnapshot) {
+        self.store_progress(snapshot.state, snapshot.position_ms, snapshot.duration_ms);
 
-        let desired = self.state_override.load(Ordering::Acquire);
-        if desired != NO_STATE_OVERRIDE && desired == raw_state {
-            self.state_override
-                .store(NO_STATE_OVERRIDE, Ordering::Release);
-        }
+        // The application never consumes PlayerSnapshot::queue; queue ownership lives in
+        // MusicApp::config. Keeping the decoder queue in the retained UI snapshot would make every
+        // UI snapshot clone copy the entire library while playback is active.
+        snapshot.queue.clear();
 
         // Always write the inactive slot. If GPUI is still reading that old slot, only this
         // background bridge waits; the application thread never waits for the writer.
@@ -82,6 +78,19 @@ impl SnapshotCache {
         if let Ok(mut slot) = self.slots[inactive].write() {
             *slot = snapshot;
             self.active.store(inactive, Ordering::Release);
+        }
+    }
+
+    fn store_progress(&self, state: PlaybackState, position_ms: u64, duration_ms: u64) {
+        let raw_state = encode_state(state);
+        self.state.store(raw_state, Ordering::Release);
+        self.position_ms.store(position_ms, Ordering::Release);
+        self.duration_ms.store(duration_ms, Ordering::Release);
+
+        let desired = self.state_override.load(Ordering::Acquire);
+        if desired != NO_STATE_OVERRIDE && desired == raw_state {
+            self.state_override
+                .store(NO_STATE_OVERRIDE, Ordering::Release);
         }
     }
 
@@ -253,11 +262,14 @@ fn run_bridge(
     snapshot: Arc<SnapshotCache>,
     running: Arc<AtomicBool>,
 ) {
-    let mut last_snapshot = Instant::now() - SNAPSHOT_INTERVAL;
+    let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
+    let mut last_snapshot = Instant::now() - STRUCTURAL_SNAPSHOT_INTERVAL;
 
     while running.load(Ordering::Acquire) {
+        let mut refresh_snapshot = false;
         match request_rx.recv_timeout(Duration::from_millis(4)) {
             Ok(request) => {
+                refresh_snapshot |= request_refreshes_snapshot(&request);
                 if !apply_request(&engine, request) {
                     break;
                 }
@@ -266,11 +278,12 @@ fn run_bridge(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Drain a bounded burst so transport input cannot starve snapshot/event publication.
+        // Drain a bounded burst so transport input cannot starve progress/event publication.
         for _ in 0..32 {
             let Ok(request) = request_rx.try_recv() else {
                 break;
             };
+            refresh_snapshot |= request_refreshes_snapshot(&request);
             if !apply_request(&engine, request) {
                 running.store(false, Ordering::Release);
                 break;
@@ -278,13 +291,33 @@ fn run_bridge(
         }
 
         for event in engine.drain_events() {
+            if !matches!(event, PlayerEvent::PositionChanged(_)) {
+                refresh_snapshot = true;
+            }
             let _ = event_tx.try_send(event);
         }
 
-        if last_snapshot.elapsed() >= SNAPSHOT_INTERVAL {
+        if last_progress.elapsed() >= PROGRESS_INTERVAL {
+            let (state, position_ms, duration_ms) = engine.progress();
+            snapshot.store_progress(state, position_ms, duration_ms);
+            last_progress = Instant::now();
+        }
+
+        if refresh_snapshot || last_snapshot.elapsed() >= STRUCTURAL_SNAPSHOT_INTERVAL {
             snapshot.store(engine.snapshot());
             last_snapshot = Instant::now();
         }
+    }
+}
+
+fn request_refreshes_snapshot(request: &EngineRequest) -> bool {
+    match request {
+        EngineRequest::Command(
+            PlayerCommand::Seek(_) | PlayerCommand::SetEq(_) | PlayerCommand::SetSpatial(_),
+        )
+        | EngineRequest::RegisterTracks(_)
+        | EngineRequest::Shutdown => false,
+        EngineRequest::Command(_) => true,
     }
 }
 
@@ -344,16 +377,32 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_double_buffer_preserves_metadata() {
-        let snapshot = PlayerSnapshot {
-            position_ms: 1_234,
-            duration_ms: 9_876,
+    fn hot_progress_does_not_replace_structural_snapshot() {
+        let structural = PlayerSnapshot {
+            volume: 0.42,
+            position_ms: 10,
+            duration_ms: 1_000,
             ..PlayerSnapshot::default()
         };
         let cache = SnapshotCache::new(PlayerSnapshot::default());
-        cache.store(snapshot);
+        cache.store(structural);
+        cache.store_progress(PlaybackState::Playing, 700, 1_000);
+
         let loaded = cache.snapshot();
-        assert_eq!(loaded.position_ms, 1_234);
-        assert_eq!(loaded.duration_ms, 9_876);
+        assert_eq!(loaded.volume, 0.42);
+        assert_eq!(loaded.state, PlaybackState::Playing);
+        assert_eq!(loaded.position_ms, 700);
+        assert_eq!(loaded.duration_ms, 1_000);
+    }
+
+    #[test]
+    fn ui_snapshot_does_not_copy_decoder_queue() {
+        let source = PlayerSnapshot {
+            queue: vec![1, 2, 3, 4],
+            ..PlayerSnapshot::default()
+        };
+        let cache = SnapshotCache::new(PlayerSnapshot::default());
+        cache.store(source);
+        assert!(cache.snapshot().queue.is_empty());
     }
 }
