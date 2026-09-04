@@ -239,7 +239,7 @@ impl AudioProcessor {
         }
         self.eq.process(output);
         self.spatial.process(output);
-        let gain = self.volume;
+        let gain = perceptual_volume_gain(self.volume);
         for sample in output {
             *sample = (*sample * gain).tanh();
         }
@@ -260,6 +260,11 @@ pub fn clamp_spatial(mut settings: SpatialSettings) -> SpatialSettings {
     settings.distance = settings.distance.clamp(0.0, 1.0);
     settings.mix = settings.mix.clamp(0.0, 1.0);
     settings
+}
+
+fn perceptual_volume_gain(volume: f32) -> f32 {
+    let volume = volume.clamp(0.0, 1.0);
+    volume * volume
 }
 
 fn to_stereo_into(input: &[f32], channels: u16, output: &mut Vec<f32>) {
@@ -322,6 +327,14 @@ mod tests {
         let input = vec![8.0; 96];
         let output = processor.process(&input, 48_000, 2);
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
+    #[test]
+    fn volume_curve_has_real_low_level_headroom() {
+        assert_eq!(perceptual_volume_gain(0.0), 0.0);
+        assert!((perceptual_volume_gain(0.1) - 0.01).abs() < 1e-6);
+        assert!((perceptual_volume_gain(0.5) - 0.25).abs() < 1e-6);
+        assert_eq!(perceptual_volume_gain(1.0), 1.0);
     }
 
     #[test]
