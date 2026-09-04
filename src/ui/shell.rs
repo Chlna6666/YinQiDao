@@ -157,8 +157,8 @@ fn text_fingerprint(text: &str) -> u64 {
 struct LibraryPageRenderKey {
     active: bool,
     content_revision: u64,
-    query_revision: u64,
     status_fingerprint: u64,
+    search_fingerprint: u64,
     tab: LibraryTab,
     search_active: bool,
     scan_in_progress: bool,
@@ -170,8 +170,8 @@ fn library_page_render_key(app: &MusicApp) -> LibraryPageRenderKey {
     LibraryPageRenderKey {
         active: app.page == AppPage::Library,
         content_revision: app.ui_content_revision,
-        query_revision: app.library_refresh_request,
         status_fingerprint: text_fingerprint(&app.status),
+        search_fingerprint: text_fingerprint(&app.search),
         tab: app.library_tab,
         search_active: app.search_active,
         scan_in_progress: app.scan_in_progress,
@@ -1055,7 +1055,8 @@ impl MusicApp {
         } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
             self.search.push_str(key);
         }
-        self.refresh_tracks_async(cx, None);
+        // `library::render` already filters the authoritative in-memory track set. Avoid a
+        // SQLite query and audio-registry replacement for every search keystroke.
         cx.notify();
     }
 
@@ -1089,10 +1090,8 @@ impl MusicApp {
         };
         self.library_refresh_request = self.library_refresh_request.wrapping_add(1);
         let request = self.library_refresh_request;
-        let search = self.search.clone();
         let task = Tokio::spawn_result(cx, async move {
-            let tracks =
-                tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await??;
+            let tracks = tokio::task::spawn_blocking(move || library.tracks(None)).await??;
             let engine_tracks = tracks.clone();
             Ok::<_, anyhow::Error>((tracks, engine_tracks))
         });
@@ -2776,6 +2775,10 @@ mod tests {
         let status_key = library_page_render_key(&app);
         app.status.push_str(" · updated");
         assert_ne!(status_key, library_page_render_key(&app));
+
+        let search_key = library_page_render_key(&app);
+        app.search.push_str("ambient");
+        assert_ne!(search_key, library_page_render_key(&app));
     }
 
     #[test]
