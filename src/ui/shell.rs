@@ -119,24 +119,88 @@ pub struct MusicApp {
     last_saved_at: std::time::Instant,
     config_save_dirty: bool,
     last_config_save_at: std::time::Instant,
+    ui_content_revision: u64,
     home_page: Option<Entity<HomePage>>,
     library_page: Option<Entity<LibraryPage>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HomePageRenderKey {
+    active: bool,
+    content_revision: u64,
+    scan_in_progress: bool,
+    current_track: Option<TrackId>,
+    playback_state: PlaybackState,
+}
+
+fn home_page_render_key(app: &MusicApp) -> HomePageRenderKey {
+    HomePageRenderKey {
+        active: app.page == AppPage::Home,
+        content_revision: app.ui_content_revision,
+        scan_in_progress: app.scan_in_progress,
+        current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
+        playback_state: app.snapshot.state,
+    }
+}
+
+#[inline]
+fn text_fingerprint(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LibraryPageRenderKey {
+    active: bool,
+    content_revision: u64,
+    query_revision: u64,
+    status_fingerprint: u64,
+    tab: LibraryTab,
+    search_active: bool,
+    scan_in_progress: bool,
+    current_track: Option<TrackId>,
+    playback_state: PlaybackState,
+}
+
+fn library_page_render_key(app: &MusicApp) -> LibraryPageRenderKey {
+    LibraryPageRenderKey {
+        active: app.page == AppPage::Library,
+        content_revision: app.ui_content_revision,
+        query_revision: app.library_refresh_request,
+        status_fingerprint: text_fingerprint(&app.status),
+        tab: app.library_tab,
+        search_active: app.search_active,
+        scan_in_progress: app.scan_in_progress,
+        current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
+        playback_state: app.snapshot.state,
+    }
+}
+
 struct HomePage {
     parent: WeakEntity<MusicApp>,
+    last_key: HomePageRenderKey,
     _subscription: Subscription,
 }
 
 impl HomePage {
     fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&parent, |_, parent, cx| {
-            if parent.read(cx).page == AppPage::Home {
-                cx.notify();
+        let last_key = home_page_render_key(parent.read(cx));
+        let subscription = cx.observe(&parent, |this, parent, cx| {
+            let next_key = home_page_render_key(parent.read(cx));
+            if next_key != this.last_key {
+                this.last_key = next_key;
+                if next_key.active {
+                    cx.notify();
+                }
             }
         });
         Self {
             parent: parent.downgrade(),
+            last_key,
             _subscription: subscription,
         }
     }
@@ -154,18 +218,25 @@ impl Render for HomePage {
 
 struct LibraryPage {
     parent: WeakEntity<MusicApp>,
+    last_key: LibraryPageRenderKey,
     _subscription: Subscription,
 }
 
 impl LibraryPage {
     fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&parent, |_, parent, cx| {
-            if parent.read(cx).page == AppPage::Library {
-                cx.notify();
+        let last_key = library_page_render_key(parent.read(cx));
+        let subscription = cx.observe(&parent, |this, parent, cx| {
+            let next_key = library_page_render_key(parent.read(cx));
+            if next_key != this.last_key {
+                this.last_key = next_key;
+                if next_key.active {
+                    cx.notify();
+                }
             }
         });
         Self {
             parent: parent.downgrade(),
+            last_key,
             _subscription: subscription,
         }
     }
@@ -344,9 +415,15 @@ impl MusicApp {
             last_saved_at: std::time::Instant::now(),
             config_save_dirty: false,
             last_config_save_at: std::time::Instant::now() - Duration::from_secs(1),
+            ui_content_revision: 0,
             home_page: None,
             library_page: None,
         }
+    }
+
+    #[inline]
+    fn bump_ui_content_revision(&mut self) {
+        self.ui_content_revision = self.ui_content_revision.wrapping_add(1);
     }
 
     fn ensure_home_page(&mut self, cx: &mut Context<Self>) -> Entity<HomePage> {
@@ -495,6 +572,7 @@ impl MusicApp {
         if self.config.queue.is_empty() && !self.tracks.is_empty() {
             let queue = Arc::new(self.tracks.iter().map(|track| track.id).collect::<Vec<_>>());
             self.config.queue = queue.clone();
+            self.bump_ui_content_revision();
             self.send(PlayerCommand::SetQueue(queue));
             self.queue_matches_tracks = true;
             self.save_config();
@@ -515,6 +593,7 @@ impl MusicApp {
         if let Some(palette) = palette {
             self.artwork_palettes.insert(track_id, palette);
         }
+        self.bump_ui_content_revision();
     }
 
     pub(crate) fn cache_lyrics(&mut self, track_id: TrackId, lyrics: LyricsDocument) {
@@ -649,6 +728,7 @@ impl MusicApp {
                 return;
             }
             self.config.queue = queue;
+            self.bump_ui_content_revision();
             self.queue_matches_tracks = true;
         }
 
@@ -668,6 +748,7 @@ impl MusicApp {
     pub(crate) fn add_to_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         if !self.config.queue.contains(&track_id) {
             Arc::make_mut(&mut self.config.queue).push(track_id);
+            self.bump_ui_content_revision();
             self.queue_matches_tracks = false;
             self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
             self.save_config();
@@ -677,7 +758,11 @@ impl MusicApp {
     }
 
     pub(crate) fn remove_from_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
+        let old_len = self.config.queue.len();
         Arc::make_mut(&mut self.config.queue).retain(|id| *id != track_id);
+        if self.config.queue.len() != old_len {
+            self.bump_ui_content_revision();
+        }
         self.queue_matches_tracks = false;
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
@@ -685,7 +770,10 @@ impl MusicApp {
     }
 
     pub(crate) fn clear_queue(&mut self, cx: &mut Context<Self>) {
-        Arc::make_mut(&mut self.config.queue).clear();
+        if !self.config.queue.is_empty() {
+            Arc::make_mut(&mut self.config.queue).clear();
+            self.bump_ui_content_revision();
+        }
         self.queue_matches_tracks = self.tracks.is_empty();
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
@@ -985,6 +1073,7 @@ impl MusicApp {
                 match query_result {
                     Ok((tracks, engine_tracks)) => {
                         this.tracks = tracks;
+                        this.bump_ui_content_revision();
                         this.queue_matches_tracks = false;
                         if let Some(engine) = &this.engine {
                             engine.register_tracks(engine_tracks);
@@ -2618,6 +2707,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_render_keys_ignore_transport_only_updates() {
+        let mut app = MusicApp::new(false);
+        app.page = AppPage::Home;
+        let home_key = home_page_render_key(&app);
+        app.snapshot.position_ms = app.snapshot.position_ms.saturating_add(1_000);
+        app.config.volume = 0.23;
+        app.drag_progress_ratio = Some(0.42);
+        app.drag_volume_ratio = Some(0.61);
+        assert_eq!(home_key, home_page_render_key(&app));
+
+        app.page = AppPage::Library;
+        let library_key = library_page_render_key(&app);
+        app.snapshot.position_ms = app.snapshot.position_ms.saturating_add(1_000);
+        app.config.volume = 0.77;
+        app.drag_progress_ratio = Some(0.11);
+        app.drag_volume_ratio = Some(0.88);
+        assert_eq!(library_key, library_page_render_key(&app));
+    }
+
+    #[test]
+    fn page_render_keys_track_visible_content_changes() {
+        let mut app = MusicApp::new(false);
+        app.page = AppPage::Home;
+        let home_key = home_page_render_key(&app);
+        app.bump_ui_content_revision();
+        assert_ne!(home_key, home_page_render_key(&app));
+
+        app.page = AppPage::Library;
+        let library_key = library_page_render_key(&app);
+        app.library_tab = LibraryTab::Albums;
+        assert_ne!(library_key, library_page_render_key(&app));
+
+        let status_key = library_page_render_key(&app);
+        app.status.push_str(" · updated");
+        assert_ne!(status_key, library_page_render_key(&app));
+    }
 
     #[test]
     fn test_drag_progress_ratio_precedence() {
