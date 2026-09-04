@@ -137,11 +137,6 @@ jobs:
           )
           replace_once(
               "src/ui/player_stage.rs",
-              "    model::{PlaybackState, PlayerSnapshot, Track},",
-              "    model::{PlayerSnapshot, Track},",
-          )
-          replace_once(
-              "src/ui/player_stage.rs",
               "            app.config.blur_radius,\n            snapshot.state == PlaybackState::Playing,\n        ))",
               "            app.config.blur_radius,\n        ))",
           )
