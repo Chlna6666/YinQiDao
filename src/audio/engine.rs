@@ -298,6 +298,7 @@ struct AudioWorker {
     decoder: Option<DecoderStream>,
     current_track: Option<TrackId>,
     queue: Arc<Vec<TrackId>>,
+    queue_positions: HashMap<TrackId, usize>,
     queue_index: usize,
     repeat: RepeatMode,
     shuffle: bool,
@@ -346,6 +347,7 @@ impl AudioWorker {
             decoder: None,
             current_track: None,
             queue: Arc::new(Vec::new()),
+            queue_positions: HashMap::new(),
             queue_index: 0,
             repeat: RepeatMode::Off,
             shuffle: false,
@@ -422,14 +424,9 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::PlayTrack(track_id) => {
-                let target_index =
-                    if let Some(index) = self.queue.iter().position(|id| *id == track_id) {
-                        index
-                    } else {
-                        let queue = Arc::make_mut(&mut self.queue);
-                        queue.push(track_id);
-                        queue.len() - 1
-                    };
+                let target_index = self
+                    .queue_position(track_id)
+                    .unwrap_or_else(|| self.append_queue_track(track_id));
                 self.open_queue_index(target_index);
             }
             PlayerCommand::RestoreTrack {
@@ -437,14 +434,9 @@ impl AudioWorker {
                 position,
                 play,
             } => {
-                let target_index =
-                    if let Some(index) = self.queue.iter().position(|id| *id == track_id) {
-                        index
-                    } else {
-                        let queue = Arc::make_mut(&mut self.queue);
-                        queue.push(track_id);
-                        queue.len() - 1
-                    };
+                let target_index = self
+                    .queue_position(track_id)
+                    .unwrap_or_else(|| self.append_queue_track(track_id));
                 self.queue_index = target_index;
                 if self.open_track(track_id) {
                     if !position.is_zero()
@@ -494,9 +486,10 @@ impl AudioWorker {
             )),
             PlayerCommand::SetQueue(queue) => {
                 self.queue = queue;
+                self.rebuild_queue_positions();
                 self.shuffle_played.clear();
                 if let Some(current_track) = self.current_track {
-                    if let Some(index) = self.queue.iter().position(|id| *id == current_track) {
+                    if let Some(index) = self.queue_position(current_track) {
                         self.queue_index = index;
                         if self.shuffle {
                             self.shuffle_played.insert(current_track);
@@ -524,6 +517,26 @@ impl AudioWorker {
             }
         }
         true
+    }
+
+    fn queue_position(&self, track_id: TrackId) -> Option<usize> {
+        self.queue_positions.get(&track_id).copied()
+    }
+
+    fn append_queue_track(&mut self, track_id: TrackId) -> usize {
+        let queue = Arc::make_mut(&mut self.queue);
+        queue.push(track_id);
+        let index = queue.len() - 1;
+        self.queue_positions.entry(track_id).or_insert(index);
+        index
+    }
+
+    fn rebuild_queue_positions(&mut self) {
+        self.queue_positions.clear();
+        self.queue_positions.reserve(self.queue.len());
+        for (index, track_id) in self.queue.iter().copied().enumerate() {
+            self.queue_positions.entry(track_id).or_insert(index);
+        }
     }
 
     fn open_queue_index(&mut self, index: usize) -> bool {
