@@ -107,7 +107,7 @@ impl AppPage {
     }
 
     pub fn from_pathname(path: &str) -> Self {
-        match pathname {
+        match path {
             "/player" => Self::Player,
             "/library" => Self::Library,
             "/settings" => Self::Settings,
