@@ -819,7 +819,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
 
     for track_id in queue_ids.iter() {
         if let Some(track) = tracks_by_id.get(track_id) {
-            list = list.child(queue_item_row(*track, app, view));
+            list = list.child(queue_item_row(track, app, view));
         }
     }
 
