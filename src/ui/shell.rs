@@ -130,7 +130,11 @@ struct HomePage {
 
 impl HomePage {
     fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&parent, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&parent, |_, parent, cx| {
+            if parent.read(cx).page == AppPage::Home {
+                cx.notify();
+            }
+        });
         Self {
             parent: parent.downgrade(),
             _subscription: subscription,
@@ -155,7 +159,11 @@ struct LibraryPage {
 
 impl LibraryPage {
     fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&parent, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&parent, |_, parent, cx| {
+            if parent.read(cx).page == AppPage::Library {
+                cx.notify();
+            }
+        });
         Self {
             parent: parent.downgrade(),
             _subscription: subscription,
@@ -463,8 +471,6 @@ impl MusicApp {
         });
         if moved {
             self.stage_last_mouse_pos = Some(pos);
-            // Meaningful pointer movement is user activity even after the controls have faded out.
-            // Micro-jitter below the threshold stays filtered and does not keep the HUD alive.
             self.wake_stage_controls(cx);
         }
     }
@@ -2166,8 +2172,6 @@ impl Render for MusicApp {
             }
         }
 
-        // Fluid background motion is renderer-owned; the root view only schedules frames for
-        // drawer/HUD/lyric layout motion that actually changes application state.
         if self.has_active_animations() {
             window.request_animation_frame();
         }
