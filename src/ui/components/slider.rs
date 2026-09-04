@@ -83,9 +83,17 @@ impl SliderStyle {
     }
 }
 
-/// 统一的高精度交互式滑块组件
+/// 统一的高精度交互式滑块组件。
+///
+/// Thumb 使用独立的 `(width - thumb_size)` 定位轨道，而不是作为 filled track 的子元素。
+/// 因此 0% 时左边缘恰好落在控件左侧，100% 时右边缘恰好落在控件右侧，任何比例都不会
+/// 因圆点半径而越过滑块边界。
 pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
+    let interaction_height = px(
+        (f32::from(style.thumb_size) * style.hover_thumb_scale)
+            .max(f32::from(style.hover_track_height)),
+    );
 
     let mut thumb = div()
         .flex_none()
@@ -100,9 +108,8 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
         thumb = thumb.border_1().border_color(border);
     }
 
-    div()
-        .id(id.into())
-        .cursor_pointer()
+    let track = div()
+        .w_full()
         .h(style.track_height)
         .rounded_full()
         .bg(style.track_bg)
@@ -113,10 +120,32 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
                 .h_full()
                 .w(relative(clamped_ratio))
                 .rounded_full()
-                .bg(style.filled_color)
+                .bg(style.filled_color),
+        );
+
+    div()
+        .id(id.into())
+        .relative()
+        .cursor_pointer()
+        .h(interaction_height)
+        .flex()
+        .items_center()
+        .child(track)
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .right(style.thumb_size)
+                .top(px(0.0))
+                .bottom(px(0.0))
                 .flex()
-                .justify_end()
                 .items_center()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(relative(clamped_ratio))
+                        .h(px(1.0)),
+                )
                 .child(thumb),
         )
 }
