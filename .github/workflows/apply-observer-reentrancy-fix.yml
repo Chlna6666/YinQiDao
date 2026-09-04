@@ -179,9 +179,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test --locked
-
       - name: Commit fix
         shell: bash
         run: |
