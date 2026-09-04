@@ -9,6 +9,7 @@ use lucide_gpui::icons as lucide_icons;
 
 use crate::{
     artwork::ArtworkPalette,
+    audio::PlayerCommand,
     lyrics::LyricLine,
     model::{PlaybackState, PlayerSnapshot, Track},
 };
@@ -364,7 +365,9 @@ fn stage_controls(
                 && this.drag_target == Some(DragTarget::Volume)
             {
                 let ratio = this.stage_volume_ratio(f32::from(event.position.x), window);
-                this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
+                    this.send(PlayerCommand::SetVolume(ratio));
+                }
             }
         }))
         .child(
@@ -489,6 +492,7 @@ fn stage_controls(
                             cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.wake_stage_controls_immediately(cx);
+                                this.pending_volume_ratio = None;
                                 this.toggle_mute(cx);
                             }),
                         ),
@@ -504,6 +508,7 @@ fn stage_controls(
                                 let ratio =
                                     this.stage_volume_ratio(f32::from(event.position.x), window);
                                 this.begin_drag(DragTarget::Volume, ratio, cx);
+                                this.send(PlayerCommand::SetVolume(ratio));
                             }),
                         )
                         .on_mouse_move(cx.listener(
@@ -513,7 +518,9 @@ fn stage_controls(
                                 {
                                     let ratio = this
                                         .stage_volume_ratio(f32::from(event.position.x), window);
-                                    this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                                    if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
+                                        this.send(PlayerCommand::SetVolume(ratio));
+                                    }
                                 }
                             },
                         ))
