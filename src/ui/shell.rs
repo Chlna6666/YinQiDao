@@ -112,6 +112,7 @@ pub struct MusicApp {
     previous_page: AppPage,
     background_started: bool,
     library_refresh_request: u64,
+    queue_matches_tracks: bool,
     timer_started: bool,
     polling_player: bool,
     last_saved_position_ms: u64,
@@ -223,6 +224,12 @@ impl MusicApp {
         } else {
             config.position_ms
         };
+        let queue_matches_tracks = config.queue.len() == tracks.len()
+            && config
+                .queue
+                .iter()
+                .copied()
+                .eq(tracks.iter().map(|track| track.id));
 
         let initial_snapshot = PlayerSnapshot {
             state: PlaybackState::Paused,
@@ -322,6 +329,7 @@ impl MusicApp {
             previous_page: AppPage::Home,
             background_started: false,
             library_refresh_request: 0,
+            queue_matches_tracks,
             timer_started: false,
             polling_player: false,
             last_saved_position_ms: initial_position,
@@ -479,9 +487,10 @@ impl MusicApp {
 
     pub(crate) fn ensure_queue(&mut self) {
         if self.config.queue.is_empty() && !self.tracks.is_empty() {
-            let queue = self.tracks.iter().map(|t| t.id).collect::<Vec<_>>();
+            let queue = Arc::new(self.tracks.iter().map(|track| track.id).collect::<Vec<_>>());
             self.config.queue = queue.clone();
             self.send(PlayerCommand::SetQueue(queue));
+            self.queue_matches_tracks = true;
             self.save_config();
         }
     }
@@ -620,16 +629,30 @@ impl MusicApp {
     }
 
     pub(crate) fn play_track(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
-        let queue = self.tracks.iter().map(|track| track.id).collect::<Vec<_>>();
-        if let Some(engine) = &self.engine {
-            engine.try_send(PlayerCommand::SetQueue(queue.clone()));
-            if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
-                self.config.queue = queue;
-                self.config.current_track = Some(track_id);
-                self.config.position_ms = 0;
-                self.status = "正在准备播放".into();
-                self.save_config();
+        let Some(engine) = self.engine.clone() else {
+            self.status = "音频输出不可用，请检查默认音频设备".into();
+            cx.notify();
+            return;
+        };
+
+        if !self.queue_matches_tracks {
+            let queue = Arc::new(self.tracks.iter().map(|track| track.id).collect::<Vec<_>>());
+            if !engine.try_send(PlayerCommand::SetQueue(queue.clone())) {
+                self.status = "音频命令队列繁忙，请稍后重试".into();
+                cx.notify();
+                return;
             }
+            self.config.queue = queue;
+            self.queue_matches_tracks = true;
+        }
+
+        if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
+            self.config.current_track = Some(track_id);
+            self.config.position_ms = 0;
+            self.status = "正在准备播放".into();
+            self.save_config();
+        } else {
+            self.status = "音频命令队列繁忙，请稍后重试".into();
         }
         self.last_lyric_index = None;
         self.lyrics_scroll_handle.scroll_to_item(0);
@@ -638,7 +661,8 @@ impl MusicApp {
 
     pub(crate) fn add_to_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         if !self.config.queue.contains(&track_id) {
-            self.config.queue.push(track_id);
+            Arc::make_mut(&mut self.config.queue).push(track_id);
+            self.queue_matches_tracks = false;
             self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
             self.save_config();
             self.status = "已加入播放队列".into();
@@ -647,15 +671,17 @@ impl MusicApp {
     }
 
     pub(crate) fn remove_from_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
-        self.config.queue.retain(|id| *id != track_id);
+        Arc::make_mut(&mut self.config.queue).retain(|id| *id != track_id);
+        self.queue_matches_tracks = false;
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
         cx.notify();
     }
 
     pub(crate) fn clear_queue(&mut self, cx: &mut Context<Self>) {
-        self.config.queue.clear();
-        self.send(PlayerCommand::SetQueue(Vec::new()));
+        Arc::make_mut(&mut self.config.queue).clear();
+        self.queue_matches_tracks = self.tracks.is_empty();
+        self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
         self.status = "播放队列已清空".into();
         cx.notify();
@@ -802,7 +828,7 @@ impl MusicApp {
                         this.status = format!("输出设备已切换为 {device}");
                         this.save_config();
                     }
-                    Err(error) => this.status = format!("音频设备切换失败：{error:#}"),
+                    Err(error) => this.status = format!("输出设备切换失败：{error:#}"),
                 }
                 cx.notify();
             })?;
@@ -939,7 +965,9 @@ impl MusicApp {
         let request = self.library_refresh_request;
         let search = self.search.clone();
         let task = Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await?
+            let tracks = tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await??;
+            let engine_tracks = tracks.clone();
+            Ok::<_, anyhow::Error>((tracks, engine_tracks))
         });
         cx.spawn(async move |this, cx| -> Result<()> {
             let query_result = task.await;
@@ -948,10 +976,11 @@ impl MusicApp {
                     return;
                 }
                 match query_result {
-                    Ok(tracks) => {
+                    Ok((tracks, engine_tracks)) => {
                         this.tracks = tracks;
+                        this.queue_matches_tracks = false;
                         if let Some(engine) = &this.engine {
-                            engine.register_tracks(this.tracks.clone());
+                            engine.register_tracks(engine_tracks);
                         }
                         if let Some(status) = status {
                             this.status = status;
