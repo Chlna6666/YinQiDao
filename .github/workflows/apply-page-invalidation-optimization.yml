@@ -63,11 +63,22 @@ jobs:
               }
           }
 
+          #[inline]
+          fn text_fingerprint(text: &str) -> u64 {
+              let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+              for byte in text.bytes() {
+                  hash ^= u64::from(byte);
+                  hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+              }
+              hash
+          }
+
           #[derive(Clone, Copy, Debug, Eq, PartialEq)]
           struct LibraryPageRenderKey {
               active: bool,
               content_revision: u64,
               query_revision: u64,
+              status_fingerprint: u64,
               tab: LibraryTab,
               search_active: bool,
               scan_in_progress: bool,
@@ -80,6 +91,7 @@ jobs:
                   active: app.page == AppPage::Library,
                   content_revision: app.ui_content_revision,
                   query_revision: app.library_refresh_request,
+                  status_fingerprint: text_fingerprint(&app.status),
                   tab: app.library_tab,
                   search_active: app.search_active,
                   scan_in_progress: app.scan_in_progress,
@@ -220,6 +232,10 @@ jobs:
               let library_key = library_page_render_key(&app);
               app.library_tab = LibraryTab::Albums;
               assert_ne!(library_key, library_page_render_key(&app));
+
+              let status_key = library_page_render_key(&app);
+              app.status.push_str(" · updated");
+              assert_ne!(status_key, library_page_render_key(&app));
           }
 
           #[test]
