@@ -118,6 +118,11 @@ jobs:
               "fn perceptual_volume_gain(volume: f32) -> f32 {",
               "pub(crate) fn perceptual_volume_gain(volume: f32) -> f32 {",
           )
+          replace_once(
+              "src/audio/dsp.rs",
+              "    pub fn set_volume(&mut self, volume: f32) {\n        self.volume = volume.clamp(0.0, 1.0);\n    }\n\n",
+              "",
+          )
 
           # AudioWorkerConfig is also instantiated by engine unit tests.
           tests = Path("src/audio/engine_tests.rs")
