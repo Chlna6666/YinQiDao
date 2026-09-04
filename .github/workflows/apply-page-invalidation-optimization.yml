@@ -42,56 +42,9 @@ jobs:
               "    config_save_dirty: bool,\n    last_config_save_at: std::time::Instant,\n    home_page: Option<Entity<HomePage>>,",
               "    config_save_dirty: bool,\n    last_config_save_at: std::time::Instant,\n    ui_content_revision: u64,\n    home_page: Option<Entity<HomePage>>,")
 
-          old_pages = '''struct HomePage {
-              parent: WeakEntity<MusicApp>,
-              _subscription: Subscription,
-          }
-
-          impl HomePage {
-              fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-                  let subscription = cx.observe(&parent, |_, parent, cx| {
-                      if parent.read(cx).page == AppPage::Home {
-                          cx.notify();
-                      }
-                  });
-                  Self {
-                      parent: parent.downgrade(),
-                      _subscription: subscription,
-                  }
-              }
-          }
-
-          impl Render for HomePage {
-              fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                  let Some(parent) = self.parent.upgrade() else {
-                      return div().into_any_element();
-                  };
-                  let app = parent.read(cx);
-                  home::render(app, &self.parent)
-              }
-          }
-
-          struct LibraryPage {
-              parent: WeakEntity<MusicApp>,
-              _subscription: Subscription,
-          }
-
-          impl LibraryPage {
-              fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-                  let subscription = cx.observe(&parent, |_, parent, cx| {
-                      if parent.read(cx).page == AppPage::Library {
-                          cx.notify();
-                      }
-                  });
-                  Self {
-                      parent: parent.downgrade(),
-                      _subscription: subscription,
-                  }
-              }
-          }
-          '''
-          old_pages = '\n'.join(line[10:] if line.startswith('          ') else line for line in old_pages.splitlines()) + '\n'
-          new_pages = '''#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+          start = text.index("struct HomePage {")
+          end = text.index("impl Render for LibraryPage {")
+          page_views = r'''#[derive(Clone, Copy, Debug, Eq, PartialEq)]
           struct HomePageRenderKey {
               active: bool,
               content_revision: u64,
@@ -196,9 +149,13 @@ jobs:
                   }
               }
           }
+
           '''
-          new_pages = '\n'.join(line[10:] if line.startswith('          ') else line for line in new_pages.splitlines()) + '\n'
-          replace_once(old_pages, new_pages)
+          page_views = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in page_views.splitlines()
+          ) + "\n"
+          text = text[:start] + page_views + text[end:]
 
           replace_once(
               "            config_save_dirty: false,\n            last_config_save_at: std::time::Instant::now() - Duration::from_secs(1),\n            home_page: None,",
@@ -211,36 +168,27 @@ jobs:
           replace_once(
               "            self.config.queue = queue.clone();\n            self.send(PlayerCommand::SetQueue(queue));",
               "            self.config.queue = queue.clone();\n            self.bump_ui_content_revision();\n            self.send(PlayerCommand::SetQueue(queue));")
-
           replace_once(
               "        if let Some(palette) = palette {\n            self.artwork_palettes.insert(track_id, palette);\n        }\n    }",
               "        if let Some(palette) = palette {\n            self.artwork_palettes.insert(track_id, palette);\n        }\n        self.bump_ui_content_revision();\n    }")
-
           replace_once(
               "            self.config.queue = queue;\n            self.queue_matches_tracks = true;",
               "            self.config.queue = queue;\n            self.bump_ui_content_revision();\n            self.queue_matches_tracks = true;")
-
           replace_once(
               "            Arc::make_mut(&mut self.config.queue).push(track_id);\n            self.queue_matches_tracks = false;",
               "            Arc::make_mut(&mut self.config.queue).push(track_id);\n            self.bump_ui_content_revision();\n            self.queue_matches_tracks = false;")
-
           replace_once(
               "        Arc::make_mut(&mut self.config.queue).retain(|id| *id != track_id);\n        self.queue_matches_tracks = false;",
               "        let old_len = self.config.queue.len();\n        Arc::make_mut(&mut self.config.queue).retain(|id| *id != track_id);\n        if self.config.queue.len() != old_len {\n            self.bump_ui_content_revision();\n        }\n        self.queue_matches_tracks = false;")
-
           replace_once(
               "        Arc::make_mut(&mut self.config.queue).clear();\n        self.queue_matches_tracks = self.tracks.is_empty();",
               "        if !self.config.queue.is_empty() {\n            Arc::make_mut(&mut self.config.queue).clear();\n            self.bump_ui_content_revision();\n        }\n        self.queue_matches_tracks = self.tracks.is_empty();")
-
           replace_once(
               "                        this.tracks = tracks;\n                        this.queue_matches_tracks = false;",
               "                        this.tracks = tracks;\n                        this.bump_ui_content_revision();\n                        this.queue_matches_tracks = false;")
 
-          test_anchor = '''    #[test]
-          fn test_drag_progress_ratio_precedence() {
-          '''
-          test_anchor = '\n'.join(line[10:] if line.startswith('          ') else line for line in test_anchor.splitlines()) + '\n'
-          tests = '''    #[test]
+          test_anchor = "    #[test]\n    fn test_drag_progress_ratio_precedence() {\n"
+          tests = r'''    #[test]
           fn page_render_keys_ignore_transport_only_updates() {
               let mut app = MusicApp::new(false);
               app.page = AppPage::Home;
@@ -277,7 +225,10 @@ jobs:
           #[test]
           fn test_drag_progress_ratio_precedence() {
           '''
-          tests = '\n'.join(line[10:] if line.startswith('          ') else line for line in tests.splitlines()) + '\n'
+          tests = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in tests.splitlines()
+          ) + "\n"
           replace_once(test_anchor, tests)
 
           path.write_text(text, encoding="utf-8")
