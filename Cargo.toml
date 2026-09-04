@@ -84,3 +84,14 @@ unsafe_code = "warn"
 all = "warn"
 
 [dev-dependencies]
+
+
+[profile.release]
+opt-level = "s"       # 优化代码体积 ("s" = 小体积, "z" = 最小体积)
+lto = "fat"           # 启用 Link Time Optimization
+codegen-units = 1       # 单代码生成单元，有助于优化整个 crate
+panic = "abort"         # 遇到 panic 直接 abort，而不是展开堆栈（减少体积）
+strip = true            # 移除调试符号（从 Rust 1.73 起支持）
+incremental = false
+debug = 0
+
