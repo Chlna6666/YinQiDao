@@ -2,6 +2,7 @@ mod command_queue;
 mod decoder;
 mod dsp;
 mod engine;
+#[rustfmt::skip]
 mod facade;
 mod fingerprint;
 

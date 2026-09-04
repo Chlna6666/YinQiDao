@@ -4,6 +4,7 @@ mod home;
 mod library;
 #[path = "player.rs"]
 mod player_legacy;
+#[rustfmt::skip]
 mod player_stage;
 use player_stage as player;
 pub mod route;
