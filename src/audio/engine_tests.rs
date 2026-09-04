@@ -142,12 +142,12 @@ fn full_output_ring_keeps_worker_playing() {
 #[test]
 fn set_queue_reanchors_index_to_current_track() {
     let (mut worker, _consumer, _command_tx, _flush, _paused) = test_worker(8);
-    worker.queue = vec![1, 2, 3];
+    worker.queue = Arc::new(vec![1, 2, 3]);
     worker.queue_index = 1;
     worker.current_track = Some(2);
     worker.state = PlaybackState::Playing;
 
-    worker.handle_command(PlayerCommand::SetQueue(vec![2, 3]));
+    worker.handle_command(PlayerCommand::SetQueue(Arc::new(vec![2, 3])));
 
     assert_eq!(worker.current_track, Some(2));
     assert_eq!(worker.queue_index, 0);
@@ -170,14 +170,14 @@ fn volume_burst_keeps_latest_value_before_next_command() {
 #[test]
 fn removing_current_track_stops_and_flushes_old_pcm() {
     let (mut worker, mut consumer, _command_tx, flush, paused) = test_worker(8);
-    worker.queue = vec![1, 2, 3];
+    worker.queue = Arc::new(vec![1, 2, 3]);
     worker.queue_index = 1;
     worker.current_track = Some(2);
     worker.state = PlaybackState::Playing;
     worker.producer.try_push(0.75).expect("old pcm");
     worker.producer.try_push(-0.75).expect("old pcm");
 
-    worker.handle_command(PlayerCommand::SetQueue(vec![1, 3]));
+    worker.handle_command(PlayerCommand::SetQueue(Arc::new(vec![1, 3])));
 
     assert_eq!(worker.current_track, None);
     assert_eq!(worker.queue_index, 0);
@@ -208,12 +208,12 @@ fn previous_after_current_removal_starts_at_new_queue_anchor() {
         .write()
         .expect("tracks")
         .insert(3, test_track(3, path.clone()));
-    worker.queue = vec![1, 2, 3];
+    worker.queue = Arc::new(vec![1, 2, 3]);
     worker.queue_index = 1;
     worker.current_track = Some(2);
     worker.state = PlaybackState::Playing;
 
-    worker.handle_command(PlayerCommand::SetQueue(vec![3]));
+    worker.handle_command(PlayerCommand::SetQueue(Arc::new(vec![3])));
     worker.handle_command(PlayerCommand::Previous);
 
     assert_eq!(worker.current_track, Some(3));
@@ -235,7 +235,7 @@ fn failed_next_keeps_index_anchored_to_current_track() {
         .write()
         .expect("tracks")
         .insert(2, test_track(2, missing_path));
-    worker.queue = vec![1, 2];
+    worker.queue = Arc::new(vec![1, 2]);
     worker.queue_index = 0;
     worker.current_track = Some(1);
     worker.state = PlaybackState::Playing;
@@ -250,7 +250,7 @@ fn failed_next_keeps_index_anchored_to_current_track() {
 #[test]
 fn next_at_end_stops_and_flushes_old_pcm() {
     let (mut worker, mut consumer, _command_tx, flush, paused) = test_worker(8);
-    worker.queue = vec![1];
+    worker.queue = Arc::new(vec![1]);
     worker.queue_index = 0;
     worker.current_track = Some(1);
     worker.state = PlaybackState::Playing;
@@ -316,7 +316,7 @@ fn restore_track_sets_queue_index_and_paused_state() {
     fs::write(&track_path, pcm_wav()).expect("write test wav");
     let track = test_track(42, track_path.clone());
     worker.tracks.write().unwrap().insert(42, track);
-    worker.queue = vec![10, 42, 99];
+    worker.queue = Arc::new(vec![10, 42, 99]);
 
     worker.handle_command(PlayerCommand::RestoreTrack {
         track_id: 42,
