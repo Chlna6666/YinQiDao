@@ -90,10 +90,8 @@ impl SliderStyle {
 /// 因圆点半径而越过滑块边界。
 pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
-    let interaction_height = px(
-        (f32::from(style.thumb_size) * style.hover_thumb_scale)
-            .max(f32::from(style.hover_track_height)),
-    );
+    let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
+        .max(f32::from(style.hover_track_height)));
 
     let mut thumb = div()
         .flex_none()
@@ -140,12 +138,7 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
                 .bottom(px(0.0))
                 .flex()
                 .items_center()
-                .child(
-                    div()
-                        .flex_none()
-                        .w(relative(clamped_ratio))
-                        .h(px(1.0)),
-                )
+                .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
                 .child(thumb),
         )
 }
