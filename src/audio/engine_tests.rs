@@ -155,6 +155,17 @@ fn set_queue_reanchors_index_to_current_track() {
 }
 
 #[test]
+fn queue_position_preserves_first_duplicate_semantics() {
+    let (mut worker, _consumer, _command_tx, _flush, _paused) = test_worker(8);
+
+    worker.handle_command(PlayerCommand::SetQueue(Arc::new(vec![7, 11, 7, 13])));
+
+    assert_eq!(worker.queue_position(7), Some(0));
+    assert_eq!(worker.queue_position(11), Some(1));
+    assert_eq!(worker.queue_position(13), Some(3));
+}
+
+#[test]
 fn volume_burst_keeps_latest_value_before_next_command() {
     let (mut worker, _consumer, command_tx, _flush, _paused) = test_worker(8);
     worker.state = PlaybackState::Playing;
@@ -316,7 +327,7 @@ fn restore_track_sets_queue_index_and_paused_state() {
     fs::write(&track_path, pcm_wav()).expect("write test wav");
     let track = test_track(42, track_path.clone());
     worker.tracks.write().unwrap().insert(42, track);
-    worker.queue = Arc::new(vec![10, 42, 99]);
+    worker.handle_command(PlayerCommand::SetQueue(Arc::new(vec![10, 42, 99])));
 
     worker.handle_command(PlayerCommand::RestoreTrack {
         track_id: 42,
