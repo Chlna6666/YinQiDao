@@ -183,24 +183,39 @@ fn library_page_render_key(app: &MusicApp) -> LibraryPageRenderKey {
 struct HomePage {
     parent: WeakEntity<MusicApp>,
     last_key: HomePageRenderKey,
+    refresh_pending: bool,
     _subscription: Subscription,
 }
 
 impl HomePage {
-    fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let last_key = home_page_render_key(parent.read(cx));
+    fn new(
+        parent: Entity<MusicApp>,
+        initial_key: HomePageRenderKey,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.observe(&parent, |this, parent, cx| {
-            let next_key = home_page_render_key(parent.read(cx));
-            if next_key != this.last_key {
-                this.last_key = next_key;
-                if next_key.active {
-                    cx.notify();
-                }
+            if this.refresh_pending {
+                return;
             }
+            this.refresh_pending = true;
+            let this_entity = cx.weak_entity();
+            cx.defer(move |cx| {
+                let next_key = home_page_render_key(parent.read(cx));
+                let _ = this_entity.update(cx, |this, cx| {
+                    this.refresh_pending = false;
+                    if next_key != this.last_key {
+                        this.last_key = next_key;
+                        if next_key.active {
+                            cx.notify();
+                        }
+                    }
+                });
+            });
         });
         Self {
             parent: parent.downgrade(),
-            last_key,
+            last_key: initial_key,
+            refresh_pending: false,
             _subscription: subscription,
         }
     }
@@ -219,24 +234,39 @@ impl Render for HomePage {
 struct LibraryPage {
     parent: WeakEntity<MusicApp>,
     last_key: LibraryPageRenderKey,
+    refresh_pending: bool,
     _subscription: Subscription,
 }
 
 impl LibraryPage {
-    fn new(parent: Entity<MusicApp>, cx: &mut Context<Self>) -> Self {
-        let last_key = library_page_render_key(parent.read(cx));
+    fn new(
+        parent: Entity<MusicApp>,
+        initial_key: LibraryPageRenderKey,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.observe(&parent, |this, parent, cx| {
-            let next_key = library_page_render_key(parent.read(cx));
-            if next_key != this.last_key {
-                this.last_key = next_key;
-                if next_key.active {
-                    cx.notify();
-                }
+            if this.refresh_pending {
+                return;
             }
+            this.refresh_pending = true;
+            let this_entity = cx.weak_entity();
+            cx.defer(move |cx| {
+                let next_key = library_page_render_key(parent.read(cx));
+                let _ = this_entity.update(cx, |this, cx| {
+                    this.refresh_pending = false;
+                    if next_key != this.last_key {
+                        this.last_key = next_key;
+                        if next_key.active {
+                            cx.notify();
+                        }
+                    }
+                });
+            });
         });
         Self {
             parent: parent.downgrade(),
-            last_key,
+            last_key: initial_key,
+            refresh_pending: false,
             _subscription: subscription,
         }
     }
@@ -430,8 +460,9 @@ impl MusicApp {
         if let Some(page) = &self.home_page {
             return page.clone();
         }
+        let initial_key = home_page_render_key(self);
         let parent = cx.entity();
-        let page = cx.new(|cx| HomePage::new(parent, cx));
+        let page = cx.new(move |cx| HomePage::new(parent, initial_key, cx));
         self.home_page = Some(page.clone());
         page
     }
@@ -440,8 +471,9 @@ impl MusicApp {
         if let Some(page) = &self.library_page {
             return page.clone();
         }
+        let initial_key = library_page_render_key(self);
         let parent = cx.entity();
-        let page = cx.new(|cx| LibraryPage::new(parent, cx));
+        let page = cx.new(move |cx| LibraryPage::new(parent, initial_key, cx));
         self.library_page = Some(page.clone());
         page
     }
