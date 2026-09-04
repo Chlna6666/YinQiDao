@@ -700,7 +700,6 @@ fn orbit_blob(
         .bg(linear_gradient(
             angle,
             linear_color_stop(color.opacity(alpha), 0.0),
-            linear_color_stop(color.opacity(alpha * 0.38), 0.56),
             linear_color_stop(color.opacity(0.0), 1.0),
         ));
 
