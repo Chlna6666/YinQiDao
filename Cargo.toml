@@ -85,17 +85,16 @@ all = "warn"
 
 [dev-dependencies]
 
-
 [profile.release]
-opt-level = "s"       # 优化代码体积 ("s" = 小体积, "z" = 最小体积)
-lto = "fat"           # 启用 Link Time Optimization
-codegen-units = 1       # 单代码生成单元，有助于优化整个 crate
-panic = "abort"         # 遇到 panic 直接 abort，而不是展开堆栈（减少体积）
-strip = true            # 移除调试符号（从 Rust 1.73 起支持）
+# Desktop audio/UI workloads are latency-sensitive; optimize hot paths instead of binary size.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
 incremental = false
 debug = 0
 
-
 [profile.dev]
 opt-level = 3
-panic = "unwind"        # 开发模式保留回溯，便于定位崩溃
+panic = "unwind"
