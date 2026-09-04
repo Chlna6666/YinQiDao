@@ -27,9 +27,14 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
         LibraryTab::Playlists => queue_view(app, view).into_any_element(),
     };
 
-    if app.library_tab == LibraryTab::Songs {
+    let virtualized_tab = matches!(app.library_tab, LibraryTab::Songs | LibraryTab::Playlists);
+    if virtualized_tab {
         div()
-            .id("library-songs-container")
+            .id(if app.library_tab == LibraryTab::Songs {
+                "library-songs-container"
+            } else {
+                "library-queue-container"
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -813,20 +818,22 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .into_any_element();
     }
 
-    let tracks_by_id: HashMap<TrackId, &Track> =
-        app.tracks.iter().map(|track| (track.id, track)).collect();
-    let mut list = div().flex().flex_col().gap_1p5();
-
-    for track_id in queue_ids.iter() {
-        if let Some(track) = tracks_by_id.get(track_id) {
-            list = list.child(queue_item_row(track, app, view));
-        }
-    }
+    let queue_ids_for_rows = queue_ids.clone();
+    let track_indices_for_rows = Arc::new(
+        app.tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect::<HashMap<TrackId, usize>>(),
+    );
+    let view_for_rows = view.clone();
 
     div()
+        .size_full()
         .flex()
         .flex_col()
         .gap_4()
+        .overflow_hidden()
         .child(
             div()
                 .flex()
@@ -857,11 +864,59 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .on_click(app_listener(view, |this, _, _, cx| this.clear_queue(cx))),
                 ),
         )
-        .child(list)
+        .child(
+            div().flex_1().min_h(px(0.0)).overflow_hidden().child(
+                uniform_list(
+                    "library-queue-vlist",
+                    queue_ids.len(),
+                    move |range: Range<usize>, _window, cx| {
+                        view_for_rows
+                            .update(cx, |this, _cx| {
+                                let mut items = Vec::with_capacity(range.end - range.start);
+                                for queue_index in range {
+                                    let Some(&track_id) = queue_ids_for_rows.get(queue_index) else {
+                                        continue;
+                                    };
+                                    let Some(&track_index) = track_indices_for_rows.get(&track_id)
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(track) = this
+                                        .tracks
+                                        .get(track_index)
+                                        .filter(|track| track.id == track_id)
+                                    else {
+                                        continue;
+                                    };
+                                    items.push(
+                                        div()
+                                            .h(px(64.0))
+                                            .child(queue_item_row(
+                                                track,
+                                                this,
+                                                &view_for_rows,
+                                                queue_index,
+                                            ))
+                                            .into_any_element(),
+                                    );
+                                }
+                                items
+                            })
+                            .unwrap_or_default()
+                    },
+                )
+                .size_full(),
+            ),
+        )
         .into_any_element()
 }
 
-fn queue_item_row(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
+fn queue_item_row(
+    track: &Track,
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+    queue_index: usize,
+) -> impl IntoElement {
     let track_id = track.id;
     let is_current = app
         .snapshot
@@ -870,8 +925,12 @@ fn queue_item_row(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) ->
         .is_some_and(|t| t.id == track_id);
 
     div()
-        .id(SharedString::from(format!("queue-row-{track_id}")))
+        .id(SharedString::from(format!(
+            "queue-row-{queue_index}-{track_id}"
+        )))
         .w_full()
+        .h(px(58.0))
+        .flex_none()
         .flex()
         .items_center()
         .justify_between()
@@ -937,7 +996,9 @@ fn queue_item_row(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) ->
                 )
                 .child(
                     div()
-                        .id(SharedString::from(format!("queue-remove-{track_id}")))
+                        .id(SharedString::from(format!(
+                            "queue-remove-{queue_index}-{track_id}"
+                        )))
                         .size(px(26.0))
                         .flex()
                         .items_center()
