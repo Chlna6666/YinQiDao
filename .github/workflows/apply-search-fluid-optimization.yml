@@ -33,8 +33,9 @@ jobs:
           shell = shell_path.read_text(encoding="utf-8")
 
           def replace_once(text: str, old: str, new: str, label: str) -> str:
-              if text.count(old) != 1:
-                  raise SystemExit(f"{label}: expected exactly one source block, found {text.count(old)}")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one source block, found {count}")
               return text.replace(old, new, 1)
 
           shell = replace_once(
@@ -50,69 +51,65 @@ jobs:
               "library render-key values",
           )
 
-          old_update_search = '''    pub(crate) fn update_search(&mut self, key: &str, cx: &mut Context<Self>) {
+          update_start = shell.index("    pub(crate) fn update_search(")
+          update_end = shell.index("    fn apply_scan(", update_start)
+          update_search = '''    pub(crate) fn update_search(&mut self, key: &str, cx: &mut Context<Self>) {
               if key == "backspace" {
                   self.search.pop();
               } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
                   self.search.push_str(key);
               }
-              self.refresh_tracks_async(cx, None);
+              // `library::render` already filters the authoritative in-memory track set. Avoid a
+              // SQLite query and audio-registry replacement for every search keystroke.
               cx.notify();
           }
-          '''
-          old_update_search = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in old_update_search.splitlines()
-          ) + "\n"
-          new_update_search = '''    pub(crate) fn update_search(&mut self, key: &str, cx: &mut Context<Self>) {
-              if key == "backspace" {
-                  self.search.pop();
-              } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
-                  self.search.push_str(key);
-              }
-              // `library::render` already filters the authoritative in-memory track set. Do not
-              // issue a SQLite query or replace the audio engine registry for every keystroke.
-              cx.notify();
-          }
-          '''
-          new_update_search = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in new_update_search.splitlines()
-          ) + "\n"
-          shell = replace_once(shell, old_update_search, new_update_search, "update_search")
 
-          old_test = '''        let status_key = library_page_render_key(&app);
-              app.status.push_str(" · updated");
-              assert_ne!(status_key, library_page_render_key(&app));
-          }
           '''
-          old_test = "\n".join(
+          update_search = "\n".join(
               line[10:] if line.startswith("          ") else line
-              for line in old_test.splitlines()
+              for line in update_search.splitlines()
           ) + "\n"
-          new_test = '''        let status_key = library_page_render_key(&app);
-              app.status.push_str(" · updated");
-              assert_ne!(status_key, library_page_render_key(&app));
+          shell = shell[:update_start] + update_search + shell[update_end:]
 
-              let search_key = library_page_render_key(&app);
-              app.search.push_str("ambient");
-              assert_ne!(search_key, library_page_render_key(&app));
-          }
-          '''
-          new_test = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in new_test.splitlines()
-          ) + "\n"
-          shell = replace_once(shell, old_test, new_test, "render-key test")
+          shell = replace_once(
+              shell,
+              "        let request = self.library_refresh_request;\n        let search = self.search.clone();\n        let task = Tokio::spawn_result(cx, async move {",
+              "        let request = self.library_refresh_request;\n        let task = Tokio::spawn_result(cx, async move {",
+              "refresh search capture",
+          )
+          shell = replace_once(
+              shell,
+              "            let tracks =\n                tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await??;",
+              "            let tracks = tokio::task::spawn_blocking(move || library.tracks(None)).await??;",
+              "authoritative library refresh",
+          )
+
+          shell = replace_once(
+              shell,
+              "        let status_key = library_page_render_key(&app);\n        app.status.push_str(\" · updated\");\n        assert_ne!(status_key, library_page_render_key(&app));\n    }",
+              "        let status_key = library_page_render_key(&app);\n        app.status.push_str(\" · updated\");\n        assert_ne!(status_key, library_page_render_key(&app));\n\n        let search_key = library_page_render_key(&app);\n        app.search.push_str(\"ambient\");\n        assert_ne!(search_key, library_page_render_key(&app));\n    }",
+              "render-key search test",
+          )
+
+          if "library.tracks(Some(&search))" in shell:
+              raise SystemExit("filtered DB refresh still present")
+          if "query_revision:" in shell:
+              raise SystemExit("obsolete query revision still present in render key")
           shell_path.write_text(shell, encoding="utf-8")
 
           stage_path = Path("src/ui/player_stage.rs")
           stage = stage_path.read_text(encoding="utf-8")
           stage = replace_once(
               stage,
-              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))\n        .repeat(RepeatMode::Forever)\n        .ease(Easing::InOutCubic);",
-              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    // Constant angular velocity avoids the visible pause that ease-in/out introduces at every\n    // revolution boundary, so the ambient field is already moving when the stage opens.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))\n        .repeat(RepeatMode::Forever)\n        .ease(Easing::Linear);",
+              ".ease(Easing::InOutCubic);",
+              ".ease(Easing::Linear);",
               "fluid easing",
+          )
+          stage = replace_once(
+              stage,
+              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))",
+              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    // Linear easing keeps angular velocity constant across revolution boundaries.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))",
+              "fluid easing comment",
           )
           stage_path.write_text(stage, encoding="utf-8")
 
