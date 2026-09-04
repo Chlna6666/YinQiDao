@@ -51,7 +51,7 @@ pub enum PlayerCommand {
     SetSpatial(SpatialSettings),
     #[allow(dead_code)]
     SetOutputDevice(DeviceId),
-    SetQueue(Vec<TrackId>),
+    SetQueue(Arc<Vec<TrackId>>),
     SetRepeat(RepeatMode),
     SetShuffle(bool),
     Stop,
@@ -297,7 +297,7 @@ struct AudioWorker {
     processed_samples: Vec<f32>,
     decoder: Option<DecoderStream>,
     current_track: Option<TrackId>,
-    queue: Vec<TrackId>,
+    queue: Arc<Vec<TrackId>>,
     queue_index: usize,
     repeat: RepeatMode,
     shuffle: bool,
@@ -345,7 +345,7 @@ impl AudioWorker {
             processed_samples: Vec::new(),
             decoder: None,
             current_track: None,
-            queue: Vec::new(),
+            queue: Arc::new(Vec::new()),
             queue_index: 0,
             repeat: RepeatMode::Off,
             shuffle: false,
@@ -426,8 +426,9 @@ impl AudioWorker {
                     if let Some(index) = self.queue.iter().position(|id| *id == track_id) {
                         index
                     } else {
-                        self.queue.push(track_id);
-                        self.queue.len() - 1
+                        let queue = Arc::make_mut(&mut self.queue);
+                        queue.push(track_id);
+                        queue.len() - 1
                     };
                 self.open_queue_index(target_index);
             }
@@ -440,8 +441,9 @@ impl AudioWorker {
                     if let Some(index) = self.queue.iter().position(|id| *id == track_id) {
                         index
                     } else {
-                        self.queue.push(track_id);
-                        self.queue.len() - 1
+                        let queue = Arc::make_mut(&mut self.queue);
+                        queue.push(track_id);
+                        queue.len() - 1
                     };
                 self.queue_index = target_index;
                 if self.open_track(track_id) {
