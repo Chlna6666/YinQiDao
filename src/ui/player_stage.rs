@@ -684,7 +684,6 @@ fn fluid_blob(
         .bg(linear_gradient(
             angle,
             linear_color_stop(color.opacity(alpha), 0.0),
-            linear_color_stop(color.opacity(alpha * 0.34), 0.58),
             linear_color_stop(color.opacity(0.0), 1.0),
         ));
 
