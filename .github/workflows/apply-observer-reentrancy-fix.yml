@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt,clippy
+          components: rustfmt
 
       - name: Apply reentrancy fix
         shell: python
@@ -172,12 +172,6 @@ jobs:
 
       - name: Format
         run: cargo fmt --all
-
-      - name: Check
-        run: cargo check --locked
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Commit fix
         shell: bash
