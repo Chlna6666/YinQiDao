@@ -100,7 +100,6 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .gap_3()
-                        // 搜索输入胶囊
                         .child(
                             div()
                                 .id("library-search-input")
@@ -168,7 +167,6 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                     cx.notify();
                                 })),
                         )
-                        // 添加目录按键
                         .child(
                             div()
                                 .id("library-add-dir-btn")
@@ -201,7 +199,6 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         ),
                 ),
         )
-        // Apple 风格分段选择器 (Segmented Control)
         .child(
             div()
                 .flex()
@@ -294,10 +291,6 @@ where
         .on_click(on_click)
 }
 
-// ============================================================================
-// Tab 1: 歌曲列表表格视图 (Apple Music Songs Table)
-// ============================================================================
-
 fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl IntoElement {
     let matching_indices = matching_track_indices(&app.tracks, query);
     let count = matching_indices
@@ -316,7 +309,6 @@ fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl 
         .flex_col()
         .gap_2()
         .overflow_hidden()
-        // 表头
         .child(
             div()
                 .flex()
@@ -335,7 +327,6 @@ fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl 
                 .child(div().w(px(80.0)).child("时长"))
                 .child(div().w(px(60.0)).child("操作")),
         )
-        // 虚拟化歌曲数据行
         .child(
             div().flex_1().min_h(px(0.0)).overflow_hidden().child(
                 uniform_list(
@@ -439,7 +430,6 @@ fn song_table_row(
         .hover(|s| s.bg(theme::bg_hover()))
         .transition(press_transition())
         .active(|s| s.scale(0.995))
-        // 序号或跳动声波
         .child(
             div()
                 .w(px(36.0))
@@ -457,7 +447,6 @@ fn song_table_row(
                         .child(format!("{index:02}"))
                 }),
         )
-        // 标题与封面
         .child(
             div()
                 .flex_1()
@@ -479,7 +468,6 @@ fn song_table_row(
                         .child(track.title.clone()),
                 ),
         )
-        // 艺人
         .child(
             div()
                 .w(px(200.0))
@@ -488,7 +476,6 @@ fn song_table_row(
                 .truncate()
                 .child(track.artist.clone()),
         )
-        // 专辑
         .child(
             div()
                 .w(px(220.0))
@@ -497,7 +484,6 @@ fn song_table_row(
                 .truncate()
                 .child(track.album.clone()),
         )
-        // 时长
         .child(
             div()
                 .w(px(80.0))
@@ -505,7 +491,6 @@ fn song_table_row(
                 .text_color(TEXT_TERTIARY)
                 .child(format_time(track.duration_ms)),
         )
-        // 加入队列快捷按键
         .child(
             div().w(px(60.0)).flex().items_center().child(
                 div()
@@ -533,10 +518,6 @@ fn song_table_row(
         })
         .into_any_element()
 }
-
-// ============================================================================
-// Tab 2: 专辑海报墙 (Albums Responsive Grid)
-// ============================================================================
 
 fn albums_view(
     tracks: &[Track],
@@ -632,7 +613,6 @@ fn album_poster_card(
                 .overflow_hidden()
                 .relative()
                 .child(cover)
-                // 悬停播放遮罩
                 .child(
                     div()
                         .absolute()
@@ -686,10 +666,6 @@ fn album_poster_card(
             this.play_track(track_id, cx)
         }))
 }
-
-// ============================================================================
-// Tab 3: 艺术家圆形肖像网格 (Artists Circle Grid)
-// ============================================================================
 
 fn artists_view(
     tracks: &[Track],
@@ -801,10 +777,6 @@ fn artist_circle_card(
         }))
 }
 
-// ============================================================================
-// Tab 4: 待播清单与播放队列 (Up Next Queue)
-// ============================================================================
-
 fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
     let queue_ids = &app.config.queue;
     if queue_ids.is_empty() {
@@ -841,11 +813,13 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .into_any_element();
     }
 
+    let tracks_by_id: HashMap<TrackId, &Track> =
+        app.tracks.iter().map(|track| (track.id, track)).collect();
     let mut list = div().flex().flex_col().gap_1p5();
 
-    for track_id in queue_ids {
-        if let Some(track) = app.tracks.iter().find(|t| t.id == *track_id) {
-            list = list.child(queue_item_row(track, app, view));
+    for track_id in queue_ids.iter() {
+        if let Some(track) = tracks_by_id.get(track_id) {
+            list = list.child(queue_item_row(*track, app, view));
         }
     }
 
