@@ -1,0 +1,231 @@
+name: Apply observer reentrancy fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-observer-reentrancy-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply reentrancy fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/ui/shell.rs")
+          text = path.read_text(encoding="utf-8")
+
+          start = text.index("struct HomePage {")
+          end = text.index("impl Render for LibraryPage {", start)
+          replacement = r'''struct HomePage {
+              parent: WeakEntity<MusicApp>,
+              last_key: HomePageRenderKey,
+              refresh_pending: bool,
+              _subscription: Subscription,
+          }
+
+          impl HomePage {
+              fn new(
+                  parent: Entity<MusicApp>,
+                  initial_key: HomePageRenderKey,
+                  cx: &mut Context<Self>,
+              ) -> Self {
+                  let subscription = cx.observe(&parent, |this, parent, cx| {
+                      if this.refresh_pending {
+                          return;
+                      }
+                      this.refresh_pending = true;
+                      let this_entity = cx.weak_entity();
+                      cx.defer(move |cx| {
+                          let next_key = home_page_render_key(parent.read(cx));
+                          let _ = this_entity.update(cx, |this, cx| {
+                              this.refresh_pending = false;
+                              if next_key != this.last_key {
+                                  this.last_key = next_key;
+                                  if next_key.active {
+                                      cx.notify();
+                                  }
+                              }
+                          });
+                      });
+                  });
+                  Self {
+                      parent: parent.downgrade(),
+                      last_key: initial_key,
+                      refresh_pending: false,
+                      _subscription: subscription,
+                  }
+              }
+          }
+
+          impl Render for HomePage {
+              fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                  let Some(parent) = self.parent.upgrade() else {
+                      return div().into_any_element();
+                  };
+                  let app = parent.read(cx);
+                  home::render(app, &self.parent)
+              }
+          }
+
+          struct LibraryPage {
+              parent: WeakEntity<MusicApp>,
+              last_key: LibraryPageRenderKey,
+              refresh_pending: bool,
+              _subscription: Subscription,
+          }
+
+          impl LibraryPage {
+              fn new(
+                  parent: Entity<MusicApp>,
+                  initial_key: LibraryPageRenderKey,
+                  cx: &mut Context<Self>,
+              ) -> Self {
+                  let subscription = cx.observe(&parent, |this, parent, cx| {
+                      if this.refresh_pending {
+                          return;
+                      }
+                      this.refresh_pending = true;
+                      let this_entity = cx.weak_entity();
+                      cx.defer(move |cx| {
+                          let next_key = library_page_render_key(parent.read(cx));
+                          let _ = this_entity.update(cx, |this, cx| {
+                              this.refresh_pending = false;
+                              if next_key != this.last_key {
+                                  this.last_key = next_key;
+                                  if next_key.active {
+                                      cx.notify();
+                                  }
+                              }
+                          });
+                      });
+                  });
+                  Self {
+                      parent: parent.downgrade(),
+                      last_key: initial_key,
+                      refresh_pending: false,
+                      _subscription: subscription,
+                  }
+              }
+          }
+
+          '''
+          replacement = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in replacement.splitlines()
+          ) + "\n"
+          text = text[:start] + replacement + text[end:]
+
+          old_home = '''    fn ensure_home_page(&mut self, cx: &mut Context<Self>) -> Entity<HomePage> {
+              if let Some(page) = &self.home_page {
+                  return page.clone();
+              }
+              let parent = cx.entity();
+              let page = cx.new(|cx| HomePage::new(parent, cx));
+              self.home_page = Some(page.clone());
+              page
+          }
+          '''
+          old_home = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in old_home.splitlines()
+          ) + "\n"
+          new_home = '''    fn ensure_home_page(&mut self, cx: &mut Context<Self>) -> Entity<HomePage> {
+              if let Some(page) = &self.home_page {
+                  return page.clone();
+              }
+              let initial_key = home_page_render_key(self);
+              let parent = cx.entity();
+              let page = cx.new(move |cx| HomePage::new(parent, initial_key, cx));
+              self.home_page = Some(page.clone());
+              page
+          }
+          '''
+          new_home = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in new_home.splitlines()
+          ) + "\n"
+          if text.count(old_home) != 1:
+              raise SystemExit(f"ensure_home_page block count={text.count(old_home)}")
+          text = text.replace(old_home, new_home, 1)
+
+          old_library = '''    fn ensure_library_page(&mut self, cx: &mut Context<Self>) -> Entity<LibraryPage> {
+              if let Some(page) = &self.library_page {
+                  return page.clone();
+              }
+              let parent = cx.entity();
+              let page = cx.new(|cx| LibraryPage::new(parent, cx));
+              self.library_page = Some(page.clone());
+              page
+          }
+          '''
+          old_library = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in old_library.splitlines()
+          ) + "\n"
+          new_library = '''    fn ensure_library_page(&mut self, cx: &mut Context<Self>) -> Entity<LibraryPage> {
+              if let Some(page) = &self.library_page {
+                  return page.clone();
+              }
+              let initial_key = library_page_render_key(self);
+              let parent = cx.entity();
+              let page = cx.new(move |cx| LibraryPage::new(parent, initial_key, cx));
+              self.library_page = Some(page.clone());
+              page
+          }
+          '''
+          new_library = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in new_library.splitlines()
+          ) + "\n"
+          if text.count(old_library) != 1:
+              raise SystemExit(f"ensure_library_page block count={text.count(old_library)}")
+          text = text.replace(old_library, new_library, 1)
+
+          if "HomePage::new(parent, cx)" in text or "LibraryPage::new(parent, cx)" in text:
+              raise SystemExit("reentrant page constructor remains")
+          path.write_text(text, encoding="utf-8")
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/ui/shell.rs
+          git diff --cached --check
+          git diff --cached --quiet && {
+            echo 'no observer reentrancy fix generated' >&2
+            exit 1
+          }
+          git commit -m 'fix(ui): 避免 retained 页面 observer 重入读取父实体'
+          git push origin HEAD:main
