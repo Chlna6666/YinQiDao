@@ -34,6 +34,8 @@ use super::{
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
+const STAGE_CONTROLS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+const STAGE_TRANSITION_RESPONSE: f32 = 8.0;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DragTarget {
@@ -212,7 +214,6 @@ impl MusicApp {
         .ok()
         .map(Arc::new);
 
-        // 重启恢复：读取已保存的当前曲目与进度
         let initial_track = config
             .current_track
             .and_then(|id| tracks.iter().find(|t| t.id == id).cloned());
@@ -432,21 +433,20 @@ impl MusicApp {
     }
 
     pub(crate) fn hide_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
         self.stage_controls_visibility = 0.0;
-        self.stage_last_user_activity = std::time::Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .unwrap_or_else(std::time::Instant::now);
+        self.stage_last_user_activity = now
+            .checked_sub(STAGE_CONTROLS_IDLE_TIMEOUT + Duration::from_secs(1))
+            .unwrap_or(now);
         self.stage_controls_hovered = false;
-        // 防抖抑制：屏蔽隐藏点击之后 600ms 内的按键抬起或事件穿透，防止误触发唤醒
-        self.stage_suppress_wake_until =
-            Some(std::time::Instant::now() + Duration::from_millis(600));
+        self.stage_suppress_wake_until = Some(now + Duration::from_millis(600));
         cx.notify();
     }
 
     pub(crate) fn handle_stage_mouse_move(
         &mut self,
         pos: gpui::Point<gpui::Pixels>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let moved = self.stage_last_mouse_pos.is_none_or(|last| {
             let dx = f32::from(pos.x - last.x).abs();
@@ -455,10 +455,9 @@ impl MusicApp {
         });
         if moved {
             self.stage_last_mouse_pos = Some(pos);
-            // 关键：鼠标移动仅在控制条已经显示的情况下顺延活跃计时器，已隐藏时严禁通过鼠标移动唤起，改由鼠标点击窗口才显示！
-            if self.stage_controls_visibility > 0.05 {
-                self.stage_last_user_activity = std::time::Instant::now();
-            }
+            // Meaningful pointer movement is user activity even after the controls have faded out.
+            // Micro-jitter below the threshold stays filtered and does not keep the HUD alive.
+            self.wake_stage_controls(cx);
         }
     }
 
@@ -467,9 +466,6 @@ impl MusicApp {
             || (self.stage_open
                 && (self.stage_controls_visibility > 0.005
                     && self.stage_controls_visibility < 0.995))
-            || (self.stage_open
-                && self.config.dynamic_blur
-                && self.snapshot.state == PlaybackState::Playing)
             || (self.stage_open
                 && (self.lyrics_target_offset - self.lyrics_current_offset).abs() > 0.5)
     }
@@ -497,7 +493,6 @@ impl MusicApp {
         blurred_png: Option<Vec<u8>>,
         palette: Option<crate::artwork::ArtworkPalette>,
     ) {
-        // 这里只保留稳定的编码源；图片解码、复用和释放交给 GPUI asset cache。
         self.artworks.insert(track_id, png.into());
         if let Some(blurred_png) = blurred_png {
             self.blurred_artworks.insert(track_id, blurred_png.into());
@@ -552,7 +547,6 @@ impl MusicApp {
         } else {
             PlayerCommand::Play
         };
-        // 乐观即时更新：瞬间切换本地状态并通知 UI 重绘 (0ms 视觉响应)
         self.snapshot.state = next_state;
         cx.notify();
 
@@ -808,14 +802,13 @@ impl MusicApp {
                         this.status = format!("输出设备已切换为 {device}");
                         this.save_config();
                     }
-                    Err(error) => this.status = format!("输出设备切换失败: {error:#}"),
+                    Err(error) => this.status = format!("音频设备切换失败：{error:#}"),
                 }
                 cx.notify();
             })?;
             Ok(())
         })
         .detach();
-        cx.notify();
     }
 
     pub(crate) fn choose_folder(&mut self, cx: &mut Context<Self>) {
@@ -1148,7 +1141,6 @@ impl MusicApp {
         }
         self.polling_player = true;
 
-        // 1. 处理系统硬件媒体控制事件 (SMTC / MPRIS / 键盘多媒体键)
         let sys_events = self.media_event_rx.try_iter().collect::<Vec<_>>();
         for ev in sys_events {
             match ev {
@@ -1189,13 +1181,11 @@ impl MusicApp {
                 }
             }
             self.snapshot = engine.snapshot();
-            // 拖拽中保护：如果用户正在拖拽进度或音量，不被后台轮询覆盖
             if self.drag_target.is_none() {
                 self.position_ms = self.snapshot.position_ms;
                 self.config.position_ms = self.position_ms;
             }
 
-            // 待确认 Seek 守卫检查：底层进度与目标接近 (< 0.02) 或切歌世代变化时清除守卫
             let curr_gen = self
                 .snapshot
                 .current_track
@@ -1213,7 +1203,6 @@ impl MusicApp {
                 }
             }
 
-            // 待确认音量守卫检查
             if let Some(ratio) = self.pending_volume_ratio
                 && (self.config.volume - ratio).abs() < 0.02
             {
@@ -1225,7 +1214,6 @@ impl MusicApp {
                     self.snapshot.current_track.as_ref().map(|track| track.id);
             }
 
-            // 播放状态下节流自动保存进度（每 3 秒持久化一次，防止异常退出或重启导致进度丢失）
             if self.snapshot.state == PlaybackState::Playing
                 && self.last_saved_at.elapsed() >= Duration::from_secs(3)
             {
@@ -1237,7 +1225,6 @@ impl MusicApp {
                 }
             }
 
-            // 2. 检查当前曲目的本地 LRC（每首曲目仅检测一次，杜绝死循环磁盘 IO 轰炸）
             if let Some(track) = &self.snapshot.current_track {
                 let track_id = track.id;
                 let track_path = track.path.clone();
@@ -1260,7 +1247,6 @@ impl MusicApp {
                 }
             }
 
-            // 3. 曲目切换时触发当前曲目封面与联网元数据加载，并重置歌词滚动
             let curr_track_id = self.snapshot.current_track.as_ref().map(|t| t.id);
             if curr_track_id != self.last_polled_track_id {
                 self.last_polled_track_id = curr_track_id;
@@ -1273,7 +1259,6 @@ impl MusicApp {
                 self.request_current_enrichment(cx);
             }
 
-            // 4. 播放中自动居中平滑追踪当前歌词行
             if let Some(track) = &self.snapshot.current_track
                 && let Some(doc) = self.lyrics.get(&track.id)
             {
@@ -1289,8 +1274,7 @@ impl MusicApp {
                             .lyrics_user_scrolling_until
                             .is_some_and(|until| std::time::Instant::now() < until);
                         if !in_user_scroll {
-                            let target_y = (current_idx as f32) * 60.0;
-                            self.lyrics_target_offset = target_y;
+                            self.lyrics_target_offset = (current_idx as f32) * 60.0;
                         }
                         self.lyrics_scroll_handle.scroll_to_item(current_idx);
                         if self.stage_open {
@@ -1300,7 +1284,6 @@ impl MusicApp {
                 }
             }
 
-            // 系统媒体控制通过后台任务更新，避免 Windows COM 调用阻塞 UI 线程。
             self.update_system_media_async(cx);
         }
 
@@ -1717,7 +1700,6 @@ impl MusicApp {
             let mut is_playing = false;
             loop {
                 let delay = if is_playing {
-                    // 进度条和时间文本由独立 GPUI 子实体刷新；根视图只需轮询状态变化。
                     Duration::from_millis(100)
                 } else {
                     Duration::from_millis(200)
@@ -1734,7 +1716,7 @@ impl MusicApp {
                         this.drag_target.is_some() || this.seeking || this.volume_dragging;
                     let stage_idle_due = this.stage_open
                         && this.stage_controls_visibility > 0.005
-                        && this.stage_last_user_activity.elapsed() >= Duration::from_millis(2500)
+                        && this.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
                         && !this.seeking
                         && !this.volume_dragging
                         && !this.stage_controls_hovered;
@@ -2112,7 +2094,6 @@ impl Render for MusicApp {
             .clamp(0.001, 0.1);
         self.last_frame_instant = Some(now);
 
-        // 1. 沉浸大舞台抽屉开闭动力学插值 (基于物理时间 dt 的平滑指数衰减阻尼，满血最高 240 FPS 丝滑)
         if self.stage_animating {
             let target = if self.stage_open { 1.0 } else { 0.0 };
             let diff = target - self.stage_progress;
@@ -2120,14 +2101,13 @@ impl Render for MusicApp {
                 self.stage_progress = target;
                 self.stage_animating = false;
             } else {
-                let factor = 1.0 - (-16.0 * dt).exp();
+                let factor = 1.0 - (-STAGE_TRANSITION_RESPONSE * dt).exp();
                 self.stage_progress += diff * factor;
             }
         }
 
-        // 2. 沉浸舞台控制组件自动隐匿与平滑缓动 (2.5s 静止自隐藏 + 拖拽/悬停保护)
         let is_idle = self.stage_open
-            && self.stage_last_user_activity.elapsed() >= Duration::from_millis(2500)
+            && self.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
             && !self.seeking
             && !self.volume_dragging
             && !self.stage_controls_hovered;
@@ -2141,7 +2121,6 @@ impl Render for MusicApp {
             self.stage_controls_visibility = target_visibility;
         }
 
-        // 3. 歌词平滑滚动插值 (基于物理时间 dt 的指数弹簧阻尼模型)
         if self.stage_open {
             let in_user_scroll = self
                 .lyrics_user_scrolling_until
@@ -2157,7 +2136,8 @@ impl Render for MusicApp {
             }
         }
 
-        // 4. 如果当前存在未收敛动画或流体背景正在播放，向窗口请求下一帧垂直同步渲染
+        // Fluid background motion is renderer-owned; the root view only schedules frames for
+        // drawer/HUD/lyric layout motion that actually changes application state.
         if self.has_active_animations() {
             window.request_animation_frame();
         }
@@ -2181,7 +2161,6 @@ impl Render for MusicApp {
         let home_page = self.ensure_home_page(cx);
         let library_page = self.ensure_library_page(cx);
 
-        // 全遮挡视锥裁剪 (Occlusion Culling)：当舞台完全展开且无退出动画时，跳过底层页面的构建与排版
         let content = if self.stage_progress >= 0.999 && !self.stage_animating {
             div().into_any_element()
         } else {
@@ -2337,7 +2316,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
         .bg(theme::BG_SIDEBAR)
         .border_r_1()
         .border_color(theme::BORDER_HAIRLINE)
-        // 顶部品牌区
         .child(
             div()
                 .flex()
@@ -2379,7 +2357,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                         ),
                 ),
         )
-        // 侧边栏全局快捷搜索胶囊
         .child(
             div()
                 .id("sidebar-search-btn")
@@ -2413,7 +2390,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                     cx.notify();
                 })),
         )
-        // 导航分组：探索
         .child(
             div()
                 .flex()
@@ -2433,7 +2409,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Songs, cx)),
                 )),
         )
-        // 导航分组：音乐库
         .child(
             div()
                 .flex()
@@ -2459,7 +2434,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Playlists, cx)),
                 )),
         )
-        // 导航分组：系统设置
         .child(
             div()
                 .flex()
@@ -2474,7 +2448,6 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 )),
         )
         .child(div().flex_1())
-        // 底部资料库与运行状态
         .child(
             div()
                 .flex()
@@ -2616,27 +2589,22 @@ mod tests {
     fn test_drag_progress_ratio_precedence() {
         let mut app = MusicApp::new(false);
         app.snapshot.duration_ms = 100_000;
-        app.snapshot.position_ms = 20_000; // 0.20
+        app.snapshot.position_ms = 20_000;
 
-        // 1. 无拖拽无 pending 时，返回当前播放比例
         assert!((app.displayed_progress_ratio() - 0.20).abs() < 0.001);
         assert_eq!(app.displayed_position_ms(), 20_000);
 
-        // 2. 有 pending_progress_ratio 时，优先显示 pending 比例
         app.pending_progress_ratio = Some((1, 0.55));
         assert!((app.displayed_progress_ratio() - 0.55).abs() < 0.001);
         assert_eq!(app.displayed_position_ms(), 55_000);
 
-        // 3. 正在拖拽时，drag_progress_ratio 具有最高优先级覆盖 pending
         app.drag_progress_ratio = Some(0.85);
         assert!((app.displayed_progress_ratio() - 0.85).abs() < 0.001);
         assert_eq!(app.displayed_position_ms(), 85_000);
 
-        // 4. 清除拖拽后，恢复到 pending
         app.drag_progress_ratio = None;
         assert!((app.displayed_progress_ratio() - 0.55).abs() < 0.001);
 
-        // 5. pending 清除后，恢复到真实播放位置
         app.pending_progress_ratio = None;
         assert!((app.displayed_progress_ratio() - 0.20).abs() < 0.001);
     }
@@ -2646,21 +2614,13 @@ mod tests {
         let mut app = MusicApp::new(false);
         app.config.volume = 0.5;
 
-        // 1. 默认状态
         assert!((app.displayed_volume_ratio() - 0.5).abs() < 0.001);
-
-        // 2. Pending 音量守卫
         app.pending_volume_ratio = Some(0.8);
         assert!((app.displayed_volume_ratio() - 0.8).abs() < 0.001);
-
-        // 3. 正在拖拽音量
         app.drag_volume_ratio = Some(0.3);
         assert!((app.displayed_volume_ratio() - 0.3).abs() < 0.001);
-
-        // 4. 释放拖拽
         app.drag_volume_ratio = None;
         assert!((app.displayed_volume_ratio() - 0.8).abs() < 0.001);
-
         app.pending_volume_ratio = None;
         assert!((app.displayed_volume_ratio() - 0.5).abs() < 0.001);
     }
@@ -2711,11 +2671,8 @@ mod tests {
 
     #[test]
     fn test_lyrics_target_offset_centering() {
-        // 第一句居中计算：0px 偏移配合 pt(240px) 黄金居中
         let target_0 = 0_f32 * 60.0;
         assert_eq!(target_0, 0.0);
-
-        // 第 10 句居中计算：10 * 60.0 = 600px 偏移
         let target_10 = 10_f32 * 60.0;
         assert_eq!(target_10, 600.0);
     }
@@ -2730,25 +2687,17 @@ mod tests {
 
         let real_move = gpui::Point::new(gpui::px(103.5), gpui::px(100.0));
         let real_dx = f32::from(real_move.x - last_pos.x).abs();
-        assert!(real_dx >= 2.0, "真实鼠标位移正常放行唤醒");
+        assert!(real_dx >= 2.0, "真实鼠标位移必须触发舞台唤醒");
     }
 
     #[test]
-    fn test_stage_debounce_and_click_wake_behavior() {
+    fn stage_idle_policy_is_twenty_seconds() {
+        assert_eq!(STAGE_CONTROLS_IDLE_TIMEOUT, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn test_stage_debounce_window() {
         let suppress_until = std::time::Instant::now() + Duration::from_millis(600);
-        assert!(
-            std::time::Instant::now() < suppress_until,
-            "防抖时间窗生效，屏蔽瞬时连击"
-        );
-
-        // 已隐藏（visibility <= 0.05）状态下，鼠标移动不延长活跃时间
-        let hidden_visibility = 0.0_f32;
-        assert!(
-            hidden_visibility <= 0.05,
-            "已隐藏状态下不顺延活跃时间，移动鼠标不唤醒"
-        );
-
-        let active_visibility = 1.0_f32;
-        assert!(active_visibility > 0.05, "已显示状态下顺延活跃时间");
+        assert!(std::time::Instant::now() < suppress_until);
     }
 }
