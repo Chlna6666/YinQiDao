@@ -1,0 +1,154 @@
+name: Apply search and fluid optimization
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-search-fluid-optimization.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply search and fluid fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          shell_path = Path("src/ui/shell.rs")
+          shell = shell_path.read_text(encoding="utf-8")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              if text.count(old) != 1:
+                  raise SystemExit(f"{label}: expected exactly one source block, found {text.count(old)}")
+              return text.replace(old, new, 1)
+
+          shell = replace_once(
+              shell,
+              "    content_revision: u64,\n    query_revision: u64,\n    status_fingerprint: u64,",
+              "    content_revision: u64,\n    status_fingerprint: u64,\n    search_fingerprint: u64,",
+              "library render-key fields",
+          )
+          shell = replace_once(
+              shell,
+              "        content_revision: app.ui_content_revision,\n        query_revision: app.library_refresh_request,\n        status_fingerprint: text_fingerprint(&app.status),",
+              "        content_revision: app.ui_content_revision,\n        status_fingerprint: text_fingerprint(&app.status),\n        search_fingerprint: text_fingerprint(&app.search),",
+              "library render-key values",
+          )
+
+          old_update_search = '''    pub(crate) fn update_search(&mut self, key: &str, cx: &mut Context<Self>) {
+              if key == "backspace" {
+                  self.search.pop();
+              } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
+                  self.search.push_str(key);
+              }
+              self.refresh_tracks_async(cx, None);
+              cx.notify();
+          }
+          '''
+          old_update_search = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in old_update_search.splitlines()
+          ) + "\n"
+          new_update_search = '''    pub(crate) fn update_search(&mut self, key: &str, cx: &mut Context<Self>) {
+              if key == "backspace" {
+                  self.search.pop();
+              } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
+                  self.search.push_str(key);
+              }
+              // `library::render` already filters the authoritative in-memory track set. Do not
+              // issue a SQLite query or replace the audio engine registry for every keystroke.
+              cx.notify();
+          }
+          '''
+          new_update_search = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in new_update_search.splitlines()
+          ) + "\n"
+          shell = replace_once(shell, old_update_search, new_update_search, "update_search")
+
+          old_test = '''        let status_key = library_page_render_key(&app);
+              app.status.push_str(" · updated");
+              assert_ne!(status_key, library_page_render_key(&app));
+          }
+          '''
+          old_test = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in old_test.splitlines()
+          ) + "\n"
+          new_test = '''        let status_key = library_page_render_key(&app);
+              app.status.push_str(" · updated");
+              assert_ne!(status_key, library_page_render_key(&app));
+
+              let search_key = library_page_render_key(&app);
+              app.search.push_str("ambient");
+              assert_ne!(search_key, library_page_render_key(&app));
+          }
+          '''
+          new_test = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in new_test.splitlines()
+          ) + "\n"
+          shell = replace_once(shell, old_test, new_test, "render-key test")
+          shell_path.write_text(shell, encoding="utf-8")
+
+          stage_path = Path("src/ui/player_stage.rs")
+          stage = stage_path.read_text(encoding="utf-8")
+          stage = replace_once(
+              stage,
+              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))\n        .repeat(RepeatMode::Forever)\n        .ease(Easing::InOutCubic);",
+              "    // coprime, keeping a long composite repeat period without a CPU animation loop.\n    // Constant angular velocity avoids the visible pause that ease-in/out introduces at every\n    // revolution boundary, so the ambient field is already moving when the stage opens.\n    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))\n        .repeat(RepeatMode::Forever)\n        .ease(Easing::Linear);",
+              "fluid easing",
+          )
+          stage_path.write_text(stage, encoding="utf-8")
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add src/ui/shell.rs
+          git diff --cached --check
+          git diff --cached --quiet && {
+            echo 'no library search optimization generated' >&2
+            exit 1
+          }
+          git commit -m 'perf(library): 移除搜索输入的重复数据库刷新'
+
+          git add src/ui/player_stage.rs
+          git diff --cached --check
+          git diff --cached --quiet && {
+            echo 'no player fluid fix generated' >&2
+            exit 1
+          }
+          git commit -m 'fix(player): 让流体轨道保持连续旋转'
+
+          git push origin HEAD:main
