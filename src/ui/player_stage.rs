@@ -1,9 +1,13 @@
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, Context, EncodedImageBytes, ImageFormat,
-    IntoElement, ObjectFit, SharedString, StatefulInteractiveElement as _, div, hsla, img,
-    linear_color_stop, linear_gradient, prelude::*, px, radians, relative, rgb,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing,
+    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString,
+    StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
+    prelude::*, px, radians, relative, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
@@ -571,10 +575,11 @@ fn ambient_background(
     let id = id.unwrap_or_default();
     let animate = dynamic && playing;
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-    // Settings are expressed as an intuitive 8..64 level. Map that to real Gaussian sigma while
-    // bounding the surface expansion cost; the blurred scene itself is retained and only its
-    // transform is animated by the renderer.
-    let sigma = (blur_radius * 0.55).clamp(3.0, 36.0);
+
+    // Keep the expensive Gaussian surface bounded. The motion itself is renderer-owned and only
+    // rotates local orbit containers; no Translation property is used, so playback no longer turns
+    // three custom-eased animations into full-viewport damage every frame.
+    let sigma = (blur_radius * 0.42).clamp(4.0, 24.0);
     let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
 
     if let Some(bytes) = blurred.or(artwork) {
@@ -582,8 +587,8 @@ fn ambient_background(
             div()
                 .absolute()
                 .inset_0()
-                .scale(1.13)
-                .opacity(0.44)
+                .scale(1.10)
+                .opacity(0.30)
                 .child(
                     img(EncodedImageBytes::new(ImageFormat::Png, bytes))
                         .size_full()
@@ -593,55 +598,58 @@ fn ambient_background(
     }
 
     root
-        .child(fluid_blob(
-            "stage-fluid-a-drift",
-            "stage-fluid-a-rotate",
-            -0.18,
-            -0.24,
-            0.90,
-            1.02,
-            23.0,
-            c1,
-            0.90,
-            sigma,
-            70.0,
-            42.0,
-            19,
-            31,
-            animate,
-        ))
-        .child(fluid_blob(
-            "stage-fluid-b-drift",
-            "stage-fluid-b-rotate",
-            0.54,
-            -0.02,
-            0.86,
-            0.94,
-            211.0,
-            c2,
-            0.86,
-            sigma * 0.92,
-            -62.0,
-            56.0,
-            23,
-            37,
-            animate,
-        ))
-        .child(fluid_blob(
-            "stage-fluid-c-drift",
-            "stage-fluid-c-rotate",
-            0.16,
-            0.45,
+        .child(orbit_blob(
+            "stage-fluid-a-orbit",
+            -0.13,
+            -0.20,
+            0.62,
+            0.70,
+            0.08,
+            0.13,
             0.82,
-            0.92,
-            302.0,
-            c3,
-            0.80,
-            sigma * 1.08,
-            52.0,
-            -64.0,
+            0.74,
+            24.0,
+            c1,
+            0.74,
+            sigma,
             29,
-            41,
+            1.0,
+            animate,
+        ))
+        .child(orbit_blob(
+            "stage-fluid-b-orbit",
+            0.48,
+            -0.10,
+            0.58,
+            0.66,
+            0.12,
+            0.05,
+            0.76,
+            0.82,
+            208.0,
+            c2,
+            0.70,
+            sigma * 0.92,
+            37,
+            -1.0,
+            animate,
+        ))
+        .child(orbit_blob(
+            "stage-fluid-c-orbit",
+            0.14,
+            0.45,
+            0.54,
+            0.58,
+            0.04,
+            0.10,
+            0.84,
+            0.76,
+            301.0,
+            c3,
+            0.66,
+            sigma * 1.06,
+            43,
+            1.0,
             animate,
         ))
         .child(
@@ -651,11 +659,11 @@ fn ambient_background(
                 .bg(linear_gradient(
                     180.0,
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.01, (mask * 0.42).clamp(0.16, 0.40)),
+                        hsla(0.0, 0.0, 0.01, (mask * 0.36).clamp(0.14, 0.34)),
                         0.0,
                     ),
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.005, (mask * 0.70).clamp(0.30, 0.56)),
+                        hsla(0.0, 0.0, 0.005, (mask * 0.60).clamp(0.26, 0.50)),
                         1.0,
                     ),
                 )),
@@ -663,62 +671,64 @@ fn ambient_background(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fluid_blob(
-    drift_id: &'static str,
-    rotate_id: &'static str,
+fn orbit_blob(
+    animation_id: &'static str,
     left: f32,
     top: f32,
     width: f32,
     height: f32,
+    blob_left: f32,
+    blob_top: f32,
+    blob_width: f32,
+    blob_height: f32,
     angle: f32,
     color: gpui::Hsla,
     alpha: f32,
     sigma: f32,
-    drift_x: f32,
-    drift_y: f32,
-    drift_seconds: u64,
-    rotate_seconds: u64,
+    period_seconds: u64,
+    direction: f32,
     animate: bool,
 ) -> gpui::AnyElement {
-    let base = div()
+    let blob = div()
         .absolute()
-        .left(relative(left))
-        .top(relative(top))
-        .w(relative(width))
-        .h(relative(height))
+        .left(relative(blob_left))
+        .top(relative(blob_top))
+        .w(relative(blob_width))
+        .h(relative(blob_height))
         .rounded_full()
         .blur(px(sigma))
         .bg(linear_gradient(
             angle,
             linear_color_stop(color.opacity(alpha), 0.0),
+            linear_color_stop(color.opacity(alpha * 0.38), 0.56),
             linear_color_stop(color.opacity(0.0), 1.0),
         ));
 
+    let orbit = div()
+        .absolute()
+        .left(relative(left))
+        .top(relative(top))
+        .w(relative(width))
+        .h(relative(height))
+        .child(blob);
+
     if !animate {
-        return base.into_any_element();
+        return orbit.into_any_element();
     }
 
-    // The cosine ping-pong has matching position and velocity at the repeat boundary. The three
-    // layers use pairwise-prime drift/rotation periods so their composition takes a long time to
-    // repeat while each individual scene stays cheap and deterministic.
-    let drift = Animation::new(Duration::from_secs(drift_seconds))
-        .repeat()
-        .with_easing(|progress| {
-            0.5 - 0.5 * (std::f32::consts::TAU * progress.clamp(0.0, 1.0)).cos()
-        })
-        .with_property(AnimationProperty::translation(
-            gpui::Point::new(px(-drift_x), px(-drift_y)),
-            gpui::Point::new(px(drift_x), px(drift_y)),
-        ));
-    let rotate = Animation::new(Duration::from_secs(rotate_seconds))
-        .repeat()
-        .with_property(AnimationProperty::rotation(
-            radians(0.0),
-            radians(std::f32::consts::TAU),
-        ));
+    // Built-in easing is GPU/scene-driver friendly. The asymmetric child makes local rotation look
+    // like a slow drift while the container's dirty envelope stays local. 29/37/43 are pairwise
+    // coprime, so the composite pattern has a long repeat period without a CPU animation loop.
+    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
+        .repeat(RepeatMode::Forever)
+        .ease(Easing::InOutCubic);
+    let rotation = Animation::from_spec(spec).with_property(AnimationProperty::rotation(
+        radians(0.0),
+        radians(std::f32::consts::TAU * direction),
+    ));
 
-    base.with_animation(drift_id, drift, |element, _| element)
-        .with_animation(rotate_id, rotate, |element, _| element)
+    orbit
+        .with_animation(animation_id, rotation, |element, _| element)
         .into_any_element()
 }
 
