@@ -117,17 +117,24 @@ impl SnapshotCache {
         )
     }
 
-    fn optimistic_command(&self, command: &PlayerCommand) {
-        let desired = match command {
+    fn optimistic_state(command: &PlayerCommand) -> Option<PlaybackState> {
+        match command {
             PlayerCommand::Play => Some(PlaybackState::Playing),
             PlayerCommand::Pause => Some(PlaybackState::Paused),
             PlayerCommand::Stop => Some(PlaybackState::Stopped),
             PlayerCommand::RestoreTrack { play: false, .. } => Some(PlaybackState::Paused),
             _ => None,
-        };
-        if let Some(state) = desired {
-            self.state_override
-                .store(encode_state(state), Ordering::Release);
+        }
+    }
+
+    fn set_optimistic_state(&self, state: PlaybackState) {
+        self.state_override
+            .store(encode_state(state), Ordering::Release);
+    }
+
+    fn optimistic_command(&self, command: &PlayerCommand) {
+        if let Some(state) = Self::optimistic_state(command) {
+            self.set_optimistic_state(state);
         }
     }
 
@@ -219,12 +226,15 @@ impl AudioEngine {
     }
 
     pub fn try_send(&self, command: PlayerCommand) -> bool {
-        match self
-            .request_tx
-            .try_send(EngineRequest::Command(command.clone()))
-        {
+        // Extract only the tiny optimistic state before moving the command. Cloning PlayerCommand
+        // here used to deep-copy SetQueue(Vec<TrackId>) on the GPUI thread for every play/queue
+        // action, defeating the non-blocking façade for large libraries.
+        let optimistic_state = SnapshotCache::optimistic_state(&command);
+        match self.request_tx.try_send(EngineRequest::Command(command)) {
             Ok(()) => {
-                self.snapshot.optimistic_command(&command);
+                if let Some(state) = optimistic_state {
+                    self.snapshot.set_optimistic_state(state);
+                }
                 true
             }
             Err(_) => false,
