@@ -965,7 +965,8 @@ impl MusicApp {
         let request = self.library_refresh_request;
         let search = self.search.clone();
         let task = Tokio::spawn_result(cx, async move {
-            let tracks = tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await??;
+            let tracks =
+                tokio::task::spawn_blocking(move || library.tracks(Some(&search))).await??;
             let engine_tracks = tracks.clone();
             Ok::<_, anyhow::Error>((tracks, engine_tracks))
         });
