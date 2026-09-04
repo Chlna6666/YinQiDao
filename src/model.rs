@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +107,7 @@ impl AppPage {
     }
 
     pub fn from_pathname(path: &str) -> Self {
-        match path {
+        match pathname {
             "/player" => Self::Player,
             "/library" => Self::Library,
             "/settings" => Self::Settings,
@@ -123,7 +123,7 @@ pub struct PlayerSnapshot {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub volume: f32,
-    pub queue: Vec<TrackId>,
+    pub queue: Arc<Vec<TrackId>>,
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub error: Option<String>,
