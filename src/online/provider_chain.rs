@@ -58,12 +58,12 @@ impl OnlineServices {
                 match provider_lyrics {
                     Some(lyrics) if lyrics.has_translation() => Some(lyrics),
                     Some(lyrics) => self
-                        .fetch_translated_lyrics_fallback(track, matched.provider)
+                        .fetch_translated_lyrics_fallback(track, Some(matched.provider))
                         .await
                         .or(Some(lyrics)),
                     None => {
                         if let Some(translated) = self
-                            .fetch_translated_lyrics_fallback(track, matched.provider)
+                            .fetch_translated_lyrics_fallback(track, Some(matched.provider))
                             .await
                         {
                             Some(translated)
@@ -93,19 +93,28 @@ impl OnlineServices {
         Ok(None)
     }
 
+    /// Upgrade an already-cached monolingual lyric without refetching metadata or artwork.
+    /// This remains entirely on the async enrichment path and never blocks GPUI.
+    pub(crate) async fn fetch_translated_lyrics_for_track(
+        &self,
+        track: &Track,
+    ) -> Option<LyricsDocument> {
+        self.fetch_translated_lyrics_fallback(track, None).await
+    }
+
     /// Prefer a lyric document that carries a synchronized translation without changing the
     /// metadata provider selected for the track. Netease and QQ expose explicit translated lyric
     /// tracks; keep this lookup in the background enrichment path so it never blocks GPUI.
     async fn fetch_translated_lyrics_fallback(
         &self,
         track: &Track,
-        exclude: providers::ProviderKind,
+        exclude: Option<providers::ProviderKind>,
     ) -> Option<LyricsDocument> {
         for provider in [
             providers::ProviderKind::Netease,
             providers::ProviderKind::QqMusic,
         ] {
-            if provider == exclude {
+            if exclude == Some(provider) {
                 continue;
             }
 
