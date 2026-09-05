@@ -1,0 +1,57 @@
+name: Apply Apple Music fluid v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-apple-fluid-v3-20260905.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Apply patch
+        shell: bash
+        run: python .github/scripts/apply_apple_fluid_v3_20260905.py
+
+      - name: Format
+        shell: bash
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        shell: bash
+        run: cargo check --locked
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Compile tests
+        shell: bash
+        run: cargo test --locked --no-run
+
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          rm .github/scripts/apply_apple_fluid_v3_20260905.py
+          rm .github/workflows/apply-apple-fluid-v3-20260905.yml
+          git config user.name "Chlna6666"
+          git config user.email "79357769+Chlna6666@users.noreply.github.com"
+          git add src/artwork.rs src/ui/player_stage.rs .github/scripts/apply_apple_fluid_v3_20260905.py .github/workflows/apply-apple-fluid-v3-20260905.yml
+          git commit -m "perf(player): 移除实时模糊并重构流体背景"
+          git push origin HEAD:main
