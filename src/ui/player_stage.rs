@@ -15,7 +15,7 @@ use crate::{
     audio::PlayerCommand,
     gpu::AppleFluidView,
     lyrics::LyricLine,
-    model::{PlaybackState, PlayerSnapshot, Track},
+    model::{PlaybackState, Track},
 };
 
 use super::{
