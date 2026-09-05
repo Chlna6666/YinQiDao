@@ -105,6 +105,13 @@ jobs:
               'close_stage',
               '#[allow(clippy::too_many_arguments)]',
           )
+
+          text = text.replace(
+              'let _ = fluid_background.update(cx, |view, cx| {',
+              'fluid_background.update(cx, |view, cx| {',
+              1,
+          )
+          text = text.replace('rgb(0x0e_0f_16)', 'rgb(0x0e0f16)', 1)
           shell.write_text(text, encoding='utf-8', newline='\n')
 
       - name: Format source
