@@ -107,6 +107,19 @@ fn ratio_from_position(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: P
     (local / usable_width).clamp(0.0, 1.0)
 }
 
+fn pointer_hits_thumb(
+    position_x: Pixels,
+    bounds: Bounds<Pixels>,
+    ratio: f32,
+    thumb_size: Pixels,
+) -> bool {
+    let thumb = f32::from(thumb_size);
+    let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
+    let thumb_center = f32::from(bounds.left()) + thumb * 0.5 + ratio.clamp(0.0, 1.0) * usable_width;
+    let hit_radius = (thumb * 0.75).max(8.0);
+    (f32::from(position_x) - thumb_center).abs() <= hit_radius
+}
+
 fn begin_pointer_press(id: &str, position_x: Pixels, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
@@ -204,11 +217,11 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with native pointer semantics: click jumps immediately, movement turns the press into scrub.
+/// Slider with strict track-click and thumb-drag semantics.
 ///
-/// This intentionally does not use GPUI's drag-and-drop API. A normal left press commits its ratio
-/// immediately. Only subsequent pointer movement of at least 3 px while the left button remains down
-/// publishes preview changes; release commits again only for a real scrub gesture.
+/// Clicking anywhere on the track commits that position immediately and leaves no pointer binding.
+/// A scrub gesture can only start when the initial press hits the current thumb. The thumb must then
+/// move at least 3 px while the left button remains down before preview updates are published.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -249,13 +262,17 @@ pub fn interactive_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            begin_pointer_press(&id_for_down, event.position.x, cx);
-            if let Some(bounds) = *bounds_for_down.borrow() {
-                (commit_for_down)(
-                    ratio_from_position(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+            let Some(bounds) = *bounds_for_down.borrow() else {
+                return;
+            };
+            let starts_on_thumb = pointer_hits_thumb(event.position.x, bounds, ratio, style.thumb_size);
+            if starts_on_thumb {
+                begin_pointer_press(&id_for_down, event.position.x, cx);
             }
+            (commit_for_down)(
+                ratio_from_position(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -326,5 +343,16 @@ mod tests {
         assert_eq!(ratio_from_position(px(305.0), bounds, thumb), 1.0);
         assert_eq!(ratio_from_position(px(-500.0), bounds, thumb), 0.0);
         assert_eq!(ratio_from_position(px(900.0), bounds, thumb), 1.0);
+    }
+
+    #[test]
+    fn track_click_and_thumb_drag_have_distinct_hit_regions() {
+        let bounds = Bounds::new(
+            gpui::point(px(100.0), px(0.0)),
+            gpui::size(px(210.0), px(12.0)),
+        );
+        let thumb = px(10.0);
+        assert!(pointer_hits_thumb(px(205.0), bounds, 0.5, thumb));
+        assert!(!pointer_hits_thumb(px(280.0), bounds, 0.5, thumb));
     }
 }
