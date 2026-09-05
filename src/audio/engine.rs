@@ -136,21 +136,17 @@ impl PreloadCoordinator {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        if self
-            .ready
-            .lock()
-            .ok()
-            .as_deref()
-            .is_some_and(|ready| ready.track_id == track_id)
+        if let Ok(ready) = self.ready.lock()
+            && ready
+                .as_ref()
+                .is_some_and(|ready| ready.track_id == track_id)
         {
             return;
         }
-        if self
-            .request
-            .lock()
-            .ok()
-            .as_deref()
-            .is_some_and(|pending| pending.track_id == track_id && pending.path == path)
+        if let Ok(pending) = self.request.lock()
+            && pending
+                .as_ref()
+                .is_some_and(|pending| pending.track_id == track_id && pending.path == path)
         {
             return;
         }
@@ -221,9 +217,6 @@ impl PreloadCoordinator {
                 request
             };
 
-            // Short debounce collapses a burst of Next/PlayTrack requests before doing filesystem
-            // probe work. A request that arrives during an expensive open is detected by generation
-            // and the stale decoder is discarded instead of being published.
             thread::sleep(PRELOAD_DEBOUNCE);
             if self.closed.load(Ordering::Acquire) {
                 return;
@@ -454,8 +447,6 @@ impl AudioEngine {
             }
             PlayerCommand::Next => self.reset_transport_for_switch(true),
             PlayerCommand::Previous => {
-                // Previous may mean either restart-current or open-previous. Both semantics start at
-                // zero, so reset the audible clock immediately without forcing a loading state.
                 self.reset_transport_for_switch(false);
             }
             PlayerCommand::SetVolume(volume) => {
