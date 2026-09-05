@@ -53,10 +53,6 @@ pub(super) fn render(
         .overflow_hidden()
         .bg(rgb(0x0e0f16))
         .text_color(TEXT_WHITE)
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
-        )
         .child(ambient_background(fluid_background))
         .child(
             div()
@@ -423,6 +419,15 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                     move |ratio, cx| {
                         let _ = view.update(cx, |this, cx| {
                             this.wake_stage_controls_immediately(cx);
+                            this.seek_to_ratio(ratio, cx);
+                        });
+                    }
+                },
+                {
+                    let view = cx.entity().downgrade();
+                    move |ratio, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.wake_stage_controls_immediately(cx);
                             if this.drag_target == Some(DragTarget::Progress) {
                                 this.update_drag_ratio(DragTarget::Progress, ratio, cx);
                             } else {
@@ -541,6 +546,16 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                         "stage-volume-track",
                         volume,
                         SliderStyle::stage_volume(),
+                        {
+                            let view = cx.entity().downgrade();
+                            move |ratio, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.wake_stage_controls_immediately(cx);
+                                    this.pending_volume_ratio = None;
+                                    this.set_app_volume(ratio, cx);
+                                });
+                            }
+                        },
                         {
                             let view = cx.entity().downgrade();
                             move |ratio, cx| {
