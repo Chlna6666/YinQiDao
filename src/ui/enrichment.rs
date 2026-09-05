@@ -50,7 +50,27 @@ impl MusicApp {
                 tokio::task::spawn_blocking(move || lookup_library.enrichment(&lookup_track))
                     .await
                     .map_err(|_| anyhow!("读取歌词缓存任务异常退出"))??;
-            if stored.checked_online || (!metadata_enabled && !lyrics_enabled) {
+
+            if !metadata_enabled && !lyrics_enabled {
+                return Ok(EnrichmentOutcome {
+                    result: EnrichmentResult::default(),
+                    artwork_key: None,
+                    artwork: None,
+                    cached_lyrics: stored.lyrics,
+                });
+            }
+
+            // Older caches considered a successful online lookup final even when the selected
+            // provider only supplied monolingual lyrics. Upgrade those entries once through the
+            // translation-only provider path instead of refetching metadata and cover artwork.
+            let needs_translation_upgrade = stored.checked_online
+                && lyrics_enabled
+                && stored
+                    .lyrics
+                    .as_ref()
+                    .is_some_and(|lyrics| !lyrics.has_translation());
+
+            if stored.checked_online && !needs_translation_upgrade {
                 return Ok(EnrichmentOutcome {
                     result: EnrichmentResult::default(),
                     artwork_key: None,
@@ -60,7 +80,23 @@ impl MusicApp {
             }
 
             let services = OnlineServices::new(api_key)?;
-            let mut result = services.enrich(&track, lyrics_enabled).await?;
+            let mut result = if needs_translation_upgrade {
+                let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
+                    return Ok(EnrichmentOutcome {
+                        result: EnrichmentResult::default(),
+                        artwork_key: None,
+                        artwork: None,
+                        cached_lyrics: stored.lyrics,
+                    });
+                };
+                EnrichmentResult {
+                    lyrics: Some(lyrics),
+                    ..EnrichmentResult::default()
+                }
+            } else {
+                services.enrich(&track, lyrics_enabled).await?
+            };
+
             if !metadata_enabled {
                 result.metadata = None;
             }
