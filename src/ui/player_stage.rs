@@ -6,9 +6,10 @@ use std::{
 use gpui::{
     Animation, AnimationDirection, AnimationExt as _, AnimationProperty, AnimationSpec,
     CompositeLayerExt as _, Context, Easing,
-    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString,
+    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString, Transition,
+    TransitionProperty,
     StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
-    point, prelude::*, px, relative, rgb,
+    point, prelude::*, px, radians, relative, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
@@ -227,6 +228,7 @@ fn stage_lyrics(
             |this, _: &gpui::ScrollWheelEvent, _, cx| {
                 this.lyrics_user_scrolling_until =
                     Some(Instant::now() + Duration::from_secs(3));
+                this.lyrics_scroll_target_y = None;
                 this.wake_stage_controls(cx);
             },
         ));
@@ -234,8 +236,8 @@ fn stage_lyrics(
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active) as f32;
         let focus = (-1.05 * distance).exp().clamp(0.0, 1.0);
-        let alpha = 0.16 + focus * 0.84;
-        let size = 18.0 + focus * 12.0;
+        let alpha = 0.18 + focus * 0.82;
+        let scale = 0.90 + focus * 0.10;
         let timestamp = line.timestamp_ms;
         let weight = if focus > 0.72 {
             gpui::FontWeight::BOLD
@@ -256,8 +258,8 @@ fn stage_lyrics(
                 div()
                     .w_full()
                     .min_w(px(0.0))
-                    .text_size(px(size))
-                    .text_color(hsla(0.0, 0.0, 1.0, alpha))
+                    .text_size(px(24.0))
+                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
                     .child(line.text.clone()),
             );
 
@@ -270,8 +272,8 @@ fn stage_lyrics(
                 div()
                     .w_full()
                     .min_w(px(0.0))
-                    .text_size(px((size * 0.66).max(13.0)))
-                    .text_color(hsla(0.0, 0.0, 1.0, alpha * 0.68))
+                    .text_size(px(15.5))
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
                     .child(translation.to_owned()),
             );
         }
@@ -286,7 +288,9 @@ fn stage_lyrics(
                 .pr(px(8.0))
                 .py(px(9.0))
                 .mb(px(8.0))
-                .opacity(if index == active { 1.0 } else { 0.96 })
+                .scale(scale)
+                .opacity(alpha)
+                .transition(lyric_focus_transition())
                 .cursor_pointer()
                 .hover(|style| style.opacity(1.0))
                 .child(text)
@@ -296,8 +300,9 @@ fn stage_lyrics(
                         cx.stop_propagation();
                         this.seek_to_ms(timestamp, cx);
                         this.lyrics_user_scrolling_until = None;
-                        this.lyrics_scroll_handle
-                            .scroll_to_top_of_item(index.saturating_sub(2));
+                        this.last_lyric_index = Some(index);
+                        this.lyrics_scroll_target_y =
+                            Some(f32::from(this.lyrics_scroll_handle.offset().y));
                         this.wake_stage_controls_immediately(cx);
                     }),
                 ),
@@ -307,6 +312,11 @@ fn stage_lyrics(
     viewport.into_any_element()
 }
 
+fn lyric_focus_transition() -> Transition {
+    Transition::new(Duration::from_millis(360))
+        .ease(Easing::OutCubic)
+        .properties([TransitionProperty::Opacity, TransitionProperty::Transform])
+}
 fn stage_controls(
     app: &MusicApp,
     snapshot: &PlayerSnapshot,
@@ -703,15 +713,30 @@ fn orbit_blob(
         return orbit.into_any_element();
     }
 
-    // Move the cached blur surface itself. Rotation around a large nearly symmetric blur can be
-    // technically active yet visually imperceptible; a bounded compositor translation produces an
-    // immediately visible Apple Music-style drift without relayout or re-running the Gaussian blur.
-    let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
+    // Keep the Gaussian blur surface cached. An off-centre blob rotating inside a non-square
+    // orbit follows a real ellipse; a slower outer translation prevents the motion from reading
+    // as a mechanical rotation. Both properties stay renderer-owned and avoid relayout/reblur.
+    let rotation = Animation::from_spec(
+        AnimationSpec::new(Duration::from_secs(period_seconds))
+            .repeat(RepeatMode::Forever)
+            .ease(Easing::Linear),
+    )
+    .with_property(AnimationProperty::rotation(
+        radians(0.0),
+        radians(std::f32::consts::TAU * direction),
+    ));
+    let orbit = orbit.with_animation(
+        SharedString::from(format!("{animation_id}-rotation")),
+        rotation,
+        |element, _| element,
+    );
+
+    let drift_spec = AnimationSpec::new(Duration::from_secs(period_seconds + 4))
         .repeat(RepeatMode::Forever)
         .direction(AnimationDirection::Alternate)
         .ease(Easing::Linear);
     let dx = drift_x * direction;
-    let translation = Animation::from_spec(spec).with_property(
+    let translation = Animation::from_spec(drift_spec).with_property(
         AnimationProperty::translation(
             point(px(-dx), px(-drift_y)),
             point(px(dx), px(drift_y)),

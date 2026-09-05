@@ -106,6 +106,7 @@ pub struct MusicApp {
     pub(crate) stage_controls_hovered: bool,
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
     pub(crate) lyrics_user_scrolling_until: Option<std::time::Instant>,
+    pub(crate) lyrics_scroll_target_y: Option<f32>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
     previous_page: AppPage,
     background_started: bool,
@@ -430,6 +431,7 @@ impl MusicApp {
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
             lyrics_user_scrolling_until: None,
+            lyrics_scroll_target_y: None,
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
             previous_page: AppPage::Home,
             background_started: false,
@@ -580,11 +582,56 @@ impl MusicApp {
         }
     }
 
+    fn advance_lyrics_scroll_animation(&mut self, dt: f32) {
+        if !self.stage_open {
+            self.lyrics_scroll_target_y = None;
+            return;
+        }
+        if self
+            .lyrics_user_scrolling_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            self.lyrics_scroll_target_y = None;
+            return;
+        }
+        let Some(index) = self.last_lyric_index else {
+            self.lyrics_scroll_target_y = None;
+            return;
+        };
+        let viewport = self.lyrics_scroll_handle.bounds();
+        let Some(line) = self.lyrics_scroll_handle.bounds_for_item(index) else {
+            self.lyrics_scroll_target_y = Some(f32::from(self.lyrics_scroll_handle.offset().y));
+            return;
+        };
+        let max_offset = f32::from(self.lyrics_scroll_handle.max_offset().height).max(0.0);
+        let target = f32::from(viewport.center().y - line.center().y).clamp(-max_offset, 0.0);
+        self.lyrics_scroll_target_y = Some(target);
+
+        let offset = self.lyrics_scroll_handle.offset();
+        let current = f32::from(offset.y);
+        let diff = target - current;
+        if diff.abs() <= 0.35 {
+            self.lyrics_scroll_handle
+                .set_offset(gpui::Point::new(offset.x, gpui::px(target)));
+            return;
+        }
+
+        let factor = 1.0 - (-13.5 * dt).exp();
+        let next = current + diff * factor;
+        self.lyrics_scroll_handle
+            .set_offset(gpui::Point::new(offset.x, gpui::px(next)));
+    }
+
     pub(crate) fn has_active_animations(&self) -> bool {
+        let lyrics_scrolling = self.stage_open
+            && self.lyrics_scroll_target_y.is_some_and(|target| {
+                (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.35
+            });
         self.stage_animating
             || (self.stage_open
                 && (self.stage_controls_visibility > 0.005
                     && self.stage_controls_visibility < 0.995))
+            || lyrics_scrolling
     }
 
     pub(crate) fn show_library_tab(&mut self, tab: LibraryTab, cx: &mut Context<Self>) {
@@ -1402,6 +1449,7 @@ impl MusicApp {
                 self.last_polled_track_id = curr_track_id;
                 self.last_lyric_index = None;
                 self.lyrics_user_scrolling_until = None;
+                self.lyrics_scroll_target_y = None;
                 self.lyrics_scroll_handle.scroll_to_item(0);
                 self.request_current_artwork(cx);
                 self.request_current_enrichment(cx);
@@ -1422,8 +1470,8 @@ impl MusicApp {
                             .lyrics_user_scrolling_until
                             .is_some_and(|until| std::time::Instant::now() < until);
                         if !in_user_scroll {
-                            self.lyrics_scroll_handle
-                                .scroll_to_top_of_item(current_idx.saturating_sub(2));
+                            self.lyrics_scroll_target_y =
+                                Some(f32::from(self.lyrics_scroll_handle.offset().y));
                         }
                         if self.stage_open {
                             cx.notify();
@@ -2268,6 +2316,8 @@ impl Render for MusicApp {
         } else {
             self.stage_controls_visibility = target_visibility;
         }
+
+        self.advance_lyrics_scroll_animation(dt);
 
         if self.has_active_animations() {
             window.request_animation_frame();
