@@ -108,6 +108,8 @@ pub struct MusicApp {
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
     pub(crate) lyrics_user_scrolling_until: Option<std::time::Instant>,
     pub(crate) lyrics_scroll_target_y: Option<f32>,
+    pub(crate) fluid_background: Option<Entity<crate::gpu::AppleFluidView>>,
+    pub(crate) artwork_online_fallback_requested: HashSet<TrackId>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
     previous_page: AppPage,
     background_started: bool,
@@ -434,6 +436,8 @@ impl MusicApp {
             stage_suppress_wake_until: None,
             lyrics_user_scrolling_until: None,
             lyrics_scroll_target_y: None,
+            fluid_background: None,
+            artwork_online_fallback_requested: HashSet::new(),
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
             previous_page: AppPage::Home,
             background_started: false,
@@ -476,6 +480,18 @@ impl MusicApp {
         let page = cx.new(move |cx| LibraryPage::new(parent, initial_key, cx));
         self.library_page = Some(page.clone());
         page
+    }
+
+    fn ensure_fluid_background(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::gpu::AppleFluidView> {
+        if let Some(view) = &self.fluid_background {
+            return view.clone();
+        }
+        let view = cx.new(|_| crate::gpu::AppleFluidView::new());
+        self.fluid_background = Some(view.clone());
+        view
     }
 
     pub(crate) fn show_page(&mut self, page: AppPage, cx: &mut Context<Self>) {
@@ -1618,10 +1634,25 @@ impl MusicApp {
                     }
                     Ok(None) => {
                         this.artwork_missing.insert(track_id);
+                        if this.config.online_metadata
+                            && this.artwork_online_fallback_requested.insert(track_id)
+                        {
+                            this.enrichment_done.remove(&track_id);
+                            this.status = "本地封面不可用，正在尝试联网封面…".into();
+                            this.request_current_enrichment(cx);
+                        }
                     }
                     Err(error) => {
                         this.artwork_missing.insert(track_id);
-                        this.status = format!("封面读取失败：{error:#}");
+                        if this.config.online_metadata
+                            && this.artwork_online_fallback_requested.insert(track_id)
+                        {
+                            this.enrichment_done.remove(&track_id);
+                            this.status = format!("本地封面解析失败，正在尝试联网封面：{error:#}");
+                            this.request_current_enrichment(cx);
+                        } else {
+                            this.status = format!("封面读取失败：{error:#}");
+                        }
                     }
                 }
                 cx.notify();
@@ -1733,31 +1764,6 @@ impl MusicApp {
         }
     }
 
-    pub(crate) fn mini_progress_ratio(&self, x: f32, window: &Window) -> f32 {
-        let win_width = f32::from(window.bounds().size.width).max(1.0);
-        (x / win_width).clamp(0.0, 1.0)
-    }
-
-    pub(crate) fn stage_progress_ratio(&self, x: f32, window: &Window) -> f32 {
-        let win_width = f32::from(window.bounds().size.width);
-        let track_start = 117.0;
-        let track_end = (win_width - 580.0).max(track_start + 100.0);
-        let track_width = (track_end - track_start).max(80.0);
-        ((x - track_start) / track_width).clamp(0.0, 1.0)
-    }
-
-    pub(crate) fn mini_volume_ratio(&self, x: f32, window: &Window) -> f32 {
-        let win_width = f32::from(window.bounds().size.width);
-        let bar_start = win_width - 96.0;
-        ((x - bar_start) / 72.0).clamp(0.0, 1.0)
-    }
-
-    pub(crate) fn stage_volume_ratio(&self, x: f32, window: &Window) -> f32 {
-        let win_width = f32::from(window.bounds().size.width);
-        let track_end = win_width - 80.0;
-        (1.0 - (track_end - x) / 72.0).clamp(0.0, 1.0)
-    }
-
     pub(crate) fn begin_drag(&mut self, target: DragTarget, ratio: f32, cx: &mut Context<Self>) {
         let ratio = ratio.clamp(0.0, 1.0);
         self.drag_target = Some(target);
@@ -1787,7 +1793,7 @@ impl MusicApp {
             DragTarget::Progress => {
                 let changed = self
                     .drag_progress_ratio
-                    .is_none_or(|c| (c - ratio).abs() >= 0.002);
+                    .is_none_or(|c| (c - ratio).abs() >= 0.0005);
                 if changed {
                     self.drag_progress_ratio = Some(ratio);
                     cx.notify();
@@ -1797,7 +1803,7 @@ impl MusicApp {
             DragTarget::Volume => {
                 let changed = self
                     .drag_volume_ratio
-                    .is_none_or(|c| (c - ratio).abs() >= 0.004);
+                    .is_none_or(|c| (c - ratio).abs() >= 0.001);
                 if changed {
                     self.drag_volume_ratio = Some(ratio);
                     cx.notify();
@@ -2116,9 +2122,9 @@ impl MusicApp {
                     .w_full()
                     .h(px(38.0))
                     .flex_none()
-                    .bg(hsla(0.0, 0.0, 0.0, 0.40))
+                    .bg(hsla(0.0, 0.0, 0.0, 0.10))
                     .border_b_1()
-                    .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+                    .border_color(hsla(0.0, 0.0, 1.0, 0.05))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -2326,6 +2332,25 @@ impl Render for MusicApp {
 
         self.advance_lyrics_scroll_animation(dt);
 
+        let fluid_background = self.ensure_fluid_background(cx);
+        let fluid_track_id = self
+            .snapshot
+            .current_track
+            .as_ref()
+            .map_or(0, |track| track.id);
+        let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
+        let fluid_active = self.stage_progress > 0.001;
+        let fluid_dynamic = self.config.dynamic_blur;
+        let _ = fluid_background.update(cx, |view, cx| {
+            view.sync(
+                fluid_track_id,
+                fluid_palette,
+                fluid_dynamic,
+                fluid_active,
+                cx,
+            );
+        });
+
         if self.has_active_animations() {
             window.request_animation_frame();
         }
@@ -2372,9 +2397,9 @@ impl Render for MusicApp {
                     .shadow_lg()
                     .border_t_1()
                     .border_color(hsla(0.0, 0.0, 1.0, 0.12))
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(0x10_11_1a))
+                    .relative()
+                    .overflow_hidden()
+                    .bg(rgb(0x0e_0f_16))
                     .text_color(theme::TEXT_WHITE)
                     .on_mouse_move(cx.listener(
                         |this, event: &gpui::MouseMoveEvent, _window, cx| {
@@ -2398,6 +2423,14 @@ impl Render for MusicApp {
                             }
                         }),
                     )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            if this.drag_target.is_some() {
+                                this.commit_drag(cx);
+                            }
+                        }),
+                    )
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                         this.wake_stage_controls(cx);
                         let key = event.keystroke.key.as_str();
@@ -2411,13 +2444,20 @@ impl Render for MusicApp {
                             this.seek_relative(10_000, cx);
                         }
                     }))
-                    .child(self.stage_titlebar(window, cx))
                     .child(
                         div()
-                            .flex_1()
-                            .min_h(px(0.0))
+                            .absolute()
+                            .inset_0()
                             .overflow_hidden()
-                            .child(player::render(self, cx)),
+                            .child(player::render(self, cx, fluid_background.clone())),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .child(self.stage_titlebar(window, cx)),
                     ),
             )
         } else {

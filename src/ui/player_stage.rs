@@ -12,15 +12,14 @@ use gpui::{
 use lucide_gpui::icons as lucide_icons;
 
 use crate::{
-    artwork::ArtworkPalette,
     audio::PlayerCommand,
-    gpu::{apple_fluid_params, apple_fluid_program, shader_effect_canvas},
+    gpu::AppleFluidView,
     lyrics::LyricLine,
     model::{PlaybackState, PlayerSnapshot, Track},
 };
 
 use super::{
-    components::{SliderStyle, smooth_slider},
+    components::{SliderStyle, interactive_slider},
     player_legacy,
     shell::{DragTarget, MusicApp},
     theme::{
@@ -31,12 +30,15 @@ use super::{
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime, mini_player};
 
-pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
+pub(super) fn render(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    fluid_background: gpui::Entity<AppleFluidView>,
+) -> gpui::AnyElement {
     let snapshot = &app.snapshot;
     let track = snapshot.current_track.as_ref();
     let id = track.map(|track| track.id);
     let artwork = id.and_then(|id| app.artworks.get(&id).cloned());
-    let palette = id.and_then(|id| app.artwork_palettes.get(&id));
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
         .map_or(&[][..], |document| document.timed_lines());
@@ -53,19 +55,16 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
         )
         .on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))
-        .child(ambient_background(
-            id,
-            palette,
-            app.config.dynamic_blur,
-            snapshot.position_ms,
-        ))
+        .child(ambient_background(fluid_background))
         .child(
             div()
                 .absolute()
                 .inset_0()
                 .flex()
                 .flex_col()
-                .p_8()
+                .px_8()
+                .pt(px(54.0))
+                .pb_8()
                 .gap_6()
                 .child(
                     div()
@@ -375,21 +374,8 @@ fn stage_controls(
                 this.wake_stage_controls(cx);
             }
         }))
-        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
             this.handle_stage_mouse_move(event.position, cx);
-            if (this.seeking || event.dragging())
-                && this.drag_target == Some(DragTarget::Progress)
-            {
-                let ratio = this.stage_progress_ratio(f32::from(event.position.x), window);
-                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-            } else if (this.volume_dragging || event.dragging())
-                && this.drag_target == Some(DragTarget::Volume)
-            {
-                let ratio = this.stage_volume_ratio(f32::from(event.position.x), window);
-                if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
-                    this.send(PlayerCommand::SetVolume(ratio));
-                }
-            }
         }))
         .child(
             div()
@@ -398,37 +384,39 @@ fn stage_controls(
                 .child(format_time(position)),
         )
         .child(
-            smooth_slider(
+            interactive_slider(
                 "stage-progress-track",
                 app.displayed_progress_ratio(),
                 SliderStyle::stage_progress(),
-            )
-            .flex_1()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.wake_stage_controls_immediately(cx);
-                    let ratio = this.stage_progress_ratio(f32::from(event.position.x), window);
-                    this.begin_drag(DragTarget::Progress, ratio, cx);
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                if (this.seeking || event.dragging())
-                    && this.drag_target == Some(DragTarget::Progress)
                 {
-                    let ratio = this.stage_progress_ratio(f32::from(event.position.x), window);
-                    this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-                }
-            }))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.wake_stage_controls_immediately(cx);
-                    this.commit_drag(cx);
-                }),
-            ),
+                    let view = cx.entity().downgrade();
+                    move |ratio, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.wake_stage_controls_immediately(cx);
+                            if this.drag_target == Some(DragTarget::Progress) {
+                                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
+                            } else {
+                                this.begin_drag(DragTarget::Progress, ratio, cx);
+                            }
+                        });
+                    }
+                },
+                {
+                    let view = cx.entity().downgrade();
+                    move |ratio, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.wake_stage_controls_immediately(cx);
+                            if this.drag_target == Some(DragTarget::Progress) {
+                                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
+                            } else {
+                                this.begin_drag(DragTarget::Progress, ratio, cx);
+                            }
+                            this.commit_drag(cx);
+                        });
+                    }
+                },
+            )
+            .flex_1(),
         )
         .child(
             div()
@@ -519,40 +507,52 @@ fn stage_controls(
                         ),
                 )
                 .child(
-                    smooth_slider("stage-volume-track", volume, SliderStyle::stage_volume())
-                        .w(px(72.0))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.wake_stage_controls_immediately(cx);
-                                let ratio =
-                                    this.stage_volume_ratio(f32::from(event.position.x), window);
-                                this.begin_drag(DragTarget::Volume, ratio, cx);
-                                this.send(PlayerCommand::SetVolume(ratio));
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            |this, event: &gpui::MouseMoveEvent, window, cx| {
-                                if (this.volume_dragging || event.dragging())
-                                    && this.drag_target == Some(DragTarget::Volume)
-                                {
-                                    let ratio = this
-                                        .stage_volume_ratio(f32::from(event.position.x), window);
-                                    if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
-                                        this.send(PlayerCommand::SetVolume(ratio));
+                    interactive_slider(
+                        "stage-volume-track",
+                        volume,
+                        SliderStyle::stage_volume(),
+                        {
+                            let view = cx.entity().downgrade();
+                            move |ratio, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.wake_stage_controls_immediately(cx);
+                                    if this.drag_target == Some(DragTarget::Volume) {
+                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                                    } else {
+                                        this.begin_drag(DragTarget::Volume, ratio, cx);
                                     }
-                                }
-                            },
-                        ))
-                        .on_mouse_up(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.wake_stage_controls_immediately(cx);
-                                this.commit_drag(cx);
-                            }),
-                        ),
+                                    this.send(PlayerCommand::SetVolume(ratio));
+                                });
+                            }
+                        },
+                        {
+                            let view = cx.entity().downgrade();
+                            move |ratio, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.wake_stage_controls_immediately(cx);
+                                    if this.drag_target == Some(DragTarget::Volume) {
+                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                                    } else {
+                                        this.begin_drag(DragTarget::Volume, ratio, cx);
+                                    }
+                                    this.commit_drag(cx);
+                                });
+                            }
+                        },
+                    )
+                    .w(px(72.0))
+                    .on_scroll_wheel(cx.listener(
+                        |this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                            cx.stop_propagation();
+                            let delta = event.delta.pixel_delta(px(48.0)).y;
+                            if delta < px(0.0) {
+                                this.adjust_volume(0.04, cx);
+                            } else if delta > px(0.0) {
+                                this.adjust_volume(-0.04, cx);
+                            }
+                            this.wake_stage_controls_immediately(cx);
+                        },
+                    )),
                 ),
         )
 }
@@ -580,113 +580,12 @@ fn control_button(
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
-fn ambient_background(
-    id: Option<i64>,
-    palette: Option<&ArtworkPalette>,
-    dynamic: bool,
-    position_ms: u64,
-) -> gpui::AnyElement {
-    let id = id.unwrap_or_default();
-    let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-    let root = div()
+fn ambient_background(fluid_background: gpui::Entity<AppleFluidView>) -> gpui::AnyElement {
+    div()
         .absolute()
         .inset_0()
         .overflow_hidden()
-        .bg(dark);
-
-    if let Ok(program) = apple_fluid_program() {
-        return root
-            .child(shader_effect_canvas(
-                program,
-                apple_fluid_params(id, palette, position_ms, dynamic),
-            ))
-            .into_any_element();
-    }
-
-    // Runtime WGSL validation/backend pipeline failures retain a cheap static fallback rather
-    // than re-entering the former realtime blur path.
-    root
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(linear_gradient(
-                    128.0,
-                    linear_color_stop(c1.opacity(0.62), 0.0),
-                    linear_color_stop(c2.opacity(0.42), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(linear_gradient(
-                    306.0,
-                    linear_color_stop(c3.opacity(0.28), 0.0),
-                    linear_color_stop(dark.opacity(mask.clamp(0.24, 0.52)), 1.0),
-                )),
-        )
+        .bg(rgb(0x0e0f16))
+        .child(fluid_background)
         .into_any_element()
-}
-
-fn ambient_palette(
-    id: i64,
-    palette: Option<&ArtworkPalette>,
-) -> (gpui::Hsla, gpui::Hsla, gpui::Hsla, gpui::Hsla, f32) {
-    if let Some(palette) = palette {
-        let mixed = [
-            ((palette.dominant_rgb[0] as u16 + palette.secondary_rgb[0] as u16) / 2) as u8,
-            ((palette.dominant_rgb[1] as u16 + palette.secondary_rgb[1] as u16) / 2) as u8,
-            ((palette.dominant_rgb[2] as u16 + palette.secondary_rgb[2] as u16) / 2) as u8,
-        ];
-        let dark = ((palette.dark_ambient_rgb[0] as u32) << 16)
-            | ((palette.dark_ambient_rgb[1] as u32) << 8)
-            | palette.dark_ambient_rgb[2] as u32;
-        return (
-            rgb_to_hsla(palette.dominant_rgb),
-            rgb_to_hsla(palette.secondary_rgb),
-            rgb_to_hsla(mixed),
-            rgb(dark).into(),
-            palette.mask_alpha,
-        );
-    }
-    let hue = ((id.unsigned_abs() * 47) % 360) as f32 / 360.0;
-    (
-        hsla(hue, 0.82, 0.56, 1.0),
-        hsla((hue + 0.22) % 1.0, 0.80, 0.50, 1.0),
-        hsla((hue + 0.47) % 1.0, 0.76, 0.54, 1.0),
-        rgb(0x10111a).into(),
-        0.60,
-    )
-}
-
-fn rgb_to_hsla(value: [u8; 3]) -> gpui::Hsla {
-    let r = value[0] as f32 / 255.0;
-    let g = value[1] as f32 / 255.0;
-    let b = value[2] as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) * 0.5;
-    let d = max - min;
-    if d < 1e-4 {
-        return hsla(0.0, 0.0, l, 1.0);
-    }
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let h = if (max - r).abs() < 1e-4 {
-        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
-    } else if (max - g).abs() < 1e-4 {
-        ((b - r) / d + 2.0) / 6.0
-    } else {
-        ((r - g) / d + 4.0) / 6.0
-    };
-    hsla(
-        h,
-        (s * 1.28).clamp(0.30, 0.96),
-        l.clamp(0.24, 0.68),
-        1.0,
-    )
 }

@@ -1,4 +1,9 @@
-use gpui::{Div, ElementId, Hsla, Pixels, Stateful, div, hsla, prelude::*, px, relative, rgb};
+use std::{cell::RefCell, rc::Rc};
+
+use gpui::{
+    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div,
+    hsla, prelude::*, px, relative, rgb,
+};
 
 use crate::ui::theme;
 
@@ -83,12 +88,52 @@ impl SliderStyle {
     }
 }
 
-/// 统一的高精度交互式滑块组件。
-///
-/// Thumb 使用独立的 `(width - thumb_size)` 定位轨道，而不是作为 filled track 的子元素。
-/// 因此 0% 时左边缘恰好落在控件左侧，100% 时右边缘恰好落在控件右侧，任何比例都不会
-/// 因圆点半径而越过滑块边界。
-pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
+#[derive(Clone)]
+struct SliderDrag {
+    id: String,
+    thumb_size: Pixels,
+    on_change: Rc<dyn Fn(f32, &mut App)>,
+}
+
+#[derive(Default)]
+struct SliderInteractionState {
+    active_drag_id: Option<String>,
+}
+
+impl Global for SliderInteractionState {}
+
+fn ratio_from_position(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
+    let thumb = f32::from(thumb_size);
+    let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
+    let local = f32::from(position_x - bounds.left()) - thumb * 0.5;
+    (local / usable_width).clamp(0.0, 1.0)
+}
+
+fn is_active_drag(id: &str, cx: &App) -> bool {
+    cx.try_global::<SliderInteractionState>()
+        .is_some_and(|state| state.active_drag_id.as_deref() == Some(id))
+}
+
+fn begin_active_drag(id: &str, cx: &mut App) {
+    if !cx.has_global::<SliderInteractionState>() {
+        cx.set_global(SliderInteractionState::default());
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.active_drag_id = Some(id.to_owned());
+    });
+}
+
+fn end_active_drag(id: &str, cx: &mut App) -> bool {
+    if !is_active_drag(id, cx) {
+        return false;
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.active_drag_id = None;
+    });
+    true
+}
+
+fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
         .max(f32::from(style.hover_track_height)));
@@ -122,7 +167,7 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
         );
 
     div()
-        .id(id.into())
+        .id(id)
         .relative()
         .cursor_pointer()
         .h(interaction_height)
@@ -141,4 +186,131 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
                 .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
                 .child(thumb),
         )
+}
+
+/// Pure visual slider kept for places that do not need pointer interaction.
+pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
+    slider_visual(id.into(), ratio, style)
+}
+
+/// Slider with retained pointer drag semantics.
+///
+/// Mapping is derived from the element's actual painted bounds and exactly matches the thumb's
+/// `(width - thumb_size)` travel range. GPUI's drag session continues dispatching `on_drag_move`
+/// after the pointer leaves the slider, while `on_mouse_up_out` commits only when the button is
+/// actually released outside the element.
+pub fn interactive_slider(
+    id: impl Into<ElementId>,
+    ratio: f32,
+    style: SliderStyle,
+    on_change: impl Fn(f32, &mut App) + 'static,
+    on_commit: impl Fn(f32, &mut App) + 'static,
+) -> Stateful<Div> {
+    let id = id.into();
+    let id_string = id.to_string();
+    let on_change: Rc<dyn Fn(f32, &mut App)> = Rc::new(on_change);
+    let on_commit: Rc<dyn Fn(f32, &mut App)> = Rc::new(on_commit);
+    let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+
+    let bounds_for_prepaint = bounds.clone();
+    let bounds_for_down = bounds.clone();
+    let bounds_for_up = bounds.clone();
+    let bounds_for_up_out = bounds.clone();
+    let id_for_down = id_string.clone();
+    let id_for_down_out = id_string.clone();
+    let id_for_drag = id_string.clone();
+    let id_for_up = id_string.clone();
+    let id_for_up_out = id_string.clone();
+    let change_for_down = on_change.clone();
+    let commit_for_up = on_commit.clone();
+    let commit_for_up_out = on_commit.clone();
+    let drag = SliderDrag {
+        id: id_string,
+        thumb_size: style.thumb_size,
+        on_change,
+    };
+
+    slider_visual(id, ratio, style)
+        // GPUI 557f9950 does not yet expose `on_children_prepainted`. A zero-paint absolute canvas
+        // participates in the same retained layout and receives the slider's exact inner bounds in
+        // prepaint, so click mapping remains geometry-driven instead of reverting to window-space
+        // constants. Canvas itself creates no hitbox and emits no primitive.
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    *bounds_for_prepaint.borrow_mut() = Some(bounds);
+                },
+                |_bounds, (), _window, _cx| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_drag(drag, |_: &SliderDrag, _, _, cx| cx.new(|_| Empty))
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            begin_active_drag(&id_for_down, cx);
+            if let Some(bounds) = *bounds_for_down.borrow() {
+                (change_for_down)(
+                    ratio_from_position(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
+        })
+        .on_mouse_down_out(move |_event, _window, cx| {
+            let _ = end_active_drag(&id_for_down_out, cx);
+        })
+        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
+            let (thumb_size, on_change) = {
+                let drag = event.drag(cx);
+                if drag.id != id_for_drag {
+                    return;
+                }
+                (drag.thumb_size, drag.on_change.clone())
+            };
+            let ratio = ratio_from_position(event.event.position.x, event.bounds, thumb_size);
+            (on_change)(ratio, cx);
+        })
+        .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            if !end_active_drag(&id_for_up, cx) {
+                return;
+            }
+            if let Some(bounds) = *bounds_for_up.borrow() {
+                (commit_for_up)(
+                    ratio_from_position(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
+        })
+        .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            if !end_active_drag(&id_for_up_out, cx) {
+                return;
+            }
+            if let Some(bounds) = *bounds_for_up_out.borrow() {
+                (commit_for_up_out)(
+                    ratio_from_position(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_mapping_matches_thumb_travel() {
+        let bounds = Bounds::new(
+            gpui::point(px(100.0), px(0.0)),
+            gpui::size(px(210.0), px(12.0)),
+        );
+        let thumb = px(10.0);
+        assert_eq!(ratio_from_position(px(105.0), bounds, thumb), 0.0);
+        assert!((ratio_from_position(px(205.0), bounds, thumb) - 0.5).abs() < 0.0001);
+        assert_eq!(ratio_from_position(px(305.0), bounds, thumb), 1.0);
+        assert_eq!(ratio_from_position(px(-500.0), bounds, thumb), 0.0);
+        assert_eq!(ratio_from_position(px(900.0), bounds, thumb), 1.0);
+    }
 }

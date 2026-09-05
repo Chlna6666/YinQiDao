@@ -155,11 +155,9 @@ impl ArtworkCache {
             }));
         }
 
-        let source = embedded_artwork(&track.path).or_else(|| sidecar_artwork(&track.path));
-        let Some(source) = source else {
+        let Some(image) = decoded_local_artwork(&track.path) else {
             return Ok(None);
         };
-        let image = image::load_from_memory(&source).context("封面格式不受支持或文件已损坏")?;
         let image = image.thumbnail(image.width().min(768), image.height().min(768));
         let png = encode_png(&image)?;
         let blurred_png = generate_blurred_artwork(&image).unwrap_or_else(|_| png.clone());
@@ -391,6 +389,12 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
         ((g1 + m).clamp(0.0, 1.0) * 255.0).round() as u8,
         ((b1 + m).clamp(0.0, 1.0) * 255.0).round() as u8,
     ]
+}
+
+fn decoded_local_artwork(path: &Path) -> Option<DynamicImage> {
+    embedded_artwork(path)
+        .and_then(|bytes| image::load_from_memory(&bytes).ok())
+        .or_else(|| sidecar_artwork(path).and_then(|bytes| image::load_from_memory(&bytes).ok()))
 }
 
 fn embedded_artwork(path: &Path) -> Option<Vec<u8>> {

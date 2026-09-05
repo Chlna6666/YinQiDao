@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, smooth_slider},
+    components::{SliderStyle, interactive_slider},
     shell::{DragTarget, MusicApp},
     theme::{
         self, ACCENT_RED, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
@@ -107,53 +107,42 @@ impl Render for PlaybackProgress {
         let parent = self.parent.clone();
         let this = cx.weak_entity();
 
-        smooth_slider("mini-progress-track", ratio, SliderStyle::mini_progress())
-            .w_full()
-            .on_mouse_down(gpui::MouseButton::Left, {
+        interactive_slider(
+            "mini-progress-track",
+            ratio,
+            SliderStyle::mini_progress(),
+            {
                 let parent = parent.clone();
                 let this = this.clone();
-                move |event, window, cx| {
-                    cx.stop_propagation();
-                    let width = f32::from(window.bounds().size.width).max(1.0);
-                    let ratio = (f32::from(event.position.x) / width).clamp(0.0, 1.0);
+                move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
-                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                        if app.drag_target == Some(DragTarget::Progress) {
+                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                        } else {
+                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                        }
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
-            })
-            .on_mouse_move({
+            },
+            {
                 let parent = parent.clone();
                 let this = this.clone();
-                move |event, window, cx| {
-                    let width = f32::from(window.bounds().size.width).max(1.0);
-                    let ratio = (f32::from(event.position.x) / width).clamp(0.0, 1.0);
-                    let changed = parent
-                        .update(cx, |app, app_cx| {
-                            if (app.seeking || event.dragging())
-                                && app.drag_target == Some(DragTarget::Progress)
-                            {
-                                app.update_drag_ratio(DragTarget::Progress, ratio, app_cx)
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
-                    if changed {
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    }
-                }
-            })
-            .on_mouse_up(gpui::MouseButton::Left, {
-                let parent = parent.clone();
-                let this = this.clone();
-                move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = parent.update(cx, |app, app_cx| app.commit_drag(app_cx));
+                move |ratio, cx| {
+                    let _ = parent.update(cx, |app, app_cx| {
+                        if app.drag_target == Some(DragTarget::Progress) {
+                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                        } else {
+                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                        }
+                        app.commit_drag(app_cx);
+                    });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
-            })
-            .into_any_element()
+            },
+        )
+        .w_full()
+        .into_any_element()
     }
 }
 
@@ -244,6 +233,7 @@ pub(super) fn mini_player(
         track.artist.as_str()
     });
     let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
+    let app_entity = cx.entity().downgrade();
 
     div()
         .id("mini-player-container")
@@ -253,31 +243,6 @@ pub(super) fn mini_player(
         .border_color(BORDER_HAIRLINE)
         .flex()
         .flex_col()
-        .on_mouse_move(
-            cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                if (this.seeking || event.dragging())
-                    && this.drag_target == Some(DragTarget::Progress)
-                {
-                    let ratio = this.mini_progress_ratio(f32::from(event.position.x), window);
-                    this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-                } else if (this.volume_dragging || event.dragging())
-                    && this.drag_target == Some(DragTarget::Volume)
-                {
-                    let ratio = this.mini_volume_ratio(f32::from(event.position.x), window);
-                    if this.update_drag_ratio(DragTarget::Volume, ratio, cx) {
-                        this.send(PlayerCommand::SetVolume(ratio));
-                    }
-                }
-            }),
-        )
-        .on_mouse_up(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                if this.drag_target.is_some() {
-                    this.commit_drag(cx);
-                }
-            }),
-        )
         .child(playback_progress)
         .child(
             div()
@@ -636,52 +601,70 @@ pub(super) fn mini_player(
                                         ),
                                 )
                                 .child(
-                                    smooth_slider(
+                                    interactive_slider(
                                         "mini-volume-bar",
                                         app.displayed_volume_ratio(),
                                         SliderStyle::mini_volume(),
-                                    )
-                                    .w(px(72.0))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(
-                                            |this, event: &gpui::MouseDownEvent, window, cx| {
-                                                cx.stop_propagation();
-                                                let ratio = this.mini_volume_ratio(
-                                                    f32::from(event.position.x),
-                                                    window,
-                                                );
-                                                this.begin_drag(DragTarget::Volume, ratio, cx);
-                                                this.send(PlayerCommand::SetVolume(ratio));
-                                            },
-                                        ),
-                                    )
-                                    .on_mouse_move(cx.listener(
-                                        |this, event: &gpui::MouseMoveEvent, window, cx| {
-                                            if (this.volume_dragging || event.dragging())
-                                                && this.drag_target == Some(DragTarget::Volume)
-                                            {
-                                                let ratio = this.mini_volume_ratio(
-                                                    f32::from(event.position.x),
-                                                    window,
-                                                );
-                                                if this.update_drag_ratio(
-                                                    DragTarget::Volume,
-                                                    ratio,
-                                                    cx,
-                                                ) {
+                                        {
+                                            let view = app_entity.clone();
+                                            move |ratio, cx| {
+                                                let _ = view.update(cx, |this, cx| {
+                                                    if this.drag_target == Some(DragTarget::Volume)
+                                                    {
+                                                        this.update_drag_ratio(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
+                                                    } else {
+                                                        this.begin_drag(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
+                                                    }
                                                     this.send(PlayerCommand::SetVolume(ratio));
-                                                }
+                                                });
                                             }
                                         },
-                                    ))
-                                    .on_mouse_up(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
+                                        {
+                                            let view = app_entity.clone();
+                                            move |ratio, cx| {
+                                                let _ = view.update(cx, |this, cx| {
+                                                    if this.drag_target == Some(DragTarget::Volume)
+                                                    {
+                                                        this.update_drag_ratio(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
+                                                    } else {
+                                                        this.begin_drag(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
+                                                    }
+                                                    this.commit_drag(cx);
+                                                });
+                                            }
+                                        },
+                                    )
+                                    .w(px(72.0))
+                                    .on_scroll_wheel({
+                                        let view = app_entity.clone();
+                                        move |event: &gpui::ScrollWheelEvent, _window, cx| {
                                             cx.stop_propagation();
-                                            this.commit_drag(cx);
-                                        }),
-                                    ),
+                                            let delta = event.delta.pixel_delta(px(48.0)).y;
+                                            let _ = view.update(cx, |this, cx| {
+                                                if delta < px(0.0) {
+                                                    this.adjust_volume(0.04, cx);
+                                                } else if delta > px(0.0) {
+                                                    this.adjust_volume(-0.04, cx);
+                                                }
+                                            });
+                                        }
+                                    }),
                                 ),
                         ),
                 ),

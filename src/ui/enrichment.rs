@@ -27,9 +27,13 @@ impl MusicApp {
         let Some(track) = self.snapshot.current_track.clone() else {
             return;
         };
-        if self.enrichment_done.contains(&track.id) || !self.enrichment_loading.insert(track.id) {
+        let pending_artwork_fallback = self.artwork_online_fallback_requested.contains(&track.id);
+        if (self.enrichment_done.contains(&track.id) && !pending_artwork_fallback)
+            || !self.enrichment_loading.insert(track.id)
+        {
             return;
         }
+        let needs_artwork_fallback = self.artwork_online_fallback_requested.remove(&track.id);
         let Some(library) = self.library.clone() else {
             self.enrichment_loading.remove(&track.id);
             return;
@@ -70,7 +74,7 @@ impl MusicApp {
                     .as_ref()
                     .is_some_and(|lyrics| !lyrics.has_translation());
 
-            if stored.checked_online && !needs_translation_upgrade {
+            if stored.checked_online && !needs_translation_upgrade && !needs_artwork_fallback {
                 return Ok(EnrichmentOutcome {
                     result: EnrichmentResult::default(),
                     artwork_key: None,
@@ -171,13 +175,20 @@ impl MusicApp {
                             this.cache_lyrics(track_id, lyrics);
                         }
                         if let Some(artwork) = outcome.artwork {
-                            this.set_artwork_parts(
-                                track_id,
-                                artwork.png,
-                                artwork.blurred_png,
-                                artwork.palette,
-                            );
-                            this.artwork_missing.remove(&track_id);
+                            // Local embedded/sidecar artwork has priority. Online artwork is only
+                            // installed if local loading has not produced a usable cover.
+                            if !this.artworks.contains_key(&track_id)
+                                || this.artwork_missing.contains(&track_id)
+                            {
+                                this.set_artwork_parts(
+                                    track_id,
+                                    artwork.png,
+                                    artwork.blurred_png,
+                                    artwork.palette,
+                                );
+                                this.artwork_missing.remove(&track_id);
+                                this.artwork_online_fallback_requested.remove(&track_id);
+                            }
                         }
 
                         // Enrichment only changes one logical track. Re-querying the entire library
@@ -226,6 +237,13 @@ impl MusicApp {
                         }
                     }
                     Err(error) => this.status = format!("联网识别失败：{error:#}"),
+                }
+                if this.artwork_online_fallback_requested.contains(&track_id)
+                    && !this.artworks.contains_key(&track_id)
+                    && !this.enrichment_loading.contains(&track_id)
+                {
+                    this.enrichment_done.remove(&track_id);
+                    this.request_current_enrichment(cx);
                 }
                 cx.notify();
             })?;

@@ -33,27 +33,45 @@ struct ShaderEffectVarying {
 @group(0) @binding(20) var<storage, read> effect_draw_parameters: array<ShaderEffectDrawParameters>;
 @group(0) @binding(21) var<storage, read> effect_vertices: array<ShaderEffectVertex>;
 
-const TAU: f32 = 6.28318530718;
-
 fn rotate2(value: vec2<f32>, angle: f32) -> vec2<f32> {
     let s = sin(angle);
     let c = cos(angle);
     return vec2<f32>(c * value.x - s * value.y, s * value.x + c * value.y);
 }
 
-fn gaussian_field(point: vec2<f32>, center: vec2<f32>, falloff: f32) -> f32 {
-    let delta = point - center;
-    return exp(-dot(delta, delta) * falloff);
+fn hash21(point: vec2<f32>, seed: f32) -> f32 {
+    let h = dot(point, vec2<f32>(127.1, 311.7)) + seed * 74.37;
+    return fract(sin(h) * 43758.5453123);
 }
 
-fn domain_warp(point: vec2<f32>, time: f32, seed: f32, amount: f32) -> vec2<f32> {
-    let wave_x =
-        sin(point.y * 3.15 + time * 0.23 + seed * 1.7) +
-        sin((point.x + point.y) * 2.05 - time * 0.17 + seed * 2.3);
-    let wave_y =
-        cos(point.x * 2.75 - time * 0.21 + seed * 2.9) +
-        cos((point.x - point.y) * 1.85 + time * 0.13 + seed * 3.7);
-    return vec2<f32>(wave_x, wave_y) * (0.055 * amount);
+fn value_noise(point: vec2<f32>, seed: f32) -> f32 {
+    let cell = floor(point);
+    let local = fract(point);
+    let smooth = local * local * (vec2<f32>(3.0) - 2.0 * local);
+    let a = hash21(cell, seed);
+    let b = hash21(cell + vec2<f32>(1.0, 0.0), seed);
+    let c = hash21(cell + vec2<f32>(0.0, 1.0), seed);
+    let d = hash21(cell + vec2<f32>(1.0, 1.0), seed);
+    return mix(mix(a, b, smooth.x), mix(c, d, smooth.x), smooth.y);
+}
+
+fn octave_transform(point: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(
+        point.x * 1.58 + point.y * 1.16,
+        -point.x * 1.16 + point.y * 1.58,
+    );
+}
+
+fn fbm(point: vec2<f32>, seed: f32) -> f32 {
+    var p = point;
+    var value = value_noise(p, seed) * 0.5333333;
+    p = octave_transform(p) + vec2<f32>(3.7, 1.9);
+    value += value_noise(p, seed + 0.17) * 0.2666667;
+    p = octave_transform(p) + vec2<f32>(-2.1, 5.4);
+    value += value_noise(p, seed + 0.41) * 0.1333333;
+    p = octave_transform(p) + vec2<f32>(4.8, -3.2);
+    value += value_noise(p, seed + 0.73) * 0.0666667;
+    return value;
 }
 
 @vertex
@@ -63,9 +81,9 @@ fn vs_shader_effect(
 ) -> ShaderEffectVarying {
     let vertex = effect_vertices[vertex_index];
     let draw = effect_draw_parameters[instance_index];
-    let local = vec2<f32>(vertex.position_x, vertex.position_y) * 0.5 + vec2<f32>(0.5, 0.5);
+    let local = vec2<f32>(vertex.position_x, vertex.position_y) * 0.5 + vec2<f32>(0.5);
     let pixel_position = draw.bounds_origin + local * draw.bounds_size;
-    let viewport = max(globals.viewport_size, vec2<f32>(1.0, 1.0));
+    let viewport = max(globals.viewport_size, vec2<f32>(1.0));
     let device_position = pixel_position / viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: ShaderEffectVarying;
@@ -87,47 +105,50 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let dark = input.params3.xyz;
     let time = input.params0.w;
     let motion = input.params1.w;
-    let seed = input.params2.w * TAU;
+    let seed = input.params2.w;
     let dim = input.params3.w;
 
     let aspect = input.bounds_size.x / max(input.bounds_size.y, 1.0);
-    var point = (input.uv - vec2<f32>(0.5, 0.5)) * vec2<f32>(aspect, 1.0);
+    var p = (input.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0) * 2.35;
 
-    // Refined Now Playing uses a ~150 s counter-rotating container around four ~60 s rotating
-    // source quadrants. Keep that motion model, but execute it as one fragment program.
-    let container_angle = -time * TAU / 150.0 * motion;
-    let block_angle = time * TAU / 60.0 * motion;
-    point = rotate2(point, container_angle);
-    point += domain_warp(point, time, seed, motion);
+    // Independent monotonic time advects the palette-noise field. Seeking or pausing audio never
+    // changes this clock. The rotation is deliberately visible but remains low frequency.
+    let t = time * 0.20 * motion;
+    p = rotate2(p, (sin(time * 0.11 + seed * 6.28318) * 0.16) * motion);
+    let drift = vec2<f32>(t * 0.27, -t * 0.19);
 
-    let spread = vec2<f32>(0.31 * max(aspect, 0.8), 0.31);
-    let center0 = rotate2(vec2<f32>(-spread.x, -spread.y), block_angle + seed);
-    let center1 = rotate2(vec2<f32>( spread.x, -spread.y), block_angle + 1.5707963 + seed * 0.7);
-    let center2 = rotate2(vec2<f32>(-spread.x,  spread.y), block_angle + 3.1415926 + seed * 1.3);
-    let center3 = rotate2(vec2<f32>( spread.x,  spread.y), block_angle + 4.7123890 + seed * 1.9);
+    // Fractional Brownian Motion domain warp. q is a low-frequency 2D flow vector; the warped
+    // coordinate is then used to sample a second FBM octave stack. This is the GPU equivalent of
+    // deforming a palette-colored noise image rather than translating flat gradient blobs.
+    let q = vec2<f32>(
+        fbm(p * 1.03 + drift + vec2<f32>(0.0, 0.0), seed + 0.11),
+        fbm(p * 1.03 - drift * 0.73 + vec2<f32>(5.2, 1.3), seed + 0.37),
+    ) - vec2<f32>(0.5);
+    let warped = p + q * (1.55 * motion + 0.42);
+    let flow = fbm(warped * 1.16 + vec2<f32>(-t * 0.22, t * 0.18), seed + 0.71);
 
-    let weight0 = gaussian_field(point, center0, 3.25);
-    let weight1 = gaussian_field(point, center1, 3.10);
-    let weight2 = gaussian_field(point, center2, 3.35);
-    let weight3 = gaussian_field(point, center3, 3.00);
-    let fourth = mix(dominant, secondary, 0.52) * 0.92 + tertiary * 0.08;
-    let sum = max(weight0 + weight1 + weight2 + weight3, 0.0001);
+    // Construct a soft noise image exclusively from colors extracted from the current artwork.
+    // Three decorrelated samples keep broad colored islands visible while FBM continuously bends
+    // their boundaries, producing the Apple/Refined-style liquid color field without CPU blur.
+    let n0 = value_noise(warped * 1.43 + vec2<f32>(t * 0.34, -t * 0.16), seed + 1.17);
+    let n1 = value_noise(warped * 1.31 + vec2<f32>(7.1, 2.8) - vec2<f32>(t * 0.21, t * 0.29), seed + 2.03);
+    let n2 = value_noise(warped * 1.57 + vec2<f32>(-3.4, 8.6) + vec2<f32>(t * 0.17, -t * 0.31), seed + 2.89);
 
-    var color = (
-        dominant * weight0 +
-        secondary * weight1 +
-        tertiary * weight2 +
-        fourth * weight3
-    ) / sum;
+    let w0 = 0.20 + smoothstep(0.18, 0.82, n0 + (flow - 0.5) * 0.36) * 0.94;
+    let w1 = 0.20 + smoothstep(0.16, 0.84, n1 - (flow - 0.5) * 0.30) * 0.90;
+    let w2 = 0.16 + smoothstep(0.20, 0.80, n2 + (q.x - q.y) * 0.42) * 0.78;
+    let weight_sum = max(w0 + w1 + w2, 0.001);
+    var color = (dominant * w0 + secondary * w1 + tertiary * w2) / weight_sum;
 
-    // Continuous low-frequency fields already have the visual footprint of a strongly blurred
-    // source. Saturation/brightness roughly match the reference's saturate(1.5) brightness(0.8).
+    // Preserve artwork identity while making the movement readable. A very low-frequency light
+    // modulation reveals flow direction without producing visible grain or flashing.
     let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    color = mix(vec3<f32>(luminance), color, 1.28) * 0.88;
+    color = mix(vec3<f32>(luminance), color, 1.34);
+    color *= 0.88 + (flow - 0.5) * 0.18;
 
-    let centered = (input.uv - vec2<f32>(0.5, 0.5)) * vec2<f32>(0.88, 1.08);
-    let vignette = smoothstep(0.26, 0.78, length(centered));
-    let dark_mix = clamp(dim * 0.58 + vignette * 0.20, 0.12, 0.58);
+    let centered = (input.uv - vec2<f32>(0.5)) * vec2<f32>(0.86, 1.06);
+    let vignette = smoothstep(0.27, 0.77, length(centered));
+    let dark_mix = clamp(dim * 0.48 + vignette * 0.18, 0.08, 0.48);
     color = mix(color, dark, dark_mix);
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

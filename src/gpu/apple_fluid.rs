@@ -1,13 +1,21 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
+
+use gpui::{Context, IntoElement, Render, Timer, Window, div, prelude::*, rgb};
 
 use crate::artwork::ArtworkPalette;
 
-use super::{ShaderEffectProgram, ShaderParams16};
+use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
 
 const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
+const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 
-pub(crate) fn apple_fluid_program() -> Result<Arc<ShaderEffectProgram>, String> {
-    static PROGRAM: OnceLock<Result<Arc<ShaderEffectProgram>, String>> = OnceLock::new();
+pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
+    static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
+        OnceLock::new();
     PROGRAM
         .get_or_init(|| {
             ShaderEffectProgram::from_source(
@@ -23,7 +31,7 @@ pub(crate) fn apple_fluid_program() -> Result<Arc<ShaderEffectProgram>, String> 
 pub(crate) fn apple_fluid_params(
     track_id: i64,
     palette: Option<&ArtworkPalette>,
-    position_ms: u64,
+    time_seconds: f32,
     dynamic: bool,
 ) -> ShaderParams16 {
     let fallback = ArtworkPalette::default();
@@ -34,12 +42,12 @@ pub(crate) fn apple_fluid_params(
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
     let time = if dynamic {
-        ((position_ms % 3_600_000) as f32) * 0.001
+        time_seconds.rem_euclid(21_600.0)
     } else {
-        seed * 150.0
+        seed * 97.0
     };
     let motion = if dynamic { 1.0 } else { 0.0 };
-    let dim = (palette.mask_alpha * 0.72).clamp(0.24, 0.52);
+    let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
 
     ShaderParams16::from_columns([
         [dominant[0], dominant[1], dominant[2], time],
@@ -47,6 +55,98 @@ pub(crate) fn apple_fluid_params(
         [tertiary[0], tertiary[1], tertiary[2], seed],
         [dark[0], dark[1], dark[2], dim],
     ])
+}
+
+pub(crate) struct AppleFluidView {
+    track_id: i64,
+    palette: Option<ArtworkPalette>,
+    dynamic: bool,
+    active: bool,
+    clock_started_at: Instant,
+    timer_started: bool,
+}
+
+impl AppleFluidView {
+    pub(crate) fn new() -> Self {
+        Self {
+            track_id: 0,
+            palette: None,
+            dynamic: true,
+            active: false,
+            clock_started_at: Instant::now(),
+            timer_started: false,
+        }
+    }
+
+    pub(crate) fn sync(
+        &mut self,
+        track_id: i64,
+        palette: Option<ArtworkPalette>,
+        dynamic: bool,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.track_id != track_id
+            || self.palette != palette
+            || self.dynamic != dynamic
+            || self.active != active;
+        self.track_id = track_id;
+        self.palette = palette;
+        self.dynamic = dynamic;
+        self.active = active;
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn start_clock(&mut self, cx: &mut Context<Self>) {
+        if self.timer_started {
+            return;
+        }
+        self.timer_started = true;
+        cx.spawn(async move |this, cx| -> anyhow::Result<()> {
+            let mut animate = false;
+            loop {
+                Timer::after(if animate {
+                    ACTIVE_FRAME_INTERVAL
+                } else {
+                    IDLE_FRAME_INTERVAL
+                })
+                .await;
+                match this.update(cx, |this, cx| {
+                    let should_animate = this.active && this.dynamic;
+                    if should_animate {
+                        cx.notify();
+                    }
+                    should_animate
+                }) {
+                    Ok(next) => animate = next,
+                    Err(_) => break,
+                }
+            }
+            Ok(())
+        })
+        .detach();
+    }
+}
+
+impl Render for AppleFluidView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_clock(cx);
+        let elapsed = self.clock_started_at.elapsed().as_secs_f32();
+        if let Ok(program) = apple_fluid_program() {
+            return shader_effect_canvas(
+                program,
+                apple_fluid_params(self.track_id, self.palette.as_ref(), elapsed, self.dynamic),
+            );
+        }
+
+        let palette = self.palette.clone().unwrap_or_default();
+        let dark = ((palette.dark_ambient_rgb[0] as u32) << 16)
+            | ((palette.dark_ambient_rgb[1] as u32) << 8)
+            | palette.dark_ambient_rgb[2] as u32;
+        div().size_full().bg(rgb(dark)).into_any_element()
+    }
 }
 
 fn rgb01(rgb: [u8; 3]) -> [f32; 3] {
@@ -72,5 +172,12 @@ mod tests {
     #[test]
     fn apple_fluid_shader_validates() {
         apple_fluid_program().expect("Apple fluid WGSL should validate");
+    }
+
+    #[test]
+    fn fluid_time_is_not_audio_position() {
+        let first = apple_fluid_params(7, None, 12.5, true);
+        let second = apple_fluid_params(7, None, 18.5, true);
+        assert_ne!(first, second);
     }
 }
