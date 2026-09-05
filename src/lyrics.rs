@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 use lofty::{prelude::TaggedFileExt, tag::ItemKey};
 
@@ -6,6 +6,7 @@ use lofty::{prelude::TaggedFileExt, tag::ItemKey};
 pub struct LyricsDocument {
     pub plain: Option<String>,
     pub synced: Option<String>,
+    pub translation: Option<String>,
     pub source: String,
     timed: Arc<[LyricLine]>,
 }
@@ -14,6 +15,7 @@ pub struct LyricsDocument {
 pub struct LyricLine {
     pub timestamp_ms: u64,
     pub text: String,
+    pub translation: Option<String>,
 }
 
 impl LyricsDocument {
@@ -23,30 +25,44 @@ impl LyricsDocument {
         translation: Option<String>,
         source: impl Into<String>,
     ) -> Self {
-        let synced = match (synced, translation) {
-            (Some(original), Some(translation)) => {
-                Some(merge_translated_lrc(&original, &translation))
+        let source = source.into();
+        let timed = match (synced.as_deref(), translation.as_deref()) {
+            (Some(original), Some(translated)) => pair_translated_lrc(original, translated),
+            (Some(original), None) if is_legacy_bilingual_source(&source) => {
+                collapse_legacy_bilingual_lrc(original)
             }
-            (Some(original), None) => Some(original),
-            (None, Some(translation)) => Some(translation),
-            (None, None) => None,
-        };
-        let timed = synced.as_deref().map(parse_lrc).unwrap_or_default().into();
+            (Some(original), None) => parse_lrc(original),
+            (None, Some(translated)) => parse_lrc(translated),
+            (None, None) => Vec::new(),
+        }
+        .into();
         Self {
             plain,
             synced,
-            source: source.into(),
+            translation,
+            source,
             timed,
         }
     }
 
     #[allow(dead_code)]
     pub fn best_text(&self) -> Option<&str> {
-        self.synced.as_deref().or(self.plain.as_deref())
+        self.synced
+            .as_deref()
+            .or(self.translation.as_deref())
+            .or(self.plain.as_deref())
     }
 
     pub fn timed_lines(&self) -> &[LyricLine] {
         &self.timed
+    }
+
+    pub fn has_translation(&self) -> bool {
+        self.timed.iter().any(|line| {
+            line.translation
+                .as_deref()
+                .is_some_and(|translation| !translation.trim().is_empty())
+        })
     }
 }
 
@@ -103,37 +119,60 @@ pub fn read_local(path: &Path) -> Option<LyricsDocument> {
     ))
 }
 
-pub fn merge_translated_lrc(original: &str, translation: &str) -> String {
-    let translated = parse_lrc(translation).into_iter().fold(
-        HashMap::<u64, Vec<String>>::new(),
-        |mut lines, line| {
-            lines.entry(line.timestamp_ms).or_default().push(line.text);
-            lines
-        },
-    );
-    let mut merged = String::with_capacity(original.len() + translation.len());
+const TRANSLATION_SYNC_TOLERANCE_MS: u64 = 900;
 
-    for line in original.lines() {
-        merged.push_str(line);
-        merged.push('\n');
-        let timestamps = line_timestamps(line);
-        for timestamp in timestamps {
-            if let Some(lines) = translated.get(&timestamp) {
-                for text in lines {
-                    merged.push_str(&format_timestamp(timestamp));
-                    merged.push_str(text);
-                    merged.push('\n');
-                }
+fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
+    let mut primary = parse_lrc(original);
+    let translations = parse_lrc(translated);
+    let mut used = vec![false; translations.len()];
+
+    for line in &mut primary {
+        let best = translations
+            .iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                !used[*index]
+                    && candidate.timestamp_ms.abs_diff(line.timestamp_ms)
+                        <= TRANSLATION_SYNC_TOLERANCE_MS
+            })
+            .min_by_key(|(_, candidate)| candidate.timestamp_ms.abs_diff(line.timestamp_ms))
+            .map(|(index, _)| index);
+        if let Some(index) = best {
+            used[index] = true;
+            let value = translations[index].text.trim();
+            if !value.is_empty() && value != line.text.trim() {
+                line.translation = Some(value.to_owned());
             }
         }
     }
 
-    if merged.is_empty() {
-        translation.trim_end().to_owned()
-    } else {
-        merged.truncate(merged.trim_end().len());
-        merged
+    for (index, translation) in translations.into_iter().enumerate() {
+        if !used[index] && !translation.text.trim().is_empty() {
+            primary.push(translation);
+        }
     }
+    primary.sort_by_key(|line| line.timestamp_ms);
+    primary
+}
+
+fn is_legacy_bilingual_source(source: &str) -> bool {
+    matches!(source, "网易云音乐" | "QQ音乐" | "缓存")
+}
+
+fn collapse_legacy_bilingual_lrc(input: &str) -> Vec<LyricLine> {
+    let mut collapsed: Vec<LyricLine> = Vec::new();
+    for line in parse_lrc(input) {
+        if let Some(previous) = collapsed.last_mut()
+            && previous.timestamp_ms == line.timestamp_ms
+            && previous.translation.is_none()
+            && previous.text.trim() != line.text.trim()
+        {
+            previous.translation = Some(line.text);
+            continue;
+        }
+        collapsed.push(line);
+    }
+    collapsed
 }
 
 /// 全功能 LRC 解析引擎：
@@ -181,6 +220,7 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             lines.push(LyricLine {
                 timestamp_ms: final_ts,
                 text: text.clone(),
+                translation: None,
             });
         }
     }
@@ -340,16 +380,40 @@ mod tests {
     }
 
     #[test]
-    fn translated_lrc_is_kept_on_the_same_timeline() {
+    fn translated_lrc_is_paired_on_the_same_timeline() {
         let document = LyricsDocument::from_sources(
             None,
-            Some("[00:01.00]你好\n[00:02.00]再见".into()),
             Some("[00:01.00]Hello\n[00:02.00]Goodbye".into()),
+            Some("[00:01.08]你好\n[00:02.12]再见".into()),
             "测试",
         );
-        assert_eq!(document.timed_lines()[0].text, "你好");
-        assert_eq!(document.timed_lines()[1].text, "Hello");
-        assert_eq!(document.timed_lines()[2].text, "再见");
-        assert_eq!(document.timed_lines()[3].text, "Goodbye");
+        assert_eq!(document.timed_lines().len(), 2);
+        assert_eq!(document.timed_lines()[0].text, "Hello");
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
+        assert_eq!(document.timed_lines()[1].text, "Goodbye");
+        assert_eq!(
+            document.timed_lines()[1].translation.as_deref(),
+            Some("再见")
+        );
+        assert!(document.has_translation());
+    }
+
+    #[test]
+    fn legacy_merged_provider_lyrics_restore_translation() {
+        let document = LyricsDocument::from_sources(
+            None,
+            Some("[00:01.00]Hello\n[00:01.00]你好".into()),
+            None,
+            "网易云音乐",
+        );
+        assert_eq!(document.timed_lines().len(), 1);
+        assert_eq!(document.timed_lines()[0].text, "Hello");
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
     }
 }

@@ -1431,8 +1431,9 @@ impl MusicApp {
                             .is_some_and(|until| std::time::Instant::now() < until);
                         if !in_user_scroll {
                             self.lyrics_target_offset = (current_idx as f32) * 60.0;
+                            self.lyrics_scroll_handle
+                                .scroll_to_top_of_item(current_idx.saturating_sub(2));
                         }
-                        self.lyrics_scroll_handle.scroll_to_item(current_idx);
                         if self.stage_open {
                             cx.notify();
                         }

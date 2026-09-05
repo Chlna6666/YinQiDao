@@ -4,11 +4,11 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, CompositeLayerExt as _,
-    Context, Easing,
+    Animation, AnimationDirection, AnimationExt as _, AnimationProperty, AnimationSpec,
+    CompositeLayerExt as _, Context, Easing,
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString,
     StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
-    prelude::*, px, radians, relative, rgb,
+    point, prelude::*, px, relative, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
@@ -30,10 +30,6 @@ use super::{
 };
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime, mini_player};
-
-const STATE_PITCH: f32 = 60.0;
-const ROW_PITCH: f32 = 68.0;
-const WINDOW_RADIUS: usize = 7;
 
 pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     let snapshot = &app.snapshot;
@@ -209,29 +205,37 @@ fn stage_lyrics(
         .iter()
         .rposition(|line| line.timestamp_ms <= position_ms)
         .unwrap_or(0);
-    let raw = app.lyrics_current_offset / STATE_PITCH;
-    let target = app.lyrics_target_offset / STATE_PITCH;
-    let center = elastic_center(raw, target);
-    let anchor = center
-        .round()
-        .clamp(0.0, lyrics.len().saturating_sub(1) as f32) as usize;
-    let start = anchor.saturating_sub(WINDOW_RADIUS);
-    let end = (anchor + WINDOW_RADIUS + 1).min(lyrics.len());
 
-    let mut layer = div()
-        .id("stage-lyrics-window")
-        .absolute()
-        .left(relative(0.0))
-        .right(relative(0.0))
-        .top(relative(0.5));
+    let mut viewport = div()
+        .id("stage-lyrics-viewport")
+        .relative()
+        .flex_1()
+        .h_full()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .overflow_y_scroll()
+        .scrollbar_width(px(0.0))
+        .track_scroll(&app.lyrics_scroll_handle)
+        .pt(px(96.0))
+        .pb(px(112.0))
+        .pr(px(8.0))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
+        )
+        .on_scroll_wheel(cx.listener(
+            |this, _: &gpui::ScrollWheelEvent, _, cx| {
+                this.lyrics_user_scrolling_until =
+                    Some(Instant::now() + Duration::from_secs(3));
+                this.wake_stage_controls(cx);
+            },
+        ));
 
-    for (index, line) in lyrics.iter().enumerate().take(end).skip(start) {
-        let distance = (index as f32 - center).abs();
+    for (index, line) in lyrics.iter().enumerate() {
+        let distance = index.abs_diff(active) as f32;
         let focus = (-1.05 * distance).exp().clamp(0.0, 1.0);
-        let alpha = 0.12 + focus * 0.88;
-        let size = 17.0 + focus * 13.0;
-        let scale = 0.96 + focus * 0.06 + (std::f32::consts::PI * focus).sin() * 0.018;
-        let y = (index as f32 - center) * ROW_PITCH - 24.0;
+        let alpha = 0.16 + focus * 0.84;
+        let size = 18.0 + focus * 12.0;
         let timestamp = line.timestamp_ms;
         let weight = if focus > 0.72 {
             gpui::FontWeight::BOLD
@@ -241,92 +245,66 @@ fn stage_lyrics(
             gpui::FontWeight::MEDIUM
         };
 
-        let mut text = div().flex().flex_col().gap_1().font_weight(weight);
-        if let Some((primary, translation)) = line.text.split_once('\n') {
-            text = text
-                .child(
-                    div()
-                        .text_size(px(size))
-                        .text_color(hsla(0.0, 0.0, 1.0, alpha))
-                        .child(primary.to_owned()),
-                )
-                .child(
-                    div()
-                        .text_size(px(size * 0.72))
-                        .text_color(hsla(0.0, 0.0, 1.0, alpha * 0.66))
-                        .child(translation.to_owned()),
-                );
-        } else {
-            text = text.child(
+        let mut text = div()
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .font_weight(weight)
+            .child(
                 div()
+                    .w_full()
+                    .min_w(px(0.0))
                     .text_size(px(size))
                     .text_color(hsla(0.0, 0.0, 1.0, alpha))
                     .child(line.text.clone()),
             );
+
+        if let Some(translation) = line
+            .translation
+            .as_deref()
+            .filter(|translation| !translation.trim().is_empty())
+        {
+            text = text.child(
+                div()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .text_size(px((size * 0.66).max(13.0)))
+                    .text_color(hsla(0.0, 0.0, 1.0, alpha * 0.68))
+                    .child(translation.to_owned()),
+            );
         }
 
-        layer = layer.child(
+        viewport = viewport.child(
             div()
                 .id(SharedString::from(format!("lyric-line-{index}")))
-                .absolute()
-                .left(relative(0.0))
-                .right(relative(0.0))
-                .top(px(y))
-                .pl_4()
-                .py_1()
-                .scale(scale)
-                .opacity(if index == active { 1.0 } else { 0.98 })
+                .w_full()
+                .min_w(px(0.0))
+                .flex_none()
+                .pl(px(16.0))
+                .pr(px(8.0))
+                .py(px(9.0))
+                .mb(px(8.0))
+                .opacity(if index == active { 1.0 } else { 0.96 })
                 .cursor_pointer()
-                .hover(|style| style.opacity(1.0).scale(1.02))
+                .hover(|style| style.opacity(1.0))
                 .child(text)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.seek_to_ms(timestamp, cx);
-                        this.lyrics_target_offset = index as f32 * STATE_PITCH;
                         this.lyrics_user_scrolling_until = None;
+                        this.lyrics_scroll_handle
+                            .scroll_to_top_of_item(index.saturating_sub(2));
                         this.wake_stage_controls_immediately(cx);
                     }),
                 ),
         );
     }
 
-    let max_offset = lyrics.len().saturating_sub(1) as f32 * STATE_PITCH;
-    div()
-        .id("stage-lyrics-viewport")
-        .relative()
-        .flex_1()
-        .h_full()
-        .overflow_hidden()
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
-        )
-        .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
-            let delta = match event.delta {
-                gpui::ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
-                gpui::ScrollDelta::Lines(lines) => lines.y * 32.0,
-            };
-            this.lyrics_current_offset =
-                (this.lyrics_current_offset - delta).clamp(0.0, max_offset);
-            this.lyrics_target_offset = this.lyrics_current_offset;
-            this.lyrics_user_scrolling_until = Some(Instant::now() + Duration::from_secs(3));
-            this.wake_stage_controls(cx);
-            cx.notify();
-        }))
-        .child(layer)
-        .into_any_element()
-}
-
-fn elastic_center(raw: f32, target: f32) -> f32 {
-    let delta = target - raw;
-    let distance = delta.abs();
-    if distance <= 0.001 || distance >= 1.25 {
-        return raw;
-    }
-    let phase = (1.25 - distance) / 1.25;
-    raw + ((phase * std::f32::consts::TAU).sin() * 0.085 * phase).copysign(delta)
+    viewport.into_any_element()
 }
 
 fn stage_controls(
@@ -578,8 +556,8 @@ fn ambient_background(
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
 
     // Keep the expensive Gaussian surface bounded. The motion itself is renderer-owned and only
-    // rotates local orbit containers; no Translation property is used, so playback no longer turns
-    // three custom-eased animations into full-viewport damage every frame.
+    // moves cached local orbit layers with bounded renderer-owned translations; the Gaussian surfaces
+    // stay retained while only their compositor transforms advance.
     let sigma = (blur_radius * 0.42).clamp(4.0, 24.0);
     let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
 
@@ -613,8 +591,10 @@ fn ambient_background(
             c1,
             0.74,
             sigma,
-            17,
+            13,
             1.0,
+            88.0,
+            52.0,
             animate,
         ))
         .child(orbit_blob(
@@ -631,8 +611,10 @@ fn ambient_background(
             c2,
             0.70,
             sigma * 0.92,
-            23,
+            17,
             -1.0,
+            72.0,
+            68.0,
             animate,
         ))
         .child(orbit_blob(
@@ -649,8 +631,10 @@ fn ambient_background(
             c3,
             0.66,
             sigma * 1.06,
-            31,
+            23,
             1.0,
+            94.0,
+            46.0,
             animate,
         ))
         .child(
@@ -688,6 +672,8 @@ fn orbit_blob(
     sigma: f32,
     period_seconds: u64,
     direction: f32,
+    drift_x: f32,
+    drift_y: f32,
     animate: bool,
 ) -> gpui::AnyElement {
     let blob = div()
@@ -717,20 +703,23 @@ fn orbit_blob(
         return orbit.into_any_element();
     }
 
-    // The child is deliberately off-center, so a retained compositor rotation becomes visible
-    // orbital drift instead of spinning an almost symmetric blob in place. 17/23/31 are pairwise
-    // coprime, keeping a long composite repeat period without a CPU animation loop.
-    // Linear easing keeps angular velocity constant across revolution boundaries.
+    // Move the cached blur surface itself. Rotation around a large nearly symmetric blur can be
+    // technically active yet visually imperceptible; a bounded compositor translation produces an
+    // immediately visible Apple Music-style drift without relayout or re-running the Gaussian blur.
     let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
         .repeat(RepeatMode::Forever)
+        .direction(AnimationDirection::Alternate)
         .ease(Easing::Linear);
-    let rotation = Animation::from_spec(spec).with_property(AnimationProperty::rotation(
-        radians(0.0),
-        radians(std::f32::consts::TAU * direction),
-    ));
+    let dx = drift_x * direction;
+    let translation = Animation::from_spec(spec).with_property(
+        AnimationProperty::translation(
+            point(px(-dx), px(-drift_y)),
+            point(px(dx), px(drift_y)),
+        ),
+    );
 
     orbit
-        .with_animation(animation_id, rotation, |element, _| element)
+        .with_animation(animation_id, translation, |element, _| element)
         .into_any_element()
 }
 

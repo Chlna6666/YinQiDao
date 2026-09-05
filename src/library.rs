@@ -276,23 +276,25 @@ impl Library {
         let stored = self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT checked_online, lyrics_plain, lyrics_synced, lyrics_source
+                    "SELECT checked_online, lyrics_plain, lyrics_synced, lyrics_translation, lyrics_source
                      FROM track_enrichment WHERE track_id = ?1",
                     params![track.id],
                     |row| {
                         let plain: Option<String> = row.get(1)?;
                         let synced: Option<String> = row.get(2)?;
-                        let source: Option<String> = row.get(3)?;
+                        let translation: Option<String> = row.get(3)?;
+                        let source: Option<String> = row.get(4)?;
                         Ok(StoredEnrichment {
                             checked_online: row.get::<_, i64>(0)? != 0,
-                            lyrics: (plain.is_some() || synced.is_some()).then(|| {
-                                LyricsDocument::from_sources(
-                                    plain.clone(),
-                                    synced,
-                                    None,
-                                    source.unwrap_or_else(|| "缓存".into()),
-                                )
-                            }),
+                            lyrics: (plain.is_some() || synced.is_some() || translation.is_some())
+                                .then(|| {
+                                    LyricsDocument::from_sources(
+                                        plain.clone(),
+                                        synced,
+                                        translation,
+                                        source.unwrap_or_else(|| "缓存".into()),
+                                    )
+                                }),
                         })
                     },
                 )
@@ -339,14 +341,15 @@ impl Library {
             transaction.execute(
                 "INSERT INTO track_enrichment(
                     track_id, checked_online, recording_mbid, release_mbid,
-                    lyrics_plain, lyrics_synced, lyrics_source, updated_at
-                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    lyrics_plain, lyrics_synced, lyrics_translation, lyrics_source, updated_at
+                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(track_id) DO UPDATE SET
                     checked_online = 1,
                     recording_mbid = COALESCE(excluded.recording_mbid, recording_mbid),
                     release_mbid = COALESCE(excluded.release_mbid, release_mbid),
                     lyrics_plain = COALESCE(excluded.lyrics_plain, lyrics_plain),
                     lyrics_synced = COALESCE(excluded.lyrics_synced, lyrics_synced),
+                    lyrics_translation = COALESCE(excluded.lyrics_translation, lyrics_translation),
                     lyrics_source = COALESCE(excluded.lyrics_source, lyrics_source),
                     updated_at = excluded.updated_at",
                 params![
@@ -361,6 +364,7 @@ impl Library {
                         .and_then(|metadata| metadata.release_mbid.as_deref()),
                     lyrics.and_then(|lyrics| lyrics.plain.as_deref()),
                     lyrics.and_then(|lyrics| lyrics.synced.as_deref()),
+                    lyrics.and_then(|lyrics| lyrics.translation.as_deref()),
                     lyrics.map(|lyrics| lyrics.source.as_str()),
                     now_unix(),
                 ],
@@ -452,6 +456,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
             release_mbid TEXT,
             lyrics_plain TEXT,
             lyrics_synced TEXT,
+            lyrics_translation TEXT,
             lyrics_source TEXT,
             updated_at INTEGER NOT NULL
          );
@@ -469,6 +474,10 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
     // 兼容已有数据库模式升级
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN file_size INTEGER", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN modified_at INTEGER", []);
+    let _ = connection.execute(
+        "ALTER TABLE track_enrichment ADD COLUMN lyrics_translation TEXT",
+        [],
+    );
     Ok(())
 }
 
