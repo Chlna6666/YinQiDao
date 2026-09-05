@@ -104,7 +104,7 @@ impl ArtworkCache {
             .unwrap_or_else(|| track.path.to_string_lossy().into_owned());
         let hash = stable_hash(&key);
         let cache_path = self.directory.join(format!("{:016x}.png", hash));
-        let blur_cache_path = self.directory.join(format!("{:016x}_blur.png", hash));
+        let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
         let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
 
         if cache_path.exists() {
@@ -185,7 +185,7 @@ impl ArtworkCache {
 
         let hash = stable_hash(key);
         let cache_path = self.directory.join(format!("{:016x}.png", hash));
-        let blur_cache_path = self.directory.join(format!("{:016x}_blur.png", hash));
+        let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
         let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
 
         fs::write(&cache_path, &png)
@@ -201,10 +201,13 @@ impl ArtworkCache {
     }
 }
 
-/// 降采样与高斯多级模糊处理（先降采样至 64x64 再模糊，兼顾极致性能与双线性抗锯齿）
+/// 生成舞台背景专用的超低频色场纹理。
+///
+/// 纹理只在封面进入缓存时生成一次；运行时仅由 GPU 对该小纹理进行双线性放大和
+/// compositor transform，不再对全屏图层执行实时 Gaussian blur。
 pub fn generate_blurred_artwork(image: &DynamicImage) -> Result<Vec<u8>> {
-    let small = image.resize_exact(64, 64, image::imageops::FilterType::Triangle);
-    let blurred = small.blur(10.0);
+    let small = image.resize_exact(48, 48, image::imageops::FilterType::Triangle);
+    let blurred = small.blur(12.0);
     encode_png(&blurred)
 }
 

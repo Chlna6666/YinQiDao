@@ -590,105 +590,89 @@ fn ambient_background(
     blurred: Option<Arc<[u8]>>,
     palette: Option<&ArtworkPalette>,
     dynamic: bool,
-    blur_radius: f32,
+    _blur_radius: f32,
 ) -> impl IntoElement {
     let id = id.unwrap_or_default();
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-    let field_blur = (blur_radius * 4.0).clamp(56.0, 96.0);
-    let artwork_blur = (blur_radius * 1.15).clamp(14.0, 28.0);
     let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
 
-    // Keep one oversized, static cover-derived field underneath the moving palette field.
-    // The physical overscan is intentional: transform-only scaling kept the original compositor
-    // clip bounds and exposed rectangular edges while the layer moved.
     if let Some(bytes) = blurred.or(artwork) {
+        // Stable base: the 48x48 ambient texture is already heavily blurred off the render path.
+        // Physical overscan (rather than a style scale transform) guarantees that no compositor
+        // clip edge can enter the viewport.
         root = root.child(
             div()
                 .absolute()
-                .left(relative(-0.18))
-                .top(relative(-0.24))
-                .w(relative(1.36))
-                .h(relative(1.48))
-                .opacity(0.28)
-                .blur(px(artwork_blur))
+                .left(relative(-0.24))
+                .top(relative(-0.30))
+                .w(relative(1.48))
+                .h(relative(1.60))
+                .opacity(0.52)
                 .child(
-                    img(EncodedImageBytes::new(ImageFormat::Png, bytes))
+                    img(EncodedImageBytes::new(ImageFormat::Png, bytes.clone()))
                         .size_full()
                         .object_fit(ObjectFit::Cover),
                 )
                 .composite_layer(),
         );
+
+        // The two moving layers contain no blur/filter at all. Each animation owns exactly one
+        // Translation property whose vector contains both X and Y, so GPUI can keep the entire
+        // motion on the retained compositor path without creating per-frame offscreen surfaces.
+        root = root
+            .child(ambient_texture_motion(
+                "stage-ambient-primary",
+                bytes.clone(),
+                -0.34,
+                -0.42,
+                1.68,
+                1.84,
+                0.30,
+                54.0,
+                34.0,
+                24,
+                false,
+                dynamic,
+            ))
+            .child(ambient_texture_motion(
+                "stage-ambient-secondary",
+                bytes,
+                -0.46,
+                -0.52,
+                1.92,
+                2.04,
+                0.18,
+                42.0,
+                -58.0,
+                31,
+                true,
+                dynamic,
+            ));
     }
 
-    // Apple Music reads as one continuous colour atmosphere. These ellipses are deliberately
-    // larger than the viewport and heavily blurred, so their own bounds never become visible.
-    // X and Y motion live on separate compositor wrappers: each wrapper owns exactly one scene
-    // animation property, preserving the retained fast path while producing a curved 2D orbit.
+    // Full-screen gradients have no local layer bounds. GPUI's helper supports two stops, so the
+    // third palette colour is composed as another full-screen gradient instead of a local blob.
     root
-        .child(fluid_field_blob(
-            "stage-fluid-field-a",
-            -0.44,
-            -0.54,
-            1.34,
-            1.46,
-            c1,
-            0.58,
-            field_blur,
-            19,
-            27,
-            112.0,
-            76.0,
-            false,
-            dynamic,
-        ))
-        .child(fluid_field_blob(
-            "stage-fluid-field-b",
-            0.18,
-            -0.46,
-            1.28,
-            1.32,
-            c2,
-            0.50,
-            field_blur * 1.08,
-            23,
-            31,
-            96.0,
-            104.0,
-            true,
-            dynamic,
-        ))
-        .child(fluid_field_blob(
-            "stage-fluid-field-c",
-            -0.38,
-            0.20,
-            1.46,
-            1.34,
-            c3,
-            0.46,
-            field_blur * 1.12,
-            29,
-            37,
-            128.0,
-            82.0,
-            true,
-            dynamic,
-        ))
-        .child(fluid_field_blob(
-            "stage-fluid-field-d",
-            0.34,
-            0.28,
-            1.18,
-            1.26,
-            c1,
-            0.30,
-            field_blur * 1.18,
-            37,
-            43,
-            84.0,
-            118.0,
-            false,
-            dynamic,
-        ))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(linear_gradient(
+                    128.0,
+                    linear_color_stop(c1.opacity(0.18), 0.0),
+                    linear_color_stop(c2.opacity(0.12), 1.0),
+                )),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(linear_gradient(
+                    306.0,
+                    linear_color_stop(c3.opacity(0.13), 0.0),
+                    linear_color_stop(c1.opacity(0.025), 1.0),
+                )),
+        )
         .child(
             div()
                 .absolute()
@@ -696,11 +680,11 @@ fn ambient_background(
                 .bg(linear_gradient(
                     180.0,
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.008, (mask * 0.22).clamp(0.08, 0.20)),
+                        hsla(0.0, 0.0, 0.008, (mask * 0.18).clamp(0.06, 0.16)),
                         0.0,
                     ),
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.003, (mask * 0.54).clamp(0.24, 0.46)),
+                        hsla(0.0, 0.0, 0.002, (mask * 0.48).clamp(0.20, 0.40)),
                         1.0,
                     ),
                 )),
@@ -708,84 +692,58 @@ fn ambient_background(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fluid_field_blob(
+fn ambient_texture_motion(
     animation_id: &'static str,
+    bytes: Arc<[u8]>,
     left: f32,
     top: f32,
     width: f32,
     height: f32,
-    color: gpui::Hsla,
-    alpha: f32,
-    blur: f32,
-    x_period_seconds: u64,
-    y_period_seconds: u64,
+    opacity: f32,
     drift_x: f32,
     drift_y: f32,
+    period_seconds: u64,
     reverse: bool,
     animate: bool,
 ) -> gpui::AnyElement {
-    let blob = div()
+    let layer = div()
         .absolute()
         .left(relative(left))
         .top(relative(top))
         .w(relative(width))
         .h(relative(height))
-        .rounded_full()
-        .bg(color.opacity(alpha))
-        .blur(px(blur))
+        .opacity(opacity)
+        .child(
+            img(EncodedImageBytes::new(ImageFormat::Png, bytes))
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
         .composite_layer();
 
     if !animate {
-        return blob.into_any_element();
+        return layer.into_any_element();
     }
 
-    let x_direction = if reverse {
+    let direction = if reverse {
         AnimationDirection::AlternateReverse
     } else {
         AnimationDirection::Alternate
     };
-    let y_direction = if reverse {
-        AnimationDirection::Alternate
-    } else {
-        AnimationDirection::AlternateReverse
-    };
-
-    let x_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(x_period_seconds))
+    let motion = Animation::from_spec(
+        AnimationSpec::new(Duration::from_secs(period_seconds))
             .repeat(RepeatMode::Forever)
-            .direction(x_direction)
-            .ease(Easing::Linear),
+            .direction(direction)
+            .ease(Easing::InOutCubic),
     )
     .with_property(AnimationProperty::translation(
-        point(px(-drift_x), px(0.0)),
-        point(px(drift_x), px(0.0)),
-    ));
-    let x_layer = blob.with_animation(
-        SharedString::from(format!("{animation_id}-x")),
-        x_motion,
-        |element, _| element,
-    );
-
-    let y_carrier = div()
-        .absolute()
-        .inset_0()
-        .child(x_layer)
-        .composite_layer();
-    let y_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(y_period_seconds))
-            .repeat(RepeatMode::Forever)
-            .direction(y_direction)
-            .ease(Easing::Linear),
-    )
-    .with_property(AnimationProperty::translation(
-        point(px(0.0), px(-drift_y)),
-        point(px(0.0), px(drift_y)),
+        point(px(-drift_x), px(-drift_y)),
+        point(px(drift_x), px(drift_y)),
     ));
 
-    y_carrier
+    layer
         .with_animation(
-            SharedString::from(format!("{animation_id}-y")),
-            y_motion,
+            SharedString::from(animation_id),
+            motion,
             |element, _| element,
         )
         .into_any_element()
