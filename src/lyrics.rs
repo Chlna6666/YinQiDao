@@ -246,29 +246,6 @@ fn parse_offset(input: &str) -> i64 {
     0
 }
 
-fn line_timestamps(line: &str) -> Vec<u64> {
-    let mut remaining = line.trim();
-    let mut timestamps = Vec::new();
-    while let Some(rest) = remaining.strip_prefix('[') {
-        let Some(end) = rest.find(']') else {
-            break;
-        };
-        let Some(timestamp) = parse_timestamp(&rest[..end]) else {
-            break;
-        };
-        timestamps.push(timestamp);
-        remaining = &rest[end + 1..];
-    }
-    timestamps
-}
-
-fn format_timestamp(timestamp_ms: u64) -> String {
-    let minutes = timestamp_ms / 60_000;
-    let seconds = (timestamp_ms % 60_000) / 1_000;
-    let hundredths = (timestamp_ms % 1_000) / 10;
-    format!("[{minutes:02}:{seconds:02}.{hundredths:02}]")
-}
-
 fn parse_timestamp(value: &str) -> Option<u64> {
     let value = value.trim();
     let parts: Vec<&str> = value.split(':').collect();
