@@ -30,7 +30,7 @@ pub(crate) fn apple_fluid_params(
     track_id: i64,
     palette: Option<&ArtworkPalette>,
     time_seconds: f32,
-    dynamic: bool,
+    _dynamic: bool,
 ) -> ShaderParams16 {
     let fallback = ArtworkPalette::default();
     let palette = palette.unwrap_or(&fallback);
@@ -39,12 +39,11 @@ pub(crate) fn apple_fluid_params(
     let tertiary = mix3(dominant, secondary, 0.46);
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
-    let time = if dynamic {
-        time_seconds.rem_euclid(21_600.0)
-    } else {
-        seed * 97.0
-    };
-    let motion = if dynamic { 1.0 } else { 0.0 };
+
+    // 沉浸式 FBM 是舞台本身的动态视觉，不再受旧 dynamic_blur 配置影响。
+    // 旧开关只保留配置兼容；进入舞台后始终使用独立 monotonic clock。
+    let time = time_seconds.rem_euclid(21_600.0);
+    let motion = 1.0;
     let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
 
     ShaderParams16::from_columns([
@@ -98,20 +97,26 @@ impl AppleFluidView {
 
 impl Render for AppleFluidView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // This is a view-driven GPU animation. Request the next frame from inside AppleFluidView
-        // itself so GPUI invalidates only this retained entity and guarantees presentation on the
-        // next vsync. A timer + cx.notify() can be coalesced/replayed by the retained scene and can
-        // leave custom-mesh draw parameters stuck on the first frame.
-        if self.active && self.dynamic {
+        // 流体是舞台自驱的 GPU 动画。只要舞台可见就逐帧采样，不依赖音乐播放状态、
+        // position_ms 或历史 dynamic_blur 配置。
+        if self.active {
             window.request_animation_frame();
         }
 
         let elapsed = self.clock_started_at.elapsed().as_secs_f32();
-        if let Ok(program) = apple_fluid_program() {
-            return shader_effect_canvas(
-                program,
-                apple_fluid_params(self.track_id, self.palette.as_ref(), elapsed, self.dynamic),
-            );
+        match apple_fluid_program() {
+            Ok(program) => {
+                return shader_effect_canvas(
+                    program,
+                    apple_fluid_params(self.track_id, self.palette.as_ref(), elapsed, true),
+                );
+            }
+            Err(error) => {
+                static LOGGED_SHADER_ERROR: OnceLock<()> = OnceLock::new();
+                if LOGGED_SHADER_ERROR.set(()).is_ok() {
+                    tracing::error!(error = %error, "Apple fluid shader initialization failed");
+                }
+            }
         }
 
         let palette = self.palette.clone().unwrap_or_default();
@@ -152,5 +157,12 @@ mod tests {
         let first = apple_fluid_params(7, None, 12.5, true);
         let second = apple_fluid_params(7, None, 18.5, true);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn legacy_dynamic_blur_flag_no_longer_freezes_immersive_fluid() {
+        let enabled = apple_fluid_params(7, None, 12.5, true);
+        let disabled = apple_fluid_params(7, None, 12.5, false);
+        assert_eq!(enabled, disabled);
     }
 }
