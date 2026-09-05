@@ -594,94 +594,99 @@ fn ambient_background(
 ) -> impl IntoElement {
     let id = id.unwrap_or_default();
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-    let sigma = (blur_radius * 0.52).clamp(6.0, 30.0);
+    let field_blur = (blur_radius * 4.0).clamp(56.0, 96.0);
+    let artwork_blur = (blur_radius * 1.15).clamp(14.0, 28.0);
     let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
 
+    // Keep one oversized, static cover-derived field underneath the moving palette field.
+    // The physical overscan is intentional: transform-only scaling kept the original compositor
+    // clip bounds and exposed rectangular edges while the layer moved.
     if let Some(bytes) = blurred.or(artwork) {
-        root = root
-            .child(artwork_motion_layer(
-                "stage-fluid-artwork-primary",
-                bytes.clone(),
-                1.34,
-                0.44,
-                145.0,
-                86.0,
-                17,
-                false,
-                dynamic,
-            ))
-            .child(artwork_motion_layer(
-                "stage-fluid-artwork-secondary",
-                bytes,
-                1.72,
-                0.20,
-                220.0,
-                132.0,
-                27,
-                true,
-                dynamic,
-            ));
+        root = root.child(
+            div()
+                .absolute()
+                .left(relative(-0.18))
+                .top(relative(-0.24))
+                .w(relative(1.36))
+                .h(relative(1.48))
+                .opacity(0.28)
+                .blur(px(artwork_blur))
+                .child(
+                    img(EncodedImageBytes::new(ImageFormat::Png, bytes))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .composite_layer(),
+        );
     }
 
+    // Apple Music reads as one continuous colour atmosphere. These ellipses are deliberately
+    // larger than the viewport and heavily blurred, so their own bounds never become visible.
+    // X and Y motion live on separate compositor wrappers: each wrapper owns exactly one scene
+    // animation property, preserving the retained fast path while producing a curved 2D orbit.
     root
-        .child(orbit_blob(
-            "stage-fluid-a-orbit",
-            -0.22,
-            -0.25,
-            0.88,
-            0.94,
-            0.04,
-            0.08,
-            0.78,
-            0.72,
-            24.0,
+        .child(fluid_field_blob(
+            "stage-fluid-field-a",
+            -0.44,
+            -0.54,
+            1.34,
+            1.46,
             c1,
             0.58,
-            sigma,
-            13,
-            1.0,
-            185.0,
-            118.0,
+            field_blur,
+            19,
+            27,
+            112.0,
+            76.0,
+            false,
             dynamic,
         ))
-        .child(orbit_blob(
-            "stage-fluid-b-orbit",
-            0.34,
-            -0.18,
-            0.82,
-            0.88,
-            0.10,
-            0.08,
-            0.76,
-            0.74,
-            208.0,
+        .child(fluid_field_blob(
+            "stage-fluid-field-b",
+            0.18,
+            -0.46,
+            1.28,
+            1.32,
             c2,
-            0.54,
-            sigma * 0.94,
-            17,
-            -1.0,
-            168.0,
-            146.0,
+            0.50,
+            field_blur * 1.08,
+            23,
+            31,
+            96.0,
+            104.0,
+            true,
             dynamic,
         ))
-        .child(orbit_blob(
-            "stage-fluid-c-orbit",
-            -0.02,
-            0.34,
-            0.94,
-            0.82,
-            0.08,
-            0.04,
-            0.82,
-            0.76,
-            301.0,
+        .child(fluid_field_blob(
+            "stage-fluid-field-c",
+            -0.38,
+            0.20,
+            1.46,
+            1.34,
             c3,
-            0.50,
-            sigma * 1.08,
-            21,
-            1.0,
-            205.0,
-            108.0,
+            0.46,
+            field_blur * 1.12,
+            29,
+            37,
+            128.0,
+            82.0,
+            true,
+            dynamic,
+        ))
+        .child(fluid_field_blob(
+            "stage-fluid-field-d",
+            0.34,
+            0.28,
+            1.18,
+            1.26,
+            c1,
+            0.30,
+            field_blur * 1.18,
+            37,
+            43,
+            84.0,
+            118.0,
+            false,
             dynamic,
         ))
         .child(
@@ -691,11 +696,11 @@ fn ambient_background(
                 .bg(linear_gradient(
                     180.0,
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.01, (mask * 0.30).clamp(0.10, 0.28)),
+                        hsla(0.0, 0.0, 0.008, (mask * 0.22).clamp(0.08, 0.20)),
                         0.0,
                     ),
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.004, (mask * 0.56).clamp(0.22, 0.46)),
+                        hsla(0.0, 0.0, 0.003, (mask * 0.54).clamp(0.24, 0.46)),
                         1.0,
                     ),
                 )),
@@ -703,31 +708,35 @@ fn ambient_background(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn artwork_motion_layer(
+fn fluid_field_blob(
     animation_id: &'static str,
-    bytes: Arc<[u8]>,
-    scale: f32,
-    opacity: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    color: gpui::Hsla,
+    alpha: f32,
+    blur: f32,
+    x_period_seconds: u64,
+    y_period_seconds: u64,
     drift_x: f32,
     drift_y: f32,
-    period_seconds: u64,
     reverse: bool,
     animate: bool,
 ) -> gpui::AnyElement {
-    let layer = div()
+    let blob = div()
         .absolute()
-        .inset_0()
-        .scale(scale)
-        .opacity(opacity)
-        .child(
-            img(EncodedImageBytes::new(ImageFormat::Png, bytes))
-                .size_full()
-                .object_fit(ObjectFit::Cover),
-        )
+        .left(relative(left))
+        .top(relative(top))
+        .w(relative(width))
+        .h(relative(height))
+        .rounded_full()
+        .bg(color.opacity(alpha))
+        .blur(px(blur))
         .composite_layer();
 
     if !animate {
-        return layer.into_any_element();
+        return blob.into_any_element();
     }
 
     let x_direction = if reverse {
@@ -740,8 +749,9 @@ fn artwork_motion_layer(
     } else {
         AnimationDirection::AlternateReverse
     };
+
     let x_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(period_seconds))
+        AnimationSpec::new(Duration::from_secs(x_period_seconds))
             .repeat(RepeatMode::Forever)
             .direction(x_direction)
             .ease(Easing::Linear),
@@ -750,108 +760,19 @@ fn artwork_motion_layer(
         point(px(-drift_x), px(0.0)),
         point(px(drift_x), px(0.0)),
     ));
-    let layer = layer.with_animation(
+    let x_layer = blob.with_animation(
         SharedString::from(format!("{animation_id}-x")),
         x_motion,
         |element, _| element,
     );
 
-    let y_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(period_seconds + 7))
-            .repeat(RepeatMode::Forever)
-            .direction(y_direction)
-            .ease(Easing::Linear),
-    )
-    .with_property(AnimationProperty::translation(
-        point(px(0.0), px(-drift_y)),
-        point(px(0.0), px(drift_y)),
-    ));
-
-    layer
-        .with_animation(
-            SharedString::from(format!("{animation_id}-y")),
-            y_motion,
-            |element, _| element,
-        )
-        .into_any_element()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn orbit_blob(
-    animation_id: &'static str,
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-    blob_left: f32,
-    blob_top: f32,
-    blob_width: f32,
-    blob_height: f32,
-    angle: f32,
-    color: gpui::Hsla,
-    alpha: f32,
-    sigma: f32,
-    period_seconds: u64,
-    direction: f32,
-    drift_x: f32,
-    drift_y: f32,
-    animate: bool,
-) -> gpui::AnyElement {
-    let blob = div()
+    let y_carrier = div()
         .absolute()
-        .left(relative(blob_left))
-        .top(relative(blob_top))
-        .w(relative(blob_width))
-        .h(relative(blob_height))
-        .rounded_full()
-        .blur(px(sigma))
-        .bg(linear_gradient(
-            angle,
-            linear_color_stop(color.opacity(alpha), 0.0),
-            linear_color_stop(color.opacity(0.0), 1.0),
-        ));
-
-    let orbit = div()
-        .absolute()
-        .left(relative(left))
-        .top(relative(top))
-        .w(relative(width))
-        .h(relative(height))
-        .child(blob)
+        .inset_0()
+        .child(x_layer)
         .composite_layer();
-
-    if !animate {
-        return orbit.into_any_element();
-    }
-
-    let x_direction = if direction >= 0.0 {
-        AnimationDirection::Alternate
-    } else {
-        AnimationDirection::AlternateReverse
-    };
-    let y_direction = if direction >= 0.0 {
-        AnimationDirection::AlternateReverse
-    } else {
-        AnimationDirection::Alternate
-    };
-    let x_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(period_seconds))
-            .repeat(RepeatMode::Forever)
-            .direction(x_direction)
-            .ease(Easing::Linear),
-    )
-    .with_property(AnimationProperty::translation(
-        point(px(-drift_x), px(0.0)),
-        point(px(drift_x), px(0.0)),
-    ));
-    let orbit = orbit.with_animation(
-        SharedString::from(format!("{animation_id}-x")),
-        x_motion,
-        |element, _| element,
-    );
-
     let y_motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(period_seconds + 6))
+        AnimationSpec::new(Duration::from_secs(y_period_seconds))
             .repeat(RepeatMode::Forever)
             .direction(y_direction)
             .ease(Easing::Linear),
@@ -861,7 +782,7 @@ fn orbit_blob(
         point(px(0.0), px(drift_y)),
     ));
 
-    orbit
+    y_carrier
         .with_animation(
             SharedString::from(format!("{animation_id}-y")),
             y_motion,
@@ -876,9 +797,9 @@ fn ambient_palette(
 ) -> (gpui::Hsla, gpui::Hsla, gpui::Hsla, gpui::Hsla, f32) {
     if let Some(palette) = palette {
         let mixed = [
-            ((palette.dominant_rgb[0] as u16 + palette.secondary_rgb[2] as u16) / 2) as u8,
-            ((palette.dominant_rgb[1] as u16 + palette.secondary_rgb[0] as u16) / 2) as u8,
-            ((palette.dominant_rgb[2] as u16 + palette.secondary_rgb[1] as u16) / 2) as u8,
+            ((palette.dominant_rgb[0] as u16 + palette.secondary_rgb[0] as u16) / 2) as u8,
+            ((palette.dominant_rgb[1] as u16 + palette.secondary_rgb[1] as u16) / 2) as u8,
+            ((palette.dominant_rgb[2] as u16 + palette.secondary_rgb[2] as u16) / 2) as u8,
         ];
         let dark = ((palette.dark_ambient_rgb[0] as u32) << 16)
             | ((palette.dark_ambient_rgb[1] as u32) << 8)
