@@ -1,0 +1,50 @@
+name: Remove dead lyric helpers once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/remove-dead-lyric-helpers-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Remove obsolete helpers
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/lyrics.rs')
+          text = path.read_text(encoding='utf-8')
+          for name in ('line_timestamps', 'format_timestamp'):
+              pattern = rf'\nfn {name}\([^\n]*\)[^{{]*\{{.*?\n\}}\n'
+              text, count = re.subn(pattern, '\n', text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f'{name}: expected one function, got {count}')
+          path.write_text(text, encoding='utf-8')
+          PY
+          cargo fmt --all
+          if grep -R -n -E 'fn (line_timestamps|format_timestamp)' src/lyrics.rs; then
+            exit 1
+          fi
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lyrics.rs
+          git commit -m 'chore(lyrics): 移除废弃 LRC 合并 helper'
+          git push origin HEAD:main
