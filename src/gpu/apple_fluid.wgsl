@@ -111,44 +111,49 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let aspect = input.bounds_size.x / max(input.bounds_size.y, 1.0);
     var p = (input.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0) * 2.35;
 
-    // Independent monotonic time advects the palette-noise field. Seeking or pausing audio never
-    // changes this clock. The rotation is deliberately visible but remains low frequency.
-    let t = time * 0.20 * motion;
-    p = rotate2(p, (sin(time * 0.11 + seed * 6.28318) * 0.16) * motion);
-    let drift = vec2<f32>(t * 0.27, -t * 0.19);
+    // Independent monotonic time advects the palette-noise field. Audio seek/pause never touches
+    // this clock. The rate is intentionally visible: broad structures should travel several
+    // percent of the viewport per second instead of appearing frozen at normal viewing distance.
+    let t = time * 0.42 * motion;
+    p = rotate2(p, (sin(time * 0.16 + seed * 6.28318) * 0.24) * motion);
+    let drift = vec2<f32>(t * 0.34, -t * 0.26);
 
-    // Fractional Brownian Motion domain warp. q is a low-frequency 2D flow vector; the warped
-    // coordinate is then used to sample a second FBM octave stack. This is the GPU equivalent of
-    // deforming a palette-colored noise image rather than translating flat gradient blobs.
+    // 4-octave Fractional Brownian Motion domain warp. q bends the palette-noise image while the
+    // second FBM sample produces a continuously evolving low-frequency flow field.
     let q = vec2<f32>(
         fbm(p * 1.03 + drift + vec2<f32>(0.0, 0.0), seed + 0.11),
-        fbm(p * 1.03 - drift * 0.73 + vec2<f32>(5.2, 1.3), seed + 0.37),
+        fbm(p * 1.03 - drift * 0.81 + vec2<f32>(5.2, 1.3), seed + 0.37),
     ) - vec2<f32>(0.5);
-    let warped = p + q * (1.55 * motion + 0.42);
-    let flow = fbm(warped * 1.16 + vec2<f32>(-t * 0.22, t * 0.18), seed + 0.71);
+    let warped = p + q * (1.72 * motion + 0.42);
+    let flow = fbm(warped * 1.16 + vec2<f32>(-t * 0.31, t * 0.27), seed + 0.71);
 
-    // Construct a soft noise image exclusively from colors extracted from the current artwork.
-    // Three decorrelated samples keep broad colored islands visible while FBM continuously bends
-    // their boundaries, producing the Apple/Refined-style liquid color field without CPU blur.
-    let n0 = value_noise(warped * 1.43 + vec2<f32>(t * 0.34, -t * 0.16), seed + 1.17);
-    let n1 = value_noise(warped * 1.31 + vec2<f32>(7.1, 2.8) - vec2<f32>(t * 0.21, t * 0.29), seed + 2.03);
-    let n2 = value_noise(warped * 1.57 + vec2<f32>(-3.4, 8.6) + vec2<f32>(t * 0.17, -t * 0.31), seed + 2.89);
+    // Build the noise image exclusively from artwork colors. The three decorrelated samples move
+    // in different directions so boundaries visibly fold and slide rather than simply translating.
+    let n0 = value_noise(warped * 1.43 + vec2<f32>(t * 0.49, -t * 0.23), seed + 1.17);
+    let n1 = value_noise(
+        warped * 1.31 + vec2<f32>(7.1, 2.8) - vec2<f32>(t * 0.31, t * 0.41),
+        seed + 2.03,
+    );
+    let n2 = value_noise(
+        warped * 1.57 + vec2<f32>(-3.4, 8.6) + vec2<f32>(t * 0.27, -t * 0.44),
+        seed + 2.89,
+    );
 
-    let w0 = 0.20 + smoothstep(0.18, 0.82, n0 + (flow - 0.5) * 0.36) * 0.94;
-    let w1 = 0.20 + smoothstep(0.16, 0.84, n1 - (flow - 0.5) * 0.30) * 0.90;
-    let w2 = 0.16 + smoothstep(0.20, 0.80, n2 + (q.x - q.y) * 0.42) * 0.78;
+    let w0 = 0.18 + smoothstep(0.17, 0.83, n0 + (flow - 0.5) * 0.44) * 0.98;
+    let w1 = 0.18 + smoothstep(0.15, 0.85, n1 - (flow - 0.5) * 0.38) * 0.94;
+    let w2 = 0.14 + smoothstep(0.19, 0.81, n2 + (q.x - q.y) * 0.50) * 0.84;
     let weight_sum = max(w0 + w1 + w2, 0.001);
     var color = (dominant * w0 + secondary * w1 + tertiary * w2) / weight_sum;
 
-    // Preserve artwork identity while making the movement readable. A very low-frequency light
-    // modulation reveals flow direction without producing visible grain or flashing.
+    // Keep the field soft, but allow enough luminance movement that similarly colored palettes
+    // still reveal motion instead of looking like one static flat fill.
     let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    color = mix(vec3<f32>(luminance), color, 1.34);
-    color *= 0.88 + (flow - 0.5) * 0.18;
+    color = mix(vec3<f32>(luminance), color, 1.36);
+    color *= 0.86 + (flow - 0.5) * 0.28;
 
     let centered = (input.uv - vec2<f32>(0.5)) * vec2<f32>(0.86, 1.06);
     let vignette = smoothstep(0.27, 0.77, length(centered));
-    let dark_mix = clamp(dim * 0.48 + vignette * 0.18, 0.08, 0.48);
+    let dark_mix = clamp(dim * 0.46 + vignette * 0.18, 0.08, 0.46);
     color = mix(color, dark, dark_mix);
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
