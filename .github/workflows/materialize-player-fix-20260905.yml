@@ -1,0 +1,53 @@
+name: Materialize player input and FBM fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Apply real source changes
+        shell: bash
+        run: |
+          python .github/scripts/apply-stage-input-fbm-20260905.py
+          python .github/scripts/fix-stage-input-fbm-20260905.py
+          python .github/scripts/fix-slider-bounds-probe-20260905.py
+          python .github/scripts/fix-slider-borrow-20260905.py
+          cargo fmt --all
+
+      - name: Commit source changes to main
+        shell: bash
+        run: |
+          git config user.name "Chlna6666"
+          git config user.email "79357769+Chlna6666@users.noreply.github.com"
+          git rm -f --ignore-unmatch \
+            .github/workflows/apply-stage-input-fbm-20260905.yml \
+            .github/workflows/apply-stage-input-fbm-v2-20260905.yml \
+            .github/workflows/materialize-player-fix-20260905.yml \
+            .github/scripts/apply-stage-input-fbm-20260905.py \
+            .github/scripts/fix-stage-input-fbm-20260905.py \
+            .github/scripts/fix-slider-bounds-probe-20260905.py \
+            .github/scripts/fix-slider-borrow-20260905.py
+          git add src
+          git diff --cached --stat
+          git diff --cached --quiet && { echo "No source changes produced"; exit 1; }
+          git commit -m "fix(player): 修正滑块交互并重构 FBM 沉浸背景"
+          git push origin HEAD:main
