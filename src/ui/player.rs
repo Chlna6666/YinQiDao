@@ -116,6 +116,16 @@ impl Render for PlaybackProgress {
                 let this = this.clone();
                 move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
+                        app.seek_to_ratio(ratio, app_cx);
+                    });
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            },
+            {
+                let parent = parent.clone();
+                let this = this.clone();
+                move |ratio, cx| {
+                    let _ = parent.update(cx, |app, app_cx| {
                         if app.drag_target == Some(DragTarget::Progress) {
                             app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
                         } else {
@@ -608,6 +618,15 @@ pub(super) fn mini_player(
                                         "mini-volume-bar",
                                         app.displayed_volume_ratio(),
                                         SliderStyle::mini_volume(),
+                                        {
+                                            let view = app_entity.clone();
+                                            move |ratio, cx| {
+                                                let _ = view.update(cx, |this, cx| {
+                                                    this.pending_volume_ratio = None;
+                                                    this.set_app_volume(ratio, cx);
+                                                });
+                                            }
+                                        },
                                         {
                                             let view = app_entity.clone();
                                             move |ratio, cx| {
