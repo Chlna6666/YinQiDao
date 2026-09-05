@@ -105,8 +105,6 @@ pub struct MusicApp {
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
-    pub(crate) lyrics_current_offset: f32,
-    pub(crate) lyrics_target_offset: f32,
     pub(crate) lyrics_user_scrolling_until: Option<std::time::Instant>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
     previous_page: AppPage,
@@ -431,8 +429,6 @@ impl MusicApp {
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
-            lyrics_current_offset: 0.0,
-            lyrics_target_offset: 0.0,
             lyrics_user_scrolling_until: None,
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
             previous_page: AppPage::Home,
@@ -589,8 +585,6 @@ impl MusicApp {
             || (self.stage_open
                 && (self.stage_controls_visibility > 0.005
                     && self.stage_controls_visibility < 0.995))
-            || (self.stage_open
-                && (self.lyrics_target_offset - self.lyrics_current_offset).abs() > 0.5)
     }
 
     pub(crate) fn show_library_tab(&mut self, tab: LibraryTab, cx: &mut Context<Self>) {
@@ -1407,8 +1401,6 @@ impl MusicApp {
             if curr_track_id != self.last_polled_track_id {
                 self.last_polled_track_id = curr_track_id;
                 self.last_lyric_index = None;
-                self.lyrics_current_offset = 0.0;
-                self.lyrics_target_offset = 0.0;
                 self.lyrics_user_scrolling_until = None;
                 self.lyrics_scroll_handle.scroll_to_item(0);
                 self.request_current_artwork(cx);
@@ -1430,7 +1422,6 @@ impl MusicApp {
                             .lyrics_user_scrolling_until
                             .is_some_and(|until| std::time::Instant::now() < until);
                         if !in_user_scroll {
-                            self.lyrics_target_offset = (current_idx as f32) * 60.0;
                             self.lyrics_scroll_handle
                                 .scroll_to_top_of_item(current_idx.saturating_sub(2));
                         }
@@ -2278,21 +2269,6 @@ impl Render for MusicApp {
             self.stage_controls_visibility = target_visibility;
         }
 
-        if self.stage_open {
-            let in_user_scroll = self
-                .lyrics_user_scrolling_until
-                .is_some_and(|until| std::time::Instant::now() < until);
-            if !in_user_scroll {
-                let diff = self.lyrics_target_offset - self.lyrics_current_offset;
-                if diff.abs() > 0.5 {
-                    let factor = 1.0 - (-9.0 * dt).exp();
-                    self.lyrics_current_offset += diff * factor;
-                } else {
-                    self.lyrics_current_offset = self.lyrics_target_offset;
-                }
-            }
-        }
-
         if self.has_active_animations() {
             window.request_animation_frame();
         }
@@ -2864,14 +2840,6 @@ mod tests {
             false,
             true,
         ));
-    }
-
-    #[test]
-    fn test_lyrics_target_offset_centering() {
-        let target_0 = 0_f32 * 60.0;
-        assert_eq!(target_0, 0.0);
-        let target_10 = 10_f32 * 60.0;
-        assert_eq!(target_10, 600.0);
     }
 
     #[test]
