@@ -42,7 +42,8 @@ pub(super) fn render(
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
         .map_or(&[][..], |document| document.timed_lines());
-    let fluid_playing = snapshot.state == PlaybackState::Playing;
+    let (transport_state, transport_position_ms, _) = live_transport(app);
+    let fluid_playing = transport_state == PlaybackState::Playing;
     fluid_background.update(cx, |view, cx| view.set_playing(fluid_playing, cx));
 
     div()
@@ -75,11 +76,42 @@ pub(super) fn render(
                         .gap_12()
                         .items_center()
                         .child(stage_cover(track, artwork))
-                        .child(stage_lyrics(app, lyrics, snapshot.position_ms, cx)),
+                        .child(stage_lyrics(app, lyrics, transport_position_ms, cx)),
                 )
-                .child(stage_controls(app, snapshot, cx)),
+                .child(stage_controls(app, cx)),
         )
         .into_any_element()
+}
+
+fn live_transport(app: &MusicApp) -> (PlaybackState, u64, u64) {
+    app.engine.as_ref().map_or(
+        (
+            app.snapshot.state,
+            app.snapshot.position_ms,
+            app.snapshot.duration_ms,
+        ),
+        |engine| engine.progress(),
+    )
+}
+
+fn displayed_transport(app: &MusicApp) -> (PlaybackState, u64, u64, f32) {
+    let (state, live_position_ms, duration_ms) = live_transport(app);
+    let override_ratio = app
+        .drag_progress_ratio
+        .or_else(|| app.pending_progress_ratio.map(|(_, ratio)| ratio));
+
+    let position_ms = override_ratio.map_or(live_position_ms, |ratio| {
+        (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
+    });
+    let ratio = override_ratio.unwrap_or_else(|| {
+        if duration_ms == 0 {
+            0.0
+        } else {
+            (live_position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+        }
+    });
+
+    (state, position_ms, duration_ms, ratio)
 }
 
 fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoElement {
@@ -346,14 +378,11 @@ fn lyric_focus_transition() -> Transition {
         .ease(Easing::OutCubic)
         .properties([TransitionProperty::Opacity, TransitionProperty::Scale])
 }
-fn stage_controls(
-    app: &MusicApp,
-    snapshot: &PlayerSnapshot,
-    cx: &mut Context<MusicApp>,
-) -> impl IntoElement {
-    let position = app.displayed_position_ms();
+
+fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
+    let (transport_state, position, duration_ms, progress_ratio) = displayed_transport(app);
     let volume = app.displayed_volume_ratio();
-    let playing = snapshot.state == PlaybackState::Playing;
+    let playing = transport_state == PlaybackState::Playing;
     let visibility = app.stage_controls_visibility;
 
     div()
@@ -387,7 +416,7 @@ fn stage_controls(
         .child(
             interactive_slider(
                 "stage-progress-track",
-                app.displayed_progress_ratio(),
+                progress_ratio,
                 SliderStyle::stage_progress(),
                 {
                     let view = cx.entity().downgrade();
@@ -423,7 +452,7 @@ fn stage_controls(
             div()
                 .text_xs()
                 .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                .child(format_remaining_time(position, snapshot.duration_ms)),
+                .child(format_remaining_time(position, duration_ms)),
         )
         .child(control_button(
             "stage-prev-btn",
