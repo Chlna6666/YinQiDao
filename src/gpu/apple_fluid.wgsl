@@ -39,15 +39,13 @@ fn rotate2(value: vec2<f32>, angle: f32) -> vec2<f32> {
     return vec2<f32>(c * value.x - s * value.y, s * value.x + c * value.y);
 }
 
-// Arithmetic hash avoids the transcendental sin() that was previously executed four times for
-// every value-noise sample. The fluid remains deterministic per track seed but is substantially
-// cheaper across a fullscreen fragment pass.
 fn hash21(point: vec2<f32>, seed: f32) -> f32 {
+    let seed_offset = vec3<f32>(seed * 0.013, seed * 0.017, seed * 0.019);
     var p3 = fract(
-        vec3<f32>(point.x, point.y, point.x) * 0.1031
-            + vec3<f32>(seed * 0.013, seed * 0.017, seed * 0.019),
+        vec3<f32>(point.x, point.y, point.x) * vec3<f32>(0.1031) + seed_offset,
     );
-    p3 += dot(p3, p3.yzx + vec3<f32>(33.33));
+    let mixing = dot(p3, p3.yzx + vec3<f32>(33.33));
+    p3 = p3 + vec3<f32>(mixing);
     return fract((p3.x + p3.y) * p3.z);
 }
 
@@ -73,8 +71,6 @@ fn octave_transform(point: vec2<f32>) -> vec2<f32> {
     );
 }
 
-// Three octaves are enough for the broad Apple-style ambient deformation. The previous fourth
-// octave was visually subtle at this scale but amplified fragment cost over the entire window.
 fn fbm(point: vec2<f32>, seed: f32) -> f32 {
     var p = point;
     var value = value_noise(p, seed) * 0.5714286;
@@ -131,9 +127,6 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
         fbm(p * 1.03 - drift * 0.81 + vec2<f32>(5.2, 1.3), seed + 0.37),
     ) - vec2<f32>(0.5);
     let warped = p + q * (1.72 * motion + 0.42);
-
-    // q already carries the multi-octave domain deformation. A single broad flow sample supplies
-    // luminance breathing without paying for a third FBM evaluation per fragment.
     let flow = value_noise(
         warped * 0.82 + vec2<f32>(-t * 0.31, t * 0.27),
         seed + 0.71,
