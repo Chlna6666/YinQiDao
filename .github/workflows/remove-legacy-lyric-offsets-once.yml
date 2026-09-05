@@ -1,0 +1,90 @@
+name: Remove legacy lyric offsets once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/remove-legacy-lyric-offsets-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+
+      - name: Remove obsolete lyric animation state
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/ui/shell.rs')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '    pub(crate) lyrics_current_offset: f32,\n    pub(crate) lyrics_target_offset: f32,\n',
+                  '',
+                  'field declarations',
+              ),
+              (
+                  '            lyrics_current_offset: 0.0,\n            lyrics_target_offset: 0.0,\n',
+                  '',
+                  'initializers',
+              ),
+              (
+                  '''            || (self.stage_open
+                      && (self.lyrics_target_offset - self.lyrics_current_offset).abs() > 0.5)
+          ''',
+                  '',
+                  'active animation predicate',
+              ),
+              (
+                  '                self.lyrics_current_offset = 0.0;\n                self.lyrics_target_offset = 0.0;\n',
+                  '',
+                  'track change reset',
+              ),
+              (
+                  '                            self.lyrics_target_offset = (current_idx as f32) * 60.0;\n',
+                  '',
+                  'active lyric target write',
+              ),
+          ]
+
+          for old, new, label in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, got {count}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          if grep -R -n -E 'lyrics_(current|target)_offset' src; then
+            echo 'obsolete lyric offset state still referenced' >&2
+            exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/ui/shell.rs
+          git commit -m 'perf(player): 移除失效的歌词逐帧动画状态'
+          git push origin HEAD:main
