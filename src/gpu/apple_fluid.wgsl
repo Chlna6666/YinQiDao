@@ -87,7 +87,10 @@ fn vs_shader_effect(
     let device_position = pixel_position / viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: ShaderEffectVarying;
-    out.position = vec4<f32>(device_position, 0.999, 1.0);
+    // Fullscreen 2D effects should use the front of the custom-mesh depth range. Using 0.999 made
+    // the stage background vulnerable to being hidden behind normal UI primitives depending on
+    // backend depth state, which looked exactly like the static dark fallback.
+    out.position = vec4<f32>(device_position, 0.0, 1.0);
     out.uv = local;
     out.params0 = draw.params[0];
     out.params1 = draw.params[1];
