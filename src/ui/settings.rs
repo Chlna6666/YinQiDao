@@ -141,9 +141,12 @@ fn audio_device_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEl
                                     .child(if active { "使用中" } else { "切换" }),
                             ),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_output_device(device_id.clone(), cx);
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.set_output_device(device_id.clone(), cx);
+                        }),
+                    ),
             );
         }
     }
@@ -234,7 +237,10 @@ fn eq_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .transition(press_transition())
                 .active(|s| s.scale(0.96))
                 .child(preset_name(preset))
-                .on_click(cx.listener(move |this, _, _, cx| this.apply_eq(preset, cx))),
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| this.apply_eq(preset, cx)),
+                ),
         );
     }
 
@@ -539,7 +545,10 @@ fn directories_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("添加文件夹"),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.choose_folder(cx)),
+                            ),
                     )
                     .child(
                         div()
@@ -569,7 +578,10 @@ fn directories_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child("快速增量同步"),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.rescan_library(cx))),
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.rescan_library(cx)),
+                            ),
                     )
                     .child(
                         div()
@@ -599,7 +611,10 @@ fn directories_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child("重置并重建索引"),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.reset_library_index(cx))),
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.reset_library_index(cx)),
+                            ),
                     ),
             )
             .child(
@@ -766,7 +781,7 @@ fn online_enrichment_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl I
                             } else {
                                 "配置密钥"
                             })
-                            .on_click(cx.listener(|this, _, _, cx| this.edit_acoustid_key(cx))),
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.edit_acoustid_key(cx))),
                     ),
             )
             .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
@@ -816,7 +831,7 @@ fn online_enrichment_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl I
                                 ACCENT_RED.into(),
                             ))
                             .child("重新识别")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
                                 this.retry_current_enrichment(cx);
                             })),
                     ),
@@ -927,7 +942,7 @@ fn appearance_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElem
                                                 13.0,
                                                 TEXT_PRIMARY.into(),
                                             ))
-                                            .on_click(cx.listener(|this, _, _, cx| {
+                                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
                                                 this.adjust_blur_radius(-2.0, cx);
                                             })),
                                     )
@@ -955,7 +970,7 @@ fn appearance_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElem
                                                 13.0,
                                                 TEXT_PRIMARY.into(),
                                             ))
-                                            .on_click(cx.listener(|this, _, _, cx| {
+                                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
                                                 this.adjust_blur_radius(2.0, cx);
                                             })),
                                     ),
@@ -1004,7 +1019,7 @@ fn appearance_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElem
                                     })
                                     .transition(press_transition())
                                     .child(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, _, cx| {
                                         this.set_blur_radius(px_val, cx);
                                     }))
                             })),
@@ -1052,7 +1067,7 @@ fn apple_settings_card(title: &str, subtitle: &str, content: impl IntoElement) -
 fn apple_toggle_switch(
     id: &'static str,
     enabled: bool,
-    listener: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    listener: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let mut switch = div()
         .id(SharedString::from(id))
@@ -1075,13 +1090,13 @@ fn apple_toggle_switch(
 
     switch
         .child(div().size(px(21.0)).rounded_full().bg(rgb(0xff_ff_ff)))
-        .on_click(listener)
+        .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
 fn apple_round_step_btn(
     id: &str,
     icon: &'static str,
-    listener: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    listener: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(id.to_string()))
@@ -1096,13 +1111,13 @@ fn apple_round_step_btn(
         .transition(press_transition())
         .active(|s| s.scale(0.90))
         .child(themed_icon(icon, 13.0, hsla(220.0, 0.08, 0.45, 1.0)))
-        .on_click(listener)
+        .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
 fn apple_micro_btn(
     id: &str,
     icon: &'static str,
-    listener: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    listener: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(id.to_string()))
@@ -1119,7 +1134,7 @@ fn apple_micro_btn(
         .transition(press_transition())
         .active(|s| s.scale(0.90))
         .child(themed_icon(icon, 11.0, hsla(220.0, 0.08, 0.45, 1.0)))
-        .on_click(listener)
+        .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
 fn preset_name(preset: EqPreset) -> &'static str {

@@ -297,7 +297,10 @@ pub(super) fn mini_player(
                                                 .child(artist.to_owned()),
                                         ),
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| this.open_stage(cx))),
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| this.open_stage(cx)),
+                                ),
                         )
                         .child(
                             div()

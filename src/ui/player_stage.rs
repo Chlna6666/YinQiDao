@@ -54,7 +54,6 @@ pub(super) fn render(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
         )
-        .on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))
         .child(ambient_background(fluid_background))
         .child(
             div()

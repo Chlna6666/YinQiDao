@@ -2201,9 +2201,13 @@ impl MusicApp {
                                     .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.22)))
                                     .transition(theme::press_transition())
                                     .active(|s| s.scale(0.95))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.hide_stage_controls_immediately(cx);
+                                        }),
+                                    )
                                     .child(theme::themed_icon(
                                         lucide_icons::icon_eye_off(),
                                         14.0,
@@ -2215,10 +2219,7 @@ impl MusicApp {
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(hsla(0.0, 0.0, 1.0, 0.90))
                                             .child("纯享沉浸"),
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.hide_stage_controls_immediately(cx);
-                                    })),
+                                    ),
                             )
                             .child(
                                 div()
@@ -2236,9 +2237,13 @@ impl MusicApp {
                                     .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.22)))
                                     .transition(theme::press_transition())
                                     .active(|s| s.scale(0.95))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.close_stage(cx);
+                                        }),
+                                    )
                                     .child(theme::themed_icon(
                                         lucide_icons::icon_chevron_down(),
                                         14.0,
@@ -2250,10 +2255,7 @@ impl MusicApp {
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(hsla(0.0, 0.0, 1.0, 0.90))
                                             .child("收起舞台 (Esc)"),
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_stage(cx);
-                                    })),
+                                    ),
                             ),
                     ),
             )
@@ -2341,7 +2343,7 @@ impl Render for MusicApp {
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
         let fluid_active = self.stage_progress > 0.001;
         let fluid_dynamic = self.config.dynamic_blur;
-        let _ = fluid_background.update(cx, |view, cx| {
+        fluid_background.update(cx, |view, cx| {
             view.sync(
                 fluid_track_id,
                 fluid_palette,
@@ -2399,7 +2401,7 @@ impl Render for MusicApp {
                     .border_color(hsla(0.0, 0.0, 1.0, 0.12))
                     .relative()
                     .overflow_hidden()
-                    .bg(rgb(0x0e_0f_16))
+                    .bg(rgb(0x0e0f16))
                     .text_color(theme::TEXT_WHITE)
                     .on_mouse_move(cx.listener(
                         |this, event: &gpui::MouseMoveEvent, _window, cx| {

@@ -161,13 +161,13 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                             10.0,
                                             TEXT_SECONDARY.into(),
                                         ))
-                                        .on_click(app_listener(view, |this, _, _, cx| {
+                                        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
                                             this.search.clear();
                                             this.search_active = false;
                                             cx.notify();
                                         }))
                                 })
-                                .on_click(app_listener(view, |this, _, _, cx| {
+                                .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
                                     this.search_active = true;
                                     cx.notify();
                                 })),
@@ -198,7 +198,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child("导入目录"),
                                 )
-                                .on_click(app_listener(view, |this, _, _, cx| {
+                                .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
                                     this.choose_folder(cx)
                                 })),
                         ),
@@ -254,7 +254,7 @@ fn segmented_tab_item<F>(
     on_click: F,
 ) -> impl IntoElement
 where
-    F: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 {
     div()
         .id(SharedString::from(format!("seg-{label}")))
@@ -293,7 +293,7 @@ where
                 .text_color(if active { TEXT_PRIMARY } else { TEXT_SECONDARY })
                 .child(label),
         )
-        .on_click(on_click)
+        .on_mouse_down(gpui::MouseButton::Left, on_click)
 }
 
 fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl IntoElement {
@@ -511,14 +511,14 @@ fn song_table_row(
                         14.0,
                         hsla(220.0, 0.08, 0.50, 1.0),
                     ))
-                    .on_click(move |_, _, cx| {
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                         let _ = view_add.update(cx, |this, cx| {
                             this.add_to_queue(track_id, cx);
                         });
                     }),
             ),
         )
-        .on_click(move |_, _, cx| {
+        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
             let _ = view_play.update(cx, |this, cx| this.play_track(track_id, cx));
         })
         .into_any_element()
@@ -667,7 +667,7 @@ fn album_poster_card(
                         .child(format!("{artist} · {count} 首")),
                 ),
         )
-        .on_click(app_listener(view, move |this, _, _, cx| {
+        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, move |this, _, _, cx| {
             this.play_track(track_id, cx)
         }))
 }
@@ -777,7 +777,7 @@ fn artist_circle_card(
                         .child(format!("{count} 首作品")),
                 ),
         )
-        .on_click(app_listener(view, move |this, _, _, cx| {
+        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, move |this, _, _, cx| {
             this.play_track(track_id, cx)
         }))
 }
@@ -861,7 +861,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .hover(|s| s.text_color(ACCENT_RED))
                         .transition(press_transition())
                         .child("清空队列")
-                        .on_click(app_listener(view, |this, _, _, cx| this.clear_queue(cx))),
+                        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| this.clear_queue(cx))),
                 ),
         )
         .child(
@@ -1010,7 +1010,7 @@ fn queue_item_row(
                             14.0,
                             TEXT_TERTIARY.into(),
                         ))
-                        .on_click(app_listener(view, move |this, _, _, cx| {
+                        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, move |this, _, _, cx| {
                             this.remove_from_queue(track_id, cx);
                         })),
                 ),

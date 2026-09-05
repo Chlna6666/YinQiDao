@@ -109,7 +109,10 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child("添加音乐目录"),
                         )
-                        .on_click(app_listener(view, |this, _, _, cx| this.choose_folder(cx))),
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, |this, _, _, cx| this.choose_folder(cx)),
+                        ),
                 )
                 .child(
                     div()
@@ -139,7 +142,10 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .child("重新扫描"),
                         )
-                        .on_click(app_listener(view, |this, _, _, cx| this.rescan(cx))),
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, |this, _, _, cx| this.rescan(cx)),
+                        ),
                 ),
         )
 }
@@ -360,9 +366,10 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                         .child(track.artist.clone()),
                 ),
         )
-        .on_click(app_listener(view, move |this, _, _, cx| {
-            this.play_track(track_id, cx)
-        }))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            app_listener(view, move |this, _, _, cx| this.play_track(track_id, cx)),
+        )
 }
 
 fn recent_tracks_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
@@ -397,9 +404,12 @@ fn recent_tracks_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl In
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.80))
                         .child("查看全部歌曲 →")
-                        .on_click(app_listener(view, |this, _, _, cx| {
-                            this.show_library_tab(crate::model::LibraryTab::Songs, cx);
-                        })),
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, |this, _, _, cx| {
+                                this.show_library_tab(crate::model::LibraryTab::Songs, cx);
+                            }),
+                        ),
                 ),
         )
         .child(list)
@@ -526,9 +536,12 @@ pub(super) fn track_row(
                             14.0,
                             hsla(220.0, 0.08, 0.50, 1.0),
                         ))
-                        .on_click(app_listener(view, move |this, _, _, cx| {
-                            this.add_to_queue(track_id, cx);
-                        })),
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, move |this, _, _, cx| {
+                                this.add_to_queue(track_id, cx);
+                            }),
+                        ),
                 )
                 .child(
                     div()
@@ -537,9 +550,10 @@ pub(super) fn track_row(
                         .child(format_time(track.duration_ms)),
                 ),
         )
-        .on_click(app_listener(view, move |this, _, _, cx| {
-            this.play_track(track_id, cx)
-        }))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            app_listener(view, move |this, _, _, cx| this.play_track(track_id, cx)),
+        )
 }
 
 fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
@@ -608,7 +622,10 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("立即选择音乐目录"),
                 )
-                .on_click(app_listener(view, |this, _, _, cx| this.choose_folder(cx))),
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    app_listener(view, |this, _, _, cx| this.choose_folder(cx)),
+                ),
         )
         .child(
             div()
