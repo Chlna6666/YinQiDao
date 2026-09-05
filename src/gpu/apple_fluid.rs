@@ -58,6 +58,7 @@ pub(crate) struct AppleFluidView {
     track_id: i64,
     palette: Option<ArtworkPalette>,
     stage_visible: bool,
+    playing: bool,
     animation_seconds: f32,
     last_tick_at: Instant,
     last_render_at: Instant,
@@ -72,6 +73,7 @@ impl AppleFluidView {
             track_id: 0,
             palette: None,
             stage_visible: false,
+            playing: false,
             animation_seconds: 0.0,
             last_tick_at: now,
             last_render_at: now,
@@ -100,6 +102,17 @@ impl AppleFluidView {
         }
     }
 
+    pub(crate) fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
+        if self.playing == playing {
+            return;
+        }
+        self.playing = playing;
+        // Pause duration must never be folded into the next animation step. Resume from the exact
+        // frozen shader time instead of jumping forward by however long playback was paused.
+        self.last_tick_at = Instant::now();
+        cx.notify();
+    }
+
     fn start_timer(&mut self, cx: &mut Context<Self>) {
         if self.timer_started {
             return;
@@ -114,8 +127,10 @@ impl AppleFluidView {
                         let now = Instant::now();
                         let mounted = now.saturating_duration_since(this.last_render_at)
                             <= FLUID_MOUNT_LIVENESS;
-                        let should_animate =
-                            this.stage_visible && mounted && this.shader_available;
+                        let should_animate = this.stage_visible
+                            && this.playing
+                            && mounted
+                            && this.shader_available;
 
                         if should_animate {
                             let delta = now
@@ -126,7 +141,7 @@ impl AppleFluidView {
                                 (this.animation_seconds + delta).rem_euclid(21_600.0);
                             cx.notify();
                         }
-                        this.last_tick_at = now;
+                        self::AppleFluidView::reset_tick_clock(this, now);
                     })
                     .is_err()
                 {
@@ -136,6 +151,11 @@ impl AppleFluidView {
             Ok(())
         })
         .detach();
+    }
+
+    #[inline]
+    fn reset_tick_clock(&mut self, now: Instant) {
+        self.last_tick_at = now;
     }
 }
 
