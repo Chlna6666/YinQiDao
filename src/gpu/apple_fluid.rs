@@ -107,8 +107,6 @@ impl AppleFluidView {
             return;
         }
         self.playing = playing;
-        // Pause duration must never be folded into the next animation step. Resume from the exact
-        // frozen shader time instead of jumping forward by however long playback was paused.
         self.last_tick_at = Instant::now();
         cx.notify();
     }
@@ -141,7 +139,7 @@ impl AppleFluidView {
                                 (this.animation_seconds + delta).rem_euclid(21_600.0);
                             cx.notify();
                         }
-                        self::AppleFluidView::reset_tick_clock(this, now);
+                        this.last_tick_at = now;
                     })
                     .is_err()
                 {
@@ -151,11 +149,6 @@ impl AppleFluidView {
             Ok(())
         })
         .detach();
-    }
-
-    #[inline]
-    fn reset_tick_clock(&mut self, now: Instant) {
-        self.last_tick_at = now;
     }
 }
 
