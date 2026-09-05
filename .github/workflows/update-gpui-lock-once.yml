@@ -1,0 +1,49 @@
+name: Update GPUI lock once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/update-gpui-lock-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Refresh GPUI git source
+        run: cargo update -p gpui@0.2.2 --precise 557f99502b7529269e6c134948ccbf8d1a3f7df4
+
+      - name: Verify GPUI revision
+        shell: bash
+        run: |
+          grep -q '557f99502b7529269e6c134948ccbf8d1a3f7df4' Cargo.lock
+          if grep -q 'bfe0f7efb999e53e470697d825e76e006af17a78' Cargo.lock; then
+            echo 'old BMCBL revision still present in Cargo.lock' >&2
+            exit 1
+          fi
+          git diff -- Cargo.lock
+
+      - name: Commit lockfile
+        shell: bash
+        run: |
+          if git diff --quiet -- Cargo.lock; then
+            echo 'Cargo.lock already points at the requested GPUI revision.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          git commit -m 'fix(gpui): 同步 retained 文本与绘制顺序修复'
+          git push origin HEAD:main
