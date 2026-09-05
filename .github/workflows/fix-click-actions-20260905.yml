@@ -36,25 +36,60 @@ jobs:
             $count = ($text.Split($needle).Count - 1)
             if ($count -gt 0) {
               $text = $text.Replace($needle, '.on_mouse_down(gpui::MouseButton::Left, ')
+              if ($path -eq 'src/ui/library.rs' -or $path -eq 'src/ui/settings.rs') {
+                $text = $text.Replace('&gpui::ClickEvent', '&gpui::MouseDownEvent')
+              }
               [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
               Write-Host "${path}: migrated $count click handlers"
               $total += $count
             }
           }
-          if ($total -lt 4) { throw "unexpectedly few click handlers migrated: $total" }
+          if ($total -ne 31) { throw "unexpected click handler migration count: $total" }
           Write-Host "migrated $total stateful click handlers to direct left-button dispatch"
 
-      - name: Remove redundant stage-root click synthesis
-        shell: pwsh
+      - name: Fix stage direct pointer actions
+        shell: python
         run: |
-          $path = 'src/ui/player_stage.rs'
-          $text = [IO.File]::ReadAllText($path)
-          $old = '.on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))'
-          if (($text.Split($old).Count - 1) -eq 1) {
-            $text = $text.Replace("`r`n        $old", '')
-            $text = $text.Replace("`n        $old", '')
-            [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
-          }
+          from pathlib import Path
+
+          stage = Path('src/ui/player_stage.rs')
+          text = stage.read_text(encoding='utf-8')
+          old = '.on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))'
+          if text.count(old) != 1:
+              raise SystemExit(f'unexpected stage root click count: {text.count(old)}')
+          text = text.replace('\n        ' + old, '', 1)
+          stage.write_text(text, encoding='utf-8', newline='\n')
+
+          shell = Path('src/ui/shell.rs')
+          text = shell.read_text(encoding='utf-8')
+
+          def migrate_button(source: str, element_id: str, action: str, next_marker: str) -> str:
+              start = source.index(f'.id("{element_id}")')
+              end = source.index(next_marker, start)
+              region = source[start:end]
+              down = '''.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })'''
+              click = f'''.on_click(cx.listener(|this, _, _, cx| {{
+                                        this.{action}(cx);
+                                    }}))'''
+              if region.count(down) != 1 or region.count(click) != 1:
+                  raise SystemExit(
+                      f'{element_id}: unexpected handlers down={region.count(down)} click={region.count(click)}'
+                  )
+              replacement = f'''.on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {{
+                                            cx.stop_propagation();
+                                            this.{action}(cx);
+                                        }}),
+                                    )'''
+              region = region.replace(down, replacement, 1).replace('\n                                    ' + click, '', 1)
+              return source[:start] + region + source[end:]
+
+          text = migrate_button(text, 'stage-quick-hide-btn', 'hide_stage_controls_immediately', '.id("stage-collapse-btn")')
+          text = migrate_button(text, 'stage-collapse-btn', 'close_stage', '),\n                    ),\n            )\n    }')
+          shell.write_text(text, encoding='utf-8', newline='\n')
 
       - name: Format source
         run: cargo fmt --all
@@ -77,7 +112,7 @@ jobs:
             .github/workflows/fix-click-actions-20260905.yml \
             .github/workflows/finalize-real-player-source-20260905.yml \
             .github/workflows/validate-real-player-fix-20260905.yml
-          git add src/ui/home.rs src/ui/library.rs src/ui/settings.rs src/ui/player.rs src/ui/player_stage.rs
+          git add src/ui/home.rs src/ui/library.rs src/ui/settings.rs src/ui/player.rs src/ui/player_stage.rs src/ui/shell.rs
           git diff --cached --stat
           git diff --cached --check
           git commit -m "fix(ui): 恢复沉浸入口与失效点击交互"
