@@ -1,0 +1,157 @@
+name: Apply local click fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source-only pointer fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          old_gpui = '557f99502b7529269e6c134948ccbf8d1a3f7df4'
+          new_gpui = '69b2049bc427fb1ceed94760ccdd7e92be9e9a02'
+          lock = Path('Cargo.lock')
+          text = lock.read_text(encoding='utf-8')
+          count = text.count(old_gpui)
+          if count == 0:
+              raise SystemExit('Cargo.lock does not contain the pinned broken GPUI revision')
+          text = text.replace(old_gpui, new_gpui)
+          lock.write_text(text, encoding='utf-8', newline='\n')
+          print(f'updated {count} GPUI git lock entries: {old_gpui} -> {new_gpui}')
+
+          shell = Path('src/ui/shell.rs')
+          text = shell.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '''                .on_click(cx.listener(|this, _, _, cx| {
+                    this.search_active = true;
+                    this.page = AppPage::Library;
+                    cx.notify();
+                })),''',
+                  '''                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.search_active = true;
+                        this.page = AppPage::Library;
+                        cx.notify();
+                    }),
+                ),''',
+              ),
+              (
+                  'F: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + \'static,',
+                  'F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + \'static,',
+              ),
+              (
+                  '''        .on_click(on_click)
+}
+
+fn traffic_light_button''',
+                  '''        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event, window, cx| {
+                cx.stop_propagation();
+                on_click(event, window, cx);
+            },
+        )
+}
+
+fn traffic_light_button''',
+              ),
+              (
+                  '''        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(on_click)
+}''',
+                  '''        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event, window, cx| {
+                cx.stop_propagation();
+                on_click(event, window, cx);
+            },
+        )
+}''',
+              ),
+              (
+                  '''                    .on_click(cx.listener(|_, _, window, _| {
+                        window.titlebar_double_click();
+                    })),''',
+                  '''                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                            if event.click_count >= 2 {
+                                cx.stop_propagation();
+                                window.titlebar_double_click();
+                            }
+                        }),
+                    ),''',
+              ),
+              (
+                  '''                            .on_click(cx.listener(|_, _, window, _| {
+                                window.titlebar_double_click();
+                            })),''',
+                  '''                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                                    if event.click_count >= 2 {
+                                        cx.stop_propagation();
+                                        window.titlebar_double_click();
+                                    }
+                                }),
+                            ),''',
+              ),
+              (
+                  '''                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.wake_stage_controls_immediately(cx);
+                    }))''',
+                  '',
+              ),
+          ]
+
+          for old, new in replacements:
+              matches = text.count(old)
+              if matches == 0:
+                  raise SystemExit(f'shell.rs replacement anchor not found:\n{old[:160]}')
+              text = text.replace(old, new)
+
+          shell.write_text(text, encoding='utf-8', newline='\n')
+
+          player = Path('src/ui/player.rs')
+          text = player.read_text(encoding='utf-8')
+          old = 'cx.listener(|this, _, _, cx| this.open_stage(cx))'
+          new = '''cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_stage(cx);
+                                    })'''
+          if text.count(old) != 1:
+              raise SystemExit(f'player open_stage click anchor count: {text.count(old)}')
+          text = text.replace(old, new)
+          player.write_text(text, encoding='utf-8', newline='\n')
+
+      - name: Remove temporary workflow and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Chlna6666"
+          git config user.email "79357769+Chlna6666@users.noreply.github.com"
+          git rm -f .github/workflows/apply-local-click-fix-20260905.yml
+          git add Cargo.lock src/ui/shell.rs src/ui/player.rs
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "fix(gpui): 更新锁定版本并恢复指针命中交互"
+          git push origin HEAD:main
