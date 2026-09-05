@@ -36,6 +36,7 @@ use super::{
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const STAGE_CONTROLS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const STAGE_TRANSITION_RESPONSE: f32 = 8.0;
+const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DragTarget {
@@ -517,6 +518,7 @@ impl MusicApp {
         self.last_frame_instant = None;
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_last_mouse_pos = None;
+        self.stage_suppress_wake_until = None;
         self.stage_controls_visibility = 1.0;
         self.page = AppPage::Player;
         route::navigate_to(cx, AppPage::Player);
@@ -528,6 +530,7 @@ impl MusicApp {
         self.stage_animating = true;
         self.last_frame_instant = None;
         self.stage_last_mouse_pos = None;
+        self.stage_suppress_wake_until = None;
         let return_page = if self.previous_page == AppPage::Player {
             AppPage::Home
         } else {
@@ -548,10 +551,7 @@ impl MusicApp {
     }
 
     pub(crate) fn wake_stage_controls(&mut self, cx: &mut Context<Self>) {
-        if self
-            .stage_suppress_wake_until
-            .is_some_and(|until| std::time::Instant::now() < until)
-        {
+        if self.stage_suppress_wake_until.is_some() {
             return;
         }
         self.stage_last_user_activity = std::time::Instant::now();
@@ -562,25 +562,27 @@ impl MusicApp {
     }
 
     pub(crate) fn wake_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
-        if self
-            .stage_suppress_wake_until
-            .is_some_and(|until| std::time::Instant::now() < until)
-        {
-            return;
-        }
+        self.stage_suppress_wake_until = None;
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_controls_visibility = 1.0;
         cx.notify();
     }
 
-    pub(crate) fn hide_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn hide_stage_controls_immediately(
+        &mut self,
+        pointer_pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let now = std::time::Instant::now();
         self.stage_controls_visibility = 0.0;
         self.stage_last_user_activity = now
             .checked_sub(STAGE_CONTROLS_IDLE_TIMEOUT + Duration::from_secs(1))
             .unwrap_or(now);
         self.stage_controls_hovered = false;
-        self.stage_suppress_wake_until = Some(now + Duration::from_millis(600));
+        self.stage_last_mouse_pos = Some(pointer_pos);
+        // Presence of this marker means the user explicitly entered clean/immersive mode. It is
+        // released by a meaningful pointer movement or an explicit action, not by a short timer.
+        self.stage_suppress_wake_until = Some(now);
         cx.notify();
     }
 
@@ -589,13 +591,22 @@ impl MusicApp {
         pos: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let manual_immersive = self.stage_suppress_wake_until.is_some();
+        let threshold = if manual_immersive {
+            STAGE_MANUAL_WAKE_THRESHOLD_PX
+        } else {
+            2.0
+        };
         let moved = self.stage_last_mouse_pos.is_none_or(|last| {
             let dx = f32::from(pos.x - last.x).abs();
             let dy = f32::from(pos.y - last.y).abs();
-            dx >= 2.0 || dy >= 2.0
+            dx >= threshold || dy >= threshold
         });
         if moved {
             self.stage_last_mouse_pos = Some(pos);
+            if manual_immersive {
+                self.stage_suppress_wake_until = None;
+            }
             self.wake_stage_controls(cx);
         }
     }
@@ -635,7 +646,6 @@ impl MusicApp {
             return;
         }
 
-        // Apple Music reads as a soft camera settle, not a constant-speed list scroll.
         let factor = 1.0 - (-9.5 * dt).exp();
         let next = current + diff * factor;
         self.lyrics_scroll_handle
@@ -757,6 +767,18 @@ impl MusicApp {
         cx.notify();
     }
 
+    fn reset_progress_for_track_switch(&mut self) {
+        if self.drag_target == Some(DragTarget::Progress) {
+            self.drag_target = None;
+            self.drag_progress_ratio = None;
+            self.seeking = false;
+        }
+        self.pending_progress_ratio = None;
+        self.snapshot.position_ms = 0;
+        self.position_ms = 0;
+        self.config.position_ms = 0;
+    }
+
     pub(crate) fn next(&mut self, cx: &mut Context<Self>) {
         self.ensure_queue();
         let is_at_end = if let (Some(curr), false) =
@@ -776,6 +798,7 @@ impl MusicApp {
         }
 
         if self.send(PlayerCommand::Next) {
+            self.reset_progress_for_track_switch();
             self.save_config();
         }
         cx.notify();
@@ -801,6 +824,7 @@ impl MusicApp {
         }
 
         if self.send(PlayerCommand::Previous) {
+            self.reset_progress_for_track_switch();
             self.save_config();
         }
         cx.notify();
@@ -826,8 +850,8 @@ impl MusicApp {
         }
 
         if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
+            self.reset_progress_for_track_switch();
             self.config.current_track = Some(track_id);
-            self.config.position_ms = 0;
             self.status = "正在准备播放".into();
             self.save_config();
         } else {
@@ -1016,7 +1040,7 @@ impl MusicApp {
                         this.status = format!("输出设备已切换为 {device}");
                         this.save_config();
                     }
-                    Err(error) => this.status = format!("输出设备切换失败：{error:#}"),
+                    Err(error) => this.status = format!("音频设备切换失败：{error:#}"),
                 }
                 cx.notify();
             })?;
@@ -1117,8 +1141,6 @@ impl MusicApp {
         } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
             self.search.push_str(key);
         }
-        // `library::render` already filters the authoritative in-memory track set. Avoid a
-        // SQLite query and audio-registry replacement for every search keystroke.
         cx.notify();
     }
 
@@ -1867,7 +1889,14 @@ impl MusicApp {
         if duration_ms == 0 {
             return;
         }
-        let position_ms = (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64;
+        let ratio = ratio.clamp(0.0, 1.0);
+        let current_gen = self
+            .snapshot
+            .current_track
+            .as_ref()
+            .map_or(0, |track| track.id as u64);
+        self.pending_progress_ratio = Some((current_gen, ratio));
+        let position_ms = (duration_ms as f32 * ratio).round() as u64;
         self.seek_to_ms(position_ms, cx);
     }
 
@@ -2212,9 +2241,9 @@ impl MusicApp {
                                     .active(|s| s.scale(0.95))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
+                                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
-                                            this.hide_stage_controls_immediately(cx);
+                                            this.hide_stage_controls_immediately(event.position, cx);
                                         }),
                                     )
                                     .child(theme::themed_icon(
@@ -2332,7 +2361,11 @@ impl Render for MusicApp {
             && !self.volume_dragging
             && !self.stage_controls_hovered;
 
-        let target_visibility = if is_idle { 0.0 } else { 1.0 };
+        let target_visibility = if self.stage_suppress_wake_until.is_some() || is_idle {
+            0.0
+        } else {
+            1.0
+        };
         let vis_diff = target_visibility - self.stage_controls_visibility;
         if vis_diff.abs() > 0.005 {
             let factor = 1.0 - (-12.0 * dt).exp();
@@ -2404,10 +2437,10 @@ impl Render for MusicApp {
                     .id("stage-drawer-root")
                     .absolute()
                     .inset_0()
+                    // Move a full-size layer instead of changing only its top inset, which shrank
+                    // the drawer during the transition and exposed a top seam.
                     .top(relative(y_offset))
-                    .shadow_lg()
-                    .border_t_1()
-                    .border_color(hsla(0.0, 0.0, 1.0, 0.12))
+                    .bottom(relative(-y_offset))
                     .overflow_hidden()
                     .occlude()
                     .bg(rgb(0x0e0f16))
@@ -2440,7 +2473,7 @@ impl Render for MusicApp {
                         }),
                     )
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                        this.wake_stage_controls(cx);
+                        this.wake_stage_controls_immediately(cx);
                         let key = event.keystroke.key.as_str();
                         if key == "escape" {
                             this.close_stage(cx);
@@ -2969,8 +3002,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_debounce_window() {
-        let suppress_until = std::time::Instant::now() + Duration::from_millis(600);
-        assert!(std::time::Instant::now() < suppress_until);
+    fn manual_immersive_requires_meaningful_pointer_motion() {
+        assert!(STAGE_MANUAL_WAKE_THRESHOLD_PX > 2.0);
+        assert_eq!(STAGE_MANUAL_WAKE_THRESHOLD_PX, 8.0);
     }
 }

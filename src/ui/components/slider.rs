@@ -107,20 +107,6 @@ fn ratio_from_position(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: P
     (local / usable_width).clamp(0.0, 1.0)
 }
 
-fn pointer_hits_thumb(
-    position_x: Pixels,
-    bounds: Bounds<Pixels>,
-    ratio: f32,
-    thumb_size: Pixels,
-) -> bool {
-    let thumb = f32::from(thumb_size);
-    let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
-    let thumb_center =
-        f32::from(bounds.left()) + thumb * 0.5 + ratio.clamp(0.0, 1.0) * usable_width;
-    let hit_radius = (thumb * 0.75).max(8.0);
-    (f32::from(position_x) - thumb_center).abs() <= hit_radius
-}
-
 fn begin_pointer_press(id: &str, position_x: Pixels, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
@@ -218,14 +204,12 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with independent track-click and thumb-scrub paths.
+/// Slider with one pointer state machine for both track clicks and scrubbing.
 ///
-/// - A track click calls `on_click` exactly once and never creates drag state.
-/// - A thumb press only arms a potential scrub. It does not seek on mouse-down.
-/// - Pointer movement of at least 3 px calls `on_drag`; mouse-up then calls `on_drag_end`.
-///
-/// GPUI's drag-and-drop API is intentionally not involved, so a click cannot be promoted into a
-/// framework drag session and the business layer never has to infer whether a commit was a click.
+/// Mouse-down anywhere on the interaction rail only arms the gesture. A release below the drag
+/// threshold becomes one click, while movement beyond the threshold becomes a scrub and is
+/// committed on release. This allows a drag to start from any position on the rail without a
+/// mouse-down seek racing a later drag update.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -250,7 +234,7 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
-    let click_for_down = on_click;
+    let click_for_up = on_click;
     let drag_for_move = on_drag;
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
@@ -268,21 +252,10 @@ pub fn interactive_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(bounds) = *bounds_for_down.borrow() else {
-                return;
-            };
-            if pointer_hits_thumb(event.position.x, bounds, ratio, style.thumb_size) {
-                begin_pointer_press(&id_for_down, event.position.x, cx);
+            if bounds_for_down.borrow().is_none() {
                 return;
             }
-
-            // A track click is a terminal click action. Clear any stale armed state first and do
-            // not leave anything that a later MouseMove could reinterpret as a drag.
-            let _ = end_pointer_press(&id_for_down, cx);
-            (click_for_down)(
-                ratio_from_position(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
+            begin_pointer_press(&id_for_down, event.position.x, cx);
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -310,14 +283,14 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
                 return;
             };
-            if !was_dragging {
+            let Some(bounds) = *bounds_for_up.borrow() else {
                 return;
-            }
-            if let Some(bounds) = *bounds_for_up.borrow() {
-                (drag_end_for_up)(
-                    ratio_from_position(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+            };
+            let ratio = ratio_from_position(event.position.x, bounds, style.thumb_size);
+            if was_dragging {
+                (drag_end_for_up)(ratio, cx);
+            } else {
+                (click_for_up)(ratio, cx);
             }
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
@@ -356,13 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn track_click_and_thumb_drag_have_distinct_hit_regions() {
-        let bounds = Bounds::new(
-            gpui::point(px(100.0), px(0.0)),
-            gpui::size(px(210.0), px(12.0)),
-        );
-        let thumb = px(10.0);
-        assert!(pointer_hits_thumb(px(205.0), bounds, 0.5, thumb));
-        assert!(!pointer_hits_thumb(px(280.0), bounds, 0.5, thumb));
+    fn drag_threshold_keeps_click_and_scrub_disjoint() {
+        assert!(2.9 < DRAG_THRESHOLD_PX);
+        assert!(3.0 >= DRAG_THRESHOLD_PX);
     }
 }
