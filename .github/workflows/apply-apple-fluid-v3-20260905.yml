@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/apply-apple-fluid-v3-20260905.yml
+      - .github/scripts/apply_apple_fluid_v3_20260905.py
 
 permissions:
   contents: write
