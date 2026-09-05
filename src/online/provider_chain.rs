@@ -137,10 +137,7 @@ impl OnlineServices {
 
             match providers::lyrics(&self.client, &matched).await {
                 Ok(Some(lyrics)) if lyrics.has_translation() => {
-                    tracing::debug!(
-                        provider = provider.name(),
-                        "使用备用平台补全同步中文字幕"
-                    );
+                    tracing::debug!(provider = provider.name(), "使用备用平台补全同步中文字幕");
                     return Some(lyrics);
                 }
                 Ok(Some(_)) | Ok(None) => {}
