@@ -204,12 +204,11 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with native pointer semantics: click commits once, movement turns the press into scrubbing.
+/// Slider with native pointer semantics: click jumps immediately, movement turns the press into scrub.
 ///
-/// This intentionally does not use GPUI's drag-and-drop API. Registering `.on_drag(...)` creates a
-/// framework drag session for the press itself, which makes a normal track click inherit drag
-/// lifecycle/state. Here a press is just a press until the pointer moves at least 3 px while the
-/// left button remains held.
+/// This intentionally does not use GPUI's drag-and-drop API. A normal left press commits its ratio
+/// immediately. Only subsequent pointer movement of at least 3 px while the left button remains down
+/// publishes preview changes; release commits again only for a real scrub gesture.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -224,6 +223,7 @@ pub fn interactive_slider(
     let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
 
     let bounds_for_prepaint = bounds.clone();
+    let bounds_for_down = bounds.clone();
     let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
@@ -231,6 +231,7 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
+    let commit_for_down = on_commit.clone();
     let change_for_move = on_change;
     let commit_for_up = on_commit.clone();
     let commit_for_up_out = on_commit;
@@ -249,6 +250,12 @@ pub fn interactive_slider(
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
             begin_pointer_press(&id_for_down, event.position.x, cx);
+            if let Some(bounds) = *bounds_for_down.borrow() {
+                (commit_for_down)(
+                    ratio_from_position(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -273,7 +280,10 @@ pub fn interactive_slider(
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            if end_pointer_press(&id_for_up, cx).is_none() {
+            let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
+                return;
+            };
+            if !was_dragging {
                 return;
             }
             if let Some(bounds) = *bounds_for_up.borrow() {
