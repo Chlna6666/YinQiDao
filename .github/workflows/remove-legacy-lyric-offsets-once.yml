@@ -35,30 +35,20 @@ jobs:
           text = path.read_text(encoding='utf-8')
 
           patterns = [
+              (r'(?m)^\s*pub\(crate\) lyrics_current_offset: f32,\n\s*pub\(crate\) lyrics_target_offset: f32,\n', '', 'field declarations'),
+              (r'(?m)^\s*lyrics_current_offset: 0\.0,\n\s*lyrics_target_offset: 0\.0,\n', '', 'initializers'),
+              (r'\n\s*\|\| \(self\.stage_open\s*\n\s*&& \(self\.lyrics_target_offset - self\.lyrics_current_offset\)\.abs\(\) > 0\.5\)', '', 'active animation predicate'),
+              (r'(?m)^\s*self\.lyrics_current_offset = 0\.0;\n\s*self\.lyrics_target_offset = 0\.0;\n', '', 'track change reset'),
+              (r'(?m)^\s*self\.lyrics_target_offset = \(current_idx as f32\) \* 60\.0;\n', '', 'active lyric target write'),
               (
-                  r'(?m)^\s*pub\(crate\) lyrics_current_offset: f32,\n\s*pub\(crate\) lyrics_target_offset: f32,\n',
-                  '',
-                  'field declarations',
+                  r'''\n\s*if self\.stage_open \{\n\s*let in_user_scroll = self\n\s*\.lyrics_user_scrolling_until\n\s*\.is_some_and\(\|until\| std::time::Instant::now\(\) < until\);\n\s*if !in_user_scroll \{\n\s*let diff = self\.lyrics_target_offset - self\.lyrics_current_offset;\n\s*if diff\.abs\(\) > 0\.5 \{\n\s*let factor = 1\.0 - \(-9\.0 \* dt\)\.exp\(\);\n\s*self\.lyrics_current_offset \+= diff \* factor;\n\s*\} else \{\n\s*self\.lyrics_current_offset = self\.lyrics_target_offset;\n\s*\}\n\s*\}\n\s*\}\n''',
+                  '\n',
+                  'render smoothing block',
               ),
               (
-                  r'(?m)^\s*lyrics_current_offset: 0\.0,\n\s*lyrics_target_offset: 0\.0,\n',
-                  '',
-                  'initializers',
-              ),
-              (
-                  r'\n\s*\|\| \(self\.stage_open\s*\n\s*&& \(self\.lyrics_target_offset - self\.lyrics_current_offset\)\.abs\(\) > 0\.5\)',
-                  '',
-                  'active animation predicate',
-              ),
-              (
-                  r'(?m)^\s*self\.lyrics_current_offset = 0\.0;\n\s*self\.lyrics_target_offset = 0\.0;\n',
-                  '',
-                  'track change reset',
-              ),
-              (
-                  r'(?m)^\s*self\.lyrics_target_offset = \(current_idx as f32\) \* 60\.0;\n',
-                  '',
-                  'active lyric target write',
+                  r'''\n\s*#\[test\]\n\s*fn test_lyrics_target_offset_centering\(\) \{\n\s*let target_0 = 0_f32 \* 60\.0;\n\s*assert_eq!\(target_0, 0\.0\);\n\s*let target_10 = 10_f32 \* 60\.0;\n\s*assert_eq!\(target_10, 600\.0\);\n\s*\}\n''',
+                  '\n',
+                  'obsolete offset test',
               ),
           ]
 
