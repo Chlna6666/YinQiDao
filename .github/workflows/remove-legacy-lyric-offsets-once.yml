@@ -29,45 +29,43 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('src/ui/shell.rs')
           text = path.read_text(encoding='utf-8')
 
-          replacements = [
+          patterns = [
               (
-                  '    pub(crate) lyrics_current_offset: f32,\n    pub(crate) lyrics_target_offset: f32,\n',
+                  r'(?m)^\s*pub\(crate\) lyrics_current_offset: f32,\n\s*pub\(crate\) lyrics_target_offset: f32,\n',
                   '',
                   'field declarations',
               ),
               (
-                  '            lyrics_current_offset: 0.0,\n            lyrics_target_offset: 0.0,\n',
+                  r'(?m)^\s*lyrics_current_offset: 0\.0,\n\s*lyrics_target_offset: 0\.0,\n',
                   '',
                   'initializers',
               ),
               (
-                  '''            || (self.stage_open
-                      && (self.lyrics_target_offset - self.lyrics_current_offset).abs() > 0.5)
-          ''',
+                  r'\n\s*\|\| \(self\.stage_open\s*\n\s*&& \(self\.lyrics_target_offset - self\.lyrics_current_offset\)\.abs\(\) > 0\.5\)',
                   '',
                   'active animation predicate',
               ),
               (
-                  '                self.lyrics_current_offset = 0.0;\n                self.lyrics_target_offset = 0.0;\n',
+                  r'(?m)^\s*self\.lyrics_current_offset = 0\.0;\n\s*self\.lyrics_target_offset = 0\.0;\n',
                   '',
                   'track change reset',
               ),
               (
-                  '                            self.lyrics_target_offset = (current_idx as f32) * 60.0;\n',
+                  r'(?m)^\s*self\.lyrics_target_offset = \(current_idx as f32\) \* 60\.0;\n',
                   '',
                   'active lyric target write',
               ),
           ]
 
-          for old, new, label in replacements:
-              count = text.count(old)
+          for pattern, replacement, label in patterns:
+              text, count = re.subn(pattern, replacement, text, count=1)
               if count != 1:
                   raise SystemExit(f'{label}: expected one match, got {count}')
-              text = text.replace(old, new, 1)
 
           path.write_text(text, encoding='utf-8')
           PY
