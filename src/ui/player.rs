@@ -117,6 +117,7 @@ impl Render for PlaybackProgress {
                 move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
                         app.seek_to_ratio(ratio, app_cx);
+                        app.pending_progress_ratio = None;
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
@@ -146,6 +147,7 @@ impl Render for PlaybackProgress {
                             app.begin_drag(DragTarget::Progress, ratio, app_cx);
                         }
                         app.commit_drag(app_cx);
+                        app.pending_progress_ratio = None;
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
@@ -668,6 +670,7 @@ pub(super) fn mini_player(
                                                         );
                                                     }
                                                     this.commit_drag(cx);
+                                                    this.pending_volume_ratio = None;
                                                 });
                                             }
                                         },
