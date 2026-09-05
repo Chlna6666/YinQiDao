@@ -39,9 +39,6 @@ pub(crate) fn apple_fluid_params(
     let tertiary = mix3(dominant, secondary, 0.46);
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
-
-    // 沉浸式 FBM 是舞台本身的动态视觉，不再受旧 dynamic_blur 配置影响。
-    // 旧开关只保留配置兼容；进入舞台后始终使用独立 monotonic clock。
     let time = time_seconds.rem_euclid(21_600.0);
     let motion = 1.0;
     let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
@@ -57,9 +54,9 @@ pub(crate) fn apple_fluid_params(
 pub(crate) struct AppleFluidView {
     track_id: i64,
     palette: Option<ArtworkPalette>,
-    dynamic: bool,
     active: bool,
-    clock_started_at: Instant,
+    animation_seconds: f32,
+    last_render_at: Instant,
 }
 
 impl AppleFluidView {
@@ -67,9 +64,9 @@ impl AppleFluidView {
         Self {
             track_id: 0,
             palette: None,
-            dynamic: true,
             active: false,
-            clock_started_at: Instant::now(),
+            animation_seconds: 0.0,
+            last_render_at: Instant::now(),
         }
     }
 
@@ -77,19 +74,16 @@ impl AppleFluidView {
         &mut self,
         track_id: i64,
         palette: Option<ArtworkPalette>,
-        dynamic: bool,
+        _dynamic: bool,
         active: bool,
         cx: &mut Context<Self>,
     ) {
-        let changed = self.track_id != track_id
-            || self.palette != palette
-            || self.dynamic != dynamic
-            || self.active != active;
+        let changed = self.track_id != track_id || self.palette != palette || self.active != active;
         self.track_id = track_id;
         self.palette = palette;
-        self.dynamic = dynamic;
         self.active = active;
         if changed {
+            self.last_render_at = Instant::now();
             cx.notify();
         }
     }
@@ -97,21 +91,36 @@ impl AppleFluidView {
 
 impl Render for AppleFluidView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 流体是舞台自驱的 GPU 动画。只要舞台可见就逐帧采样，不依赖音乐播放状态、
-        // position_ms 或历史 dynamic_blur 配置。
-        if self.active {
-            window.request_animation_frame();
-        }
-
-        let elapsed = self.clock_started_at.elapsed().as_secs_f32();
         match apple_fluid_program() {
             Ok(program) => {
+                let now = Instant::now();
+                if self.active {
+                    // 只累计真正被提交的动画帧时间。视图暂停挂载或窗口短暂停顿后，
+                    // 首帧最多推进 50ms，避免恢复播放时流场突然跳到很远的位置。
+                    let frame_delta = now
+                        .saturating_duration_since(self.last_render_at)
+                        .as_secs_f32()
+                        .min(0.05);
+                    self.animation_seconds =
+                        (self.animation_seconds + frame_delta).rem_euclid(21_600.0);
+                    window.request_animation_frame();
+                }
+                self.last_render_at = now;
+
                 return shader_effect_canvas(
                     program,
-                    apple_fluid_params(self.track_id, self.palette.as_ref(), elapsed, true),
+                    apple_fluid_params(
+                        self.track_id,
+                        self.palette.as_ref(),
+                        self.animation_seconds,
+                        true,
+                    ),
                 );
             }
             Err(error) => {
+                // Shader 失败时绝不能继续 request_animation_frame。旧逻辑会在纯色 fallback
+                // 上制造永久逐帧刷新，既没有任何视觉收益，又会持续占用 UI/提交路径。
+                self.last_render_at = Instant::now();
                 static LOGGED_SHADER_ERROR: OnceLock<()> = OnceLock::new();
                 if LOGGED_SHADER_ERROR.set(()).is_ok() {
                     tracing::error!(error = %error, "Apple fluid shader initialization failed");
