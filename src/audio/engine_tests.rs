@@ -28,6 +28,7 @@ fn test_worker(
         Arc::new(RwLock::new(PlayerSnapshot::default())),
         flush.clone(),
         paused.clone(),
+        Arc::new(AtomicU64::new(0)),
         AudioWorkerConfig {
             output_rate: 8_000,
             eq: EqSettings::default(),
@@ -82,9 +83,45 @@ fn output_converters_fill_silence_without_allocating() {
     let (_, mut consumer) = ring.split();
     let flush = AtomicBool::new(false);
     let paused = AtomicBool::new(false);
+    let audible_frames = AtomicU64::new(0);
     let mut samples = [1i16, 1i16, 1i16, 1i16];
-    fill_i16(&mut samples, 2, &mut consumer, &flush, &paused);
+    fill_i16(
+        &mut samples,
+        2,
+        &mut consumer,
+        &flush,
+        &paused,
+        &audible_frames,
+    );
     assert_eq!(samples, [0, 0, 0, 0]);
+    assert_eq!(audible_frames.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn audible_clock_advances_only_for_consumed_pcm_frames() {
+    let ring = HeapRb::<f32>::new(8);
+    let (mut producer, mut consumer) = ring.split();
+    producer.try_push(0.25).expect("left");
+    producer.try_push(-0.25).expect("right");
+    producer.try_push(0.5).expect("left");
+    producer.try_push(-0.5).expect("right");
+
+    let flush = AtomicBool::new(false);
+    let paused = AtomicBool::new(false);
+    let audible_frames = AtomicU64::new(0);
+    let mut output = [0.0f32; 6];
+    fill_f32(
+        &mut output,
+        2,
+        &mut consumer,
+        &flush,
+        &paused,
+        &audible_frames,
+    );
+
+    assert_eq!(audible_frames.load(Ordering::Acquire), 2);
+    assert_eq!(&output[..4], &[0.25, -0.25, 0.5, -0.5]);
+    assert_eq!(&output[4..], &[0.0, 0.0]);
 }
 
 #[test]
@@ -112,6 +149,7 @@ fn full_output_ring_keeps_worker_playing() {
         snapshot,
         flush,
         paused,
+        Arc::new(AtomicU64::new(0)),
         AudioWorkerConfig {
             output_rate: 8_000,
             eq: EqSettings::default(),
@@ -199,6 +237,7 @@ fn removing_current_track_stops_and_flushes_old_pcm() {
         &mut consumer,
         flush.as_ref(),
         paused.as_ref(),
+        worker.audible_frames.as_ref(),
     );
     assert_eq!(output, [0.0, 0.0]);
 }
@@ -279,6 +318,7 @@ fn next_at_end_stops_and_flushes_old_pcm() {
         &mut consumer,
         flush.as_ref(),
         paused.as_ref(),
+        worker.audible_frames.as_ref(),
     );
     assert_eq!(output, [0.0, 0.0]);
 }
@@ -294,7 +334,6 @@ fn pause_outputs_silence_without_dropping_pcm() {
     assert_eq!(worker.state, PlaybackState::Paused);
     assert!(paused.load(Ordering::Acquire));
 
-    // When paused, fill_f32 outputs silence (0.0) without clearing consumer
     let mut output = [1.0f32, 1.0];
     fill_f32(
         &mut output,
@@ -302,10 +341,11 @@ fn pause_outputs_silence_without_dropping_pcm() {
         &mut consumer,
         flush.as_ref(),
         paused.as_ref(),
+        worker.audible_frames.as_ref(),
     );
     assert_eq!(output, [0.0, 0.0]);
+    assert_eq!(worker.audible_frames.load(Ordering::Acquire), 0);
 
-    // When unpaused, playback resumes seamlessly with the preserved samples
     worker.handle_command(PlayerCommand::Play);
     assert!(!paused.load(Ordering::Acquire));
     fill_f32(
@@ -314,8 +354,10 @@ fn pause_outputs_silence_without_dropping_pcm() {
         &mut consumer,
         flush.as_ref(),
         paused.as_ref(),
+        worker.audible_frames.as_ref(),
     );
     assert_eq!(output, [0.6, 0.4]);
+    assert_eq!(worker.audible_frames.load(Ordering::Acquire), 1);
 }
 
 #[test]
@@ -340,6 +382,7 @@ fn restore_track_sets_queue_index_and_paused_state() {
     let snapshot = worker.snapshot.read().unwrap().clone();
     assert_eq!(snapshot.state, PlaybackState::Paused);
     assert_eq!(snapshot.current_track.as_ref().map(|t| t.id), Some(42));
+    assert_eq!(worker.audible_frames.load(Ordering::Acquire), 400);
 
     let _ = fs::remove_file(track_path);
 }
