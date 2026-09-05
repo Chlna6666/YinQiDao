@@ -16,7 +16,7 @@ use cpal::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use ringbuf::{
     HeapRb,
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Observer, Producer, Split},
 };
 use thiserror::Error;
 
