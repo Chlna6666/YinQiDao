@@ -51,6 +51,7 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
 
           stage = Path('src/ui/player_stage.rs')
           text = stage.read_text(encoding='utf-8')
@@ -63,19 +64,23 @@ jobs:
           shell = Path('src/ui/shell.rs')
           text = shell.read_text(encoding='utf-8')
 
+          down_re = re.compile(
+              r'\.on_mouse_down\(gpui::MouseButton::Left,\s*\|_, _, cx\| \{\s*cx\.stop_propagation\(\);\s*\}\)'
+          )
+
           def migrate_button(source: str, element_id: str, action: str, next_marker: str) -> str:
               start = source.index(f'.id("{element_id}")')
               end = source.index(next_marker, start)
               region = source[start:end]
-              down = '''.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })'''
-              click = f'''.on_click(cx.listener(|this, _, _, cx| {{
-                                        this.{action}(cx);
-                                    }}))'''
-              if region.count(down) != 1 or region.count(click) != 1:
+              click_re = re.compile(
+                  r'\s*\.on_click\(cx\.listener\(\|this, _, _, cx\| \{\s*'
+                  + rf'this\.{action}\(cx\);'
+                  + r'\s*\}\)\)'
+              )
+              if len(down_re.findall(region)) != 1 or len(click_re.findall(region)) != 1:
                   raise SystemExit(
-                      f'{element_id}: unexpected handlers down={region.count(down)} click={region.count(click)}'
+                      f'{element_id}: unexpected handlers down={len(down_re.findall(region))} '
+                      f'click={len(click_re.findall(region))}'
                   )
               replacement = f'''.on_mouse_down(
                                         gpui::MouseButton::Left,
@@ -84,11 +89,22 @@ jobs:
                                             this.{action}(cx);
                                         }}),
                                     )'''
-              region = region.replace(down, replacement, 1).replace('\n                                    ' + click, '', 1)
+              region = down_re.sub(replacement, region, count=1)
+              region = click_re.sub('', region, count=1)
               return source[:start] + region + source[end:]
 
-          text = migrate_button(text, 'stage-quick-hide-btn', 'hide_stage_controls_immediately', '.id("stage-collapse-btn")')
-          text = migrate_button(text, 'stage-collapse-btn', 'close_stage', '),\n                    ),\n            )\n    }')
+          text = migrate_button(
+              text,
+              'stage-quick-hide-btn',
+              'hide_stage_controls_immediately',
+              '.id("stage-collapse-btn")',
+          )
+          text = migrate_button(
+              text,
+              'stage-collapse-btn',
+              'close_stage',
+              '#[allow(clippy::too_many_arguments)]',
+          )
           shell.write_text(text, encoding='utf-8', newline='\n')
 
       - name: Format source
