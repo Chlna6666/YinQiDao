@@ -1337,7 +1337,6 @@ impl MusicApp {
         let task = Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || scan_library.scan_all(&roots)).await?
         });
-
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await?;
             this.update(cx, |this, cx| {
@@ -2071,9 +2070,14 @@ impl MusicApp {
                             .truncate()
                             .child(title),
                     )
-                    .on_click(cx.listener(|_, _, window, _| {
-                        window.titlebar_double_click();
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, event: &gpui::MouseDownEvent, window, _| {
+                            if event.click_count >= 2 {
+                                window.titlebar_double_click();
+                            }
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -2176,9 +2180,14 @@ impl MusicApp {
                                     .truncate()
                                     .child(title),
                             )
-                            .on_click(cx.listener(|_, _, window, _| {
-                                window.titlebar_double_click();
-                            })),
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_, event: &gpui::MouseDownEvent, window, _| {
+                                    if event.click_count >= 2 {
+                                        window.titlebar_double_click();
+                                    }
+                                }),
+                            ),
                     )
                     .child(
                         div()
@@ -2399,8 +2408,8 @@ impl Render for MusicApp {
                     .shadow_lg()
                     .border_t_1()
                     .border_color(hsla(0.0, 0.0, 1.0, 0.12))
-                    .relative()
                     .overflow_hidden()
+                    .occlude()
                     .bg(rgb(0x0e0f16))
                     .text_color(theme::TEXT_WHITE)
                     .on_mouse_move(cx.listener(
@@ -2414,9 +2423,6 @@ impl Render for MusicApp {
                             this.wake_stage_controls_immediately(cx);
                         }),
                     )
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.wake_stage_controls_immediately(cx);
-                    }))
                     .on_mouse_up(
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {
@@ -2614,11 +2620,14 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                         .text_color(theme::TEXT_SECONDARY)
                         .child("搜索音乐 (Ctrl+F)"),
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.search_active = true;
-                    this.page = AppPage::Library;
-                    cx.notify();
-                })),
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.search_active = true;
+                        this.page = AppPage::Library;
+                        cx.notify();
+                    }),
+                ),
         )
         .child(
             div()
@@ -2722,10 +2731,10 @@ fn sidebar_item<F>(
     label: &'static str,
     icon: &'static str,
     active: bool,
-    on_click: F,
+    on_press: F,
 ) -> impl IntoElement
 where
-    F: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 {
     let text_color = if active {
         theme::ACCENT_RED
@@ -2785,12 +2794,12 @@ where
                         .child(label),
                 ),
         )
-        .on_click(on_click)
+        .on_mouse_down(gpui::MouseButton::Left, on_press)
 }
 
-fn traffic_light_button<F>(id: &'static str, color: gpui::Rgba, on_click: F) -> impl IntoElement
+fn traffic_light_button<F>(id: &'static str, color: gpui::Rgba, on_press: F) -> impl IntoElement
 where
-    F: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 {
     div()
         .id(SharedString::from(id))
@@ -2805,10 +2814,10 @@ where
         .hover(|s| s.opacity(0.80))
         .transition(theme::press_transition())
         .active(|s| s.scale(0.90))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
+            on_press(event, window, cx);
         })
-        .on_click(on_click)
 }
 
 #[cfg(test)]
