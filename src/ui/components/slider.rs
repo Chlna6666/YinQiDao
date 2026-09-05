@@ -7,6 +7,8 @@ use gpui::{
 
 use crate::ui::theme;
 
+type SliderCallback = Rc<dyn Fn(f32, &mut App)>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct SliderStyle {
     pub track_height: Pixels,
@@ -92,7 +94,7 @@ impl SliderStyle {
 struct SliderDrag {
     id: String,
     thumb_size: Pixels,
-    on_change: Rc<dyn Fn(f32, &mut App)>,
+    on_change: SliderCallback,
 }
 
 #[derive(Default)]
@@ -208,8 +210,8 @@ pub fn interactive_slider(
 ) -> Stateful<Div> {
     let id = id.into();
     let id_string = id.to_string();
-    let on_change: Rc<dyn Fn(f32, &mut App)> = Rc::new(on_change);
-    let on_commit: Rc<dyn Fn(f32, &mut App)> = Rc::new(on_commit);
+    let on_change: SliderCallback = Rc::new(on_change);
+    let on_commit: SliderCallback = Rc::new(on_commit);
     let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
 
     let bounds_for_prepaint = bounds.clone();
