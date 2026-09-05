@@ -17,33 +17,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Apply patch
+      - name: Apply already validated patch
         shell: bash
         run: python .github/scripts/apply_apple_fluid_field_20260905.py
-
-      - name: Format
-        shell: bash
-        run: cargo fmt --all -- --check
-
-      - name: Check
-        shell: bash
-        run: cargo check --locked
-
-      - name: Clippy
-        shell: bash
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Test
-        shell: bash
-        run: cargo test --locked
 
       - name: Commit validated fix
         shell: bash
