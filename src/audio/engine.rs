@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
-        Arc, RwLock,
+        Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     thread,
@@ -32,6 +33,8 @@ use crate::{
 };
 
 pub type DeviceId = String;
+
+const PRELOAD_DEBOUNCE: Duration = Duration::from_millis(40);
 
 #[derive(Clone, Debug)]
 pub enum PlayerCommand {
@@ -91,6 +94,180 @@ pub struct OutputDeviceInfo {
     pub channels: u16,
 }
 
+struct PreloadedChunk {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+    position: Duration,
+}
+
+struct PreloadedTrack {
+    track_id: TrackId,
+    decoder: DecoderStream,
+    first_chunk: Option<PreloadedChunk>,
+}
+
+struct PreloadRequest {
+    generation: u64,
+    track_id: TrackId,
+    path: PathBuf,
+}
+
+struct PreloadCoordinator {
+    request: Mutex<Option<PreloadRequest>>,
+    ready: Mutex<Option<PreloadedTrack>>,
+    wake: Condvar,
+    generation: AtomicU64,
+    closed: AtomicBool,
+}
+
+impl PreloadCoordinator {
+    fn new() -> Self {
+        Self {
+            request: Mutex::new(None),
+            ready: Mutex::new(None),
+            wake: Condvar::new(),
+            generation: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn request(&self, track_id: TrackId, path: PathBuf) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .ready
+            .lock()
+            .ok()
+            .as_deref()
+            .is_some_and(|ready| ready.track_id == track_id)
+        {
+            return;
+        }
+        if self
+            .request
+            .lock()
+            .ok()
+            .as_deref()
+            .is_some_and(|pending| pending.track_id == track_id && pending.path == path)
+        {
+            return;
+        }
+
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = None;
+        }
+        if let Ok(mut request) = self.request.lock() {
+            *request = Some(PreloadRequest {
+                generation,
+                track_id,
+                path,
+            });
+            self.wake.notify_one();
+        }
+    }
+
+    fn cancel(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut request) = self.request.lock() {
+            *request = None;
+        }
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = None;
+        }
+    }
+
+    fn take(&self, track_id: TrackId) -> Option<PreloadedTrack> {
+        let mut ready = self.ready.lock().ok()?;
+        if ready.as_ref().is_some_and(|ready| ready.track_id == track_id) {
+            ready.take()
+        } else {
+            None
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wake.notify_all();
+    }
+
+    fn spawn(self: &Arc<Self>) -> std::io::Result<thread::JoinHandle<()>> {
+        let coordinator = self.clone();
+        thread::Builder::new()
+            .name("yinqidao-audio-preloader".into())
+            .spawn(move || coordinator.run())
+    }
+
+    fn run(&self) {
+        loop {
+            let mut request = {
+                let Ok(mut slot) = self.request.lock() else {
+                    return;
+                };
+                while slot.is_none() && !self.closed.load(Ordering::Acquire) {
+                    let Ok(next_slot) = self.wake.wait(slot) else {
+                        return;
+                    };
+                    slot = next_slot;
+                }
+                if self.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                let Some(request) = slot.take() else {
+                    continue;
+                };
+                request
+            };
+
+            // Short debounce collapses a burst of Next/PlayTrack requests before doing filesystem
+            // probe work. A request that arrives during an expensive open is detected by generation
+            // and the stale decoder is discarded instead of being published.
+            thread::sleep(PRELOAD_DEBOUNCE);
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(mut slot) = self.request.lock()
+                && let Some(latest) = slot.take()
+            {
+                request = latest;
+            }
+
+            let mut decoder = match DecoderStream::open(&request.path) {
+                Ok(decoder) => decoder,
+                Err(_) => continue,
+            };
+            let mut samples = Vec::new();
+            let first_chunk = match decoder.next_chunk_into(&mut samples) {
+                Ok(Some((sample_rate, channels))) => Some(PreloadedChunk {
+                    samples,
+                    sample_rate,
+                    channels,
+                    position: decoder.position(),
+                }),
+                Ok(None) => None,
+                Err(_) => continue,
+            };
+
+            if self.closed.load(Ordering::Acquire)
+                || self.generation.load(Ordering::Acquire) != request.generation
+            {
+                continue;
+            }
+            if let Ok(mut ready) = self.ready.lock() {
+                if self.generation.load(Ordering::Acquire) == request.generation {
+                    *ready = Some(PreloadedTrack {
+                        track_id: request.track_id,
+                        decoder,
+                        first_chunk,
+                    });
+                }
+            }
+        }
+    }
+}
+
 pub struct AudioEngine {
     command_queue: Arc<CommandQueue<PlayerCommand>>,
     event_rx: Receiver<PlayerEvent>,
@@ -101,6 +278,8 @@ pub struct AudioEngine {
     output_gain: Arc<AtomicU32>,
     audible_frames: Arc<AtomicU64>,
     output_rate: u32,
+    preloader: Arc<PreloadCoordinator>,
+    preload_worker: Option<thread::JoinHandle<()>>,
     _stream: Stream,
     _worker: thread::JoinHandle<()>,
 }
@@ -144,6 +323,7 @@ impl AudioEngine {
         let paused = Arc::new(AtomicBool::new(false));
         let output_gain = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
         let audible_frames = Arc::new(AtomicU64::new(0));
+        let preloader = Arc::new(PreloadCoordinator::new());
         let stream = build_output_stream(
             &device,
             &supported,
@@ -162,10 +342,11 @@ impl AudioEngine {
         let worker_paused = paused.clone();
         let worker_audible_frames = audible_frames.clone();
         let worker_command_queue = command_queue.clone();
+        let worker_preloader = preloader.clone();
         let worker = thread::Builder::new()
             .name("yinqidao-audio-worker".into())
             .spawn(move || {
-                let mut worker = AudioWorker::new(
+                let mut worker = AudioWorker::new_with_preloader(
                     worker_command_queue,
                     event_tx,
                     producer,
@@ -174,6 +355,7 @@ impl AudioEngine {
                     worker_flush,
                     worker_paused,
                     worker_audible_frames,
+                    worker_preloader,
                     AudioWorkerConfig {
                         output_rate,
                         eq,
@@ -183,6 +365,14 @@ impl AudioEngine {
                 worker.run();
             })
             .context("创建音频工作线程失败")?;
+        let preload_worker = match preloader.spawn() {
+            Ok(worker) => worker,
+            Err(error) => {
+                command_queue.close();
+                preloader.close();
+                return Err(anyhow!("创建音频预加载线程失败: {error}"));
+            }
+        };
 
         Ok(Self {
             command_queue,
@@ -194,6 +384,8 @@ impl AudioEngine {
             output_gain,
             audible_frames,
             output_rate,
+            preloader,
+            preload_worker: Some(preload_worker),
             _stream: stream,
             _worker: worker,
         })
@@ -202,6 +394,27 @@ impl AudioEngine {
     pub fn register_tracks(&self, tracks: impl IntoIterator<Item = Track>) {
         if let Ok(mut known_tracks) = self.tracks.write() {
             known_tracks.extend(tracks.into_iter().map(|track| (track.id, track)));
+        }
+    }
+
+    fn set_audible_position_immediately(&self, position: Duration) {
+        self.flush.store(true, Ordering::Release);
+        let frames = position.as_nanos().saturating_mul(self.output_rate as u128)
+            / 1_000_000_000_u128;
+        self.audible_frames.store(
+            frames.min(u64::MAX as u128) as u64,
+            Ordering::Release,
+        );
+    }
+
+    fn reset_transport_for_switch(&self, loading: bool) {
+        self.set_audible_position_immediately(Duration::ZERO);
+        if let Ok(mut snapshot) = self.snapshot.write() {
+            snapshot.position_ms = 0;
+            snapshot.error = None;
+            if loading {
+                snapshot.state = PlaybackState::Loading;
+            }
         }
     }
 
@@ -220,9 +433,30 @@ impl AudioEngine {
                 }
             }
             PlayerCommand::Seek(position) => {
+                self.set_audible_position_immediately(*position);
                 if let Ok(mut snapshot) = self.snapshot.write() {
                     snapshot.position_ms = position.as_millis() as u64;
                 }
+            }
+            PlayerCommand::PlayTrack(track_id) => {
+                self.reset_transport_for_switch(true);
+                let track = self
+                    .tracks
+                    .read()
+                    .ok()
+                    .and_then(|tracks| tracks.get(track_id).cloned());
+                if let Some(track) = track
+                    && let Ok(mut snapshot) = self.snapshot.write()
+                {
+                    snapshot.duration_ms = track.duration_ms;
+                    snapshot.current_track = Some(track);
+                }
+            }
+            PlayerCommand::Next => self.reset_transport_for_switch(true),
+            PlayerCommand::Previous => {
+                // Previous may mean either restart-current or open-previous. Both semantics start at
+                // zero, so reset the audible clock immediately without forcing a loading state.
+                self.reset_transport_for_switch(false);
             }
             PlayerCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0.0, 1.0);
@@ -233,9 +467,10 @@ impl AudioEngine {
             }
             PlayerCommand::Stop => {
                 self.paused.store(true, Ordering::Release);
-                self.flush.store(true, Ordering::Release);
+                self.set_audible_position_immediately(Duration::ZERO);
                 if let Ok(mut snapshot) = self.snapshot.write() {
                     snapshot.state = PlaybackState::Stopped;
+                    snapshot.position_ms = 0;
                 }
             }
             PlayerCommand::RestoreTrack { play, .. } => {
@@ -307,6 +542,10 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         self.command_queue.close();
+        self.preloader.close();
+        if let Some(worker) = self.preload_worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -324,6 +563,8 @@ struct AudioWorker {
     decoded_samples: Vec<f32>,
     processed_samples: Vec<f32>,
     decoder: Option<DecoderStream>,
+    prefetched_chunk: Option<PreloadedChunk>,
+    preloader: Arc<PreloadCoordinator>,
     current_track: Option<TrackId>,
     queue: Arc<Vec<TrackId>>,
     queue_positions: HashMap<TrackId, usize>,
@@ -356,6 +597,33 @@ impl AudioWorker {
         audible_frames: Arc<AtomicU64>,
         config: AudioWorkerConfig,
     ) -> Self {
+        Self::new_with_preloader(
+            command_queue,
+            event_tx,
+            producer,
+            tracks,
+            snapshot,
+            flush,
+            paused,
+            audible_frames,
+            Arc::new(PreloadCoordinator::new()),
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_preloader(
+        command_queue: Arc<CommandQueue<PlayerCommand>>,
+        event_tx: Sender<PlayerEvent>,
+        producer: ringbuf::HeapProd<f32>,
+        tracks: Arc<RwLock<HashMap<TrackId, Track>>>,
+        snapshot: Arc<RwLock<PlayerSnapshot>>,
+        flush: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
+        audible_frames: Arc<AtomicU64>,
+        preloader: Arc<PreloadCoordinator>,
+        config: AudioWorkerConfig,
+    ) -> Self {
         let output_rate = config.output_rate;
         Self {
             command_queue,
@@ -371,6 +639,8 @@ impl AudioWorker {
             decoded_samples: Vec::new(),
             processed_samples: Vec::new(),
             decoder: None,
+            prefetched_chunk: None,
+            preloader,
             current_track: None,
             queue: Arc::new(Vec::new()),
             queue_positions: HashMap::new(),
@@ -404,6 +674,7 @@ impl AudioWorker {
                     self.emit(PlayerEvent::Error(error.into()));
                     self.emit(PlayerEvent::StateChanged(self.state));
                     self.decoder = None;
+                    self.prefetched_chunk = None;
                 }
             }
         }
@@ -439,6 +710,7 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::Seek(position) => {
+                self.prefetched_chunk = None;
                 if let Some(decoder) = &mut self.decoder {
                     self.decode_generation = self.decode_generation.wrapping_add(1);
                     if let Err(error) = decoder.seek(position) {
@@ -465,14 +737,15 @@ impl AudioWorker {
                     .unwrap_or_else(|| self.append_queue_track(track_id));
                 self.queue_index = target_index;
                 if self.open_track(track_id) {
-                    if !position.is_zero()
-                        && let Some(decoder) = &mut self.decoder
-                    {
-                        if let Err(error) = decoder.seek(position) {
-                            self.emit(PlayerEvent::Error(error.into()));
-                        } else {
-                            self.synchronize_audible_position(position);
-                            self.emit(PlayerEvent::PositionChanged(position));
+                    if !position.is_zero() {
+                        self.prefetched_chunk = None;
+                        if let Some(decoder) = &mut self.decoder {
+                            if let Err(error) = decoder.seek(position) {
+                                self.emit(PlayerEvent::Error(error.into()));
+                            } else {
+                                self.synchronize_audible_position(position);
+                                self.emit(PlayerEvent::PositionChanged(position));
+                            }
                         }
                     }
                     if !play {
@@ -480,6 +753,7 @@ impl AudioWorker {
                         self.paused.store(true, Ordering::Release);
                         self.emit(PlayerEvent::StateChanged(self.state));
                     }
+                    self.schedule_next_preload();
                 }
             }
             PlayerCommand::Next => self.next_track(),
@@ -519,15 +793,21 @@ impl AudioWorker {
                         if self.shuffle {
                             self.shuffle_played.insert(current_track);
                         }
+                        self.schedule_next_preload();
                     } else {
                         self.queue_index = 0;
+                        self.preloader.cancel();
                         self.stop_playback(true);
                     }
                 } else {
                     self.queue_index = 0;
+                    self.preloader.cancel();
                 }
             }
-            PlayerCommand::SetRepeat(repeat) => self.repeat = repeat,
+            PlayerCommand::SetRepeat(repeat) => {
+                self.repeat = repeat;
+                self.schedule_next_preload();
+            }
             PlayerCommand::SetShuffle(shuffle) => {
                 self.shuffle = shuffle;
                 self.shuffle_played.clear();
@@ -536,8 +816,14 @@ impl AudioWorker {
                 {
                     self.shuffle_played.insert(track_id);
                 }
+                if self.shuffle {
+                    self.preloader.cancel();
+                } else {
+                    self.schedule_next_preload();
+                }
             }
             PlayerCommand::Stop => {
+                self.preloader.cancel();
                 self.stop_playback(false);
             }
         }
@@ -564,16 +850,50 @@ impl AudioWorker {
         }
     }
 
+    fn schedule_next_preload(&self) {
+        if self.shuffle || self.queue.is_empty() || self.current_track.is_none() {
+            return;
+        }
+        let next_index = if self.queue_index + 1 < self.queue.len() {
+            self.queue_index + 1
+        } else if self.repeat == RepeatMode::All {
+            0
+        } else {
+            self.preloader.cancel();
+            return;
+        };
+        let Some(track_id) = self.queue.get(next_index).copied() else {
+            return;
+        };
+        if Some(track_id) == self.current_track {
+            return;
+        }
+        let path = self
+            .tracks
+            .read()
+            .ok()
+            .and_then(|tracks| tracks.get(&track_id).map(|track| track.path.clone()));
+        if let Some(path) = path {
+            self.preloader.request(track_id, path);
+        }
+    }
+
     fn open_queue_index(&mut self, index: usize) -> bool {
         let Some(track_id) = self.queue.get(index).copied() else {
             return false;
         };
         if self.open_track(track_id) {
             self.queue_index = index;
+            self.schedule_next_preload();
             true
         } else {
             false
         }
+    }
+
+    fn reset_audible_position(&self) {
+        self.flush.store(true, Ordering::Release);
+        self.audible_frames.store(0, Ordering::Release);
     }
 
     fn open_track(&mut self, track_id: TrackId) -> bool {
@@ -590,13 +910,26 @@ impl AudioWorker {
             self.emit(PlayerEvent::StateChanged(self.state));
             return false;
         };
+
+        let previous_track = self.current_track;
+        self.current_track = Some(track_id);
         self.state = PlaybackState::Loading;
+        self.reset_audible_position();
+        self.emit(PlayerEvent::PositionChanged(Duration::ZERO));
         self.emit(PlayerEvent::StateChanged(self.state));
-        self.synchronize_audible_position(Duration::ZERO);
-        match DecoderStream::open(&track.path) {
+
+        let prepared = self.preloader.take(track_id);
+        let opened = if let Some(preloaded) = prepared {
+            self.prefetched_chunk = preloaded.first_chunk;
+            Ok(preloaded.decoder)
+        } else {
+            self.prefetched_chunk = None;
+            DecoderStream::open(&track.path)
+        };
+
+        match opened {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
-                self.current_track = Some(track_id);
                 if self.shuffle {
                     self.shuffle_played.insert(track_id);
                 }
@@ -607,6 +940,8 @@ impl AudioWorker {
             }
             Err(error) => {
                 self.decoder = None;
+                self.prefetched_chunk = None;
+                self.current_track = previous_track;
                 self.state = PlaybackState::Error;
                 self.emit(PlayerEvent::Error(error.into()));
                 self.emit(PlayerEvent::StateChanged(self.state));
@@ -616,7 +951,10 @@ impl AudioWorker {
     }
 
     fn decode_next(&mut self) -> Result<bool, DecodeError> {
-        let (sample_rate, channels, position) = {
+        let (sample_rate, channels, position) = if let Some(chunk) = self.prefetched_chunk.take() {
+            self.decoded_samples = chunk.samples;
+            (chunk.sample_rate, chunk.channels, chunk.position)
+        } else {
             let Some(decoder) = &mut self.decoder else {
                 return Ok(false);
             };
@@ -748,12 +1086,13 @@ impl AudioWorker {
     fn stop_playback(&mut self, clear_current_track: bool) {
         self.decode_generation = self.decode_generation.wrapping_add(1);
         self.decoder = None;
+        self.prefetched_chunk = None;
         if clear_current_track {
             self.current_track = None;
         }
         self.state = PlaybackState::Stopped;
         self.paused.store(true, Ordering::Release);
-        self.synchronize_audible_position(Duration::ZERO);
+        self.reset_audible_position();
         self.emit(PlayerEvent::PositionChanged(Duration::ZERO));
         self.emit(PlayerEvent::StateChanged(self.state));
     }
@@ -794,6 +1133,8 @@ fn can_coalesce_commands(queued: &PlayerCommand, incoming: &PlayerCommand) -> bo
         (queued, incoming),
         (PlayerCommand::Seek(_), PlayerCommand::Seek(_))
             | (PlayerCommand::PlayTrack(_), PlayerCommand::PlayTrack(_))
+            | (PlayerCommand::Next, PlayerCommand::Next)
+            | (PlayerCommand::Previous, PlayerCommand::Previous)
             | (PlayerCommand::SetVolume(_), PlayerCommand::SetVolume(_))
             | (PlayerCommand::SetEq(_), PlayerCommand::SetEq(_))
             | (PlayerCommand::SetSpatial(_), PlayerCommand::SetSpatial(_))
