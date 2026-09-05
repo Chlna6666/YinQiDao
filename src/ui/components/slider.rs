@@ -115,7 +115,8 @@ fn pointer_hits_thumb(
 ) -> bool {
     let thumb = f32::from(thumb_size);
     let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
-    let thumb_center = f32::from(bounds.left()) + thumb * 0.5 + ratio.clamp(0.0, 1.0) * usable_width;
+    let thumb_center =
+        f32::from(bounds.left()) + thumb * 0.5 + ratio.clamp(0.0, 1.0) * usable_width;
     let hit_radius = (thumb * 0.75).max(8.0);
     (f32::from(position_x) - thumb_center).abs() <= hit_radius
 }
@@ -217,22 +218,27 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with strict track-click and thumb-drag semantics.
+/// Slider with independent track-click and thumb-scrub paths.
 ///
-/// Clicking anywhere on the track commits that position immediately and leaves no pointer binding.
-/// A scrub gesture can only start when the initial press hits the current thumb. The thumb must then
-/// move at least 3 px while the left button remains down before preview updates are published.
+/// - A track click calls `on_click` exactly once and never creates drag state.
+/// - A thumb press only arms a potential scrub. It does not seek on mouse-down.
+/// - Pointer movement of at least 3 px calls `on_drag`; mouse-up then calls `on_drag_end`.
+///
+/// GPUI's drag-and-drop API is intentionally not involved, so a click cannot be promoted into a
+/// framework drag session and the business layer never has to infer whether a commit was a click.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
     style: SliderStyle,
-    on_change: impl Fn(f32, &mut App) + 'static,
-    on_commit: impl Fn(f32, &mut App) + 'static,
+    on_click: impl Fn(f32, &mut App) + 'static,
+    on_drag: impl Fn(f32, &mut App) + 'static,
+    on_drag_end: impl Fn(f32, &mut App) + 'static,
 ) -> Stateful<Div> {
     let id = id.into();
     let id_string = id.to_string();
-    let on_change: SliderCallback = Rc::new(on_change);
-    let on_commit: SliderCallback = Rc::new(on_commit);
+    let on_click: SliderCallback = Rc::new(on_click);
+    let on_drag: SliderCallback = Rc::new(on_drag);
+    let on_drag_end: SliderCallback = Rc::new(on_drag_end);
     let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
 
     let bounds_for_prepaint = bounds.clone();
@@ -244,10 +250,10 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
-    let commit_for_down = on_commit.clone();
-    let change_for_move = on_change;
-    let commit_for_up = on_commit.clone();
-    let commit_for_up_out = on_commit;
+    let click_for_down = on_click;
+    let drag_for_move = on_drag;
+    let drag_end_for_up = on_drag_end.clone();
+    let drag_end_for_up_out = on_drag_end;
 
     slider_visual(id, ratio, style)
         .child(
@@ -265,11 +271,15 @@ pub fn interactive_slider(
             let Some(bounds) = *bounds_for_down.borrow() else {
                 return;
             };
-            let starts_on_thumb = pointer_hits_thumb(event.position.x, bounds, ratio, style.thumb_size);
-            if starts_on_thumb {
+            if pointer_hits_thumb(event.position.x, bounds, ratio, style.thumb_size) {
                 begin_pointer_press(&id_for_down, event.position.x, cx);
+                return;
             }
-            (commit_for_down)(
+
+            // A track click is a terminal click action. Clear any stale armed state first and do
+            // not leave anything that a later MouseMove could reinterpret as a drag.
+            let _ = end_pointer_press(&id_for_down, cx);
+            (click_for_down)(
                 ratio_from_position(event.position.x, bounds, style.thumb_size),
                 cx,
             );
@@ -289,7 +299,7 @@ pub fn interactive_slider(
                 mark_pointer_dragging(&id_for_move, cx);
             }
             if let Some(bounds) = *bounds_for_move.borrow() {
-                (change_for_move)(
+                (drag_for_move)(
                     ratio_from_position(event.position.x, bounds, style.thumb_size),
                     cx,
                 );
@@ -304,7 +314,7 @@ pub fn interactive_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up.borrow() {
-                (commit_for_up)(
+                (drag_end_for_up)(
                     ratio_from_position(event.position.x, bounds, style.thumb_size),
                     cx,
                 );
@@ -319,7 +329,7 @@ pub fn interactive_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up_out.borrow() {
-                (commit_for_up_out)(
+                (drag_end_for_up_out)(
                     ratio_from_position(event.position.x, bounds, style.thumb_size),
                     cx,
                 );
