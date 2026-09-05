@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -99,6 +99,8 @@ pub struct AudioEngine {
     paused: Arc<AtomicBool>,
     flush: Arc<AtomicBool>,
     output_gain: Arc<AtomicU32>,
+    audible_frames: Arc<AtomicU64>,
+    output_rate: u32,
     _stream: Stream,
     _worker: thread::JoinHandle<()>,
 }
@@ -128,8 +130,6 @@ impl AudioEngine {
             .default_output_config()
             .context("读取默认音频输出配置失败")?;
         let output_rate = supported.sample_rate().0;
-        // The command mailbox is bounded and coalesces latest-value controls, so rapid input
-        // cannot turn into unbounded allocations while the decoder is opening a track.
         let command_queue = Arc::new(CommandQueue::new());
         let (event_tx, event_rx) = bounded::<PlayerEvent>(256);
         let tracks = Arc::new(RwLock::new(HashMap::new()));
@@ -137,13 +137,13 @@ impl AudioEngine {
             volume: volume.clamp(0.0, 1.0),
             ..PlayerSnapshot::default()
         }));
-        // 收紧环形缓冲区至约 125ms (~12,000 samples at 48kHz stereo)，消除 1 秒时间超前与 Seek 清空延迟
         let ring_capacity = ((output_rate as usize / 8) * 2).max(4096);
         let ring = HeapRb::<f32>::new(ring_capacity);
         let (producer, consumer) = ring.split();
         let flush = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let output_gain = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
+        let audible_frames = Arc::new(AtomicU64::new(0));
         let stream = build_output_stream(
             &device,
             &supported,
@@ -151,6 +151,7 @@ impl AudioEngine {
             flush.clone(),
             paused.clone(),
             output_gain.clone(),
+            audible_frames.clone(),
             event_tx.clone(),
         )?;
         stream.play().context("启动音频输出流失败")?;
@@ -159,6 +160,7 @@ impl AudioEngine {
         let worker_snapshot = snapshot.clone();
         let worker_flush = flush.clone();
         let worker_paused = paused.clone();
+        let worker_audible_frames = audible_frames.clone();
         let worker_command_queue = command_queue.clone();
         let worker = thread::Builder::new()
             .name("yinqidao-audio-worker".into())
@@ -171,6 +173,7 @@ impl AudioEngine {
                     worker_snapshot,
                     worker_flush,
                     worker_paused,
+                    worker_audible_frames,
                     AudioWorkerConfig {
                         output_rate,
                         eq,
@@ -189,6 +192,8 @@ impl AudioEngine {
             paused,
             flush,
             output_gain,
+            audible_frames,
+            output_rate,
             _stream: stream,
             _worker: worker,
         })
@@ -249,17 +254,34 @@ impl AudioEngine {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        self.snapshot
+        let mut snapshot = self
+            .snapshot
             .read()
-            .map_or_else(|_| PlayerSnapshot::default(), |snapshot| snapshot.clone())
+            .map_or_else(|_| PlayerSnapshot::default(), |snapshot| snapshot.clone());
+        snapshot.position_ms = self.audible_position_ms(snapshot.duration_ms);
+        snapshot
     }
 
     pub fn progress(&self) -> (PlaybackState, u64, u64) {
         self.snapshot
             .read()
             .map_or((PlaybackState::Stopped, 0, 0), |snapshot| {
-                (snapshot.state, snapshot.position_ms, snapshot.duration_ms)
+                (
+                    snapshot.state,
+                    self.audible_position_ms(snapshot.duration_ms),
+                    snapshot.duration_ms,
+                )
             })
+    }
+
+    fn audible_position_ms(&self, duration_ms: u64) -> u64 {
+        let frames = self.audible_frames.load(Ordering::Acquire);
+        let position_ms = frames.saturating_mul(1_000) / u64::from(self.output_rate.max(1));
+        if duration_ms > 0 {
+            position_ms.min(duration_ms)
+        } else {
+            position_ms
+        }
     }
 
     pub fn output_devices() -> Result<Vec<OutputDeviceInfo>> {
@@ -296,6 +318,8 @@ struct AudioWorker {
     snapshot: Arc<RwLock<PlayerSnapshot>>,
     flush: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    audible_frames: Arc<AtomicU64>,
+    output_rate: u32,
     processor: AudioProcessor,
     decoded_samples: Vec<f32>,
     processed_samples: Vec<f32>,
@@ -329,8 +353,10 @@ impl AudioWorker {
         snapshot: Arc<RwLock<PlayerSnapshot>>,
         flush: Arc<AtomicBool>,
         paused: Arc<AtomicBool>,
+        audible_frames: Arc<AtomicU64>,
         config: AudioWorkerConfig,
     ) -> Self {
+        let output_rate = config.output_rate;
         Self {
             command_queue,
             event_tx,
@@ -339,10 +365,9 @@ impl AudioWorker {
             snapshot,
             flush,
             paused,
-            // Main volume is a post-buffer output gain. Keep decoded PCM at unity so
-            // a new volume value can affect the very next device callback instead of waiting for
-            // the ring buffer to drain.
-            processor: AudioProcessor::new(config.output_rate, config.eq, config.spatial, 1.0),
+            audible_frames,
+            output_rate,
+            processor: AudioProcessor::new(output_rate, config.eq, config.spatial, 1.0),
             decoded_samples: Vec::new(),
             processed_samples: Vec::new(),
             decoder: None,
@@ -419,7 +444,7 @@ impl AudioWorker {
                     if let Err(error) = decoder.seek(position) {
                         self.emit(PlayerEvent::Error(error.into()));
                     } else {
-                        self.flush_output();
+                        self.synchronize_audible_position(position);
                         self.emit(PlayerEvent::PositionChanged(position));
                     }
                 }
@@ -446,7 +471,7 @@ impl AudioWorker {
                         if let Err(error) = decoder.seek(position) {
                             self.emit(PlayerEvent::Error(error.into()));
                         } else {
-                            self.flush_output();
+                            self.synchronize_audible_position(position);
                             self.emit(PlayerEvent::PositionChanged(position));
                         }
                     }
@@ -567,7 +592,7 @@ impl AudioWorker {
         };
         self.state = PlaybackState::Loading;
         self.emit(PlayerEvent::StateChanged(self.state));
-        self.flush_output();
+        self.synchronize_audible_position(Duration::ZERO);
         match DecoderStream::open(&track.path) {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
@@ -626,9 +651,6 @@ impl AudioWorker {
                 if self.producer.try_push(sample).is_ok() {
                     break;
                 }
-                // A full output ring means decoding is ahead of playback, not that playback is
-                // buffering. Keep the Playing state while waiting for the CPAL callback to drain
-                // samples, otherwise the worker loop will suspend itself after a few seconds.
                 if !self.handle_commands() {
                     return Ok(false);
                 }
@@ -707,8 +729,20 @@ impl AudioWorker {
         (self.shuffle_state as usize) % length.max(1)
     }
 
-    fn flush_output(&self) {
+    fn synchronize_audible_position(&self, position: Duration) {
         self.flush.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        while self.flush.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.audible_frames
+            .store(self.duration_to_output_frames(position), Ordering::Release);
+    }
+
+    fn duration_to_output_frames(&self, position: Duration) -> u64 {
+        let frames = position.as_nanos().saturating_mul(self.output_rate as u128)
+            / 1_000_000_000_u128;
+        frames.min(u64::MAX as u128) as u64
     }
 
     fn stop_playback(&mut self, clear_current_track: bool) {
@@ -719,7 +753,7 @@ impl AudioWorker {
         }
         self.state = PlaybackState::Stopped;
         self.paused.store(true, Ordering::Release);
-        self.flush_output();
+        self.synchronize_audible_position(Duration::ZERO);
         self.emit(PlayerEvent::PositionChanged(Duration::ZERO));
         self.emit(PlayerEvent::StateChanged(self.state));
     }
@@ -780,6 +814,7 @@ fn build_output_stream(
     flush: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     output_gain: Arc<AtomicU32>,
+    audible_frames: Arc<AtomicU64>,
     event_tx: Sender<PlayerEvent>,
 ) -> Result<Stream> {
     let config: StreamConfig = supported.clone().into();
@@ -791,7 +826,14 @@ fn build_output_stream(
         SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
-                fill_f32(data, channels, &mut consumer, &flush, &paused);
+                fill_f32(
+                    data,
+                    channels,
+                    &mut consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                );
                 let gain = current_output_gain(&output_gain);
                 if gain != 1.0 {
                     for sample in data {
@@ -808,7 +850,14 @@ fn build_output_stream(
         SampleFormat::I16 => device.build_output_stream(
             &config,
             move |data: &mut [i16], _| {
-                fill_i16(data, channels, &mut consumer, &flush, &paused);
+                fill_i16(
+                    data,
+                    channels,
+                    &mut consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                );
                 let gain = current_output_gain(&output_gain);
                 if gain != 1.0 {
                     for sample in data {
@@ -828,7 +877,14 @@ fn build_output_stream(
         SampleFormat::U16 => device.build_output_stream(
             &config,
             move |data: &mut [u16], _| {
-                fill_u16(data, channels, &mut consumer, &flush, &paused);
+                fill_u16(
+                    data,
+                    channels,
+                    &mut consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                );
                 let gain = current_output_gain(&output_gain);
                 if gain != 1.0 {
                     const CENTER: f32 = 32768.0;
@@ -857,11 +913,11 @@ fn current_output_gain(output_gain: &AtomicU32) -> f32 {
     perceptual_volume_gain(f32::from_bits(output_gain.load(Ordering::Acquire)))
 }
 
-fn read_stereo(consumer: &mut ringbuf::HeapCons<f32>) -> (f32, f32) {
-    (
-        consumer.try_pop().unwrap_or(0.0),
-        consumer.try_pop().unwrap_or(0.0),
-    )
+fn read_stereo(consumer: &mut ringbuf::HeapCons<f32>) -> Option<(f32, f32)> {
+    if consumer.occupied_len() < 2 {
+        return None;
+    }
+    Some((consumer.try_pop()?, consumer.try_pop()?))
 }
 
 fn fill_f32(
@@ -870,6 +926,7 @@ fn fill_f32(
     consumer: &mut ringbuf::HeapCons<f32>,
     flush: &AtomicBool,
     paused: &AtomicBool,
+    audible_frames: &AtomicU64,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -879,7 +936,10 @@ fn fill_f32(
         return;
     }
     for frame in data.chunks_exact_mut(channels.max(1)) {
-        let (left, right) = read_stereo(consumer);
+        let Some((left, right)) = read_stereo(consumer) else {
+            frame.fill(0.0);
+            continue;
+        };
         for (index, sample) in frame.iter_mut().enumerate() {
             *sample = if channels == 1 {
                 (left + right) * 0.5
@@ -889,6 +949,7 @@ fn fill_f32(
                 right
             };
         }
+        audible_frames.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -898,6 +959,7 @@ fn fill_i16(
     consumer: &mut ringbuf::HeapCons<f32>,
     flush: &AtomicBool,
     paused: &AtomicBool,
+    audible_frames: &AtomicU64,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -907,7 +969,10 @@ fn fill_i16(
         return;
     }
     for frame in data.chunks_exact_mut(channels.max(1)) {
-        let (left, right) = read_stereo(consumer);
+        let Some((left, right)) = read_stereo(consumer) else {
+            frame.fill(0);
+            continue;
+        };
         for (index, sample) in frame.iter_mut().enumerate() {
             let value = if channels == 1 {
                 (left + right) * 0.5
@@ -918,6 +983,7 @@ fn fill_i16(
             };
             *sample = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
         }
+        audible_frames.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -927,6 +993,7 @@ fn fill_u16(
     consumer: &mut ringbuf::HeapCons<f32>,
     flush: &AtomicBool,
     paused: &AtomicBool,
+    audible_frames: &AtomicU64,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -936,7 +1003,10 @@ fn fill_u16(
         return;
     }
     for frame in data.chunks_exact_mut(channels.max(1)) {
-        let (left, right) = read_stereo(consumer);
+        let Some((left, right)) = read_stereo(consumer) else {
+            frame.fill(32768);
+            continue;
+        };
         for (index, sample) in frame.iter_mut().enumerate() {
             let value = if channels == 1 {
                 (left + right) * 0.5
@@ -947,6 +1017,7 @@ fn fill_u16(
             };
             *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
         }
+        audible_frames.fetch_add(1, Ordering::Relaxed);
     }
 }
 
