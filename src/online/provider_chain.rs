@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::model::Track;
+use crate::{lyrics::LyricsDocument, model::Track};
 
 use super::{EnrichmentResult, MetadataMatch, OnlineServices, SpotifyTokenResponse, providers};
 
@@ -43,9 +43,34 @@ impl OnlineServices {
                 release_date: matched.release_date.clone(),
             };
             let lyrics = if fetch_lyrics {
-                match providers::lyrics(&self.client, &matched).await {
-                    Ok(Some(lyrics)) => Some(lyrics),
-                    Ok(None) | Err(_) => self.fetch_lyrics(Some(&metadata), track).await?,
+                let provider_lyrics = match providers::lyrics(&self.client, &matched).await {
+                    Ok(lyrics) => lyrics,
+                    Err(error) => {
+                        tracing::debug!(
+                            provider = provider.name(),
+                            %error,
+                            "首选音乐平台歌词读取失败，尝试中文字幕兜底"
+                        );
+                        None
+                    }
+                };
+
+                match provider_lyrics {
+                    Some(lyrics) if lyrics.has_translation() => Some(lyrics),
+                    Some(lyrics) => self
+                        .fetch_translated_lyrics_fallback(track, matched.provider)
+                        .await
+                        .or(Some(lyrics)),
+                    None => {
+                        if let Some(translated) = self
+                            .fetch_translated_lyrics_fallback(track, matched.provider)
+                            .await
+                        {
+                            Some(translated)
+                        } else {
+                            self.fetch_lyrics(Some(&metadata), track).await?
+                        }
+                    }
                 }
             } else {
                 None
@@ -66,6 +91,56 @@ impl OnlineServices {
             }));
         }
         Ok(None)
+    }
+
+    /// Prefer a lyric document that carries a synchronized translation without changing the
+    /// metadata provider selected for the track. Netease and QQ expose explicit translated lyric
+    /// tracks; keep this lookup in the background enrichment path so it never blocks GPUI.
+    async fn fetch_translated_lyrics_fallback(
+        &self,
+        track: &Track,
+        exclude: providers::ProviderKind,
+    ) -> Option<LyricsDocument> {
+        for provider in [
+            providers::ProviderKind::Netease,
+            providers::ProviderKind::QqMusic,
+        ] {
+            if provider == exclude {
+                continue;
+            }
+
+            let matched = match providers::search(
+                &self.client,
+                provider,
+                track,
+                &self.netease_base_url,
+                None,
+            )
+            .await
+            {
+                Ok(Some(matched)) => matched,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(provider = provider.name(), %error, "中文字幕候选搜索失败");
+                    continue;
+                }
+            };
+
+            match providers::lyrics(&self.client, &matched).await {
+                Ok(Some(lyrics)) if lyrics.has_translation() => {
+                    tracing::debug!(
+                        provider = provider.name(),
+                        "使用备用平台补全同步中文字幕"
+                    );
+                    return Some(lyrics);
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(provider = provider.name(), %error, "中文字幕候选歌词读取失败");
+                }
+            }
+        }
+        None
     }
 
     async fn spotify_token(&self) -> Option<String> {
