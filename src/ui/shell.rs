@@ -96,6 +96,7 @@ pub struct MusicApp {
     last_polled_track_id: Option<TrackId>,
     pub(crate) lyrics_scroll_handle: gpui::ScrollHandle,
     pub(crate) last_lyric_index: Option<usize>,
+    pub(crate) lyric_motion_epoch: u64,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -421,6 +422,7 @@ impl MusicApp {
             last_polled_track_id: None,
             lyrics_scroll_handle: gpui::ScrollHandle::new(),
             last_lyric_index: None,
+            lyric_motion_epoch: 0,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -604,19 +606,21 @@ impl MusicApp {
             return;
         };
         let max_offset = f32::from(self.lyrics_scroll_handle.max_offset().height).max(0.0);
-        let target = f32::from(viewport.center().y - line.center().y).clamp(-max_offset, 0.0);
+        let anchor_y = f32::from(viewport.origin.y) + f32::from(viewport.size.height) * 0.43;
+        let target = (anchor_y - f32::from(line.center().y)).clamp(-max_offset, 0.0);
         self.lyrics_scroll_target_y = Some(target);
 
         let offset = self.lyrics_scroll_handle.offset();
         let current = f32::from(offset.y);
         let diff = target - current;
-        if diff.abs() <= 0.35 {
+        if diff.abs() <= 0.30 {
             self.lyrics_scroll_handle
                 .set_offset(gpui::Point::new(offset.x, gpui::px(target)));
             return;
         }
 
-        let factor = 1.0 - (-13.5 * dt).exp();
+        // Apple Music reads as a soft camera settle, not a constant-speed list scroll.
+        let factor = 1.0 - (-9.5 * dt).exp();
         let next = current + diff * factor;
         self.lyrics_scroll_handle
             .set_offset(gpui::Point::new(offset.x, gpui::px(next)));
@@ -625,7 +629,7 @@ impl MusicApp {
     pub(crate) fn has_active_animations(&self) -> bool {
         let lyrics_scrolling = self.stage_open
             && self.lyrics_scroll_target_y.is_some_and(|target| {
-                (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.35
+                (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.30
             });
         self.stage_animating
             || (self.stage_open
@@ -814,6 +818,7 @@ impl MusicApp {
             self.status = "音频命令队列繁忙，请稍后重试".into();
         }
         self.last_lyric_index = None;
+        self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
         self.lyrics_scroll_handle.scroll_to_item(0);
         cx.notify();
     }
@@ -1448,6 +1453,7 @@ impl MusicApp {
             if curr_track_id != self.last_polled_track_id {
                 self.last_polled_track_id = curr_track_id;
                 self.last_lyric_index = None;
+                self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
                 self.lyrics_user_scrolling_until = None;
                 self.lyrics_scroll_target_y = None;
                 self.lyrics_scroll_handle.scroll_to_item(0);
@@ -1466,6 +1472,7 @@ impl MusicApp {
                         .unwrap_or(0);
                     if self.last_lyric_index != Some(current_idx) {
                         self.last_lyric_index = Some(current_idx);
+                        self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
                         let in_user_scroll = self
                             .lyrics_user_scrolling_until
                             .is_some_and(|until| std::time::Instant::now() < until);

@@ -9,7 +9,7 @@ use gpui::{
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString, Transition,
     TransitionProperty,
     StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
-    point, prelude::*, px, radians, relative, rgb,
+    point, prelude::*, px, relative, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
@@ -234,14 +234,22 @@ fn stage_lyrics(
         ));
 
     for (index, line) in lyrics.iter().enumerate() {
-        let distance = index.abs_diff(active) as f32;
-        let focus = (-1.05 * distance).exp().clamp(0.0, 1.0);
-        let alpha = 0.18 + focus * 0.82;
-        let scale = 0.90 + focus * 0.10;
+        let distance = index.abs_diff(active);
+        let alpha = match distance {
+            0 => 1.0,
+            1 => 0.48,
+            2 => 0.28,
+            _ => 0.18,
+        };
+        let scale = match distance {
+            0 => 1.0,
+            1 => 0.955,
+            _ => 0.925,
+        };
         let timestamp = line.timestamp_ms;
-        let weight = if focus > 0.72 {
+        let weight = if index == active {
             gpui::FontWeight::BOLD
-        } else if focus > 0.32 {
+        } else if distance == 1 {
             gpui::FontWeight::SEMIBOLD
         } else {
             gpui::FontWeight::MEDIUM
@@ -258,7 +266,7 @@ fn stage_lyrics(
                 div()
                     .w_full()
                     .min_w(px(0.0))
-                    .text_size(px(24.0))
+                    .text_size(px(28.0))
                     .text_color(hsla(0.0, 0.0, 1.0, 1.0))
                     .child(line.text.clone()),
             );
@@ -272,50 +280,75 @@ fn stage_lyrics(
                 div()
                     .w_full()
                     .min_w(px(0.0))
-                    .text_size(px(15.5))
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
+                    .text_size(px(17.0))
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.72))
                     .child(translation.to_owned()),
             );
         }
 
-        viewport = viewport.child(
-            div()
-                .id(SharedString::from(format!("lyric-line-{index}")))
-                .w_full()
-                .min_w(px(0.0))
-                .flex_none()
-                .pl(px(16.0))
-                .pr(px(8.0))
-                .py(px(9.0))
-                .mb(px(8.0))
-                .scale(scale)
-                .opacity(alpha)
-                .transition(lyric_focus_transition())
-                .cursor_pointer()
-                .hover(|style| style.opacity(1.0))
-                .child(text)
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.seek_to_ms(timestamp, cx);
-                        this.lyrics_user_scrolling_until = None;
+        let line_element = div()
+            .id(SharedString::from(format!("lyric-line-{index}")))
+            .w_full()
+            .min_w(px(0.0))
+            .flex_none()
+            .pl(px(16.0))
+            .pr(px(12.0))
+            .py(px(11.0))
+            .mb(px(10.0))
+            .scale(scale)
+            .opacity(alpha)
+            .transition(lyric_focus_transition())
+            .cursor_pointer()
+            .hover(|style| style.opacity(1.0))
+            .child(text)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.seek_to_ms(timestamp, cx);
+                    this.lyrics_user_scrolling_until = None;
+                    if this.last_lyric_index != Some(index) {
                         this.last_lyric_index = Some(index);
-                        this.lyrics_scroll_target_y =
-                            Some(f32::from(this.lyrics_scroll_handle.offset().y));
-                        this.wake_stage_controls_immediately(cx);
-                    }),
-                ),
-        );
+                        this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
+                    }
+                    this.lyrics_scroll_target_y =
+                        Some(f32::from(this.lyrics_scroll_handle.offset().y));
+                    this.wake_stage_controls_immediately(cx);
+                }),
+            );
+
+        let line_element = if index == active {
+            let enter = Animation::from_spec(
+                AnimationSpec::new(Duration::from_millis(440)).ease(Easing::OutCubic),
+            )
+            .with_property(AnimationProperty::translation(
+                point(px(0.0), px(20.0)),
+                point(px(0.0), px(0.0)),
+            ));
+            line_element
+                .with_animation(
+                    SharedString::from(format!(
+                        "lyric-enter-{}-{index}",
+                        app.lyric_motion_epoch
+                    )),
+                    enter,
+                    |element, _| element,
+                )
+                .into_any_element()
+        } else {
+            line_element.into_any_element()
+        };
+
+        viewport = viewport.child(line_element);
     }
 
     viewport.into_any_element()
 }
 
 fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(360))
+    Transition::new(Duration::from_millis(420))
         .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity, TransitionProperty::Transform])
+        .properties([TransitionProperty::Opacity, TransitionProperty::Scale])
 }
 fn stage_controls(
     app: &MusicApp,
@@ -560,92 +593,96 @@ fn ambient_background(
     blur_radius: f32,
 ) -> impl IntoElement {
     let id = id.unwrap_or_default();
-    // Keep the Apple Music-style field alive while the immersive stage is open, including
-    // paused playback. Dynamic blur controls whether the field is animated at all.
-    let animate = dynamic;
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-
-    // Keep the expensive Gaussian surface bounded. The motion itself is renderer-owned and only
-    // moves cached local orbit layers with bounded renderer-owned translations; the Gaussian surfaces
-    // stay retained while only their compositor transforms advance.
-    let sigma = (blur_radius * 0.42).clamp(4.0, 24.0);
+    let sigma = (blur_radius * 0.52).clamp(6.0, 30.0);
     let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
 
     if let Some(bytes) = blurred.or(artwork) {
-        root = root.child(
-            div()
-                .absolute()
-                .inset_0()
-                .scale(1.10)
-                .opacity(0.30)
-                .child(
-                    img(EncodedImageBytes::new(ImageFormat::Png, bytes))
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                ),
-        );
+        root = root
+            .child(artwork_motion_layer(
+                "stage-fluid-artwork-primary",
+                bytes.clone(),
+                1.34,
+                0.44,
+                145.0,
+                86.0,
+                17,
+                false,
+                dynamic,
+            ))
+            .child(artwork_motion_layer(
+                "stage-fluid-artwork-secondary",
+                bytes,
+                1.72,
+                0.20,
+                220.0,
+                132.0,
+                27,
+                true,
+                dynamic,
+            ));
     }
 
     root
         .child(orbit_blob(
             "stage-fluid-a-orbit",
-            -0.13,
-            -0.20,
-            0.62,
-            0.70,
-            0.02,
-            0.03,
-            0.68,
-            0.58,
+            -0.22,
+            -0.25,
+            0.88,
+            0.94,
+            0.04,
+            0.08,
+            0.78,
+            0.72,
             24.0,
             c1,
-            0.74,
+            0.58,
             sigma,
             13,
             1.0,
-            88.0,
-            52.0,
-            animate,
+            185.0,
+            118.0,
+            dynamic,
         ))
         .child(orbit_blob(
             "stage-fluid-b-orbit",
-            0.48,
-            -0.10,
-            0.58,
-            0.66,
-            0.30,
+            0.34,
+            -0.18,
+            0.82,
+            0.88,
+            0.10,
             0.08,
-            0.62,
-            0.64,
+            0.76,
+            0.74,
             208.0,
             c2,
-            0.70,
-            sigma * 0.92,
+            0.54,
+            sigma * 0.94,
             17,
             -1.0,
-            72.0,
-            68.0,
-            animate,
+            168.0,
+            146.0,
+            dynamic,
         ))
         .child(orbit_blob(
             "stage-fluid-c-orbit",
-            0.14,
-            0.45,
-            0.54,
-            0.58,
-            0.10,
-            0.32,
-            0.66,
-            0.58,
+            -0.02,
+            0.34,
+            0.94,
+            0.82,
+            0.08,
+            0.04,
+            0.82,
+            0.76,
             301.0,
             c3,
-            0.66,
-            sigma * 1.06,
-            23,
+            0.50,
+            sigma * 1.08,
+            21,
             1.0,
-            94.0,
-            46.0,
-            animate,
+            205.0,
+            108.0,
+            dynamic,
         ))
         .child(
             div()
@@ -654,15 +691,89 @@ fn ambient_background(
                 .bg(linear_gradient(
                     180.0,
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.01, (mask * 0.36).clamp(0.14, 0.34)),
+                        hsla(0.0, 0.0, 0.01, (mask * 0.30).clamp(0.10, 0.28)),
                         0.0,
                     ),
                     linear_color_stop(
-                        hsla(0.0, 0.0, 0.005, (mask * 0.60).clamp(0.26, 0.50)),
+                        hsla(0.0, 0.0, 0.004, (mask * 0.56).clamp(0.22, 0.46)),
                         1.0,
                     ),
                 )),
         )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn artwork_motion_layer(
+    animation_id: &'static str,
+    bytes: Arc<[u8]>,
+    scale: f32,
+    opacity: f32,
+    drift_x: f32,
+    drift_y: f32,
+    period_seconds: u64,
+    reverse: bool,
+    animate: bool,
+) -> gpui::AnyElement {
+    let layer = div()
+        .absolute()
+        .inset_0()
+        .scale(scale)
+        .opacity(opacity)
+        .child(
+            img(EncodedImageBytes::new(ImageFormat::Png, bytes))
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .composite_layer();
+
+    if !animate {
+        return layer.into_any_element();
+    }
+
+    let x_direction = if reverse {
+        AnimationDirection::AlternateReverse
+    } else {
+        AnimationDirection::Alternate
+    };
+    let y_direction = if reverse {
+        AnimationDirection::Alternate
+    } else {
+        AnimationDirection::AlternateReverse
+    };
+    let x_motion = Animation::from_spec(
+        AnimationSpec::new(Duration::from_secs(period_seconds))
+            .repeat(RepeatMode::Forever)
+            .direction(x_direction)
+            .ease(Easing::Linear),
+    )
+    .with_property(AnimationProperty::translation(
+        point(px(-drift_x), px(0.0)),
+        point(px(drift_x), px(0.0)),
+    ));
+    let layer = layer.with_animation(
+        SharedString::from(format!("{animation_id}-x")),
+        x_motion,
+        |element, _| element,
+    );
+
+    let y_motion = Animation::from_spec(
+        AnimationSpec::new(Duration::from_secs(period_seconds + 7))
+            .repeat(RepeatMode::Forever)
+            .direction(y_direction)
+            .ease(Easing::Linear),
+    )
+    .with_property(AnimationProperty::translation(
+        point(px(0.0), px(-drift_y)),
+        point(px(0.0), px(drift_y)),
+    ));
+
+    layer
+        .with_animation(
+            SharedString::from(format!("{animation_id}-y")),
+            y_motion,
+            |element, _| element,
+        )
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -713,38 +824,49 @@ fn orbit_blob(
         return orbit.into_any_element();
     }
 
-    // Keep the Gaussian blur surface cached. An off-centre blob rotating inside a non-square
-    // orbit follows a real ellipse; a slower outer translation prevents the motion from reading
-    // as a mechanical rotation. Both properties stay renderer-owned and avoid relayout/reblur.
-    let rotation = Animation::from_spec(
+    let x_direction = if direction >= 0.0 {
+        AnimationDirection::Alternate
+    } else {
+        AnimationDirection::AlternateReverse
+    };
+    let y_direction = if direction >= 0.0 {
+        AnimationDirection::AlternateReverse
+    } else {
+        AnimationDirection::Alternate
+    };
+    let x_motion = Animation::from_spec(
         AnimationSpec::new(Duration::from_secs(period_seconds))
             .repeat(RepeatMode::Forever)
+            .direction(x_direction)
             .ease(Easing::Linear),
     )
-    .with_property(AnimationProperty::rotation(
-        radians(0.0),
-        radians(std::f32::consts::TAU * direction),
+    .with_property(AnimationProperty::translation(
+        point(px(-drift_x), px(0.0)),
+        point(px(drift_x), px(0.0)),
     ));
     let orbit = orbit.with_animation(
-        SharedString::from(format!("{animation_id}-rotation")),
-        rotation,
+        SharedString::from(format!("{animation_id}-x")),
+        x_motion,
         |element, _| element,
     );
 
-    let drift_spec = AnimationSpec::new(Duration::from_secs(period_seconds + 4))
-        .repeat(RepeatMode::Forever)
-        .direction(AnimationDirection::Alternate)
-        .ease(Easing::Linear);
-    let dx = drift_x * direction;
-    let translation = Animation::from_spec(drift_spec).with_property(
-        AnimationProperty::translation(
-            point(px(-dx), px(-drift_y)),
-            point(px(dx), px(drift_y)),
-        ),
-    );
+    let y_motion = Animation::from_spec(
+        AnimationSpec::new(Duration::from_secs(period_seconds + 6))
+            .repeat(RepeatMode::Forever)
+            .direction(y_direction)
+            .ease(Easing::Linear),
+    )
+    .with_property(AnimationProperty::translation(
+        point(px(0.0), px(-drift_y)),
+        point(px(0.0), px(drift_y)),
+    ));
 
     orbit
-        .with_animation(animation_id, translation, |element, _| element)
+        .with_animation(
+            SharedString::from(format!("{animation_id}-y")),
+            y_motion,
+            |element, _| element,
+        )
         .into_any_element()
 }
 
