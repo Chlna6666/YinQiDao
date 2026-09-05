@@ -195,12 +195,13 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with retained pointer drag semantics.
+/// Slider with distinct click-to-jump and drag-to-scrub semantics.
 ///
-/// Mapping is derived from the element's actual painted bounds and exactly matches the thumb's
-/// `(width - thumb_size)` travel range. GPUI's drag session continues dispatching `on_drag_move`
-/// after the pointer leaves the slider, while `on_mouse_up_out` commits only when the button is
-/// actually released outside the element.
+/// A plain press/release never enters drag state: the release commits the clicked ratio directly.
+/// GPUI starts the drag session only after pointer movement crosses its drag threshold; only then do
+/// we mark this slider as actively dragging and publish preview changes. This keeps a simple track
+/// click from inheriting drag preview/seeking state while preserving continuous scrubbing once the
+/// pointer actually moves.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -215,15 +216,12 @@ pub fn interactive_slider(
     let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
 
     let bounds_for_prepaint = bounds.clone();
-    let bounds_for_down = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
-    let id_for_down = id_string.clone();
     let id_for_down_out = id_string.clone();
     let id_for_drag = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string.clone();
-    let change_for_down = on_change.clone();
     let commit_for_up = on_commit.clone();
     let commit_for_up_out = on_commit.clone();
     let drag = SliderDrag {
@@ -233,10 +231,6 @@ pub fn interactive_slider(
     };
 
     slider_visual(id, ratio, style)
-        // GPUI 557f9950 does not yet expose `on_children_prepainted`. A zero-paint absolute canvas
-        // participates in the same retained layout and receives the slider's exact inner bounds in
-        // prepaint, so click mapping remains geometry-driven instead of reverting to window-space
-        // constants. Canvas itself creates no hitbox and emits no primitive.
         .child(
             canvas(
                 move |bounds, _window, _cx| {
@@ -248,15 +242,8 @@ pub fn interactive_slider(
             .inset_0(),
         )
         .on_drag(drag, |_: &SliderDrag, _, _, cx| cx.new(|_| Empty))
-        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             cx.stop_propagation();
-            begin_active_drag(&id_for_down, cx);
-            if let Some(bounds) = *bounds_for_down.borrow() {
-                (change_for_down)(
-                    ratio_from_position(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
-            }
         })
         .on_mouse_down_out(move |_event, _window, cx| {
             let _ = end_active_drag(&id_for_down_out, cx);
@@ -269,14 +256,15 @@ pub fn interactive_slider(
                 }
                 (drag.thumb_size, drag.on_change.clone())
             };
+            if !is_active_drag(&id_for_drag, cx) {
+                begin_active_drag(&id_for_drag, cx);
+            }
             let ratio = ratio_from_position(event.event.position.x, event.bounds, thumb_size);
             (on_change)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            if !end_active_drag(&id_for_up, cx) {
-                return;
-            }
+            let _was_drag = end_active_drag(&id_for_up, cx);
             if let Some(bounds) = *bounds_for_up.borrow() {
                 (commit_for_up)(
                     ratio_from_position(event.position.x, bounds, style.thumb_size),
