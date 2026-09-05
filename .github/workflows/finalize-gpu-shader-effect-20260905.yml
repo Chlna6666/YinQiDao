@@ -1,0 +1,40 @@
+name: Finalize GPU shader effect
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/finalize-gpu-shader-effect-20260905.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Apply validated source patch
+        shell: bash
+        run: |
+          python .github/scripts/apply_gpu_shader_effect_20260905.py
+          cargo fmt --all
+
+      - name: Commit implementation and clean temporary workflows
+        shell: bash
+        run: |
+          rm .github/scripts/apply_gpu_shader_effect_20260905.py
+          rm .github/workflows/apply-gpu-shader-effect-20260905.yml
+          rm .github/workflows/finalize-gpu-shader-effect-20260905.yml
+          git config user.name "Chlna6666"
+          git config user.email "79357769+Chlna6666@users.noreply.github.com"
+          git add src/main.rs src/gpu src/ui/player_stage.rs .github/scripts/apply_gpu_shader_effect_20260905.py .github/workflows/apply-gpu-shader-effect-20260905.yml .github/workflows/finalize-gpu-shader-effect-20260905.yml
+          git commit -m "feat(gpu): 新增通用着色器效果层并重构流体背景"
+          git push origin HEAD:main
