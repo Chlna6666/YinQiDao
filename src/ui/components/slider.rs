@@ -204,12 +204,11 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with one pointer state machine for both track clicks and scrubbing.
+/// Slider with one pointer state machine for both direct clicks and scrubbing.
 ///
-/// Mouse-down anywhere on the interaction rail only arms the gesture. A release below the drag
-/// threshold becomes one click, while movement beyond the threshold becomes a scrub and is
-/// committed on release. This allows a drag to start from any position on the rail without a
-/// mouse-down seek racing a later drag update.
+/// Mouse-down immediately applies the pointed value so a normal click never depends on a later
+/// mouse-up being delivered to the same retained element. Movement beyond the small threshold
+/// promotes the same press into a drag; only real drags run `on_drag_end` on release.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -234,7 +233,7 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
-    let click_for_up = on_click;
+    let click_for_down = on_click;
     let drag_for_move = on_drag;
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
@@ -252,10 +251,14 @@ pub fn interactive_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            if bounds_for_down.borrow().is_none() {
+            let Some(bounds) = *bounds_for_down.borrow() else {
                 return;
-            }
+            };
             begin_pointer_press(&id_for_down, event.position.x, cx);
+            (click_for_down)(
+                ratio_from_position(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -283,15 +286,16 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
                 return;
             };
+            if !was_dragging {
+                return;
+            }
             let Some(bounds) = *bounds_for_up.borrow() else {
                 return;
             };
-            let ratio = ratio_from_position(event.position.x, bounds, style.thumb_size);
-            if was_dragging {
-                (drag_end_for_up)(ratio, cx);
-            } else {
-                (click_for_up)(ratio, cx);
-            }
+            (drag_end_for_up)(
+                ratio_from_position(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();

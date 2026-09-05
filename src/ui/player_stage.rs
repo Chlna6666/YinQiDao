@@ -53,6 +53,33 @@ pub(super) fn render(
         .overflow_hidden()
         .bg(rgb(0x0e0f16))
         .text_color(TEXT_WHITE)
+        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+            // Once clean/immersive mode has started, pointer motion must not wake the chrome.
+            // This also turns the automatic 20 s idle fade into click-to-wake instead of the old
+            // accidental wake caused by tiny mouse jitter or layout-generated move events.
+            cx.stop_propagation();
+            this.stage_last_mouse_pos = Some(event.position);
+            if this.stage_suppress_wake_until.is_some()
+                || this.stage_controls_visibility < 0.995
+            {
+                return;
+            }
+            this.stage_last_user_activity = Instant::now();
+        }))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                // A real click is the explicit wake gesture. Normal clicks while the chrome is
+                // already visible simply count as application activity for the 20 s idle timer.
+                if this.stage_suppress_wake_until.is_some()
+                    || this.stage_controls_visibility < 0.995
+                {
+                    this.wake_stage_controls_immediately(cx);
+                } else {
+                    this.stage_last_user_activity = Instant::now();
+                }
+            }),
+        )
         .child(ambient_background(fluid_background))
         .child(
             div()
@@ -330,6 +357,7 @@ fn stage_lyrics(
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.seek_to_ms(timestamp, cx);
+                    this.pending_progress_ratio = None;
                     this.lyrics_user_scrolling_until = None;
                     if this.last_lyric_index != Some(index) {
                         this.last_lyric_index = Some(index);
@@ -394,10 +422,16 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
         .bg(hsla(0.0, 0.0, 0.0, 0.40))
         .border_1()
         .border_color(hsla(0.0, 0.0, 1.0, 0.10))
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            this.stage_controls_hovered = *hovered;
-            if *hovered {
-                this.wake_stage_controls(cx);
+        .on_hover(cx.listener(|this, hovered: &bool, _, _cx| {
+            // Hover is not an active operation. Keeping this flag true forever prevented the
+            // application's 20 s no-input policy from ever entering clean mode while the pointer
+            // happened to rest over the dock.
+            this.stage_controls_hovered = false;
+            if *hovered
+                && this.stage_suppress_wake_until.is_none()
+                && this.stage_controls_visibility >= 0.995
+            {
+                this.stage_last_user_activity = Instant::now();
             }
         }))
         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
@@ -420,6 +454,7 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                         let _ = view.update(cx, |this, cx| {
                             this.wake_stage_controls_immediately(cx);
                             this.seek_to_ratio(ratio, cx);
+                            this.pending_progress_ratio = None;
                         });
                     }
                 },
@@ -447,6 +482,7 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                                 this.begin_drag(DragTarget::Progress, ratio, cx);
                             }
                             this.commit_drag(cx);
+                            this.pending_progress_ratio = None;
                         });
                     }
                 },
@@ -581,6 +617,7 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                                         this.begin_drag(DragTarget::Volume, ratio, cx);
                                     }
                                     this.commit_drag(cx);
+                                    this.pending_volume_ratio = None;
                                 });
                             }
                         },
