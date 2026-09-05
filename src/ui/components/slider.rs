@@ -1,13 +1,14 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div,
-    hsla, prelude::*, px, relative, rgb,
+    App, Bounds, Div, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div, hsla,
+    prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
 
 type SliderCallback = Rc<dyn Fn(f32, &mut App)>;
+const DRAG_THRESHOLD_PX: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SliderStyle {
@@ -90,16 +91,11 @@ impl SliderStyle {
     }
 }
 
-#[derive(Clone)]
-struct SliderDrag {
-    id: String,
-    thumb_size: Pixels,
-    on_change: SliderCallback,
-}
-
 #[derive(Default)]
 struct SliderInteractionState {
-    active_drag_id: Option<String>,
+    pressed_id: Option<String>,
+    press_x: f32,
+    dragging: bool,
 }
 
 impl Global for SliderInteractionState {}
@@ -111,28 +107,41 @@ fn ratio_from_position(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: P
     (local / usable_width).clamp(0.0, 1.0)
 }
 
-fn is_active_drag(id: &str, cx: &App) -> bool {
-    cx.try_global::<SliderInteractionState>()
-        .is_some_and(|state| state.active_drag_id.as_deref() == Some(id))
-}
-
-fn begin_active_drag(id: &str, cx: &mut App) {
+fn begin_pointer_press(id: &str, position_x: Pixels, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.active_drag_id = Some(id.to_owned());
+        state.pressed_id = Some(id.to_owned());
+        state.press_x = f32::from(position_x);
+        state.dragging = false;
     });
 }
 
-fn end_active_drag(id: &str, cx: &mut App) -> bool {
-    if !is_active_drag(id, cx) {
-        return false;
+fn pointer_state(id: &str, cx: &App) -> Option<(f32, bool)> {
+    let state = cx.try_global::<SliderInteractionState>()?;
+    (state.pressed_id.as_deref() == Some(id)).then_some((state.press_x, state.dragging))
+}
+
+fn mark_pointer_dragging(id: &str, cx: &mut App) {
+    if cx
+        .try_global::<SliderInteractionState>()
+        .is_none_or(|state| state.pressed_id.as_deref() != Some(id))
+    {
+        return;
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.active_drag_id = None;
+        state.dragging = true;
     });
-    true
+}
+
+fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
+    let dragging = pointer_state(id, cx)?.1;
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.pressed_id = None;
+        state.dragging = false;
+    });
+    Some(dragging)
 }
 
 fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div> {
@@ -195,13 +204,12 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with distinct click-to-jump and drag-to-scrub semantics.
+/// Slider with native pointer semantics: click commits once, movement turns the press into scrubbing.
 ///
-/// A plain press/release never enters drag state: the release commits the clicked ratio directly.
-/// GPUI starts the drag session only after pointer movement crosses its drag threshold; only then do
-/// we mark this slider as actively dragging and publish preview changes. This keeps a simple track
-/// click from inheriting drag preview/seeking state while preserving continuous scrubbing once the
-/// pointer actually moves.
+/// This intentionally does not use GPUI's drag-and-drop API. Registering `.on_drag(...)` creates a
+/// framework drag session for the press itself, which makes a normal track click inherit drag
+/// lifecycle/state. Here a press is just a press until the pointer moves at least 3 px while the
+/// left button remains held.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -216,19 +224,16 @@ pub fn interactive_slider(
     let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
 
     let bounds_for_prepaint = bounds.clone();
+    let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
-    let id_for_down_out = id_string.clone();
-    let id_for_drag = id_string.clone();
+    let id_for_down = id_string.clone();
+    let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
-    let id_for_up_out = id_string.clone();
+    let id_for_up_out = id_string;
+    let change_for_move = on_change;
     let commit_for_up = on_commit.clone();
-    let commit_for_up_out = on_commit.clone();
-    let drag = SliderDrag {
-        id: id_string,
-        thumb_size: style.thumb_size,
-        on_change,
-    };
+    let commit_for_up_out = on_commit;
 
     slider_visual(id, ratio, style)
         .child(
@@ -241,30 +246,36 @@ pub fn interactive_slider(
             .absolute()
             .inset_0(),
         )
-        .on_drag(drag, |_: &SliderDrag, _, _, cx| cx.new(|_| Empty))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
+            begin_pointer_press(&id_for_down, event.position.x, cx);
         })
-        .on_mouse_down_out(move |_event, _window, cx| {
-            let _ = end_active_drag(&id_for_down_out, cx);
-        })
-        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
-            let (thumb_size, on_change) = {
-                let drag = event.drag(cx);
-                if drag.id != id_for_drag {
-                    return;
-                }
-                (drag.thumb_size, drag.on_change.clone())
-            };
-            if !is_active_drag(&id_for_drag, cx) {
-                begin_active_drag(&id_for_drag, cx);
+        .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
+            if !event.dragging() {
+                return;
             }
-            let ratio = ratio_from_position(event.event.position.x, event.bounds, thumb_size);
-            (on_change)(ratio, cx);
+            let Some((press_x, dragging)) = pointer_state(&id_for_move, cx) else {
+                return;
+            };
+            let distance = (f32::from(event.position.x) - press_x).abs();
+            if !dragging && distance < DRAG_THRESHOLD_PX {
+                return;
+            }
+            if !dragging {
+                mark_pointer_dragging(&id_for_move, cx);
+            }
+            if let Some(bounds) = *bounds_for_move.borrow() {
+                (change_for_move)(
+                    ratio_from_position(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let _was_drag = end_active_drag(&id_for_up, cx);
+            if end_pointer_press(&id_for_up, cx).is_none() {
+                return;
+            }
             if let Some(bounds) = *bounds_for_up.borrow() {
                 (commit_for_up)(
                     ratio_from_position(event.position.x, bounds, style.thumb_size),
@@ -274,7 +285,10 @@ pub fn interactive_slider(
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            if !end_active_drag(&id_for_up_out, cx) {
+            let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
+                return;
+            };
+            if !was_dragging {
                 return;
             }
             if let Some(bounds) = *bounds_for_up_out.borrow() {
