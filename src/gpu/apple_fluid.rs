@@ -1,17 +1,15 @@
 use std::{
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use gpui::{Context, IntoElement, Render, Timer, Window, div, prelude::*, rgb};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
 
 use crate::artwork::ArtworkPalette;
 
 use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
 
 const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
-const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
     static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
@@ -63,7 +61,6 @@ pub(crate) struct AppleFluidView {
     dynamic: bool,
     active: bool,
     clock_started_at: Instant,
-    timer_started: bool,
 }
 
 impl AppleFluidView {
@@ -74,7 +71,6 @@ impl AppleFluidView {
             dynamic: true,
             active: false,
             clock_started_at: Instant::now(),
-            timer_started: false,
         }
     }
 
@@ -98,41 +94,18 @@ impl AppleFluidView {
             cx.notify();
         }
     }
-
-    fn start_clock(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
-            return;
-        }
-        self.timer_started = true;
-        cx.spawn(async move |this, cx| -> anyhow::Result<()> {
-            let mut animate = false;
-            loop {
-                Timer::after(if animate {
-                    ACTIVE_FRAME_INTERVAL
-                } else {
-                    IDLE_FRAME_INTERVAL
-                })
-                .await;
-                match this.update(cx, |this, cx| {
-                    let should_animate = this.active && this.dynamic;
-                    if should_animate {
-                        cx.notify();
-                    }
-                    should_animate
-                }) {
-                    Ok(next) => animate = next,
-                    Err(_) => break,
-                }
-            }
-            Ok(())
-        })
-        .detach();
-    }
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.start_clock(cx);
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // This is a view-driven GPU animation. Request the next frame from inside AppleFluidView
+        // itself so GPUI invalidates only this retained entity and guarantees presentation on the
+        // next vsync. A timer + cx.notify() can be coalesced/replayed by the retained scene and can
+        // leave custom-mesh draw parameters stuck on the first frame.
+        if self.active && self.dynamic {
+            window.request_animation_frame();
+        }
+
         let elapsed = self.clock_started_at.elapsed().as_secs_f32();
         if let Ok(program) = apple_fluid_program() {
             return shader_effect_canvas(
