@@ -1,0 +1,644 @@
+name: Apply bilingual lyrics and stage fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-bilingual-lyrics-stage-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+
+      - name: Apply fixes
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import re
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, got {count}")
+              return text.replace(old, new, 1)
+
+          # ---- lyrics.rs: make translation a first-class timed field ----
+          path = Path('src/lyrics.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'use std::{collections::HashMap, fs, path::Path, sync::Arc};',
+              'use std::{fs, path::Path, sync::Arc};',
+              'lyrics imports',
+          )
+
+          model_start = text.index('#[derive(Clone, Debug, Default, Eq, PartialEq)]\npub struct LyricsDocument')
+          model_end = text.index('/// 自动识别并解码字节流')
+          model = r'''#[derive(Clone, Debug, Default, Eq, PartialEq)]
+          pub struct LyricsDocument {
+              pub plain: Option<String>,
+              pub synced: Option<String>,
+              pub translation: Option<String>,
+              pub source: String,
+              timed: Arc<[LyricLine]>,
+          }
+
+          #[derive(Clone, Debug, Eq, PartialEq)]
+          pub struct LyricLine {
+              pub timestamp_ms: u64,
+              pub text: String,
+              pub translation: Option<String>,
+          }
+
+          impl LyricsDocument {
+              pub fn from_sources(
+                  plain: Option<String>,
+                  synced: Option<String>,
+                  translation: Option<String>,
+                  source: impl Into<String>,
+              ) -> Self {
+                  let source = source.into();
+                  let timed = match (synced.as_deref(), translation.as_deref()) {
+                      (Some(original), Some(translated)) => pair_translated_lrc(original, translated),
+                      (Some(original), None) if is_legacy_bilingual_source(&source) => {
+                          collapse_legacy_bilingual_lrc(original)
+                      }
+                      (Some(original), None) => parse_lrc(original),
+                      (None, Some(translated)) => parse_lrc(translated),
+                      (None, None) => Vec::new(),
+                  }
+                  .into();
+                  Self {
+                      plain,
+                      synced,
+                      translation,
+                      source,
+                      timed,
+                  }
+              }
+
+              #[allow(dead_code)]
+              pub fn best_text(&self) -> Option<&str> {
+                  self.synced
+                      .as_deref()
+                      .or(self.translation.as_deref())
+                      .or(self.plain.as_deref())
+              }
+
+              pub fn timed_lines(&self) -> &[LyricLine] {
+                  &self.timed
+              }
+
+              pub fn has_translation(&self) -> bool {
+                  self.timed.iter().any(|line| {
+                      line.translation
+                          .as_deref()
+                          .is_some_and(|translation| !translation.trim().is_empty())
+                  })
+              }
+          }
+
+          '''
+          text = text[:model_start] + model + text[model_end:]
+
+          merge_start = text.index('pub fn merge_translated_lrc')
+          parse_marker = text.index('/// 全功能 LRC 解析引擎')
+          helpers = r'''const TRANSLATION_SYNC_TOLERANCE_MS: u64 = 900;
+
+          fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
+              let mut primary = parse_lrc(original);
+              let translations = parse_lrc(translated);
+              let mut used = vec![false; translations.len()];
+
+              for line in &mut primary {
+                  let best = translations
+                      .iter()
+                      .enumerate()
+                      .filter(|(index, candidate)| {
+                          !used[*index]
+                              && candidate
+                                  .timestamp_ms
+                                  .abs_diff(line.timestamp_ms)
+                                  <= TRANSLATION_SYNC_TOLERANCE_MS
+                      })
+                      .min_by_key(|(_, candidate)| candidate.timestamp_ms.abs_diff(line.timestamp_ms))
+                      .map(|(index, _)| index);
+                  if let Some(index) = best {
+                      used[index] = true;
+                      let value = translations[index].text.trim();
+                      if !value.is_empty() && value != line.text.trim() {
+                          line.translation = Some(value.to_owned());
+                      }
+                  }
+              }
+
+              for (index, translation) in translations.into_iter().enumerate() {
+                  if !used[index] && !translation.text.trim().is_empty() {
+                      primary.push(translation);
+                  }
+              }
+              primary.sort_by_key(|line| line.timestamp_ms);
+              primary
+          }
+
+          fn is_legacy_bilingual_source(source: &str) -> bool {
+              matches!(source, "网易云音乐" | "QQ音乐" | "缓存")
+          }
+
+          fn collapse_legacy_bilingual_lrc(input: &str) -> Vec<LyricLine> {
+              let mut collapsed: Vec<LyricLine> = Vec::new();
+              for line in parse_lrc(input) {
+                  if let Some(previous) = collapsed.last_mut()
+                      && previous.timestamp_ms == line.timestamp_ms
+                      && previous.translation.is_none()
+                      && previous.text.trim() != line.text.trim()
+                  {
+                      previous.translation = Some(line.text);
+                      continue;
+                  }
+                  collapsed.push(line);
+              }
+              collapsed
+          }
+
+          '''
+          text = text[:merge_start] + helpers + text[parse_marker:]
+
+          text = replace_once(
+              text,
+              '''            lines.push(LyricLine {
+                          timestamp_ms: final_ts,
+                          text: text.clone(),
+                      });''',
+              '''            lines.push(LyricLine {
+                          timestamp_ms: final_ts,
+                          text: text.clone(),
+                          translation: None,
+                      });''',
+              'LyricLine parser construction',
+          )
+
+          old_test = r'''    #[test]
+              fn translated_lrc_is_kept_on_the_same_timeline() {
+                  let document = LyricsDocument::from_sources(
+                      None,
+                      Some("[00:01.00]你好\n[00:02.00]再见".into()),
+                      Some("[00:01.00]Hello\n[00:02.00]Goodbye".into()),
+                      "测试",
+                  );
+                  assert_eq!(document.timed_lines()[0].text, "你好");
+                  assert_eq!(document.timed_lines()[1].text, "Hello");
+                  assert_eq!(document.timed_lines()[2].text, "再见");
+                  assert_eq!(document.timed_lines()[3].text, "Goodbye");
+              }'''
+          new_test = r'''    #[test]
+              fn translated_lrc_is_paired_on_the_same_timeline() {
+                  let document = LyricsDocument::from_sources(
+                      None,
+                      Some("[00:01.00]Hello\n[00:02.00]Goodbye".into()),
+                      Some("[00:01.08]你好\n[00:02.12]再见".into()),
+                      "测试",
+                  );
+                  assert_eq!(document.timed_lines().len(), 2);
+                  assert_eq!(document.timed_lines()[0].text, "Hello");
+                  assert_eq!(
+                      document.timed_lines()[0].translation.as_deref(),
+                      Some("你好")
+                  );
+                  assert_eq!(document.timed_lines()[1].text, "Goodbye");
+                  assert_eq!(
+                      document.timed_lines()[1].translation.as_deref(),
+                      Some("再见")
+                  );
+                  assert!(document.has_translation());
+              }
+
+              #[test]
+              fn legacy_merged_provider_lyrics_restore_translation() {
+                  let document = LyricsDocument::from_sources(
+                      None,
+                      Some("[00:01.00]Hello\n[00:01.00]你好".into()),
+                      None,
+                      "网易云音乐",
+                  );
+                  assert_eq!(document.timed_lines().len(), 1);
+                  assert_eq!(document.timed_lines()[0].text, "Hello");
+                  assert_eq!(
+                      document.timed_lines()[0].translation.as_deref(),
+                      Some("你好")
+                  );
+              }'''
+          text = replace_once(text, old_test, new_test, 'lyrics translation tests')
+          path.write_text(text, encoding='utf-8')
+
+          # ---- library.rs: persist translation separately, migrate existing DBs ----
+          path = Path('src/library.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '''                    "SELECT checked_online, lyrics_plain, lyrics_synced, lyrics_source
+                               FROM track_enrichment WHERE track_id = ?1",''',
+              '''                    "SELECT checked_online, lyrics_plain, lyrics_synced, lyrics_translation, lyrics_source
+                               FROM track_enrichment WHERE track_id = ?1",''',
+              'enrichment select',
+          )
+          text = replace_once(
+              text,
+              '''                        let source: Option<String> = row.get(3)?;
+                                  Ok(StoredEnrichment {
+                                      checked_online: row.get::<_, i64>(0)? != 0,
+                                      lyrics: (plain.is_some() || synced.is_some()).then(|| {
+                                          LyricsDocument::from_sources(
+                                              plain.clone(),
+                                              synced,
+                                              None,
+                                              source.unwrap_or_else(|| "缓存".into()),
+                                          )
+                                      }),
+                                  })''',
+              '''                        let translation: Option<String> = row.get(3)?;
+                                  let source: Option<String> = row.get(4)?;
+                                  Ok(StoredEnrichment {
+                                      checked_online: row.get::<_, i64>(0)? != 0,
+                                      lyrics: (plain.is_some() || synced.is_some() || translation.is_some())
+                                          .then(|| {
+                                              LyricsDocument::from_sources(
+                                                  plain.clone(),
+                                                  synced,
+                                                  translation,
+                                                  source.unwrap_or_else(|| "缓存".into()),
+                                              )
+                                          }),
+                                  })''',
+              'enrichment row decode',
+          )
+          text = replace_once(
+              text,
+              '''                    lyrics_plain, lyrics_synced, lyrics_source, updated_at
+                           ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)
+                           ON CONFLICT(track_id) DO UPDATE SET
+                              checked_online = 1,
+                              recording_mbid = COALESCE(excluded.recording_mbid, recording_mbid),
+                              release_mbid = COALESCE(excluded.release_mbid, release_mbid),
+                              lyrics_plain = COALESCE(excluded.lyrics_plain, lyrics_plain),
+                              lyrics_synced = COALESCE(excluded.lyrics_synced, lyrics_synced),
+                              lyrics_source = COALESCE(excluded.lyrics_source, lyrics_source),
+                              updated_at = excluded.updated_at",''',
+              '''                    lyrics_plain, lyrics_synced, lyrics_translation, lyrics_source, updated_at
+                           ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                           ON CONFLICT(track_id) DO UPDATE SET
+                              checked_online = 1,
+                              recording_mbid = COALESCE(excluded.recording_mbid, recording_mbid),
+                              release_mbid = COALESCE(excluded.release_mbid, release_mbid),
+                              lyrics_plain = COALESCE(excluded.lyrics_plain, lyrics_plain),
+                              lyrics_synced = COALESCE(excluded.lyrics_synced, lyrics_synced),
+                              lyrics_translation = COALESCE(excluded.lyrics_translation, lyrics_translation),
+                              lyrics_source = COALESCE(excluded.lyrics_source, lyrics_source),
+                              updated_at = excluded.updated_at",''',
+              'enrichment upsert sql',
+          )
+          text = replace_once(
+              text,
+              '''                    lyrics.and_then(|lyrics| lyrics.synced.as_deref()),
+                              lyrics.map(|lyrics| lyrics.source.as_str()),
+                              now_unix(),''',
+              '''                    lyrics.and_then(|lyrics| lyrics.synced.as_deref()),
+                              lyrics.and_then(|lyrics| lyrics.translation.as_deref()),
+                              lyrics.map(|lyrics| lyrics.source.as_str()),
+                              now_unix(),''',
+              'enrichment upsert params',
+          )
+          text = replace_once(
+              text,
+              '''            lyrics_plain TEXT,
+                      lyrics_synced TEXT,
+                      lyrics_source TEXT,''',
+              '''            lyrics_plain TEXT,
+                      lyrics_synced TEXT,
+                      lyrics_translation TEXT,
+                      lyrics_source TEXT,''',
+              'schema translation column',
+          )
+          text = replace_once(
+              text,
+              '''    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN modified_at INTEGER", []);
+              Ok(())''',
+              '''    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN modified_at INTEGER", []);
+              let _ = connection.execute(
+                  "ALTER TABLE track_enrichment ADD COLUMN lyrics_translation TEXT",
+                  [],
+              );
+              Ok(())''',
+              'schema migration',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          # ---- player_stage.rs: natural-height bilingual rows + visible GPU drift ----
+          path = Path('src/ui/player_stage.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, CompositeLayerExt as _,\n    Context, Easing,',
+              '    Animation, AnimationDirection, AnimationExt as _, AnimationProperty, AnimationSpec,\n    CompositeLayerExt as _, Context, Easing,',
+              'animation imports',
+          )
+          text = replace_once(
+              text,
+              '    prelude::*, px, radians, relative, rgb,',
+              '    point, prelude::*, px, relative, rgb,',
+              'animation geometry imports',
+          )
+          text = replace_once(
+              text,
+              'const STATE_PITCH: f32 = 60.0;\nconst ROW_PITCH: f32 = 68.0;\nconst WINDOW_RADIUS: usize = 7;\n\n',
+              '',
+              'legacy lyric constants',
+          )
+
+          stage_start = text.index('fn stage_lyrics(')
+          controls_start = text.index('fn stage_controls(')
+          stage = r'''fn stage_lyrics(
+              app: &MusicApp,
+              lyrics: &[LyricLine],
+              position_ms: u64,
+              cx: &mut Context<MusicApp>,
+          ) -> impl IntoElement {
+              if lyrics.is_empty() {
+                  return div()
+                      .flex_1()
+                      .h_full()
+                      .flex()
+                      .flex_col()
+                      .items_center()
+                      .justify_center()
+                      .gap_3()
+                      .child(themed_icon(
+                          lucide_icons::icon_music(),
+                          36.0,
+                          hsla(0.0, 0.0, 1.0, 0.25),
+                      ))
+                      .child(
+                          div()
+                              .text_lg()
+                              .text_color(hsla(0.0, 0.0, 1.0, 0.50))
+                              .child("暂无同步滚动歌词"),
+                      )
+                      .child(
+                          div()
+                              .text_sm()
+                              .text_color(hsla(0.0, 0.0, 1.0, 0.30))
+                              .child("支持内嵌 LRC 或联网自动检索"),
+                      )
+                      .into_any_element();
+              }
+
+              let active = lyrics
+                  .iter()
+                  .rposition(|line| line.timestamp_ms <= position_ms)
+                  .unwrap_or(0);
+
+              let mut viewport = div()
+                  .id("stage-lyrics-viewport")
+                  .relative()
+                  .flex_1()
+                  .h_full()
+                  .min_w(px(0.0))
+                  .min_h(px(0.0))
+                  .overflow_y_scroll()
+                  .scrollbar_width(px(0.0))
+                  .track_scroll(&app.lyrics_scroll_handle)
+                  .pt(px(96.0))
+                  .pb(px(112.0))
+                  .pr(px(8.0))
+                  .on_mouse_down(
+                      gpui::MouseButton::Left,
+                      cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
+                  )
+                  .on_scroll_wheel(cx.listener(
+                      |this, _: &gpui::ScrollWheelEvent, _, cx| {
+                          this.lyrics_user_scrolling_until =
+                              Some(Instant::now() + Duration::from_secs(3));
+                          this.wake_stage_controls(cx);
+                      },
+                  ));
+
+              for (index, line) in lyrics.iter().enumerate() {
+                  let distance = index.abs_diff(active) as f32;
+                  let focus = (-1.05 * distance).exp().clamp(0.0, 1.0);
+                  let alpha = 0.16 + focus * 0.84;
+                  let size = 18.0 + focus * 12.0;
+                  let timestamp = line.timestamp_ms;
+                  let weight = if focus > 0.72 {
+                      gpui::FontWeight::BOLD
+                  } else if focus > 0.32 {
+                      gpui::FontWeight::SEMIBOLD
+                  } else {
+                      gpui::FontWeight::MEDIUM
+                  };
+
+                  let mut text = div()
+                      .w_full()
+                      .min_w(px(0.0))
+                      .flex()
+                      .flex_col()
+                      .gap_1()
+                      .font_weight(weight)
+                      .child(
+                          div()
+                              .w_full()
+                              .min_w(px(0.0))
+                              .text_size(px(size))
+                              .text_color(hsla(0.0, 0.0, 1.0, alpha))
+                              .child(line.text.clone()),
+                      );
+
+                  if let Some(translation) = line
+                      .translation
+                      .as_deref()
+                      .filter(|translation| !translation.trim().is_empty())
+                  {
+                      text = text.child(
+                          div()
+                              .w_full()
+                              .min_w(px(0.0))
+                              .text_size(px((size * 0.66).max(13.0)))
+                              .text_color(hsla(0.0, 0.0, 1.0, alpha * 0.68))
+                              .child(translation.to_owned()),
+                      );
+                  }
+
+                  viewport = viewport.child(
+                      div()
+                          .id(SharedString::from(format!("lyric-line-{index}")))
+                          .w_full()
+                          .min_w(px(0.0))
+                          .flex_none()
+                          .pl(px(16.0))
+                          .pr(px(8.0))
+                          .py(px(9.0))
+                          .mb(px(8.0))
+                          .opacity(if index == active { 1.0 } else { 0.96 })
+                          .cursor_pointer()
+                          .hover(|style| style.opacity(1.0))
+                          .child(text)
+                          .on_mouse_down(
+                              gpui::MouseButton::Left,
+                              cx.listener(move |this, _, _, cx| {
+                                  cx.stop_propagation();
+                                  this.seek_to_ms(timestamp, cx);
+                                  this.lyrics_user_scrolling_until = None;
+                                  this.lyrics_scroll_handle
+                                      .scroll_to_top_of_item(index.saturating_sub(2));
+                                  this.wake_stage_controls_immediately(cx);
+                              }),
+                          ),
+                  );
+              }
+
+              viewport.into_any_element()
+          }
+
+          '''
+          text = text[:stage_start] + stage + text[controls_start:]
+
+          text = replace_once(
+              text,
+              '''            17,
+                      1.0,
+                      animate,''',
+              '''            13,
+                      1.0,
+                      88.0,
+                      52.0,
+                      animate,''',
+              'fluid A args',
+          )
+          text = replace_once(
+              text,
+              '''            23,
+                      -1.0,
+                      animate,''',
+              '''            17,
+                      -1.0,
+                      72.0,
+                      68.0,
+                      animate,''',
+              'fluid B args',
+          )
+          text = replace_once(
+              text,
+              '''            31,
+                      1.0,
+                      animate,''',
+              '''            23,
+                      1.0,
+                      94.0,
+                      46.0,
+                      animate,''',
+              'fluid C args',
+          )
+          text = replace_once(
+              text,
+              '''    direction: f32,
+              animate: bool,''',
+              '''    direction: f32,
+              drift_x: f32,
+              drift_y: f32,
+              animate: bool,''',
+              'orbit signature',
+          )
+
+          old_animation = r'''    // The child is deliberately off-center, so a retained compositor rotation becomes visible
+              // orbital drift instead of spinning an almost symmetric blob in place. 17/23/31 are pairwise
+              // coprime, keeping a long composite repeat period without a CPU animation loop.
+              // Linear easing keeps angular velocity constant across revolution boundaries.
+              let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
+                  .repeat(RepeatMode::Forever)
+                  .ease(Easing::Linear);
+              let rotation = Animation::from_spec(spec).with_property(AnimationProperty::rotation(
+                  radians(0.0),
+                  radians(std::f32::consts::TAU * direction),
+              ));
+
+              orbit
+                  .with_animation(animation_id, rotation, |element, _| element)
+                  .into_any_element()'''
+          new_animation = r'''    // Move the cached blur surface itself. Rotation around a large nearly symmetric blur can be
+              // technically active yet visually imperceptible; a bounded compositor translation produces an
+              // immediately visible Apple Music-style drift without relayout or re-running the Gaussian blur.
+              let spec = AnimationSpec::new(Duration::from_secs(period_seconds))
+                  .repeat(RepeatMode::Forever)
+                  .direction(AnimationDirection::Alternate)
+                  .ease(Easing::Linear);
+              let dx = drift_x * direction;
+              let translation = Animation::from_spec(spec).with_property(
+                  AnimationProperty::translation(
+                      point(px(-dx), px(-drift_y)),
+                      point(px(dx), px(drift_y)),
+                  ),
+              );
+
+              orbit
+                  .with_animation(animation_id, translation, |element, _| element)
+                  .into_any_element()'''
+          text = replace_once(text, old_animation, new_animation, 'fluid animation body')
+          text = text.replace(
+              'rotates local orbit containers; no Translation property is used, so playback no longer turns\n    // three custom-eased animations into full-viewport damage every frame.',
+              'moves cached local orbit layers with bounded renderer-owned translations; the Gaussian surfaces\n    // stay retained while only their compositor transforms advance.',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          # ---- shell.rs: do not fight manual lyric scrolling; keep active line near center ----
+          path = Path('src/ui/shell.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '''                        if !in_user_scroll {
+                                      self.lyrics_target_offset = (current_idx as f32) * 60.0;
+                                  }
+                                  self.lyrics_scroll_handle.scroll_to_item(current_idx);''',
+              '''                        if !in_user_scroll {
+                                      self.lyrics_target_offset = (current_idx as f32) * 60.0;
+                                      self.lyrics_scroll_handle
+                                          .scroll_to_top_of_item(current_idx.saturating_sub(2));
+                                  }''',
+              'lyric auto scroll',
+          )
+          path.write_text(text, encoding='utf-8')
+          '@ | Set-Content -Encoding utf8 patch.py
+          python patch.py
+          Remove-Item patch.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Verify diff
+        shell: pwsh
+        run: |
+          git diff --check
+          git diff --stat
+
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lyrics.rs src/library.rs src/ui/player_stage.rs src/ui/shell.rs
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m 'fix(player): 修复双语歌词布局与流体漂移'
+          git push origin HEAD:main
