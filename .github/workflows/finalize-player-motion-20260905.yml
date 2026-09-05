@@ -1,0 +1,52 @@
+name: Finalize player motion fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/finalize-player-motion-20260905.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply final source patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/recover-player-motion-20260905.yml').read_text(encoding='utf-8')
+          marker = "          python3 <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n          PY", start)
+          lines = source[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, '<player-motion-patch>', 'exec'))
+          PY
+          cargo fmt --all
+
+      - name: Commit source fix and remove temporary workflows
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/fix-player-motion-20260905.yml
+          rm -f .github/workflows/recover-player-motion-20260905.yml
+          rm -f .github/workflows/windows-player-motion-20260905.yml
+          rm -f .github/workflows/finalize-player-motion-20260905.yml
+          git add src/ui/player_stage.rs src/ui/shell.rs .github/workflows/
+          git commit -m "fix(player): 恢复歌词动效并增强流体背景"
+          git push origin HEAD:main
