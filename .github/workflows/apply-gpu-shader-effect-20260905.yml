@@ -27,7 +27,9 @@ jobs:
 
       - name: Apply source patch
         shell: bash
-        run: python .github/scripts/apply_gpu_shader_effect_20260905.py
+        run: |
+          python .github/scripts/apply_gpu_shader_effect_20260905.py
+          cargo fmt --all
 
       - name: Format
         shell: bash
