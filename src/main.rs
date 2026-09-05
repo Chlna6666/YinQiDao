@@ -1,5 +1,6 @@
 mod artwork;
 mod audio;
+mod gpu;
 mod library;
 pub mod logger;
 mod lyrics;

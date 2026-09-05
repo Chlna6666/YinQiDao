@@ -4,18 +4,17 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationDirection, AnimationExt as _, AnimationProperty, AnimationSpec,
-    CompositeLayerExt as _, Context, Easing,
-    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, RepeatMode, SharedString, Transition,
-    TransitionProperty,
-    StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
-    point, prelude::*, px, relative, rgb,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing,
+    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Transition,
+    TransitionProperty, StatefulInteractiveElement as _, div, hsla, img, linear_color_stop,
+    linear_gradient, point, prelude::*, px, rgb,
 };
 use lucide_gpui::icons as lucide_icons;
 
 use crate::{
     artwork::ArtworkPalette,
     audio::PlayerCommand,
+    gpu::{apple_fluid_params, apple_fluid_program, shader_effect_canvas},
     lyrics::LyricLine,
     model::{PlaybackState, PlayerSnapshot, Track},
 };
@@ -37,7 +36,6 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
     let track = snapshot.current_track.as_ref();
     let id = track.map(|track| track.id);
     let artwork = id.and_then(|id| app.artworks.get(&id).cloned());
-    let blurred = id.and_then(|id| app.blurred_artworks.get(&id).cloned());
     let palette = id.and_then(|id| app.artwork_palettes.get(&id));
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
@@ -57,11 +55,9 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         .on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))
         .child(ambient_background(
             id,
-            artwork.clone(),
-            blurred,
             palette,
             app.config.dynamic_blur,
-            app.config.blur_radius,
+            snapshot.position_ms,
         ))
         .child(
             div()
@@ -586,72 +582,29 @@ fn control_button(
 
 fn ambient_background(
     id: Option<i64>,
-    artwork: Option<Arc<[u8]>>,
-    blurred: Option<Arc<[u8]>>,
     palette: Option<&ArtworkPalette>,
     dynamic: bool,
-    _blur_radius: f32,
-) -> impl IntoElement {
+    position_ms: u64,
+) -> gpui::AnyElement {
     let id = id.unwrap_or_default();
     let (c1, c2, c3, dark, mask) = ambient_palette(id, palette);
-    let mut root = div().absolute().inset_0().overflow_hidden().bg(dark);
+    let root = div()
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .bg(dark);
 
-    if let Some(bytes) = blurred.or(artwork) {
-        // Stable base: the 48x48 ambient texture is already heavily blurred off the render path.
-        // Physical overscan (rather than a style scale transform) guarantees that no compositor
-        // clip edge can enter the viewport.
-        root = root.child(
-            div()
-                .absolute()
-                .left(relative(-0.24))
-                .top(relative(-0.30))
-                .w(relative(1.48))
-                .h(relative(1.60))
-                .opacity(0.52)
-                .child(
-                    img(EncodedImageBytes::new(ImageFormat::Png, bytes.clone()))
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-                .composite_layer(),
-        );
-
-        // The two moving layers contain no blur/filter at all. Each animation owns exactly one
-        // Translation property whose vector contains both X and Y, so GPUI can keep the entire
-        // motion on the retained compositor path without creating per-frame offscreen surfaces.
-        root = root
-            .child(ambient_texture_motion(
-                "stage-ambient-primary",
-                bytes.clone(),
-                -0.34,
-                -0.42,
-                1.68,
-                1.84,
-                0.30,
-                54.0,
-                34.0,
-                24,
-                false,
-                dynamic,
+    if let Ok(program) = apple_fluid_program() {
+        return root
+            .child(shader_effect_canvas(
+                program,
+                apple_fluid_params(id, palette, position_ms, dynamic),
             ))
-            .child(ambient_texture_motion(
-                "stage-ambient-secondary",
-                bytes,
-                -0.46,
-                -0.52,
-                1.92,
-                2.04,
-                0.18,
-                42.0,
-                -58.0,
-                31,
-                true,
-                dynamic,
-            ));
+            .into_any_element();
     }
 
-    // Full-screen gradients have no local layer bounds. GPUI's helper supports two stops, so the
-    // third palette colour is composed as another full-screen gradient instead of a local blob.
+    // Runtime WGSL validation/backend pipeline failures retain a cheap static fallback rather
+    // than re-entering the former realtime blur path.
     root
         .child(
             div()
@@ -659,8 +612,8 @@ fn ambient_background(
                 .inset_0()
                 .bg(linear_gradient(
                     128.0,
-                    linear_color_stop(c1.opacity(0.18), 0.0),
-                    linear_color_stop(c2.opacity(0.12), 1.0),
+                    linear_color_stop(c1.opacity(0.62), 0.0),
+                    linear_color_stop(c2.opacity(0.42), 1.0),
                 )),
         )
         .child(
@@ -669,82 +622,9 @@ fn ambient_background(
                 .inset_0()
                 .bg(linear_gradient(
                     306.0,
-                    linear_color_stop(c3.opacity(0.13), 0.0),
-                    linear_color_stop(c1.opacity(0.025), 1.0),
+                    linear_color_stop(c3.opacity(0.28), 0.0),
+                    linear_color_stop(dark.opacity(mask.clamp(0.24, 0.52)), 1.0),
                 )),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(linear_gradient(
-                    180.0,
-                    linear_color_stop(
-                        hsla(0.0, 0.0, 0.008, (mask * 0.18).clamp(0.06, 0.16)),
-                        0.0,
-                    ),
-                    linear_color_stop(
-                        hsla(0.0, 0.0, 0.002, (mask * 0.48).clamp(0.20, 0.40)),
-                        1.0,
-                    ),
-                )),
-        )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ambient_texture_motion(
-    animation_id: &'static str,
-    bytes: Arc<[u8]>,
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-    opacity: f32,
-    drift_x: f32,
-    drift_y: f32,
-    period_seconds: u64,
-    reverse: bool,
-    animate: bool,
-) -> gpui::AnyElement {
-    let layer = div()
-        .absolute()
-        .left(relative(left))
-        .top(relative(top))
-        .w(relative(width))
-        .h(relative(height))
-        .opacity(opacity)
-        .child(
-            img(EncodedImageBytes::new(ImageFormat::Png, bytes))
-                .size_full()
-                .object_fit(ObjectFit::Cover),
-        )
-        .composite_layer();
-
-    if !animate {
-        return layer.into_any_element();
-    }
-
-    let direction = if reverse {
-        AnimationDirection::AlternateReverse
-    } else {
-        AnimationDirection::Alternate
-    };
-    let motion = Animation::from_spec(
-        AnimationSpec::new(Duration::from_secs(period_seconds))
-            .repeat(RepeatMode::Forever)
-            .direction(direction)
-            .ease(Easing::InOutCubic),
-    )
-    .with_property(AnimationProperty::translation(
-        point(px(-drift_x), px(-drift_y)),
-        point(px(drift_x), px(drift_y)),
-    ));
-
-    layer
-        .with_animation(
-            SharedString::from(animation_id),
-            motion,
-            |element, _| element,
         )
         .into_any_element()
 }
