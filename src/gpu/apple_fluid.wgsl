@@ -47,12 +47,16 @@ fn hash21(point: vec2<f32>, seed: f32) -> f32 {
 fn value_noise(point: vec2<f32>, seed: f32) -> f32 {
     let cell = floor(point);
     let local = fract(point);
-    let smooth = local * local * (vec2<f32>(3.0) - 2.0 * local);
+    let interpolation_curve = local * local * (vec2<f32>(3.0) - 2.0 * local);
     let a = hash21(cell, seed);
     let b = hash21(cell + vec2<f32>(1.0, 0.0), seed);
     let c = hash21(cell + vec2<f32>(0.0, 1.0), seed);
     let d = hash21(cell + vec2<f32>(1.0, 1.0), seed);
-    return mix(mix(a, b, smooth.x), mix(c, d, smooth.x), smooth.y);
+    return mix(
+        mix(a, b, interpolation_curve.x),
+        mix(c, d, interpolation_curve.x),
+        interpolation_curve.y,
+    );
 }
 
 fn octave_transform(point: vec2<f32>) -> vec2<f32> {
@@ -87,9 +91,6 @@ fn vs_shader_effect(
     let device_position = pixel_position / viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: ShaderEffectVarying;
-    // Fullscreen 2D effects should use the front of the custom-mesh depth range. Using 0.999 made
-    // the stage background vulnerable to being hidden behind normal UI primitives depending on
-    // backend depth state, which looked exactly like the static dark fallback.
     out.position = vec4<f32>(device_position, 0.0, 1.0);
     out.uv = local;
     out.params0 = draw.params[0];
@@ -114,15 +115,10 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let aspect = input.bounds_size.x / max(input.bounds_size.y, 1.0);
     var p = (input.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0) * 2.35;
 
-    // Independent monotonic time advects the palette-noise field. Audio seek/pause never touches
-    // this clock. The rate is intentionally visible: broad structures should travel several
-    // percent of the viewport per second instead of appearing frozen at normal viewing distance.
     let t = time * 0.42 * motion;
     p = rotate2(p, (sin(time * 0.16 + seed * 6.28318) * 0.24) * motion);
     let drift = vec2<f32>(t * 0.34, -t * 0.26);
 
-    // 4-octave Fractional Brownian Motion domain warp. q bends the palette-noise image while the
-    // second FBM sample produces a continuously evolving low-frequency flow field.
     let q = vec2<f32>(
         fbm(p * 1.03 + drift + vec2<f32>(0.0, 0.0), seed + 0.11),
         fbm(p * 1.03 - drift * 0.81 + vec2<f32>(5.2, 1.3), seed + 0.37),
@@ -130,8 +126,6 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let warped = p + q * (1.72 * motion + 0.42);
     let flow = fbm(warped * 1.16 + vec2<f32>(-t * 0.31, t * 0.27), seed + 0.71);
 
-    // Build the noise image exclusively from artwork colors. The three decorrelated samples move
-    // in different directions so boundaries visibly fold and slide rather than simply translating.
     let n0 = value_noise(warped * 1.43 + vec2<f32>(t * 0.49, -t * 0.23), seed + 1.17);
     let n1 = value_noise(
         warped * 1.31 + vec2<f32>(7.1, 2.8) - vec2<f32>(t * 0.31, t * 0.41),
@@ -148,8 +142,6 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let weight_sum = max(w0 + w1 + w2, 0.001);
     var color = (dominant * w0 + secondary * w1 + tertiary * w2) / weight_sum;
 
-    // Keep the field soft, but allow enough luminance movement that similarly colored palettes
-    // still reveal motion instead of looking like one static flat fill.
     let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
     color = mix(vec3<f32>(luminance), color, 1.36);
     color *= 0.86 + (flow - 0.5) * 0.28;
