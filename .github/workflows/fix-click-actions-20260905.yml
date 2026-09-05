@@ -1,0 +1,82 @@
+name: Fix broken click actions
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-click-actions:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Replace fragile composite click handlers
+        shell: pwsh
+        run: |
+          $targets = @(
+            'src/ui/home.rs',
+            'src/ui/library.rs',
+            'src/ui/settings.rs',
+            'src/ui/player.rs'
+          )
+          $total = 0
+          foreach ($path in $targets) {
+            $text = [IO.File]::ReadAllText($path)
+            $needle = '.on_click('
+            $count = ($text.Split($needle).Count - 1)
+            if ($count -gt 0) {
+              $text = $text.Replace($needle, '.on_mouse_down(gpui::MouseButton::Left, ')
+              [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+              Write-Host "$path: migrated $count click handlers"
+              $total += $count
+            }
+          }
+          if ($total -lt 4) { throw "unexpectedly few click handlers migrated: $total" }
+          Write-Host "migrated $total stateful click handlers to direct left-button dispatch"
+
+      - name: Remove redundant stage-root click synthesis
+        shell: pwsh
+        run: |
+          $path = 'src/ui/player_stage.rs'
+          $text = [IO.File]::ReadAllText($path)
+          $old = @'
+          .on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))
+          '@.Trim()
+          if (($text.Split($old).Count - 1) -eq 1) {
+            $text = $text.Replace("`n        $old", '')
+            [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+          }
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Commit real source fix
+        shell: bash
+        run: |
+          git config user.name "Chlna6666"
+          git config user.email "79357769+Chlna6666@users.noreply.github.com"
+          git rm -f --ignore-unmatch \
+            .github/workflows/fix-click-actions-20260905.yml \
+            .github/workflows/finalize-real-player-source-20260905.yml \
+            .github/workflows/validate-real-player-fix-20260905.yml
+          git add src/ui/home.rs src/ui/library.rs src/ui/settings.rs src/ui/player.rs src/ui/player_stage.rs
+          git diff --cached --stat
+          git diff --cached --check
+          git commit -m "fix(ui): 恢复沉浸入口与失效点击交互"
+          git push origin HEAD:main
