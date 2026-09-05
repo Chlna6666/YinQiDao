@@ -111,8 +111,8 @@ new_background = r'''fn ambient_background(
             ));
     }
 
-    // Full-screen gradients have no local layer bounds, so they tint the moving texture without
-    // introducing the rectangular bands produced by blurred child surfaces.
+    // Full-screen gradients have no local layer bounds. GPUI's helper supports two stops, so the
+    // third palette colour is composed as another full-screen gradient instead of a local blob.
     root
         .child(
             div()
@@ -121,8 +121,17 @@ new_background = r'''fn ambient_background(
                 .bg(linear_gradient(
                     128.0,
                     linear_color_stop(c1.opacity(0.18), 0.0),
-                    linear_color_stop(c2.opacity(0.10), 0.56),
-                    linear_color_stop(c3.opacity(0.16), 1.0),
+                    linear_color_stop(c2.opacity(0.12), 1.0),
+                )),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(linear_gradient(
+                    306.0,
+                    linear_color_stop(c3.opacity(0.13), 0.0),
+                    linear_color_stop(c1.opacity(0.025), 1.0),
                 )),
         )
         .child(
