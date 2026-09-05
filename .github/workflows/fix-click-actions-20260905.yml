@@ -37,7 +37,7 @@ jobs:
             if ($count -gt 0) {
               $text = $text.Replace($needle, '.on_mouse_down(gpui::MouseButton::Left, ')
               [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
-              Write-Host "$path: migrated $count click handlers"
+              Write-Host "${path}: migrated $count click handlers"
               $total += $count
             }
           }
@@ -49,15 +49,17 @@ jobs:
         run: |
           $path = 'src/ui/player_stage.rs'
           $text = [IO.File]::ReadAllText($path)
-          $old = @'
-          .on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))
-          '@.Trim()
+          $old = '.on_click(cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)))'
           if (($text.Split($old).Count - 1) -eq 1) {
+            $text = $text.Replace("`r`n        $old", '')
             $text = $text.Replace("`n        $old", '')
             [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
           }
 
-      - name: Format
+      - name: Format source
+        run: cargo fmt --all
+
+      - name: Verify formatting
         run: cargo fmt --all -- --check
 
       - name: Check
