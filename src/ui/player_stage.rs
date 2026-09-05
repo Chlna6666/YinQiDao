@@ -42,6 +42,7 @@ pub(super) fn render(
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
         .map_or(&[][..], |document| document.timed_lines());
+    let fluid_playing = snapshot.state == PlaybackState::Playing;
 
     div()
         .id("stage-player-root")
@@ -54,7 +55,7 @@ pub(super) fn render(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
         )
-        .child(ambient_background(fluid_background))
+        .child(ambient_background(fluid_background, fluid_playing))
         .child(
             div()
                 .absolute()
@@ -579,12 +580,19 @@ fn control_button(
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
-fn ambient_background(fluid_background: gpui::Entity<AppleFluidView>) -> gpui::AnyElement {
-    div()
+fn ambient_background(
+    fluid_background: gpui::Entity<AppleFluidView>,
+    playing: bool,
+) -> gpui::AnyElement {
+    let background = div()
         .absolute()
         .inset_0()
         .overflow_hidden()
-        .bg(rgb(0x0e0f16))
-        .child(fluid_background)
-        .into_any_element()
+        .bg(rgb(0x0e0f16));
+
+    if playing {
+        background.child(fluid_background).into_any_element()
+    } else {
+        background.into_any_element()
+    }
 }
