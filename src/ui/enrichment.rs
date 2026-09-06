@@ -84,7 +84,7 @@ impl MusicApp {
             }
 
             let services = OnlineServices::new(api_key)?;
-            let mut result = if needs_translation_upgrade {
+            let mut result = if needs_translation_upgrade && !needs_artwork_fallback {
                 let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
                     return Ok(EnrichmentOutcome {
                         result: EnrichmentResult::default(),
@@ -98,7 +98,9 @@ impl MusicApp {
                     ..EnrichmentResult::default()
                 }
             } else {
-                services.enrich(&track, lyrics_enabled).await?
+                services
+                    .enrich(&track, lyrics_enabled, needs_artwork_fallback)
+                    .await?
             };
 
             if !metadata_enabled {
@@ -149,6 +151,8 @@ impl MusicApp {
             };
             let persist_library = library.clone();
             // 封面所有权只交给 PreparedArtwork；持久化结果仅复制元数据与歌词，避免复制 PNG。
+            // artwork_key 只有在本地封面明确缺失时才可能存在，因此普通在线识别不会覆盖
+            // 音频内嵌/sidecar 封面的本地缓存身份。
             let persist_result = result.clone();
             let persist_key = artwork_key.clone();
             tokio::task::spawn_blocking(move || {
@@ -175,11 +179,10 @@ impl MusicApp {
                             this.cache_lyrics(track_id, lyrics);
                         }
                         if let Some(artwork) = outcome.artwork {
-                            // Local embedded/sidecar artwork has priority. Online artwork is only
-                            // installed if local loading has not produced a usable cover.
-                            if !this.artworks.contains_key(&track_id)
-                                || this.artwork_missing.contains(&track_id)
-                            {
+                            // Local embedded/sidecar artwork is absolute priority. Even if a stale
+                            // `artwork_missing` marker exists, an already installed local image must
+                            // never be replaced by an online fallback.
+                            if !this.artworks.contains_key(&track_id) {
                                 this.set_artwork_parts(
                                     track_id,
                                     artwork.png,
