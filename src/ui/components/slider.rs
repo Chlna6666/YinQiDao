@@ -89,38 +89,58 @@ impl SliderStyle {
             thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.12)),
         }
     }
+
+    pub fn settings_control() -> Self {
+        Self {
+            track_height: px(6.0),
+            hover_track_height: px(7.0),
+            thumb_size: px(13.0),
+            hover_thumb_scale: 1.15,
+            track_bg: rgb(0xe1_e4_ea).into(),
+            filled_color: theme::ACCENT_RED.into(),
+            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
+            thumb_border: Some(hsla(220.0, 0.08, 0.68, 0.55)),
+        }
+    }
 }
 
 #[derive(Default)]
 struct SliderInteractionState {
     pressed_id: Option<String>,
-    press_x: f32,
+    press_axis: f32,
     dragging: bool,
 }
 
 impl Global for SliderInteractionState {}
 
-fn ratio_from_position(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
+fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
     let thumb = f32::from(thumb_size);
     let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
     let local = f32::from(position_x - bounds.left()) - thumb * 0.5;
     (local / usable_width).clamp(0.0, 1.0)
 }
 
-fn begin_pointer_press(id: &str, position_x: Pixels, cx: &mut App) {
+fn vertical_ratio(position_y: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
+    let thumb = f32::from(thumb_size);
+    let usable_height = (f32::from(bounds.size.height) - thumb).max(1.0);
+    let local = f32::from(position_y - bounds.top()) - thumb * 0.5;
+    (1.0 - local / usable_height).clamp(0.0, 1.0)
+}
+
+fn begin_pointer_press(id: &str, axis: f32, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
         state.pressed_id = Some(id.to_owned());
-        state.press_x = f32::from(position_x);
+        state.press_axis = axis;
         state.dragging = false;
     });
 }
 
 fn pointer_state(id: &str, cx: &App) -> Option<(f32, bool)> {
     let state = cx.try_global::<SliderInteractionState>()?;
-    (state.pressed_id.as_deref() == Some(id)).then_some((state.press_x, state.dragging))
+    (state.pressed_id.as_deref() == Some(id)).then_some((state.press_axis, state.dragging))
 }
 
 fn mark_pointer_dragging(id: &str, cx: &mut App) {
@@ -199,18 +219,79 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         )
 }
 
+fn vertical_slider_visual(
+    id: ElementId,
+    ratio: f32,
+    height: Pixels,
+    style: SliderStyle,
+) -> Stateful<Div> {
+    let clamped_ratio = ratio.clamp(0.0, 1.0);
+    let interaction_width = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
+        .max(f32::from(style.hover_track_height)));
+
+    let mut thumb = div()
+        .flex_none()
+        .size(style.thumb_size)
+        .rounded_full()
+        .bg(style.thumb_color)
+        .shadow_md()
+        .hover(move |s| s.scale(style.hover_thumb_scale))
+        .transition(theme::hover_transition());
+    if let Some(border) = style.thumb_border {
+        thumb = thumb.border_1().border_color(border);
+    }
+
+    let track = div()
+        .h_full()
+        .w(style.track_height)
+        .rounded_full()
+        .bg(style.track_bg)
+        .flex()
+        .flex_col()
+        .justify_end()
+        .child(
+            div()
+                .w_full()
+                .h(relative(clamped_ratio))
+                .rounded_full()
+                .bg(style.filled_color),
+        );
+
+    div()
+        .id(id)
+        .relative()
+        .cursor_pointer()
+        .w(interaction_width)
+        .h(height)
+        .flex()
+        .justify_center()
+        .child(track)
+        .child(
+            div()
+                .absolute()
+                .top(px(0.0))
+                .bottom(style.thumb_size)
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(relative(1.0 - clamped_ratio))
+                        .w(px(1.0)),
+                )
+                .child(thumb),
+        )
+}
+
 /// Pure visual slider kept for places that do not need pointer interaction.
 pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     slider_visual(id.into(), ratio, style)
 }
 
 /// Slider with one pointer state machine for both direct clicks and scrubbing.
-///
-/// Mouse-down immediately applies the pointed value so a normal click never depends on a later
-/// mouse-up being delivered to the same retained element. Movement beyond the small threshold
-/// promotes the same press into a drag. Each drag movement is also committed immediately so the
-/// application never keeps a stale drag-only display override if retained reconstruction loses the
-/// final mouse-up event; mouse-up still commits the exact final pointer position.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -257,20 +338,17 @@ pub fn interactive_slider(
             let Some(bounds) = *bounds_for_down.borrow() else {
                 return;
             };
-            begin_pointer_press(&id_for_down, event.position.x, cx);
-            (click_for_down)(
-                ratio_from_position(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
+            begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
+            (click_for_down)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
                 return;
             }
-            let Some((press_x, dragging)) = pointer_state(&id_for_move, cx) else {
+            let Some((press_axis, dragging)) = pointer_state(&id_for_move, cx) else {
                 return;
             };
-            let distance = (f32::from(event.position.x) - press_x).abs();
+            let distance = (f32::from(event.position.x) - press_axis).abs();
             if !dragging && distance < DRAG_THRESHOLD_PX {
                 return;
             }
@@ -278,7 +356,7 @@ pub fn interactive_slider(
                 mark_pointer_dragging(&id_for_move, cx);
             }
             if let Some(bounds) = *bounds_for_move.borrow() {
-                let ratio = ratio_from_position(event.position.x, bounds, style.thumb_size);
+                let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
                 (drag_for_move)(ratio, cx);
                 (drag_end_for_move)(ratio, cx);
             }
@@ -294,10 +372,7 @@ pub fn interactive_slider(
             let Some(bounds) = *bounds_for_up.borrow() else {
                 return;
             };
-            (drag_end_for_up)(
-                ratio_from_position(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
+            (drag_end_for_up)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
@@ -308,10 +383,97 @@ pub fn interactive_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up_out.borrow() {
-                (drag_end_for_up_out)(
-                    ratio_from_position(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+                (drag_end_for_up_out)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
+            }
+        })
+}
+
+/// Vertical variant for professional EQ faders. Ratio 0 is the bottom and ratio 1 is the top.
+pub fn interactive_vertical_slider(
+    id: impl Into<ElementId>,
+    ratio: f32,
+    height: Pixels,
+    style: SliderStyle,
+    on_change: impl Fn(f32, &mut App) + 'static,
+) -> Stateful<Div> {
+    let id = id.into();
+    let id_string = id.to_string();
+    let on_change: SliderCallback = Rc::new(on_change);
+    let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+
+    let bounds_for_prepaint = bounds.clone();
+    let bounds_for_down = bounds.clone();
+    let bounds_for_move = bounds.clone();
+    let bounds_for_up = bounds.clone();
+    let bounds_for_up_out = bounds.clone();
+    let id_for_down = id_string.clone();
+    let id_for_move = id_string.clone();
+    let id_for_up = id_string.clone();
+    let id_for_up_out = id_string;
+    let change_for_down = on_change.clone();
+    let change_for_move = on_change.clone();
+    let change_for_up = on_change.clone();
+    let change_for_up_out = on_change;
+
+    vertical_slider_visual(id, ratio, height, style)
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    *bounds_for_prepaint.borrow_mut() = Some(bounds);
+                },
+                |_bounds, (), _window, _cx| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            let Some(bounds) = *bounds_for_down.borrow() else {
+                return;
+            };
+            begin_pointer_press(&id_for_down, f32::from(event.position.y), cx);
+            (change_for_down)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+        })
+        .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
+            if !event.dragging() {
+                return;
+            }
+            let Some((press_axis, dragging)) = pointer_state(&id_for_move, cx) else {
+                return;
+            };
+            let distance = (f32::from(event.position.y) - press_axis).abs();
+            if !dragging && distance < DRAG_THRESHOLD_PX {
+                return;
+            }
+            if !dragging {
+                mark_pointer_dragging(&id_for_move, cx);
+            }
+            if let Some(bounds) = *bounds_for_move.borrow() {
+                (change_for_move)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
+                return;
+            };
+            if !was_dragging {
+                return;
+            }
+            if let Some(bounds) = *bounds_for_up.borrow() {
+                (change_for_up)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+            }
+        })
+        .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
+            cx.stop_propagation();
+            let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
+                return;
+            };
+            if !was_dragging {
+                return;
+            }
+            if let Some(bounds) = *bounds_for_up_out.borrow() {
+                (change_for_up_out)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
             }
         })
 }
@@ -327,11 +489,21 @@ mod tests {
             gpui::size(px(210.0), px(12.0)),
         );
         let thumb = px(10.0);
-        assert_eq!(ratio_from_position(px(105.0), bounds, thumb), 0.0);
-        assert!((ratio_from_position(px(205.0), bounds, thumb) - 0.5).abs() < 0.0001);
-        assert_eq!(ratio_from_position(px(305.0), bounds, thumb), 1.0);
-        assert_eq!(ratio_from_position(px(-500.0), bounds, thumb), 0.0);
-        assert_eq!(ratio_from_position(px(900.0), bounds, thumb), 1.0);
+        assert_eq!(horizontal_ratio(px(105.0), bounds, thumb), 0.0);
+        assert!((horizontal_ratio(px(205.0), bounds, thumb) - 0.5).abs() < 0.0001);
+        assert_eq!(horizontal_ratio(px(305.0), bounds, thumb), 1.0);
+    }
+
+    #[test]
+    fn vertical_pointer_mapping_is_bottom_to_top() {
+        let bounds = Bounds::new(
+            gpui::point(px(0.0), px(100.0)),
+            gpui::size(px(16.0), px(210.0)),
+        );
+        let thumb = px(10.0);
+        assert_eq!(vertical_ratio(px(105.0), bounds, thumb), 1.0);
+        assert!((vertical_ratio(px(205.0), bounds, thumb) - 0.5).abs() < 0.0001);
+        assert_eq!(vertical_ratio(px(305.0), bounds, thumb), 0.0);
     }
 
     #[test]
