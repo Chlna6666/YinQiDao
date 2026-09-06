@@ -302,15 +302,18 @@ fn version_compatibility_score(expected: &str, actual: &str) -> i32 {
 
 fn version_flags(value: &str) -> u16 {
     let normalized = normalize_text(value);
-    VERSION_TERMS
-        .iter()
-        .filter(|(term, _)| normalized.contains(term))
-        .fold(0, |flags, (_, flag)| flags | *flag)
+    let mut flags = 0;
+    for &(term, flag) in VERSION_TERMS {
+        if normalized.contains(term) {
+            flags |= flag;
+        }
+    }
+    flags
 }
 
 fn normalized_title_base(value: &str) -> String {
     let mut normalized = normalize_text(value);
-    for (term, _) in VERSION_TERMS {
+    for &(term, _) in VERSION_TERMS {
         normalized = normalized.replace(term, "");
     }
     normalized
