@@ -63,8 +63,16 @@ impl OnlineServices {
         })
     }
 
-    pub async fn enrich(&self, track: &Track, fetch_lyrics: bool) -> Result<EnrichmentResult> {
-        if let Some(result) = self.enrich_from_providers(track, fetch_lyrics).await? {
+    pub async fn enrich(
+        &self,
+        track: &Track,
+        fetch_lyrics: bool,
+        fetch_artwork: bool,
+    ) -> Result<EnrichmentResult> {
+        if let Some(result) = self
+            .enrich_from_providers(track, fetch_lyrics, fetch_artwork)
+            .await?
+        {
             return Ok(result);
         }
 
@@ -90,11 +98,15 @@ impl OnlineServices {
         } else {
             None
         };
-        let artwork = if let Some(release_mbid) = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.release_mbid.as_deref())
-        {
-            self.fetch_cover(release_mbid).await?
+        let artwork = if fetch_artwork {
+            if let Some(release_mbid) = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.release_mbid.as_deref())
+            {
+                self.fetch_cover(release_mbid).await?
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -253,9 +265,17 @@ impl OnlineServices {
                 .filter_map(|item| {
                     let identity = lrclib_identity_score(title, artist, album, target_sec, &item);
                     (identity >= LRCLIB_MIN_IDENTITY_SCORE).then(|| {
-                        let quality = if item.synced_lyrics.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                        let quality = if item
+                            .synced_lyrics
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty())
+                        {
                             2
-                        } else if item.plain_lyrics.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                        } else if item
+                            .plain_lyrics
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty())
+                        {
                             1
                         } else {
                             0
@@ -546,7 +566,10 @@ mod tests {
             synced_lyrics: None,
             duration: Some(180.0),
         };
-        assert!(lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &wrong) < LRCLIB_MIN_IDENTITY_SCORE);
+        assert!(
+            lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &wrong)
+                < LRCLIB_MIN_IDENTITY_SCORE
+        );
     }
 
     #[test]
@@ -560,6 +583,9 @@ mod tests {
             synced_lyrics: Some("[00:01.00]故事的小黄花".into()),
             duration: Some(180.8),
         };
-        assert!(lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &matched) >= LRCLIB_MIN_IDENTITY_SCORE);
+        assert!(
+            lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &matched)
+                >= LRCLIB_MIN_IDENTITY_SCORE
+        );
     }
 }
