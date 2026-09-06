@@ -1,12 +1,8 @@
 mod artwork;
 mod audio;
-#[path = "audio_debug_window_v2.rs"]
 mod audio_debug_window;
 mod audio_policy;
-mod desktop_lyrics {
-    use gpui::BorrowAppContext;
-    include!("desktop_lyrics.rs");
-}
+mod desktop_lyrics;
 mod global_shortcuts;
 mod gpu;
 mod hotkeys;
