@@ -45,8 +45,8 @@ impl OnlineServices {
                     tracing::debug!(
                         provider = provider.name(),
                         score = candidate.score,
-                        title = candidate.title,
-                        artist = candidate.artist,
+                        title = %candidate.title,
+                        artist = %candidate.artist,
                         "在线平台提交候选"
                     );
                     candidates.push(candidate);
@@ -70,8 +70,8 @@ impl OnlineServices {
         tracing::debug!(
             provider = matched_provider.name(),
             score = matched.score,
-            title = matched.title,
-            artist = matched.artist,
+            title = %matched.title,
+            artist = %matched.artist,
             "采用全局最佳在线候选"
         );
 
