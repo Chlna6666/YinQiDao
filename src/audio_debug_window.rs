@@ -415,9 +415,17 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
 }
 
 fn chart(height: f32, body: impl IntoElement) -> gpui::AnyElement {
+    // Canvas has no intrinsic size. In a normal flow container it can therefore collapse to a
+    // zero-height/zero-width layout node and all plots appear as a single flat line. A one-cell
+    // grid gives the Canvas an explicit stretch constraint on both axes without relying on the
+    // opaque `impl IntoElement` return type to expose `Styled` methods.
     div()
         .w_full()
         .h(px(height))
+        .grid()
+        .grid_cols(1)
+        .grid_rows(1)
+        .overflow_hidden()
         .child(body)
         .into_any_element()
 }

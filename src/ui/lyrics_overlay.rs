@@ -148,24 +148,25 @@ impl gpui::Render for DesktopLyricsView {
                 }
             }));
 
-        if background_opacity > 0.001 {
-            root = root.child(liquid_glass_surface(background_opacity, interacting));
+        // Do not rely on WindowControlArea::Drag here. The root itself owns an interactive hover
+        // hitbox, and GPUI intentionally lets the frontmost interactive hitbox suppress a drag
+        // control area behind it. Starting the platform move explicitly from the root makes the
+        // unlocked state deterministic while button/menu children keep using stop_propagation().
+        if !config.locked {
+            root = root.on_mouse_down(
+                gpui::MouseButton::Left,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let drag_right = window.bounds().size.width - px(CONTROL_LANE_WIDTH);
+                    if event.position.x < drag_right {
+                        cx.stop_propagation();
+                        window.start_window_move();
+                    }
+                },
+            );
         }
 
-        // Win32 原生 hit-test 由几何上最具体的 WindowControlArea 决定。未锁定时只给
-        // 左侧主体注册 Drag，右侧 224px 永久保留给按钮和菜单；文字绘制层本身不再注册
-        // Client，否则它会覆盖下面的 Drag hitbox，造成“显示未锁定但仍完全拖不动”。
-        if !config.locked {
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(CONTROL_LANE_WIDTH))
-                    .top(px(0.0))
-                    .bottom(px(0.0))
-                    .window_control_area(WindowControlArea::Drag)
-                    .cursor_move(),
-            );
+        if background_opacity > 0.001 {
+            root = root.child(liquid_glass_surface(background_opacity, interacting));
         }
 
         root = root.child(
@@ -224,7 +225,6 @@ impl gpui::Render for DesktopLyricsView {
                     "desktop-lyrics-close",
                     "×",
                     move |_, window, cx| {
-                        // 先撤销 visible 与唯一 handle，再请求 native close，周期同步服务不会复活窗口。
                         let _ = close_parent.update(cx, |app, app_cx| {
                             app.desktop_lyrics_window_closed(app_cx);
                         });
