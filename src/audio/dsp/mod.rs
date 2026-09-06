@@ -171,7 +171,10 @@ impl AudioProcessor {
         self.spatial.process(output);
         let gain = perceptual_volume_gain(self.volume);
         for sample in output {
-            *sample = (*sample * gain).tanh();
+            // Normal PCM must stay linear. The previous unconditional tanh both coloured every
+            // sample and was expensive enough to increase underrun risk during dual-stream
+            // crossfades. Only constrain actual overs here; output conversion also guards bounds.
+            *sample = (*sample * gain).clamp(-1.0, 1.0);
         }
     }
 }
