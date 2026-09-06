@@ -13,7 +13,7 @@ all = "warn"
 pedantic = "warn"
 
 [dependencies]
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "c2a9b3e9da292ee0f58d6c1e47f1cc3b35dbf23d", default-features = false }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "f3e19493d3d599e7075a67570af5faa5b3a9f1cf", default-features = false }
 anyhow = "1.0.100"
 
 [build-dependencies]
