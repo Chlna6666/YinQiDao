@@ -135,10 +135,6 @@ impl EqProcessor {
         self.sample_rate as u32
     }
 
-    pub(crate) fn settings(&self) -> &EqSettings {
-        &self.settings
-    }
-
     pub(crate) fn set_settings(&mut self, settings: EqSettings) {
         self.settings = clamp_eq(settings);
         self.rebuild();
