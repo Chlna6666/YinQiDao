@@ -20,15 +20,19 @@ use ringbuf::{
 };
 use thiserror::Error;
 
-use crate::model::{
-    EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SpatialSettings, Track, TrackId,
-    TrackTransitionSettings, TransitionMode,
+use crate::{
+    audio_policy::audio_runtime_policy,
+    model::{
+        EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SmartAudioSettings,
+        SpatialSettings, Track, TrackId, TrackTransitionSettings, TransitionMode,
+    },
 };
 
 use super::{
     command_queue::CommandQueue,
     decoder::{DecodeError, DecoderStream},
     dsp::{AudioProcessor, perceptual_volume_gain},
+    smart_profile::resolve_smart_audio,
     transition::{SmartCue, analyze_smart_cue, equal_power_gains, fade_in_gain, fade_out_gain},
 };
 
@@ -54,6 +58,7 @@ pub enum PlayerCommand {
     SetVolume(f32),
     SetEq(EqSettings),
     SetSpatial(SpatialSettings),
+    SetSmartAudio(SmartAudioSettings),
     SetTransition(TrackTransitionSettings),
     #[allow(dead_code)]
     SetOutputDevice(DeviceId),
@@ -350,8 +355,7 @@ impl CrossfadeState {
         }
         if self.buffer_cursor >= 8_192 {
             let remaining = self.buffered_samples.len() - self.buffer_cursor;
-            self.buffered_samples
-                .copy_within(self.buffer_cursor.., 0);
+            self.buffered_samples.copy_within(self.buffer_cursor.., 0);
             self.buffered_samples.truncate(remaining);
             self.buffer_cursor = 0;
         }
@@ -377,8 +381,7 @@ impl CrossfadeState {
                 channels,
                 &mut self.chunk_processed,
             );
-            self.buffered_samples
-                .extend_from_slice(&self.chunk_processed);
+            self.buffered_samples.extend_from_slice(&self.chunk_processed);
         }
         Ok(())
     }
@@ -715,6 +718,7 @@ struct AudioWorker {
     processor: AudioProcessor,
     eq_settings: EqSettings,
     spatial_settings: SpatialSettings,
+    smart_audio: SmartAudioSettings,
     transition: TrackTransitionSettings,
     decoded_samples: Vec<f32>,
     processed_samples: Vec<f32>,
@@ -789,6 +793,7 @@ impl AudioWorker {
         let output_rate = config.output_rate;
         let eq_settings = config.eq;
         let spatial_settings = config.spatial;
+        let runtime_policy = audio_runtime_policy();
         Self {
             command_queue,
             event_tx,
@@ -807,7 +812,8 @@ impl AudioWorker {
             ),
             eq_settings,
             spatial_settings,
-            transition: TrackTransitionSettings::default(),
+            smart_audio: runtime_policy.smart_audio,
+            transition: sanitize_transition(runtime_policy.transition),
             decoded_samples: Vec::new(),
             processed_samples: Vec::new(),
             decoder: None,
@@ -965,12 +971,17 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::SetEq(settings) => {
-                self.eq_settings = settings.clone();
-                self.processor.eq.set_settings(settings);
+                self.eq_settings = settings;
+                self.apply_processing_for_current_track();
             }
             PlayerCommand::SetSpatial(settings) => {
-                self.spatial_settings = settings.clone();
-                self.processor.spatial.set_settings(settings);
+                self.spatial_settings = settings;
+                self.apply_processing_for_current_track();
+            }
+            PlayerCommand::SetSmartAudio(settings) => {
+                self.smart_audio = settings;
+                self.apply_processing_for_current_track();
+                self.schedule_next_preload();
             }
             PlayerCommand::SetTransition(settings) => {
                 self.transition = sanitize_transition(settings);
@@ -1027,6 +1038,49 @@ impl AudioWorker {
             }
         }
         true
+    }
+
+    fn effective_processing_for_track(&self, track: &Track) -> (EqSettings, SpatialSettings) {
+        if self.smart_audio.enabled {
+            let decision = resolve_smart_audio(
+                track,
+                &self.eq_settings,
+                &self.spatial_settings,
+                self.smart_audio.intensity,
+            );
+            tracing::debug!(
+                track_id = track.id,
+                profile = decision.profile.label(),
+                confidence = decision.confidence,
+                "智能音效已匹配曲目"
+            );
+            (decision.eq, decision.spatial)
+        } else {
+            (self.eq_settings.clone(), self.spatial_settings.clone())
+        }
+    }
+
+    fn apply_processing_for_track(&mut self, track: &Track) {
+        let (eq, spatial) = self.effective_processing_for_track(track);
+        self.processor.eq.set_settings(eq);
+        self.processor.spatial.set_settings(spatial);
+    }
+
+    fn apply_processing_for_current_track(&mut self) {
+        let track = self.current_track.and_then(|track_id| {
+            self.tracks
+                .read()
+                .ok()
+                .and_then(|tracks| tracks.get(&track_id).cloned())
+        });
+        if let Some(track) = track {
+            self.apply_processing_for_track(&track);
+        } else {
+            self.processor.eq.set_settings(self.eq_settings.clone());
+            self.processor
+                .spatial
+                .set_settings(self.spatial_settings.clone());
+        }
     }
 
     fn cancel_transition_runtime(&mut self) {
@@ -1150,8 +1204,6 @@ impl AudioWorker {
                 self.prefetched_chunk = preloaded.first_chunk;
                 Ok(preloaded.decoder)
             } else {
-                // Smart Cue is a crossfade-only optimization. A normal/gapless open must preserve
-                // an intentional quiet intro instead of silently skipping it.
                 self.prefetched_chunk = None;
                 DecoderStream::open(&track.path)
             }
@@ -1164,6 +1216,7 @@ impl AudioWorker {
         match opened {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
+                self.apply_processing_for_track(&track);
                 if self.shuffle {
                     self.shuffle_played.insert(track_id);
                 }
@@ -1326,6 +1379,15 @@ impl AudioWorker {
         let Some(preloaded) = self.preloader.take(next_track_id) else {
             return Ok(());
         };
+        let next_track = self
+            .tracks
+            .read()
+            .ok()
+            .and_then(|tracks| tracks.get(&next_track_id).cloned());
+        let Some(next_track) = next_track else {
+            return Ok(());
+        };
+        let (next_eq, next_spatial) = self.effective_processing_for_track(&next_track);
         let total_ms = self
             .transition
             .duration_ms
@@ -1342,8 +1404,8 @@ impl AudioWorker {
         self.crossfade = Some(CrossfadeState::new(
             preloaded,
             self.output_rate,
-            self.eq_settings.clone(),
-            self.spatial_settings.clone(),
+            next_eq,
+            next_spatial,
             total_frames,
         ));
         Ok(())
@@ -1593,6 +1655,7 @@ fn can_coalesce_commands(queued: &PlayerCommand, incoming: &PlayerCommand) -> bo
             | (PlayerCommand::SetVolume(_), PlayerCommand::SetVolume(_))
             | (PlayerCommand::SetEq(_), PlayerCommand::SetEq(_))
             | (PlayerCommand::SetSpatial(_), PlayerCommand::SetSpatial(_))
+            | (PlayerCommand::SetSmartAudio(_), PlayerCommand::SetSmartAudio(_))
             | (PlayerCommand::SetTransition(_), PlayerCommand::SetTransition(_))
             | (
                 PlayerCommand::SetOutputDevice(_),
