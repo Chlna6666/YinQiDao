@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    f32::consts::FRAC_PI_2,
     sync::{
         Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -33,7 +34,7 @@ use super::{
     decoder::{DecodeError, DecoderStream},
     dsp::{AudioProcessor, perceptual_volume_gain},
     smart_profile::resolve_smart_audio,
-    transition::{SmartCue, analyze_smart_cue, equal_power_gains, fade_in_gain, fade_out_gain},
+    transition::{SmartCue, analyze_smart_cue, fade_in_gain, fade_out_gain},
 };
 
 pub type DeviceId = String;
@@ -114,6 +115,8 @@ struct PreloadedTrack {
     decoder: DecoderStream,
     first_chunk: Option<PreloadedChunk>,
     smart_cue: SmartCue,
+    use_smart_cue: bool,
+    max_smart_cue_ms: u64,
 }
 
 struct PreloadRequest {
@@ -152,7 +155,11 @@ impl PreloadCoordinator {
         let max_smart_cue_ms = transition.max_smart_cue_ms.clamp(0, 8_000);
 
         if let Ok(ready) = self.ready.lock()
-            && ready.as_ref().is_some_and(|ready| ready.track_id == track.id)
+            && ready.as_ref().is_some_and(|ready| {
+                ready.track_id == track.id
+                    && ready.use_smart_cue == use_smart_cue
+                    && ready.max_smart_cue_ms == max_smart_cue_ms
+            })
         {
             return;
         }
@@ -297,10 +304,19 @@ impl PreloadCoordinator {
                     decoder,
                     first_chunk,
                     smart_cue,
+                    use_smart_cue: request.use_smart_cue,
+                    max_smart_cue_ms: request.max_smart_cue_ms,
                 });
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrossfadeMixOutcome {
+    Continue,
+    Complete,
+    NextExhausted,
 }
 
 struct CrossfadeState {
@@ -312,8 +328,13 @@ struct CrossfadeState {
     chunk_processed: Vec<f32>,
     buffered_samples: Vec<f32>,
     buffer_cursor: usize,
-    elapsed_frames: u64,
+    transition_frames: u64,
+    next_frames_consumed: u64,
     total_frames: u64,
+    current_gain: f32,
+    next_gain: f32,
+    rotation_cos: f32,
+    rotation_sin: f32,
     cue: SmartCue,
 }
 
@@ -325,6 +346,14 @@ impl CrossfadeState {
         spatial: SpatialSettings,
         total_frames: u64,
     ) -> Self {
+        let total_frames = total_frames.max(1);
+        let (current_gain, next_gain, rotation_cos, rotation_sin) = if total_frames <= 1 {
+            (0.0, 1.0, 1.0, 0.0)
+        } else {
+            let step = FRAC_PI_2 / (total_frames - 1) as f32;
+            let (rotation_sin, rotation_cos) = step.sin_cos();
+            (1.0, 0.0, rotation_cos, rotation_sin)
+        };
         Self {
             track_id: preloaded.track_id,
             decoder: preloaded.decoder,
@@ -334,8 +363,13 @@ impl CrossfadeState {
             chunk_processed: Vec::new(),
             buffered_samples: Vec::new(),
             buffer_cursor: 0,
-            elapsed_frames: 0,
-            total_frames: total_frames.max(1),
+            transition_frames: 0,
+            next_frames_consumed: 0,
+            total_frames,
+            current_gain,
+            next_gain,
+            rotation_cos,
+            rotation_sin,
             cue: preloaded.smart_cue,
         }
     }
@@ -386,38 +420,81 @@ impl CrossfadeState {
         Ok(())
     }
 
-    fn mix_into(&mut self, current: &mut [f32]) -> Result<bool, DecodeError> {
+    fn mix_into(&mut self, current: &mut [f32]) -> Result<CrossfadeMixOutcome, DecodeError> {
         self.ensure_samples(current.len())?;
+        // Do not partially fade the current chunk if the next decoder cannot provide a complete
+        // matching chunk. Partial mutation followed by fallback causes an audible gain step.
+        if self.available_samples() < current.len() {
+            return Ok(CrossfadeMixOutcome::NextExhausted);
+        }
+
         let frames = current.len() / 2;
         for frame in 0..frames {
-            let progress = self.elapsed_frames as f32 / self.total_frames as f32;
-            let (current_gain, next_gain) = equal_power_gains(progress);
             let next_index = self.buffer_cursor;
-            let (next_left, next_right) = if next_index + 1 < self.buffered_samples.len() {
-                let values = (
-                    self.buffered_samples[next_index],
-                    self.buffered_samples[next_index + 1],
-                );
-                self.buffer_cursor += 2;
-                values
+            let next_left = self.buffered_samples[next_index];
+            let next_right = self.buffered_samples[next_index + 1];
+            self.buffer_cursor += 2;
+
+            let (current_gain, next_gain) = if self.transition_frames >= self.total_frames {
+                (0.0, 1.0)
             } else {
-                (0.0, 0.0)
+                (self.current_gain, self.next_gain)
             };
             let index = frame * 2;
-            current[index] =
-                (current[index] * current_gain + next_left * next_gain).tanh();
-            current[index + 1] =
-                (current[index + 1] * current_gain + next_right * next_gain).tanh();
-            self.elapsed_frames = self.elapsed_frames.saturating_add(1);
+            current[index] = mix_crossfade_sample(
+                current[index],
+                next_left,
+                current_gain,
+                next_gain,
+            );
+            current[index + 1] = mix_crossfade_sample(
+                current[index + 1],
+                next_right,
+                current_gain,
+                next_gain,
+            );
+            self.next_frames_consumed = self.next_frames_consumed.saturating_add(1);
+
+            if self.transition_frames < self.total_frames {
+                self.transition_frames = self.transition_frames.saturating_add(1);
+                if self.transition_frames >= self.total_frames {
+                    self.current_gain = 0.0;
+                    self.next_gain = 1.0;
+                } else {
+                    let next_current = self.current_gain * self.rotation_cos
+                        - self.next_gain * self.rotation_sin;
+                    let next_next = self.next_gain * self.rotation_cos
+                        + self.current_gain * self.rotation_sin;
+                    self.current_gain = next_current;
+                    self.next_gain = next_next;
+                }
+            }
         }
-        Ok(self.elapsed_frames >= self.total_frames)
+
+        if self.transition_frames >= self.total_frames {
+            Ok(CrossfadeMixOutcome::Complete)
+        } else {
+            Ok(CrossfadeMixOutcome::Continue)
+        }
     }
 
     fn consumed_position(&self, output_rate: u32) -> Duration {
         self.cue.position
             + Duration::from_secs_f64(
-                self.elapsed_frames as f64 / f64::from(output_rate.max(1)),
+                self.next_frames_consumed as f64 / f64::from(output_rate.max(1)),
             )
+    }
+
+    fn remaining_transition_frames(&self) -> u64 {
+        self.total_frames.saturating_sub(self.transition_frames)
+    }
+
+    fn continuation_gain(&self) -> f32 {
+        if self.transition_frames >= self.total_frames {
+            1.0
+        } else {
+            self.next_gain.clamp(0.0, 1.0)
+        }
     }
 
     fn take_remaining_buffer(&mut self) -> Vec<f32> {
@@ -426,6 +503,13 @@ impl CrossfadeState {
         }
         self.buffered_samples.split_off(self.buffer_cursor)
     }
+}
+
+#[inline]
+fn mix_crossfade_sample(current: f32, next: f32, current_gain: f32, next_gain: f32) -> f32 {
+    // Each stream is already limited by its own AudioProcessor. A second tanh here changed the
+    // timbre even at progress=0. Clamp only the rare correlated peak above full scale.
+    (current * current_gain + next * next_gain).clamp(-1.0, 1.0)
 }
 
 pub struct AudioEngine {
@@ -730,6 +814,7 @@ struct AudioWorker {
     transition_carry_position: Option<Duration>,
     fade_in_total_frames: u64,
     fade_in_elapsed_frames: u64,
+    fade_in_start_gain: f32,
     preserve_ring_for_auto_next: bool,
     current_track: Option<TrackId>,
     queue: Arc<Vec<TrackId>>,
@@ -824,6 +909,7 @@ impl AudioWorker {
             transition_carry_position: None,
             fade_in_total_frames: 0,
             fade_in_elapsed_frames: 0,
+            fade_in_start_gain: 0.0,
             preserve_ring_for_auto_next: false,
             current_track: None,
             queue: Arc::new(Vec::new()),
@@ -985,8 +1071,7 @@ impl AudioWorker {
             }
             PlayerCommand::SetTransition(settings) => {
                 self.transition = sanitize_transition(settings);
-                self.crossfade = None;
-                self.transition_carry.clear();
+                self.cancel_transition_runtime();
                 self.schedule_next_preload();
             }
             PlayerCommand::SetOutputDevice(device) => self.emit(PlayerEvent::Error(
@@ -1089,6 +1174,7 @@ impl AudioWorker {
         self.transition_carry_position = None;
         self.fade_in_total_frames = 0;
         self.fade_in_elapsed_frames = 0;
+        self.fade_in_start_gain = 0.0;
         self.preserve_ring_for_auto_next = false;
     }
 
@@ -1231,6 +1317,7 @@ impl AudioWorker {
                 self.current_track = previous_track;
                 self.fade_in_total_frames = 0;
                 self.fade_in_elapsed_frames = 0;
+                self.fade_in_start_gain = 0.0;
                 self.state = PlaybackState::Error;
                 self.emit(PlayerEvent::Error(error.into()));
                 self.emit(PlayerEvent::StateChanged(self.state));
@@ -1242,6 +1329,7 @@ impl AudioWorker {
     fn decode_next(&mut self) -> Result<bool, DecodeError> {
         if !self.transition_carry.is_empty() {
             std::mem::swap(&mut self.processed_samples, &mut self.transition_carry);
+            self.apply_pending_fade_in();
             let position = self
                 .transition_carry_position
                 .take()
@@ -1267,7 +1355,7 @@ impl AudioWorker {
 
         let Some((sample_rate, channels, position)) = decoded else {
             if self.crossfade.is_some() {
-                let next_position = self.complete_crossfade();
+                let next_position = self.complete_crossfade(0, true);
                 return Ok(next_position.is_some());
             }
             return Ok(false);
@@ -1287,12 +1375,27 @@ impl AudioWorker {
 
         let mut reported_position = position;
         if let Some(mut crossfade) = self.crossfade.take() {
-            let complete = crossfade.mix_into(&mut self.processed_samples)?;
-            self.crossfade = Some(crossfade);
-            if complete
-                && let Some(next_position) = self.complete_crossfade()
-            {
-                reported_position = next_position;
+            match crossfade.mix_into(&mut self.processed_samples)? {
+                CrossfadeMixOutcome::Continue => {
+                    self.crossfade = Some(crossfade);
+                }
+                CrossfadeMixOutcome::Complete => {
+                    self.crossfade = Some(crossfade);
+                    let pending_chunk_frames = self.processed_samples.len() as u64 / 2;
+                    if let Some(next_position) =
+                        self.complete_crossfade(pending_chunk_frames, false)
+                    {
+                        reported_position = next_position;
+                    }
+                }
+                CrossfadeMixOutcome::NextExhausted => {
+                    tracing::warn!(
+                        current_track = ?self.current_track,
+                        next_track = crossfade.track_id,
+                        "下一曲预加载流在交叉淡化前耗尽，本次保持当前曲原始 PCM 并回退到普通自动切换"
+                    );
+                    self.crossfade = None;
+                }
             }
         } else {
             self.apply_fade_out(position);
@@ -1387,17 +1490,30 @@ impl AudioWorker {
         let Some(next_track) = next_track else {
             return Ok(());
         };
+        let cue_ms = preloaded.smart_cue.position.as_millis() as u64;
+        let next_available_ms = if next_track.duration_ms > 0 {
+            next_track.duration_ms.saturating_sub(cue_ms)
+        } else {
+            u64::MAX
+        };
+        if next_available_ms == 0 {
+            return Ok(());
+        }
         let (next_eq, next_spatial) = self.effective_processing_for_track(&next_track);
+        // Never extend a late-start transition beyond the actual remaining current audio. The old
+        // MIN_TRANSITION floor could ask for 250 ms with only ~30 ms left and then jump gains at EOF.
         let total_ms = self
             .transition
             .duration_ms
-            .min(remaining_at_chunk_start.max(MIN_TRANSITION_MS));
+            .min(remaining_at_chunk_start)
+            .min(next_available_ms)
+            .max(1);
         let total_frames = total_ms.saturating_mul(u64::from(self.output_rate.max(1))) / 1_000;
         tracing::debug!(
             current_track = ?self.current_track,
             next_track = next_track_id,
             duration_ms = total_ms,
-            cue_ms = preloaded.smart_cue.position.as_millis() as u64,
+            cue_ms,
             cue_confidence = preloaded.smart_cue.confidence,
             "启动自动交叉淡化"
         );
@@ -1411,14 +1527,26 @@ impl AudioWorker {
         Ok(())
     }
 
-    fn complete_crossfade(&mut self) -> Option<Duration> {
+    fn complete_crossfade(
+        &mut self,
+        pending_chunk_frames: u64,
+        current_ended_early: bool,
+    ) -> Option<Duration> {
         let mut crossfade = self.crossfade.take()?;
         let next_track_id = crossfade.track_id;
         let next_position = crossfade.consumed_position(self.output_rate);
-        let carry_position = crossfade.decoder.position();
+        let cue_position = crossfade.cue.position;
+        let remaining_transition_frames = crossfade.remaining_transition_frames();
+        let continuation_gain = crossfade.continuation_gain();
         let carry = crossfade.take_remaining_buffer();
+        let carry_frames = carry.len() as u64 / 2;
+        let carry_end_position = next_position
+            + Duration::from_secs_f64(
+                carry_frames as f64 / f64::from(self.output_rate.max(1)),
+            );
 
         self.emit(PlayerEvent::TrackEnded);
+        self.decode_generation = self.decode_generation.wrapping_add(1);
         self.current_track = Some(next_track_id);
         if let Some(index) = self.queue_position(next_track_id) {
             self.queue_index = index;
@@ -1427,17 +1555,44 @@ impl AudioWorker {
         self.prefetched_chunk = crossfade.prefetched_chunk;
         self.processor = crossfade.processor;
         self.transition_carry = carry;
-        self.transition_carry_position = (!self.transition_carry.is_empty()).then_some(carry_position);
-        self.fade_in_total_frames = 0;
-        self.fade_in_elapsed_frames = 0;
+        self.transition_carry_position =
+            (!self.transition_carry.is_empty()).then_some(carry_end_position);
+
+        if current_ended_early && remaining_transition_frames > 0 {
+            self.fade_in_total_frames = remaining_transition_frames;
+            self.fade_in_elapsed_frames = 0;
+            self.fade_in_start_gain = continuation_gain;
+            tracing::debug!(
+                next_track = next_track_id,
+                remaining_frames = remaining_transition_frames,
+                start_gain = continuation_gain,
+                "当前曲提前 EOF，下一曲从现有交叉增益继续平滑接管"
+            );
+        } else {
+            self.fade_in_total_frames = 0;
+            self.fade_in_elapsed_frames = 0;
+            self.fade_in_start_gain = 0.0;
+        }
+
+        // Worker position is ahead of the hardware by the ring-buffer backlog. Rebase the next-track
+        // clock conservatively so progress does not jump forward before queued crossfade PCM is heard.
+        let queued_frames = self.producer.occupied_len() as u64 / 2;
+        let not_yet_audible = queued_frames.saturating_add(pending_chunk_frames);
+        let next_position_frames = self.duration_to_output_frames(next_position);
+        let cue_frames = self.duration_to_output_frames(cue_position);
+        let audible_next_frames = next_position_frames
+            .saturating_sub(not_yet_audible)
+            .max(cue_frames.min(next_position_frames));
         self.audible_frames
-            .store(self.duration_to_output_frames(next_position), Ordering::Release);
+            .store(audible_next_frames, Ordering::Release);
+        let audible_next_position = self.output_frames_to_duration(audible_next_frames);
+
         self.state = PlaybackState::Playing;
         self.paused.store(false, Ordering::Release);
-        self.emit(PlayerEvent::PositionChanged(next_position));
+        self.emit(PlayerEvent::PositionChanged(audible_next_position));
         self.emit(PlayerEvent::StateChanged(self.state));
         self.schedule_next_preload();
-        Some(next_position)
+        Some(audible_next_position)
     }
 
     fn apply_fade_out(&mut self, position: Duration) {
@@ -1485,8 +1640,14 @@ impl AudioWorker {
         }
         let frames = self.processed_samples.len() / 2;
         for frame in 0..frames {
-            let progress = self.fade_in_elapsed_frames as f32 / self.fade_in_total_frames as f32;
-            let gain = fade_in_gain(progress);
+            let progress = if self.fade_in_total_frames <= 1 {
+                1.0
+            } else {
+                self.fade_in_elapsed_frames as f32 / (self.fade_in_total_frames - 1) as f32
+            };
+            let curved = fade_in_gain(progress);
+            let gain = self.fade_in_start_gain
+                + (1.0 - self.fade_in_start_gain) * curved;
             let index = frame * 2;
             self.processed_samples[index] *= gain;
             self.processed_samples[index + 1] *= gain;
@@ -1494,6 +1655,7 @@ impl AudioWorker {
             if self.fade_in_elapsed_frames >= self.fade_in_total_frames {
                 self.fade_in_total_frames = 0;
                 self.fade_in_elapsed_frames = 0;
+                self.fade_in_start_gain = 0.0;
                 break;
             }
         }
@@ -1509,6 +1671,7 @@ impl AudioWorker {
             self.fade_in_total_frames =
                 fade_in_ms.saturating_mul(u64::from(self.output_rate.max(1))) / 1_000;
             self.fade_in_elapsed_frames = 0;
+            self.fade_in_start_gain = 0.0;
         }
     }
 
@@ -1592,12 +1755,20 @@ impl AudioWorker {
         frames.min(u64::MAX as u128) as u64
     }
 
+    fn output_frames_to_duration(&self, frames: u64) -> Duration {
+        Duration::from_secs_f64(frames as f64 / f64::from(self.output_rate.max(1)))
+    }
+
     fn stop_playback(&mut self, clear_current_track: bool) {
         self.decode_generation = self.decode_generation.wrapping_add(1);
         self.decoder = None;
         self.prefetched_chunk = None;
         self.crossfade = None;
         self.transition_carry.clear();
+        self.transition_carry_position = None;
+        self.fade_in_total_frames = 0;
+        self.fade_in_elapsed_frames = 0;
+        self.fade_in_start_gain = 0.0;
         if clear_current_track {
             self.current_track = None;
         }
