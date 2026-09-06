@@ -20,6 +20,8 @@ pub(crate) struct SmartCue {
     pub confidence: f32,
 }
 
+/// Analyze only. The caller must prepare a fresh decoder at the returned PCM position.
+/// Keeping analysis and playback positioning separate avoids relying on container seek accuracy.
 pub(crate) fn analyze_smart_cue(
     decoder: &mut DecoderStream,
     track: &Track,
@@ -31,14 +33,9 @@ pub(crate) fn analyze_smart_cue(
         .min(track.duration_ms / 8)
         .min(MAX_ANALYSIS_MS);
     if hard_cap_ms < ANALYSIS_WINDOW_MS {
-        decoder.seek(Duration::ZERO)?;
         return Ok(SmartCue::default());
     }
 
-    decoder.seek(Duration::ZERO)?;
-    // We only need enough look-ahead to validate the latest legal cue plus a stable onset window.
-    // Scanning an unconditional 12 seconds made every preload more expensive without improving the
-    // decision when the configured/style cap was only 0.8-4 seconds.
     let validation_tail_ms = ANALYSIS_WINDOW_MS * (STABLE_WINDOWS as u64 + 2);
     let scan_ms = hard_cap_ms
         .saturating_add(validation_tail_ms)
@@ -113,9 +110,6 @@ pub(crate) fn analyze_smart_cue(
             break;
         }
 
-        // Smart Cue is allowed to remove encoder/recording silence, not musical content. A quiet
-        // intro often sits below ACTIVE_RMS but still has sustained energy. If we observed three
-        // consecutive non-silent windows before the candidate onset, preserve the intro entirely.
         if has_sustained_leading_audio(&windows[..index]) {
             break;
         }
@@ -137,11 +131,6 @@ pub(crate) fn analyze_smart_cue(
         break;
     }
 
-    if best.position.is_zero() {
-        decoder.seek(Duration::ZERO)?;
-    } else {
-        decoder.seek_accurate(best.position)?;
-    }
     tracing::debug!(
         cue_ms = best.position.as_millis() as u64,
         confidence = best.confidence,
