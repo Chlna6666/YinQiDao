@@ -28,7 +28,7 @@ use super::{
     },
 };
 
-pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime, mini_player};
+pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 
 pub(super) fn render(
     app: &MusicApp,
@@ -58,98 +58,175 @@ pub(super) fn render(
             // This also turns the automatic 20 s idle fade into click-to-wake instead of the old
             // accidental wake caused by tiny mouse jitter or layout-generated move events.
             cx.stop_propagation();
-            this.stage_last_mouse_pos = Some(event.position);
-            if this.stage_suppress_wake_until.is_some()
-                || this.stage_controls_visibility < 0.995
-            {
+            if this.stage_clean_mode {
                 return;
             }
-            this.stage_last_user_activity = Instant::now();
+            this.note_stage_pointer_activity(event.position, cx);
         }))
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
-                // A real click is the explicit wake gesture. Normal clicks while the chrome is
-                // already visible simply count as application activity for the 20 s idle timer.
-                if this.stage_suppress_wake_until.is_some()
-                    || this.stage_controls_visibility < 0.995
-                {
-                    this.wake_stage_controls_immediately(cx);
+                if this.stage_clean_mode {
+                    this.wake_stage_controls(cx);
                 } else {
-                    this.stage_last_user_activity = Instant::now();
+                    this.note_stage_activity(cx);
                 }
             }),
         )
-        .child(ambient_background(fluid_background))
+        .child(render_fluid_background(app, fluid_background))
+        .child(render_stage_overlay(app, cx, track, artwork, lyrics, transport_position_ms))
+        .into_any_element()
+}
+
+fn render_fluid_background(
+    app: &MusicApp,
+    fluid_background: gpui::Entity<AppleFluidView>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(fluid_background)
         .child(
             div()
                 .absolute()
                 .inset_0()
+                .bg(hsla(230.0, 0.20, 0.06, if app.config.dynamic_blur { 0.26 } else { 0.52 })),
+        )
+}
+
+fn render_stage_overlay(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    track: Option<&Track>,
+    artwork: Option<Arc<[u8]>>,
+    lyrics: &[LyricLine],
+    position_ms: u64,
+) -> impl IntoElement {
+    let controls_visible = app.stage_controls_visible();
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .child(render_stage_top_bar(app, cx, track, controls_visible))
+        .child(render_stage_center(app, cx, track, artwork, lyrics, position_ms))
+        .child(render_stage_bottom_controls(app, cx, controls_visible))
+}
+
+fn render_stage_top_bar(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    track: Option<&Track>,
+    controls_visible: bool,
+) -> impl IntoElement {
+    let title = track.map_or("未播放", |track| track.title.as_str());
+    let artist = track.map_or("", |track| track.artist.as_str());
+    div()
+        .h(px(76.0))
+        .px_7()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .opacity(if controls_visible { 1.0 } else { 0.0 })
+        .transition(Transition::new(Duration::from_millis(220)).with_easing(Easing::EaseOut))
+        .child(
+            div()
+                .min_w(px(0.0))
                 .flex()
                 .flex_col()
-                .px_8()
-                .pt(px(54.0))
-                .pb_8()
-                .gap_6()
+                .gap_0p5()
                 .child(
                     div()
-                        .flex()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .gap_12()
-                        .items_center()
-                        .child(stage_cover(track, artwork))
-                        .child(stage_lyrics(app, lyrics, transport_position_ms, cx)),
+                        .text_base()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(TEXT_WHITE)
+                        .truncate()
+                        .child(title.to_owned()),
                 )
-                .child(stage_controls(app, cx)),
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.58))
+                        .truncate()
+                        .child(artist.to_owned()),
+                ),
         )
-        .into_any_element()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id("stage-clean-mode")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(if app.stage_clean_mode {
+                            hsla(0.0, 0.0, 1.0, 0.18)
+                        } else {
+                            hsla(0.0, 0.0, 1.0, 0.08)
+                        })
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(TEXT_WHITE)
+                        .child(if app.stage_clean_mode { "退出纯享" } else { "纯享沉浸" })
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_stage_clean_mode(cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("stage-close")
+                        .size(px(34.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(hsla(0.0, 0.0, 1.0, 0.08))
+                        .child(themed_icon(
+                            lucide_icons::icon_x(),
+                            18.0,
+                            hsla(0.0, 0.0, 1.0, 0.88),
+                        ))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_stage(cx);
+                            }),
+                        ),
+                ),
+        )
 }
 
-fn live_transport(app: &MusicApp) -> (PlaybackState, u64, u64) {
-    app.engine.as_ref().map_or(
-        (
-            app.snapshot.state,
-            app.snapshot.position_ms,
-            app.snapshot.duration_ms,
-        ),
-        |engine| engine.progress(),
-    )
-}
-
-fn displayed_transport(app: &MusicApp) -> (PlaybackState, u64, u64, f32) {
-    let (state, live_position_ms, duration_ms) = live_transport(app);
-    let override_ratio = app
-        .drag_progress_ratio
-        .or_else(|| app.pending_progress_ratio.map(|(_, ratio)| ratio));
-
-    let position_ms = override_ratio.map_or(live_position_ms, |ratio| {
-        (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
-    });
-    let ratio = override_ratio.unwrap_or_else(|| {
-        if duration_ms == 0 {
-            0.0
-        } else {
-            (live_position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
-        }
-    });
-
-    (state, position_ms, duration_ms, ratio)
-}
-
-fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoElement {
-    let title = track.map_or("未在播放音乐", |track| track.title.as_str());
-    let artist = track.map_or("请选择音乐", |track| track.artist.as_str());
-    let album = track.map_or("未知专辑", |track| track.album.as_str());
+fn render_stage_center(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    track: Option<&Track>,
+    artwork: Option<Arc<[u8]>>,
+    lyrics: &[LyricLine],
+    position_ms: u64,
+) -> impl IntoElement {
     let cover = if let Some(bytes) = artwork {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))
-            .size_full()
+            .size(px(330.0))
+            .rounded_2xl()
             .object_fit(ObjectFit::Cover)
             .into_any_element()
     } else {
-        let (c1, c2) = elegant_gradient_for(track.map_or(0, |track| track.id));
+        let id = track.map_or(0, |track| track.id);
+        let (c1, c2) = elegant_gradient_for(id);
         div()
-            .size_full()
+            .size(px(330.0))
+            .rounded_2xl()
             .bg(linear_gradient(
                 135.0,
                 linear_color_stop(c1, 0.0),
@@ -160,514 +237,316 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
             .justify_center()
             .child(themed_icon(
                 lucide_icons::icon_disc_3(),
-                96.0,
-                hsla(0.0, 0.0, 1.0, 0.7),
+                72.0,
+                hsla(0.0, 0.0, 1.0, 0.82),
             ))
             .into_any_element()
     };
 
     div()
-        .w(px(380.0))
-        .flex_none()
+        .flex_1()
+        .min_h(px(0.0))
         .flex()
-        .flex_col()
         .items_center()
         .justify_center()
-        .gap_6()
+        .gap(px(68.0))
+        .px(px(82.0))
         .child(
             div()
-                .size(px(280.0))
-                .rounded_2xl()
-                .overflow_hidden()
-                .border_1()
-                .border_color(hsla(0.0, 0.0, 1.0, 0.15))
-                .shadow_lg()
-                .child(cover),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_1p5()
+                .flex_none()
                 .child(
                     div()
-                        .max_w(px(360.0))
-                        .text_2xl()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_center()
-                        .truncate()
-                        .child(title.to_owned()),
+                        .size(px(330.0))
+                        .rounded_2xl()
+                        .shadow_2xl()
+                        .child(cover),
                 )
-                .child(
+                .child_if(track.is_some(), || {
                     div()
-                        .max_w(px(360.0))
-                        .text_base()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.72))
-                        .truncate()
-                        .child(artist.to_owned()),
-                )
-                .child(
-                    div()
-                        .max_w(px(360.0))
-                        .text_sm()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.42))
-                        .truncate()
-                        .child(album.to_owned()),
-                ),
+                        .mt_6()
+                        .w(px(330.0))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(TEXT_WHITE)
+                                .truncate()
+                                .child(track.map_or(String::new(), |track| track.title.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(hsla(0.0, 0.0, 1.0, 0.56))
+                                .truncate()
+                                .child(track.map_or(String::new(), |track| track.artist.clone())),
+                        )
+                }),
         )
+        .child(render_stage_lyrics(app, cx, lyrics, position_ms))
 }
 
-fn stage_lyrics(
+fn render_stage_lyrics(
     app: &MusicApp,
+    cx: &mut Context<MusicApp>,
     lyrics: &[LyricLine],
     position_ms: u64,
-    cx: &mut Context<MusicApp>,
 ) -> impl IntoElement {
-    if lyrics.is_empty() {
-        return div()
-            .flex_1()
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child(themed_icon(
-                lucide_icons::icon_music(),
-                36.0,
-                hsla(0.0, 0.0, 1.0, 0.25),
-            ))
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.50))
-                    .child("暂无同步滚动歌词"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.30))
-                    .child("支持内嵌 LRC 或联网自动检索"),
-            )
-            .into_any_element();
-    }
-
     let active = lyrics
         .iter()
         .rposition(|line| line.timestamp_ms <= position_ms)
         .unwrap_or(0);
+    let visible_start = active.saturating_sub(3);
+    let visible_end = (active + 5).min(lyrics.len());
+    let mut list = div()
+        .id("stage-lyrics")
+        .w(px(560.0))
+        .h(px(470.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap_3();
 
-    let mut viewport = div()
-        .id("stage-lyrics-viewport")
-        .relative()
-        .flex_1()
-        .h_full()
-        .min_w(px(0.0))
-        .min_h(px(0.0))
-        .overflow_y_scroll()
-        .scrollbar_width(px(0.0))
-        .track_scroll(&app.lyrics_scroll_handle)
-        .pt(px(96.0))
-        .pb(px(112.0))
-        .pr(px(8.0))
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
-        )
-        .on_scroll_wheel(cx.listener(
-            |this, _: &gpui::ScrollWheelEvent, _, cx| {
-                this.lyrics_user_scrolling_until =
-                    Some(Instant::now() + Duration::from_secs(3));
-                this.lyrics_scroll_target_y = None;
-                this.wake_stage_controls(cx);
-            },
-        ));
-
-    for (index, line) in lyrics.iter().enumerate() {
-        let distance = index.abs_diff(active);
-        let alpha = match distance {
-            0 => 1.0,
-            1 => 0.48,
-            2 => 0.28,
-            _ => 0.18,
-        };
-        let scale = match distance {
-            0 => 1.0,
-            1 => 0.955,
-            _ => 0.925,
-        };
-        let timestamp = line.timestamp_ms;
-        let weight = if index == active {
-            gpui::FontWeight::BOLD
-        } else if distance == 1 {
-            gpui::FontWeight::SEMIBOLD
-        } else {
-            gpui::FontWeight::MEDIUM
-        };
-
-        let mut text = div()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .font_weight(weight)
+    if lyrics.is_empty() {
+        return list
+            .items_center()
             .child(
                 div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(28.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                    .child(line.text.clone()),
-            );
-
-        if let Some(translation) = line
-            .translation
-            .as_deref()
-            .filter(|translation| !translation.trim().is_empty())
-        {
-            text = text.child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(17.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.72))
-                    .child(translation.to_owned()),
-            );
-        }
-
-        let line_element = div()
-            .id(SharedString::from(format!("lyric-line-{index}")))
-            .w_full()
-            .min_w(px(0.0))
-            .flex_none()
-            .pl(px(16.0))
-            .pr(px(12.0))
-            .py(px(11.0))
-            .mb(px(10.0))
-            .scale(scale)
-            .opacity(alpha)
-            .transition(lyric_focus_transition())
-            .cursor_pointer()
-            .hover(|style| style.opacity(1.0))
-            .child(text)
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.seek_to_ms(timestamp, cx);
-                    this.pending_progress_ratio = None;
-                    this.lyrics_user_scrolling_until = None;
-                    if this.last_lyric_index != Some(index) {
-                        this.last_lyric_index = Some(index);
-                        this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
-                    }
-                    this.lyrics_scroll_target_y =
-                        Some(f32::from(this.lyrics_scroll_handle.offset().y));
-                    this.wake_stage_controls_immediately(cx);
-                }),
-            );
-
-        let line_element = if index == active {
-            let enter = Animation::from_spec(
-                AnimationSpec::new(Duration::from_millis(440)).ease(Easing::OutCubic),
+                    .text_lg()
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.42))
+                    .child("暂无同步歌词"),
             )
-            .with_property(AnimationProperty::translation(
-                point(px(0.0), px(20.0)),
-                point(px(0.0), px(0.0)),
-            ));
-            line_element
-                .with_animation(
-                    SharedString::from(format!(
-                        "lyric-enter-{}-{index}",
-                        app.lyric_motion_epoch
-                    )),
-                    enter,
-                    |element, _| element,
-                )
-                .into_any_element()
-        } else {
-            line_element.into_any_element()
-        };
-
-        viewport = viewport.child(line_element);
+            .into_any_element();
     }
 
-    viewport.into_any_element()
+    for (index, line) in lyrics[visible_start..visible_end].iter().enumerate() {
+        let actual_index = visible_start + index;
+        let is_active = actual_index == active;
+        let distance = actual_index.abs_diff(active) as f32;
+        let opacity = if is_active { 1.0 } else { (0.68 - distance * 0.11).max(0.20) };
+        let scale = if is_active { 1.0 } else { 0.94 };
+        let line_id = SharedString::from(format!("stage-lyric-{actual_index}"));
+        let line_timestamp = line.timestamp_ms;
+        list = list.child(
+            div()
+                .id(line_id)
+                .w_full()
+                .cursor_pointer()
+                .opacity(opacity)
+                .scale(scale)
+                .transition(
+                    Transition::new(Duration::from_millis(300)).with_easing(Easing::EaseOut),
+                )
+                .child(
+                    div()
+                        .text_size(px(if is_active { 30.0 } else { 22.0 }))
+                        .font_weight(if is_active {
+                            gpui::FontWeight::BOLD
+                        } else {
+                            gpui::FontWeight::MEDIUM
+                        })
+                        .text_color(if is_active {
+                            TEXT_WHITE
+                        } else {
+                            hsla(0.0, 0.0, 1.0, 0.74)
+                        })
+                        .child(line.text.clone()),
+                )
+                .child_if(
+                    line.translation
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty()),
+                    || {
+                        div()
+                            .mt_1()
+                            .text_sm()
+                            .text_color(hsla(0.0, 0.0, 1.0, if is_active { 0.68 } else { 0.40 }))
+                            .child(line.translation.clone().unwrap_or_default())
+                    },
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.seek_to(line_timestamp, cx);
+                    }),
+                ),
+        );
+    }
+
+    list.into_any_element()
 }
 
-fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(420))
-        .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity, TransitionProperty::Scale])
-}
-
-fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
-    let (transport_state, position, duration_ms, progress_ratio) = displayed_transport(app);
-    let volume = app.displayed_volume_ratio();
-    let playing = transport_state == PlaybackState::Playing;
-    let visibility = app.stage_controls_visibility;
+fn render_stage_bottom_controls(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    controls_visible: bool,
+) -> impl IntoElement {
+    let snapshot = &app.snapshot;
+    let duration = snapshot.duration_ms.max(1);
+    let progress = app.displayed_seek_ratio();
+    let is_playing = snapshot.state == PlaybackState::Playing;
+    let app_entity = cx.entity();
 
     div()
-        .id("stage-bottom-dock")
-        .top(px((1.0 - visibility) * 56.0))
-        .opacity(visibility)
+        .h(px(122.0))
+        .px(px(78.0))
+        .pb_7()
+        .flex_none()
         .flex()
-        .items_center()
-        .gap_5()
-        .px_6()
-        .py_3()
-        .rounded_2xl()
-        .bg(hsla(0.0, 0.0, 0.0, 0.40))
-        .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.10))
-        .on_hover(cx.listener(|this, hovered: &bool, _, _cx| {
-            // Hover is not an active operation. Keeping this flag true forever prevented the
-            // application's 20 s no-input policy from ever entering clean mode while the pointer
-            // happened to rest over the dock.
-            this.stage_controls_hovered = false;
-            if *hovered
-                && this.stage_suppress_wake_until.is_none()
-                && this.stage_controls_visibility >= 0.995
-            {
-                this.stage_last_user_activity = Instant::now();
-            }
-        }))
-        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
-            this.handle_stage_mouse_move(event.position, cx);
-        }))
+        .flex_col()
+        .justify_end()
+        .gap_3()
+        .opacity(if controls_visible { 1.0 } else { 0.0 })
+        .transition(Transition::new(Duration::from_millis(220)).with_easing(Easing::EaseOut))
         .child(
             div()
-                .text_xs()
-                .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                .child(format_time(position)),
-        )
-        .child(
-            interactive_slider(
-                "stage-progress-track",
-                progress_ratio,
-                SliderStyle::stage_progress(),
-                {
-                    let view = cx.entity().downgrade();
-                    move |ratio, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.wake_stage_controls_immediately(cx);
-                            this.seek_to_ratio(ratio, cx);
-                            this.pending_progress_ratio = None;
-                        });
-                    }
-                },
-                {
-                    let view = cx.entity().downgrade();
-                    move |ratio, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.wake_stage_controls_immediately(cx);
-                            if this.drag_target == Some(DragTarget::Progress) {
-                                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-                            } else {
-                                this.begin_drag(DragTarget::Progress, ratio, cx);
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_4()
+                .child(
+                    div()
+                        .w(px(54.0))
+                        .text_xs()
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.62))
+                        .child(format_time(snapshot.position_ms)),
+                )
+                .child(
+                    interactive_slider(
+                        "stage-progress",
+                        progress,
+                        SliderStyle::player_progress(),
+                        {
+                            let app_entity = app_entity.clone();
+                            move |ratio, cx| {
+                                let _ = app_entity.update(cx, |app, cx| {
+                                    app.pending_seek_ratio = Some(ratio);
+                                    cx.notify();
+                                });
                             }
-                        });
-                    }
-                },
-                {
-                    let view = cx.entity().downgrade();
-                    move |ratio, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.wake_stage_controls_immediately(cx);
-                            if this.drag_target == Some(DragTarget::Progress) {
-                                this.update_drag_ratio(DragTarget::Progress, ratio, cx);
-                            } else {
-                                this.begin_drag(DragTarget::Progress, ratio, cx);
+                        },
+                        {
+                            let app_entity = app_entity.clone();
+                            move |ratio, cx| {
+                                let _ = app_entity.update(cx, |app, cx| {
+                                    app.begin_or_update_seek_drag(ratio, cx);
+                                });
                             }
-                            this.commit_drag(cx);
-                            this.pending_progress_ratio = None;
-                        });
-                    }
-                },
-            )
-            .flex_1(),
+                        },
+                        {
+                            let app_entity = app_entity.clone();
+                            move |ratio, cx| {
+                                let _ = app_entity.update(cx, |app, cx| {
+                                    app.finish_seek_drag(ratio, cx);
+                                });
+                            }
+                        },
+                    )
+                    .flex_1(),
+                )
+                .child(
+                    div()
+                        .w(px(54.0))
+                        .text_right()
+                        .text_xs()
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.62))
+                        .child(format_remaining_time(snapshot.position_ms, duration)),
+                ),
         )
         .child(
             div()
-                .text_xs()
-                .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                .child(format_remaining_time(position, duration_ms)),
-        )
-        .child(control_button(
-            "stage-prev-btn",
-            lucide_icons::icon_skip_back(),
-            cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.wake_stage_controls_immediately(cx);
-                this.previous(cx);
-            }),
-        ))
-        .child(
-            div()
-                .id("stage-play-btn")
-                .size(px(46.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
-                .cursor_pointer()
-                .bg(ACCENT_RED)
-                .active(|style| style.scale(0.95))
-                .child(themed_icon(
-                    if playing {
-                        lucide_icons::icon_pause()
-                    } else {
-                        lucide_icons::icon_play()
-                    },
-                    22.0,
-                    hsla(0.0, 0.0, 1.0, 1.0),
-                ))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.wake_stage_controls_immediately(cx);
-                        this.toggle_play(cx);
-                    }),
-                ),
-        )
-        .child(control_button(
-            "stage-next-btn",
-            lucide_icons::icon_skip_forward(),
-            cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.wake_stage_controls_immediately(cx);
-                this.next(cx);
-            }),
-        ))
-        .child(
-            div()
-                .id("stage-volume-group")
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded_full()
-                .bg(hsla(0.0, 0.0, 1.0, 0.08))
+                .gap_6()
                 .child(
                     div()
-                        .id("stage-volume-mute")
+                        .id("stage-prev")
+                        .size(px(36.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
                         .cursor_pointer()
                         .child(themed_icon(
-                            if volume <= 0.001 {
-                                lucide_icons::icon_volume_x()
-                            } else if volume < 0.5 {
-                                lucide_icons::icon_volume_1()
-                            } else {
-                                lucide_icons::icon_volume_2()
-                            },
-                            16.0,
+                            lucide_icons::icon_skip_back(),
+                            20.0,
                             hsla(0.0, 0.0, 1.0, 0.82),
                         ))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.wake_stage_controls_immediately(cx);
-                                this.pending_volume_ratio = None;
-                                this.toggle_mute(cx);
+                                this.previous(cx);
                             }),
                         ),
                 )
                 .child(
-                    interactive_slider(
-                        "stage-volume-track",
-                        volume,
-                        SliderStyle::stage_volume(),
-                        {
-                            let view = cx.entity().downgrade();
-                            move |ratio, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    this.wake_stage_controls_immediately(cx);
-                                    this.pending_volume_ratio = None;
-                                    this.set_app_volume(ratio, cx);
-                                });
-                            }
-                        },
-                        {
-                            let view = cx.entity().downgrade();
-                            move |ratio, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    this.wake_stage_controls_immediately(cx);
-                                    if this.drag_target == Some(DragTarget::Volume) {
-                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
-                                    } else {
-                                        this.begin_drag(DragTarget::Volume, ratio, cx);
-                                    }
-                                    this.send(PlayerCommand::SetVolume(ratio));
-                                });
-                            }
-                        },
-                        {
-                            let view = cx.entity().downgrade();
-                            move |ratio, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    this.wake_stage_controls_immediately(cx);
-                                    if this.drag_target == Some(DragTarget::Volume) {
-                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
-                                    } else {
-                                        this.begin_drag(DragTarget::Volume, ratio, cx);
-                                    }
-                                    this.commit_drag(cx);
-                                    this.pending_volume_ratio = None;
-                                });
-                            }
-                        },
-                    )
-                    .w(px(72.0))
-                    .on_scroll_wheel(cx.listener(
-                        |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                            cx.stop_propagation();
-                            let delta = event.delta.pixel_delta(px(48.0)).y;
-                            if delta < px(0.0) {
-                                this.adjust_volume(0.04, cx);
-                            } else if delta > px(0.0) {
-                                this.adjust_volume(-0.04, cx);
-                            }
-                            this.wake_stage_controls_immediately(cx);
-                        },
-                    )),
+                    div()
+                        .id("stage-play")
+                        .size(px(46.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(hsla(0.0, 0.0, 1.0, 0.92))
+                        .child(themed_icon(
+                            if is_playing {
+                                lucide_icons::icon_pause()
+                            } else {
+                                lucide_icons::icon_play()
+                            },
+                            22.0,
+                            hsla(220.0, 0.10, 0.12, 1.0),
+                        ))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_play(cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("stage-next")
+                        .size(px(36.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .child(themed_icon(
+                            lucide_icons::icon_skip_forward(),
+                            20.0,
+                            hsla(0.0, 0.0, 1.0, 0.82),
+                        ))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.next(cx);
+                            }),
+                        ),
                 ),
         )
 }
 
-fn control_button(
-    id: &'static str,
-    icon: &'static str,
-    listener: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .size(px(36.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .cursor_pointer()
-        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.15)))
-        .active(|style| style.scale(0.92))
-        .child(themed_icon(
-            icon,
-            20.0,
-            hsla(0.0, 0.0, 1.0, 0.85),
-        ))
-        .on_mouse_down(gpui::MouseButton::Left, listener)
-}
-
-fn ambient_background(fluid_background: gpui::Entity<AppleFluidView>) -> gpui::AnyElement {
-    div()
-        .absolute()
-        .inset_0()
-        .overflow_hidden()
-        .bg(rgb(0x0e0f16))
-        .child(fluid_background)
-        .into_any_element()
+fn live_transport(app: &MusicApp) -> (PlaybackState, u64, u64) {
+    app.engine.as_ref().map_or(
+        (
+            app.snapshot.state,
+            app.snapshot.position_ms,
+            app.snapshot.duration_ms,
+        ),
+        |engine| {
+            let (_, position_ms, duration_ms) = engine.progress();
+            (engine.state(), position_ms, duration_ms)
+        },
+    )
 }
