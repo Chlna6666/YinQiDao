@@ -186,16 +186,6 @@ impl DecoderStream {
     }
 
     pub fn seek(&mut self, position: Duration) -> Result<(), DecodeError> {
-        self.seek_with_mode(position, SeekMode::Coarse)
-    }
-
-    /// Accurate seek is intentionally reserved for background preparation paths (for example
-    /// Smart Cue). Interactive scrubbing keeps using coarse seek so pointer movement stays cheap.
-    pub fn seek_accurate(&mut self, position: Duration) -> Result<(), DecodeError> {
-        self.seek_with_mode(position, SeekMode::Accurate)
-    }
-
-    fn seek_with_mode(&mut self, position: Duration, mode: SeekMode) -> Result<(), DecodeError> {
         let time = symphonia::core::units::Time::try_from_secs_f64(position.as_secs_f64())
             .ok_or_else(|| DecodeError::Seek {
                 path: self.path.clone(),
@@ -203,7 +193,7 @@ impl DecoderStream {
             })?;
         self.format
             .seek(
-                mode,
+                SeekMode::Coarse,
                 SeekTo::Time {
                     time,
                     track_id: Some(self.track_id),
