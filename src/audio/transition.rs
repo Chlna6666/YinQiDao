@@ -11,6 +11,8 @@ const STABLE_WINDOWS: usize = 5;
 const FLOOR_RMS: f64 = 0.0025;
 const ACTIVE_RMS: f64 = 0.0063;
 const PEAK_RMS: f64 = 0.0120;
+const MIN_USEFUL_CUE_MS: u64 = 150;
+const MIN_CUE_CONFIDENCE: f32 = 0.62;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SmartCue {
@@ -34,7 +36,14 @@ pub(crate) fn analyze_smart_cue(
     }
 
     decoder.seek(Duration::ZERO)?;
-    let scan_ms = MAX_ANALYSIS_MS.min(track.duration_ms / 4).max(ANALYSIS_WINDOW_MS);
+    // We only need enough look-ahead to validate the latest legal cue plus a stable onset window.
+    // Scanning an unconditional 12 seconds made every preload more expensive without improving the
+    // decision when the configured/style cap was only 0.8-4 seconds.
+    let validation_tail_ms = ANALYSIS_WINDOW_MS * (STABLE_WINDOWS as u64 + 2);
+    let scan_ms = hard_cap_ms
+        .saturating_add(validation_tail_ms)
+        .min(MAX_ANALYSIS_MS)
+        .min((track.duration_ms / 4).max(ANALYSIS_WINDOW_MS));
     let mut chunk_samples = Vec::new();
     let mut windows = Vec::<(u64, f64)>::new();
     let mut sum_squares = 0.0_f64;
@@ -92,23 +101,47 @@ pub(crate) fn analyze_smart_cue(
             .iter()
             .map(|(_, rms)| *rms)
             .fold(0.0_f64, f64::max);
-        if stable[0].1 >= ACTIVE_RMS && active_count >= STABLE_WINDOWS - 1 && max_rms >= PEAK_RMS {
-            let onset_ms = stable[0].0;
-            if onset_ms <= hard_cap_ms {
-                let cue_ms = onset_ms.saturating_sub(80);
-                let energy_confidence = ((max_rms - FLOOR_RMS) / 0.05).clamp(0.0, 1.0) as f32;
-                let stability_confidence = active_count as f32 / STABLE_WINDOWS as f32;
-                best = SmartCue {
-                    position: Duration::from_millis(cue_ms),
-                    confidence: (0.55 * stability_confidence + 0.45 * energy_confidence)
-                        .clamp(0.0, 1.0),
-                };
-            }
+        if stable[0].1 < ACTIVE_RMS
+            || active_count < STABLE_WINDOWS - 1
+            || max_rms < PEAK_RMS
+        {
+            continue;
+        }
+
+        let onset_ms = stable[0].0;
+        if onset_ms > hard_cap_ms {
             break;
         }
+
+        // Smart Cue is allowed to remove encoder/recording silence, not musical content. A quiet
+        // intro often sits below ACTIVE_RMS but still has sustained energy. If we observed three
+        // consecutive non-silent windows before the candidate onset, preserve the intro entirely.
+        if has_sustained_leading_audio(&windows[..index]) {
+            break;
+        }
+
+        let cue_ms = onset_ms.saturating_sub(80);
+        if cue_ms < MIN_USEFUL_CUE_MS {
+            break;
+        }
+        let energy_confidence = ((max_rms - FLOOR_RMS) / 0.05).clamp(0.0, 1.0) as f32;
+        let stability_confidence = active_count as f32 / STABLE_WINDOWS as f32;
+        let confidence =
+            (0.55 * stability_confidence + 0.45 * energy_confidence).clamp(0.0, 1.0);
+        if confidence >= MIN_CUE_CONFIDENCE {
+            best = SmartCue {
+                position: Duration::from_millis(cue_ms),
+                confidence,
+            };
+        }
+        break;
     }
 
-    decoder.seek(best.position)?;
+    if best.position.is_zero() {
+        decoder.seek(Duration::ZERO)?;
+    } else {
+        decoder.seek_accurate(best.position)?;
+    }
     tracing::debug!(
         cue_ms = best.position.as_millis() as u64,
         confidence = best.confidence,
@@ -118,6 +151,12 @@ pub(crate) fn analyze_smart_cue(
         "下一曲 Smart Cue 分析完成"
     );
     Ok(best)
+}
+
+fn has_sustained_leading_audio(windows: &[(u64, f64)]) -> bool {
+    windows
+        .windows(3)
+        .any(|group| group.iter().all(|(_, rms)| *rms >= FLOOR_RMS))
 }
 
 pub(crate) fn equal_power_gains(progress: f32) -> (f32, f32) {
@@ -177,5 +216,27 @@ mod tests {
         let input = fade_in_gain(0.5);
         assert!((out - input).abs() < 1.0e-6);
         assert!(out > 0.7 && out < 0.71);
+    }
+
+    #[test]
+    fn sustained_quiet_intro_is_not_treated_as_leading_silence() {
+        let windows = [
+            (0, FLOOR_RMS + 0.0002),
+            (50, FLOOR_RMS + 0.0003),
+            (100, FLOOR_RMS + 0.0001),
+            (150, FLOOR_RMS + 0.0004),
+        ];
+        assert!(has_sustained_leading_audio(&windows));
+    }
+
+    #[test]
+    fn isolated_encoder_noise_does_not_block_silence_skip() {
+        let windows = [
+            (0, 0.0002),
+            (50, FLOOR_RMS + 0.0002),
+            (100, 0.0003),
+            (150, 0.0002),
+        ];
+        assert!(!has_sustained_leading_audio(&windows));
     }
 }
