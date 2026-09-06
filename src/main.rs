@@ -15,6 +15,7 @@ mod preferences;
 pub mod runtime;
 mod settings;
 mod ui;
+mod window_platform;
 
 use anyhow::Result;
 use gpui::{
