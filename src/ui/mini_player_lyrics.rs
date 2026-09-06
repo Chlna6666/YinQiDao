@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, IntoElement, div, hsla, prelude::*, px, rgb};
+use gpui::{Context, Entity, IntoElement, div, prelude::*, px, rgb};
 
 use super::{
     player_legacy::{self, PlaybackProgress, PlaybackTime},
@@ -22,11 +22,11 @@ pub(super) fn mini_player(
         .relative()
         .child(base)
         // The legacy mini player already reserves this slot for its captions/stage button. Draw
-        // the desktop-lyrics control above that slot so the active facade owns the behavior without
-        // duplicating the complete player layout.
+        // an opaque control over that slot so neither the icon nor its hit target leaks through.
         .child(
             div()
                 .id("mini-desktop-lyrics-btn")
+                .occlude()
                 .absolute()
                 .top(px(23.0))
                 .right(px(172.0))
@@ -39,7 +39,7 @@ pub(super) fn mini_player(
                 .bg(if visible {
                     theme::accent_red_muted()
                 } else {
-                    hsla(0.0, 0.0, 0.0, 0.0)
+                    rgb(0xff_ff_ff)
                 })
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
