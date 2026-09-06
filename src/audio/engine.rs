@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -21,20 +20,23 @@ use ringbuf::{
 };
 use thiserror::Error;
 
-use crate::{
-    audio::{
-        command_queue::CommandQueue,
-        decoder::{DecodeError, DecoderStream},
-        dsp::{AudioProcessor, perceptual_volume_gain},
-    },
-    model::{
-        EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SpatialSettings, Track, TrackId,
-    },
+use crate::model::{
+    EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SpatialSettings, Track, TrackId,
+    TrackTransitionSettings, TransitionMode,
+};
+
+use super::{
+    command_queue::CommandQueue,
+    decoder::{DecodeError, DecoderStream},
+    dsp::{AudioProcessor, perceptual_volume_gain},
+    transition::{SmartCue, analyze_smart_cue, equal_power_gains, fade_in_gain, fade_out_gain},
 };
 
 pub type DeviceId = String;
 
 const PRELOAD_DEBOUNCE: Duration = Duration::from_millis(40);
+const MIN_TRANSITION_MS: u64 = 250;
+const MAX_TRANSITION_MS: u64 = 12_000;
 
 #[derive(Clone, Debug)]
 pub enum PlayerCommand {
@@ -52,6 +54,7 @@ pub enum PlayerCommand {
     SetVolume(f32),
     SetEq(EqSettings),
     SetSpatial(SpatialSettings),
+    SetTransition(TrackTransitionSettings),
     #[allow(dead_code)]
     SetOutputDevice(DeviceId),
     SetQueue(Arc<Vec<TrackId>>),
@@ -105,12 +108,14 @@ struct PreloadedTrack {
     track_id: TrackId,
     decoder: DecoderStream,
     first_chunk: Option<PreloadedChunk>,
+    smart_cue: SmartCue,
 }
 
 struct PreloadRequest {
     generation: u64,
-    track_id: TrackId,
-    path: PathBuf,
+    track: Track,
+    use_smart_cue: bool,
+    max_smart_cue_ms: u64,
 }
 
 struct PreloadCoordinator {
@@ -132,21 +137,27 @@ impl PreloadCoordinator {
         }
     }
 
-    fn request(&self, track_id: TrackId, path: PathBuf) {
+    fn request(&self, track: Track, transition: &TrackTransitionSettings) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
+        let use_smart_cue = transition.enabled
+            && transition.mode == TransitionMode::Crossfade
+            && transition.smart_cue;
+        let max_smart_cue_ms = transition.max_smart_cue_ms.clamp(0, 8_000);
+
         if let Ok(ready) = self.ready.lock()
-            && ready
-                .as_ref()
-                .is_some_and(|ready| ready.track_id == track_id)
+            && ready.as_ref().is_some_and(|ready| ready.track_id == track.id)
         {
             return;
         }
         if let Ok(pending) = self.request.lock()
-            && pending
-                .as_ref()
-                .is_some_and(|pending| pending.track_id == track_id && pending.path == path)
+            && pending.as_ref().is_some_and(|pending| {
+                pending.track.id == track.id
+                    && pending.track.path == track.path
+                    && pending.use_smart_cue == use_smart_cue
+                    && pending.max_smart_cue_ms == max_smart_cue_ms
+            })
         {
             return;
         }
@@ -158,8 +169,9 @@ impl PreloadCoordinator {
         if let Ok(mut request) = self.request.lock() {
             *request = Some(PreloadRequest {
                 generation,
-                track_id,
-                path,
+                track,
+                use_smart_cue,
+                max_smart_cue_ms,
             });
             self.wake.notify_one();
         }
@@ -227,10 +239,34 @@ impl PreloadCoordinator {
                 request = latest;
             }
 
-            let mut decoder = match DecoderStream::open(&request.path) {
+            let mut decoder = match DecoderStream::open(&request.track.path) {
                 Ok(decoder) => decoder,
                 Err(_) => continue,
             };
+            let smart_cue = if request.use_smart_cue {
+                match analyze_smart_cue(
+                    &mut decoder,
+                    &request.track,
+                    request.max_smart_cue_ms,
+                ) {
+                    Ok(cue) => cue,
+                    Err(error) => {
+                        tracing::debug!(
+                            track_id = request.track.id,
+                            error = %error,
+                            "Smart Cue 分析失败，回退到歌曲起点"
+                        );
+                        decoder = match DecoderStream::open(&request.track.path) {
+                            Ok(decoder) => decoder,
+                            Err(_) => continue,
+                        };
+                        SmartCue::default()
+                    }
+                }
+            } else {
+                SmartCue::default()
+            };
+
             let mut samples = Vec::new();
             let first_chunk = match decoder.next_chunk_into(&mut samples) {
                 Ok(Some((sample_rate, channels))) => Some(PreloadedChunk {
@@ -248,16 +284,144 @@ impl PreloadCoordinator {
             {
                 continue;
             }
-            if let Ok(mut ready) = self.ready.lock() {
-                if self.generation.load(Ordering::Acquire) == request.generation {
-                    *ready = Some(PreloadedTrack {
-                        track_id: request.track_id,
-                        decoder,
-                        first_chunk,
-                    });
-                }
+            if let Ok(mut ready) = self.ready.lock()
+                && self.generation.load(Ordering::Acquire) == request.generation
+            {
+                *ready = Some(PreloadedTrack {
+                    track_id: request.track.id,
+                    decoder,
+                    first_chunk,
+                    smart_cue,
+                });
             }
         }
+    }
+}
+
+struct CrossfadeState {
+    track_id: TrackId,
+    decoder: DecoderStream,
+    prefetched_chunk: Option<PreloadedChunk>,
+    processor: AudioProcessor,
+    decoded_samples: Vec<f32>,
+    chunk_processed: Vec<f32>,
+    buffered_samples: Vec<f32>,
+    buffer_cursor: usize,
+    elapsed_frames: u64,
+    total_frames: u64,
+    cue: SmartCue,
+}
+
+impl CrossfadeState {
+    fn new(
+        preloaded: PreloadedTrack,
+        output_rate: u32,
+        eq: EqSettings,
+        spatial: SpatialSettings,
+        total_frames: u64,
+    ) -> Self {
+        Self {
+            track_id: preloaded.track_id,
+            decoder: preloaded.decoder,
+            prefetched_chunk: preloaded.first_chunk,
+            processor: AudioProcessor::new(output_rate, eq, spatial, 1.0),
+            decoded_samples: Vec::new(),
+            chunk_processed: Vec::new(),
+            buffered_samples: Vec::new(),
+            buffer_cursor: 0,
+            elapsed_frames: 0,
+            total_frames: total_frames.max(1),
+            cue: preloaded.smart_cue,
+        }
+    }
+
+    fn available_samples(&self) -> usize {
+        self.buffered_samples.len().saturating_sub(self.buffer_cursor)
+    }
+
+    fn compact_buffer(&mut self) {
+        if self.buffer_cursor == 0 {
+            return;
+        }
+        if self.buffer_cursor >= self.buffered_samples.len() {
+            self.buffered_samples.clear();
+            self.buffer_cursor = 0;
+            return;
+        }
+        if self.buffer_cursor >= 8_192 {
+            let remaining = self.buffered_samples.len() - self.buffer_cursor;
+            self.buffered_samples
+                .copy_within(self.buffer_cursor.., 0);
+            self.buffered_samples.truncate(remaining);
+            self.buffer_cursor = 0;
+        }
+    }
+
+    fn ensure_samples(&mut self, needed_samples: usize) -> Result<(), DecodeError> {
+        self.compact_buffer();
+        while self.available_samples() < needed_samples {
+            let (sample_rate, channels) = if let Some(chunk) = self.prefetched_chunk.take() {
+                self.decoded_samples = chunk.samples;
+                (chunk.sample_rate, chunk.channels)
+            } else {
+                let Some((sample_rate, channels)) =
+                    self.decoder.next_chunk_into(&mut self.decoded_samples)?
+                else {
+                    break;
+                };
+                (sample_rate, channels)
+            };
+            self.processor.process_into(
+                &self.decoded_samples,
+                sample_rate,
+                channels,
+                &mut self.chunk_processed,
+            );
+            self.buffered_samples
+                .extend_from_slice(&self.chunk_processed);
+        }
+        Ok(())
+    }
+
+    fn mix_into(&mut self, current: &mut [f32]) -> Result<bool, DecodeError> {
+        self.ensure_samples(current.len())?;
+        let frames = current.len() / 2;
+        for frame in 0..frames {
+            let progress = self.elapsed_frames as f32 / self.total_frames as f32;
+            let (current_gain, next_gain) = equal_power_gains(progress);
+            let next_index = self.buffer_cursor;
+            let (next_left, next_right) = if next_index + 1 < self.buffered_samples.len() {
+                let values = (
+                    self.buffered_samples[next_index],
+                    self.buffered_samples[next_index + 1],
+                );
+                self.buffer_cursor += 2;
+                values
+            } else {
+                (0.0, 0.0)
+            };
+            let index = frame * 2;
+            current[index] =
+                (current[index] * current_gain + next_left * next_gain).tanh();
+            current[index + 1] =
+                (current[index + 1] * current_gain + next_right * next_gain).tanh();
+            self.elapsed_frames = self.elapsed_frames.saturating_add(1);
+        }
+        Ok(self.elapsed_frames >= self.total_frames)
+    }
+
+    fn consumed_position(&self, output_rate: u32) -> Duration {
+        self.cue.position
+            + Duration::from_secs_f64(
+                self.elapsed_frames as f64 / f64::from(output_rate.max(1)),
+            )
+    }
+
+    fn take_remaining_buffer(&mut self) -> Vec<f32> {
+        if self.buffer_cursor >= self.buffered_samples.len() {
+            return Vec::new();
+        }
+        self.buffered_samples.split_off(self.buffer_cursor)
     }
 }
 
@@ -446,9 +610,7 @@ impl AudioEngine {
                 }
             }
             PlayerCommand::Next => self.reset_transport_for_switch(true),
-            PlayerCommand::Previous => {
-                self.reset_transport_for_switch(false);
-            }
+            PlayerCommand::Previous => self.reset_transport_for_switch(false),
             PlayerCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0.0, 1.0);
                 self.output_gain.store(volume.to_bits(), Ordering::Release);
@@ -551,11 +713,20 @@ struct AudioWorker {
     audible_frames: Arc<AtomicU64>,
     output_rate: u32,
     processor: AudioProcessor,
+    eq_settings: EqSettings,
+    spatial_settings: SpatialSettings,
+    transition: TrackTransitionSettings,
     decoded_samples: Vec<f32>,
     processed_samples: Vec<f32>,
     decoder: Option<DecoderStream>,
     prefetched_chunk: Option<PreloadedChunk>,
     preloader: Arc<PreloadCoordinator>,
+    crossfade: Option<CrossfadeState>,
+    transition_carry: Vec<f32>,
+    transition_carry_position: Option<Duration>,
+    fade_in_total_frames: u64,
+    fade_in_elapsed_frames: u64,
+    preserve_ring_for_auto_next: bool,
     current_track: Option<TrackId>,
     queue: Arc<Vec<TrackId>>,
     queue_positions: HashMap<TrackId, usize>,
@@ -616,6 +787,8 @@ impl AudioWorker {
         config: AudioWorkerConfig,
     ) -> Self {
         let output_rate = config.output_rate;
+        let eq_settings = config.eq;
+        let spatial_settings = config.spatial;
         Self {
             command_queue,
             event_tx,
@@ -626,12 +799,26 @@ impl AudioWorker {
             paused,
             audible_frames,
             output_rate,
-            processor: AudioProcessor::new(output_rate, config.eq, config.spatial, 1.0),
+            processor: AudioProcessor::new(
+                output_rate,
+                eq_settings.clone(),
+                spatial_settings.clone(),
+                1.0,
+            ),
+            eq_settings,
+            spatial_settings,
+            transition: TrackTransitionSettings::default(),
             decoded_samples: Vec::new(),
             processed_samples: Vec::new(),
             decoder: None,
             prefetched_chunk: None,
             preloader,
+            crossfade: None,
+            transition_carry: Vec::new(),
+            transition_carry_position: None,
+            fade_in_total_frames: 0,
+            fade_in_elapsed_frames: 0,
+            preserve_ring_for_auto_next: false,
             current_track: None,
             queue: Arc::new(Vec::new()),
             queue_positions: HashMap::new(),
@@ -666,6 +853,7 @@ impl AudioWorker {
                     self.emit(PlayerEvent::StateChanged(self.state));
                     self.decoder = None;
                     self.prefetched_chunk = None;
+                    self.crossfade = None;
                 }
             }
         }
@@ -701,6 +889,7 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::Seek(position) => {
+                self.cancel_transition_runtime();
                 self.prefetched_chunk = None;
                 if let Some(decoder) = &mut self.decoder {
                     self.decode_generation = self.decode_generation.wrapping_add(1);
@@ -713,6 +902,7 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::PlayTrack(track_id) => {
+                self.cancel_transition_runtime();
                 let target_index = self
                     .queue_position(track_id)
                     .unwrap_or_else(|| self.append_queue_track(track_id));
@@ -723,6 +913,7 @@ impl AudioWorker {
                 position,
                 play,
             } => {
+                self.cancel_transition_runtime();
                 let target_index = self
                     .queue_position(track_id)
                     .unwrap_or_else(|| self.append_queue_track(track_id));
@@ -747,8 +938,12 @@ impl AudioWorker {
                     self.schedule_next_preload();
                 }
             }
-            PlayerCommand::Next => self.next_track(),
+            PlayerCommand::Next => {
+                self.cancel_transition_runtime();
+                self.next_track();
+            }
             PlayerCommand::Previous => {
+                self.cancel_transition_runtime();
                 if self
                     .decoder
                     .as_ref()
@@ -769,8 +964,20 @@ impl AudioWorker {
                     snapshot.volume = volume;
                 }
             }
-            PlayerCommand::SetEq(settings) => self.processor.eq.set_settings(settings),
-            PlayerCommand::SetSpatial(settings) => self.processor.spatial.set_settings(settings),
+            PlayerCommand::SetEq(settings) => {
+                self.eq_settings = settings.clone();
+                self.processor.eq.set_settings(settings);
+            }
+            PlayerCommand::SetSpatial(settings) => {
+                self.spatial_settings = settings.clone();
+                self.processor.spatial.set_settings(settings);
+            }
+            PlayerCommand::SetTransition(settings) => {
+                self.transition = sanitize_transition(settings);
+                self.crossfade = None;
+                self.transition_carry.clear();
+                self.schedule_next_preload();
+            }
             PlayerCommand::SetOutputDevice(device) => self.emit(PlayerEvent::Error(
                 PlaybackError::Device(format!("设备“{device}”将在下次启动时应用")),
             )),
@@ -814,11 +1021,21 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::Stop => {
+                self.cancel_transition_runtime();
                 self.preloader.cancel();
                 self.stop_playback(false);
             }
         }
         true
+    }
+
+    fn cancel_transition_runtime(&mut self) {
+        self.crossfade = None;
+        self.transition_carry.clear();
+        self.transition_carry_position = None;
+        self.fade_in_total_frames = 0;
+        self.fade_in_elapsed_frames = 0;
+        self.preserve_ring_for_auto_next = false;
     }
 
     fn queue_position(&self, track_id: TrackId) -> Option<usize> {
@@ -841,15 +1058,31 @@ impl AudioWorker {
         }
     }
 
+    fn linear_next_index(&self) -> Option<usize> {
+        if self.queue.is_empty() || self.current_track.is_none() || self.repeat == RepeatMode::One {
+            return None;
+        }
+        if self.queue_index + 1 < self.queue.len() {
+            Some(self.queue_index + 1)
+        } else if self.repeat == RepeatMode::All {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    fn has_automatic_next(&self) -> bool {
+        if self.repeat == RepeatMode::One {
+            return true;
+        }
+        self.shuffle || self.linear_next_index().is_some()
+    }
+
     fn schedule_next_preload(&self) {
         if self.shuffle || self.queue.is_empty() || self.current_track.is_none() {
             return;
         }
-        let next_index = if self.queue_index + 1 < self.queue.len() {
-            self.queue_index + 1
-        } else if self.repeat == RepeatMode::All {
-            0
-        } else {
+        let Some(next_index) = self.linear_next_index() else {
             self.preloader.cancel();
             return;
         };
@@ -859,13 +1092,13 @@ impl AudioWorker {
         if Some(track_id) == self.current_track {
             return;
         }
-        let path = self
+        let track = self
             .tracks
             .read()
             .ok()
-            .and_then(|tracks| tracks.get(&track_id).map(|track| track.path.clone()));
-        if let Some(path) = path {
-            self.preloader.request(track_id, path);
+            .and_then(|tracks| tracks.get(&track_id).cloned());
+        if let Some(track) = track {
+            self.preloader.request(track, &self.transition);
         }
     }
 
@@ -882,8 +1115,10 @@ impl AudioWorker {
         }
     }
 
-    fn reset_audible_position(&self) {
-        self.flush.store(true, Ordering::Release);
+    fn reset_audible_position(&self, flush_pcm: bool) {
+        if flush_pcm {
+            self.flush.store(true, Ordering::Release);
+        }
         self.audible_frames.store(0, Ordering::Release);
     }
 
@@ -905,19 +1140,27 @@ impl AudioWorker {
         let previous_track = self.current_track;
         self.current_track = Some(track_id);
         self.state = PlaybackState::Loading;
-        self.reset_audible_position();
+        self.reset_audible_position(!self.preserve_ring_for_auto_next);
         self.emit(PlayerEvent::PositionChanged(Duration::ZERO));
         self.emit(PlayerEvent::StateChanged(self.state));
 
         let prepared = self.preloader.take(track_id);
         let opened = if let Some(preloaded) = prepared {
-            self.prefetched_chunk = preloaded.first_chunk;
-            Ok(preloaded.decoder)
+            if preloaded.smart_cue.position.is_zero() {
+                self.prefetched_chunk = preloaded.first_chunk;
+                Ok(preloaded.decoder)
+            } else {
+                // Smart Cue is a crossfade-only optimization. A normal/gapless open must preserve
+                // an intentional quiet intro instead of silently skipping it.
+                self.prefetched_chunk = None;
+                DecoderStream::open(&track.path)
+            }
         } else {
             self.prefetched_chunk = None;
             DecoderStream::open(&track.path)
         };
 
+        self.preserve_ring_for_auto_next = false;
         match opened {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
@@ -933,6 +1176,8 @@ impl AudioWorker {
                 self.decoder = None;
                 self.prefetched_chunk = None;
                 self.current_track = previous_track;
+                self.fade_in_total_frames = 0;
+                self.fade_in_elapsed_frames = 0;
                 self.state = PlaybackState::Error;
                 self.emit(PlayerEvent::Error(error.into()));
                 self.emit(PlayerEvent::StateChanged(self.state));
@@ -942,26 +1187,68 @@ impl AudioWorker {
     }
 
     fn decode_next(&mut self) -> Result<bool, DecodeError> {
-        let (sample_rate, channels, position) = if let Some(chunk) = self.prefetched_chunk.take() {
+        if !self.transition_carry.is_empty() {
+            std::mem::swap(&mut self.processed_samples, &mut self.transition_carry);
+            let position = self
+                .transition_carry_position
+                .take()
+                .or_else(|| self.decoder.as_ref().map(DecoderStream::position))
+                .unwrap_or_default();
+            return self.push_processed_samples(position);
+        }
+
+        let decoded = if let Some(chunk) = self.prefetched_chunk.take() {
             self.decoded_samples = chunk.samples;
-            (chunk.sample_rate, chunk.channels, chunk.position)
+            Some((chunk.sample_rate, chunk.channels, chunk.position))
         } else {
             let Some(decoder) = &mut self.decoder else {
                 return Ok(false);
             };
-            let Some((sample_rate, channels)) =
-                decoder.next_chunk_into(&mut self.decoded_samples)?
-            else {
-                return Ok(false);
-            };
-            (sample_rate, channels, decoder.position())
+            match decoder.next_chunk_into(&mut self.decoded_samples)? {
+                Some((sample_rate, channels)) => {
+                    Some((sample_rate, channels, decoder.position()))
+                }
+                None => None,
+            }
         };
+
+        let Some((sample_rate, channels, position)) = decoded else {
+            if self.crossfade.is_some() {
+                let next_position = self.complete_crossfade();
+                return Ok(next_position.is_some());
+            }
+            return Ok(false);
+        };
+
         self.processor.process_into(
             &self.decoded_samples,
             sample_rate,
             channels,
             &mut self.processed_samples,
         );
+        self.apply_pending_fade_in();
+
+        if self.crossfade.is_none() {
+            self.maybe_begin_crossfade(position)?;
+        }
+
+        let mut reported_position = position;
+        if let Some(mut crossfade) = self.crossfade.take() {
+            let complete = crossfade.mix_into(&mut self.processed_samples)?;
+            self.crossfade = Some(crossfade);
+            if complete
+                && let Some(next_position) = self.complete_crossfade()
+            {
+                reported_position = next_position;
+            }
+        } else {
+            self.apply_fade_out(position);
+        }
+
+        self.push_processed_samples(reported_position)
+    }
+
+    fn push_processed_samples(&mut self, position: Duration) -> Result<bool, DecodeError> {
         let decode_generation = self.decode_generation;
         for index in 0..self.processed_samples.len() {
             let sample = self.processed_samples[index];
@@ -999,17 +1286,186 @@ impl AudioWorker {
         Ok(true)
     }
 
+    fn maybe_begin_crossfade(&mut self, position: Duration) -> Result<(), DecodeError> {
+        if !self.transition.enabled
+            || self.transition.mode != TransitionMode::Crossfade
+            || self.repeat == RepeatMode::One
+            || self.shuffle
+        {
+            return Ok(());
+        }
+        let Some(next_index) = self.linear_next_index() else {
+            return Ok(());
+        };
+        let Some(next_track_id) = self.queue.get(next_index).copied() else {
+            return Ok(());
+        };
+        if Some(next_track_id) == self.current_track {
+            return Ok(());
+        }
+        let duration_ms = self
+            .current_track
+            .and_then(|track_id| {
+                self.tracks
+                    .read()
+                    .ok()
+                    .and_then(|tracks| tracks.get(&track_id).map(|track| track.duration_ms))
+            })
+            .unwrap_or(0);
+        if duration_ms == 0 {
+            return Ok(());
+        }
+        let chunk_frames = self.processed_samples.len() as u64 / 2;
+        let chunk_ms = chunk_frames.saturating_mul(1_000) / u64::from(self.output_rate.max(1));
+        let remaining_at_chunk_start = duration_ms
+            .saturating_sub(position.as_millis() as u64)
+            .saturating_add(chunk_ms);
+        if remaining_at_chunk_start > self.transition.duration_ms {
+            return Ok(());
+        }
+        let Some(preloaded) = self.preloader.take(next_track_id) else {
+            return Ok(());
+        };
+        let total_ms = self
+            .transition
+            .duration_ms
+            .min(remaining_at_chunk_start.max(MIN_TRANSITION_MS));
+        let total_frames = total_ms.saturating_mul(u64::from(self.output_rate.max(1))) / 1_000;
+        tracing::debug!(
+            current_track = ?self.current_track,
+            next_track = next_track_id,
+            duration_ms = total_ms,
+            cue_ms = preloaded.smart_cue.position.as_millis() as u64,
+            cue_confidence = preloaded.smart_cue.confidence,
+            "启动自动交叉淡化"
+        );
+        self.crossfade = Some(CrossfadeState::new(
+            preloaded,
+            self.output_rate,
+            self.eq_settings.clone(),
+            self.spatial_settings.clone(),
+            total_frames,
+        ));
+        Ok(())
+    }
+
+    fn complete_crossfade(&mut self) -> Option<Duration> {
+        let mut crossfade = self.crossfade.take()?;
+        let next_track_id = crossfade.track_id;
+        let next_position = crossfade.consumed_position(self.output_rate);
+        let carry_position = crossfade.decoder.position();
+        let carry = crossfade.take_remaining_buffer();
+
+        self.emit(PlayerEvent::TrackEnded);
+        self.current_track = Some(next_track_id);
+        if let Some(index) = self.queue_position(next_track_id) {
+            self.queue_index = index;
+        }
+        self.decoder = Some(crossfade.decoder);
+        self.prefetched_chunk = crossfade.prefetched_chunk;
+        self.processor = crossfade.processor;
+        self.transition_carry = carry;
+        self.transition_carry_position = (!self.transition_carry.is_empty()).then_some(carry_position);
+        self.fade_in_total_frames = 0;
+        self.fade_in_elapsed_frames = 0;
+        self.audible_frames
+            .store(self.duration_to_output_frames(next_position), Ordering::Release);
+        self.state = PlaybackState::Playing;
+        self.paused.store(false, Ordering::Release);
+        self.emit(PlayerEvent::PositionChanged(next_position));
+        self.emit(PlayerEvent::StateChanged(self.state));
+        self.schedule_next_preload();
+        Some(next_position)
+    }
+
+    fn apply_fade_out(&mut self, position: Duration) {
+        if !self.transition.enabled
+            || self.transition.mode != TransitionMode::FadeOutIn
+            || !self.has_automatic_next()
+            || self.repeat == RepeatMode::One
+        {
+            return;
+        }
+        let fade_ms = (self.transition.duration_ms / 2).max(MIN_TRANSITION_MS / 2);
+        let duration_ms = self
+            .current_track
+            .and_then(|track_id| {
+                self.tracks
+                    .read()
+                    .ok()
+                    .and_then(|tracks| tracks.get(&track_id).map(|track| track.duration_ms))
+            })
+            .unwrap_or(0);
+        if duration_ms == 0 {
+            return;
+        }
+        let frames = self.processed_samples.len() / 2;
+        let chunk_ms = frames as u64 * 1_000 / u64::from(self.output_rate.max(1));
+        let chunk_start_ms = (position.as_millis() as u64).saturating_sub(chunk_ms);
+        let fade_start_ms = duration_ms.saturating_sub(fade_ms);
+        for frame in 0..frames {
+            let frame_ms = chunk_start_ms
+                .saturating_add(frame as u64 * 1_000 / u64::from(self.output_rate.max(1)));
+            if frame_ms < fade_start_ms {
+                continue;
+            }
+            let progress = (frame_ms.saturating_sub(fade_start_ms)) as f32 / fade_ms as f32;
+            let gain = fade_out_gain(progress);
+            let index = frame * 2;
+            self.processed_samples[index] *= gain;
+            self.processed_samples[index + 1] *= gain;
+        }
+    }
+
+    fn apply_pending_fade_in(&mut self) {
+        if self.fade_in_total_frames == 0 {
+            return;
+        }
+        let frames = self.processed_samples.len() / 2;
+        for frame in 0..frames {
+            let progress = self.fade_in_elapsed_frames as f32 / self.fade_in_total_frames as f32;
+            let gain = fade_in_gain(progress);
+            let index = frame * 2;
+            self.processed_samples[index] *= gain;
+            self.processed_samples[index + 1] *= gain;
+            self.fade_in_elapsed_frames = self.fade_in_elapsed_frames.saturating_add(1);
+            if self.fade_in_elapsed_frames >= self.fade_in_total_frames {
+                self.fade_in_total_frames = 0;
+                self.fade_in_elapsed_frames = 0;
+                break;
+            }
+        }
+    }
+
+    fn prepare_automatic_open(&mut self) {
+        self.preserve_ring_for_auto_next = true;
+        if self.transition.enabled
+            && self.transition.mode == TransitionMode::FadeOutIn
+            && self.repeat != RepeatMode::One
+        {
+            let fade_in_ms = (self.transition.duration_ms / 2).max(MIN_TRANSITION_MS / 2);
+            self.fade_in_total_frames =
+                fade_in_ms.saturating_mul(u64::from(self.output_rate.max(1))) / 1_000;
+            self.fade_in_elapsed_frames = 0;
+        }
+    }
+
     fn finish_track(&mut self) {
         self.emit(PlayerEvent::TrackEnded);
         match self.repeat {
             RepeatMode::One => {
                 if let Some(track_id) = self.current_track {
+                    self.preserve_ring_for_auto_next = true;
                     self.open_track(track_id);
                 }
             }
-            RepeatMode::All => self.next_track(),
+            RepeatMode::All => {
+                self.prepare_automatic_open();
+                self.next_track();
+            }
             RepeatMode::Off => {
                 if self.queue_index + 1 < self.queue.len() {
+                    self.prepare_automatic_open();
                     self.next_track();
                 } else {
                     self.stop_playback(false);
@@ -1078,12 +1534,14 @@ impl AudioWorker {
         self.decode_generation = self.decode_generation.wrapping_add(1);
         self.decoder = None;
         self.prefetched_chunk = None;
+        self.crossfade = None;
+        self.transition_carry.clear();
         if clear_current_track {
             self.current_track = None;
         }
         self.state = PlaybackState::Stopped;
         self.paused.store(true, Ordering::Release);
-        self.reset_audible_position();
+        self.reset_audible_position(true);
         self.emit(PlayerEvent::PositionChanged(Duration::ZERO));
         self.emit(PlayerEvent::StateChanged(self.state));
     }
@@ -1119,6 +1577,12 @@ impl AudioWorker {
     }
 }
 
+fn sanitize_transition(mut settings: TrackTransitionSettings) -> TrackTransitionSettings {
+    settings.duration_ms = settings.duration_ms.clamp(MIN_TRANSITION_MS, MAX_TRANSITION_MS);
+    settings.max_smart_cue_ms = settings.max_smart_cue_ms.min(8_000);
+    settings
+}
+
 fn can_coalesce_commands(queued: &PlayerCommand, incoming: &PlayerCommand) -> bool {
     matches!(
         (queued, incoming),
@@ -1129,6 +1593,7 @@ fn can_coalesce_commands(queued: &PlayerCommand, incoming: &PlayerCommand) -> bo
             | (PlayerCommand::SetVolume(_), PlayerCommand::SetVolume(_))
             | (PlayerCommand::SetEq(_), PlayerCommand::SetEq(_))
             | (PlayerCommand::SetSpatial(_), PlayerCommand::SetSpatial(_))
+            | (PlayerCommand::SetTransition(_), PlayerCommand::SetTransition(_))
             | (
                 PlayerCommand::SetOutputDevice(_),
                 PlayerCommand::SetOutputDevice(_)
