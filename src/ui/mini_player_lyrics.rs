@@ -1,7 +1,7 @@
 use gpui::{Context, Entity, IntoElement, div, prelude::*, px, rgb};
 
 use super::{
-    player_legacy::{self, PlaybackProgress, PlaybackTime},
+    player_stage::{self, PlaybackProgress, PlaybackTime},
     shell::MusicApp,
     theme,
 };
@@ -14,7 +14,7 @@ pub(super) fn mini_player(
     playback_progress: Entity<PlaybackProgress>,
     playback_time: Entity<PlaybackTime>,
 ) -> impl IntoElement {
-    let base = player_legacy::mini_player(app, cx, playback_progress, playback_time);
+    let base = player_stage::mini_player(app, cx, playback_progress, playback_time);
     let visible = app.config.desktop_lyrics.visible;
 
     div()
