@@ -14,7 +14,6 @@ mod player_stage;
 use player_facade as player;
 pub mod route;
 mod settings;
-mod settings_content;
 mod shell;
 pub mod theme;
 
