@@ -1,6 +1,6 @@
 use gpui::{
-    App, AppContext, Bounds, Context, Global, Timer, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, point, px, size,
+    App, AppContext, BorrowAppContext, Bounds, Context, Global, Timer, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size,
 };
 
 use crate::{
@@ -79,7 +79,6 @@ impl MusicApp {
             });
         }
 
-        // 旧版本可能遗留未登记窗口。打开新的唯一实例前先清理，避免可见=true 时重复创建。
         remove_untracked_overlay_windows(cx);
 
         let config = self.config.desktop_lyrics.clone();
