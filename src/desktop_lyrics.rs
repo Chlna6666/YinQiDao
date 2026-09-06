@@ -1,6 +1,6 @@
 use gpui::{
-    App, Bounds, Context, Timer, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, point, px, size,
+    App, AppContext, Bounds, Context, Timer, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, point, px, size,
 };
 
 use crate::{
