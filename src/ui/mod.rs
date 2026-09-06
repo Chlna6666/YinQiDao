@@ -10,6 +10,7 @@ mod player_legacy;
 mod player_stage;
 use player_stage as player;
 pub mod route;
+#[path = "settings_v2.rs"]
 mod settings;
 mod shell;
 pub mod theme;
