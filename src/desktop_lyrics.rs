@@ -174,6 +174,7 @@ impl MusicApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn adjust_desktop_lyrics_background(
         &mut self,
         delta: f32,
@@ -401,7 +402,11 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
                 if changed
                     && let Some(window) = find_overlay_window(cx)
                 {
-                    let _ = window.update(cx, |_view, _window, view_cx| view_cx.notify());
+                    // Transparent surfaces cannot leave the previous lyric's damage outside the
+                    // new glyph bounds. Refresh invalidates the whole overlay window and forces a
+                    // transparent clear before repaint; the main application window remains on its
+                    // normal retained/partial redraw path.
+                    let _ = window.update(cx, |_view, window, _view_cx| window.refresh());
                 }
                 true
             })?;
