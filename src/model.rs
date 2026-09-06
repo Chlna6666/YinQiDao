@@ -58,6 +58,19 @@ impl Default for EqSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialMotionMode {
+    #[default]
+    Static,
+    Orbit8d,
+    Orbit360,
+    Pendulum,
+    FrontBack,
+    Planetary,
+    NearEar,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SpatialSettings {
@@ -74,8 +87,18 @@ pub struct SpatialSettings {
     pub crossfeed: f32,
     /// Early-room reflection size/amount.
     pub room_size: f32,
-    /// Interaural delay/decorrelation amount used by the 3D stage.
+    /// Static 3D decorrelation amount independent of motion.
     pub immersive_3d: f32,
+    /// Dynamic source trajectory used by 8D/360/planetary modes.
+    pub motion_mode: SpatialMotionMode,
+    /// Orbit cycles per second. Normal UI range is roughly 0.02..0.30 Hz.
+    pub motion_speed_hz: f32,
+    /// Normalized virtual orbit radius around the listener.
+    pub motion_radius: f32,
+    /// How strongly the moving virtual source is mixed into the processed signal.
+    pub motion_intensity: f32,
+    /// Reverse the orbital direction without changing the preset geometry.
+    pub clockwise: bool,
 }
 
 impl Default for SpatialSettings {
@@ -89,6 +112,11 @@ impl Default for SpatialSettings {
             crossfeed: 0.08,
             room_size: 0.15,
             immersive_3d: 0.10,
+            motion_mode: SpatialMotionMode::Static,
+            motion_speed_hz: 0.08,
+            motion_radius: 0.65,
+            motion_intensity: 0.0,
+            clockwise: true,
         }
     }
 }
