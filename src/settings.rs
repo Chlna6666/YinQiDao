@@ -12,6 +12,77 @@ use crate::model::{
 /// Adding fields with serde defaults is backward-compatible and keeps the existing version.
 pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 2;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopLyricsAlignment {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DesktopLyricsConfig {
+    /// Whether the independent desktop lyric window should be visible.
+    pub visible: bool,
+    /// Prevent dragging the lyric window while keeping the toolbar available for unlocking.
+    pub locked: bool,
+    /// Use a GPUI popup window so the lyrics stay above normal application windows.
+    pub always_on_top: bool,
+    /// Saved global window origin. `None` means center it on the primary display.
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub width: f32,
+    pub height: f32,
+    pub font_size: f32,
+    pub active_color: u32,
+    pub inactive_color: u32,
+    pub translation_color: u32,
+    pub background_opacity: f32,
+    pub show_translation: bool,
+    pub two_line: bool,
+    pub alignment: DesktopLyricsAlignment,
+    /// Show the current lyric above the normal bottom player as well.
+    pub show_in_player: bool,
+}
+
+impl Default for DesktopLyricsConfig {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            locked: false,
+            always_on_top: true,
+            x: None,
+            y: None,
+            width: 760.0,
+            height: 148.0,
+            font_size: 30.0,
+            active_color: 0xff_3b_5c,
+            inactive_color: 0xf2_f2_f7,
+            translation_color: 0xb8_c0_cc,
+            background_opacity: 0.22,
+            show_translation: true,
+            two_line: true,
+            alignment: DesktopLyricsAlignment::Center,
+            show_in_player: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LyricsShortcutSettings {
+    /// System-wide lyric shortcuts are opt-in. They are intentionally disabled by default.
+    pub enabled: bool,
+}
+
+impl Default for LyricsShortcutSettings {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "current_schema_version")]
@@ -30,6 +101,10 @@ pub struct AppConfig {
     pub smart_audio: SmartAudioSettings,
     #[serde(default)]
     pub transition: TrackTransitionSettings,
+    #[serde(default)]
+    pub desktop_lyrics: DesktopLyricsConfig,
+    #[serde(default)]
+    pub lyrics_shortcuts: LyricsShortcutSettings,
     #[serde(default)]
     pub repeat: RepeatMode,
     #[serde(default)]
@@ -141,6 +216,8 @@ impl AppConfigV1 {
             },
             smart_audio: SmartAudioSettings::default(),
             transition: TrackTransitionSettings::default(),
+            desktop_lyrics: DesktopLyricsConfig::default(),
+            lyrics_shortcuts: LyricsShortcutSettings::default(),
             repeat: self.repeat,
             shuffle: self.shuffle,
             queue: self.queue,
@@ -205,6 +282,8 @@ impl Default for AppConfig {
             spatial: SpatialSettings::default(),
             smart_audio: SmartAudioSettings::default(),
             transition: TrackTransitionSettings::default(),
+            desktop_lyrics: DesktopLyricsConfig::default(),
+            lyrics_shortcuts: LyricsShortcutSettings::default(),
             repeat: RepeatMode::Off,
             shuffle: false,
             queue: Arc::new(Vec::new()),
@@ -353,6 +432,13 @@ mod tests {
         config.transition.enabled = true;
         config.transition.mode = TransitionMode::Crossfade;
         config.transition.duration_ms = 4_200;
+        config.desktop_lyrics.visible = true;
+        config.desktop_lyrics.locked = true;
+        config.desktop_lyrics.x = Some(123.0);
+        config.desktop_lyrics.y = Some(456.0);
+        config.desktop_lyrics.active_color = 0x3a_8d_ff;
+        config.desktop_lyrics.font_size = 34.0;
+        config.lyrics_shortcuts.enabled = true;
         store.save(&config).expect("save");
 
         let restored = store.load().expect("load");
@@ -364,6 +450,13 @@ mod tests {
         assert_eq!(restored.transition.duration_ms, 4_200);
         assert_eq!(restored.eq.bands_db[4], 5.5);
         assert_eq!(restored.spatial.motion_mode, SpatialMotionMode::Orbit360);
+        assert!(restored.desktop_lyrics.visible);
+        assert!(restored.desktop_lyrics.locked);
+        assert_eq!(restored.desktop_lyrics.x, Some(123.0));
+        assert_eq!(restored.desktop_lyrics.y, Some(456.0));
+        assert_eq!(restored.desktop_lyrics.active_color, 0x3a_8d_ff);
+        assert_eq!(restored.desktop_lyrics.font_size, 34.0);
+        assert!(restored.lyrics_shortcuts.enabled);
         fs::remove_file(path).expect("cleanup");
     }
 
@@ -401,6 +494,10 @@ clockwise = true
         assert!(!loaded.transition.enabled);
         assert_eq!(loaded.transition.mode, TransitionMode::Crossfade);
         assert_eq!(loaded.transition.duration_ms, 3_500);
+        assert!(!loaded.desktop_lyrics.visible);
+        assert!(loaded.desktop_lyrics.always_on_top);
+        assert!(loaded.desktop_lyrics.show_in_player);
+        assert!(!loaded.lyrics_shortcuts.enabled);
         assert_eq!(fs::read_to_string(&path).expect("unchanged"), content);
         let backup = path.with_file_name(format!(
             "{}.v2.bak",
