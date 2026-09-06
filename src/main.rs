@@ -1,5 +1,6 @@
 mod artwork;
 mod audio;
+mod audio_debug_window;
 mod audio_policy;
 mod desktop_lyrics;
 mod global_shortcuts;
@@ -25,11 +26,9 @@ use settings::ConfigStore;
 use ui::MusicApp;
 
 fn main() -> Result<()> {
-    // 1. 初始化全局多线程 Tokio 异步运行时 (对标 bmcbl)
     let app_runtime = runtime::initialize_app_runtime()?;
     let io_handle = app_runtime.io_handle().clone();
 
-    // 2. 异步读取配置与数据存储路径
     let (config, base_dir) = io_handle.block_on(async {
         let config_store = ConfigStore::discover()
             .unwrap_or_else(|_| ConfigStore::from_path(std::path::PathBuf::from("config.toml")));
@@ -44,17 +43,14 @@ fn main() -> Result<()> {
     audio_policy::set_audio_runtime_policy(audio_policy::policy_from_config(&config));
     hotkeys::set_enabled(config.lyrics_shortcuts.enabled);
 
-    // 3. 初始化包含滚动归档和 debug 级别的 Tracing 日志系统
     let _log_guard = logger::init_logging(&config.log, &base_dir);
     tracing::info!(
         "音栖岛启动中... 运行模式: 异步多线程, 日志级别: {}",
         config.log.level
     );
 
-    // 4. 确保进入 GPUI 主事件循环前，主线程不在 Tokio 运行时上下文中 (对标 bmcbl)
     ensure_gpui_outside_tokio_runtime()?;
 
-    // 5. 进入 GPUI 专属主线程并通过 gpui_tokio 桥接注入 Tokio 句柄
     let app = Application::new().with_assets(lucide_gpui::Assets);
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, io_handle);
@@ -87,8 +83,30 @@ fn main() -> Result<()> {
             }
         };
 
-        desktop_lyrics::start_ui_service(main_window, cx);
-        global_shortcuts::start_ui_service(main_window, cx);
+        desktop_lyrics::start_ui_service(main_window.clone(), cx);
+        global_shortcuts::start_ui_service(main_window.clone(), cx);
+
+        if audio_debug_window::requested()
+            && let Err(error) = audio_debug_window::open(cx)
+        {
+            tracing::warn!(error = %error, "Audio Laboratory debug 窗口打开失败");
+        }
+
+        // 主窗口是进程生命周期所有者。桌面歌词/Audio Laboratory 都只是辅助窗口，
+        // 关闭主窗口后必须同步销毁，不能继续让 GPUI event loop 存活。
+        let lifecycle_main = main_window.clone();
+        cx.on_window_closed(move |cx| {
+            if lifecycle_main
+                .update(cx, |_app, _window, _cx| ())
+                .is_err()
+            {
+                desktop_lyrics::shutdown(cx);
+                audio_debug_window::shutdown(cx);
+                cx.quit();
+            }
+        })
+        .detach();
+
         cx.activate(true);
     });
 
