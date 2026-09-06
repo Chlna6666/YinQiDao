@@ -12,6 +12,7 @@ use crate::{
 const LYRICS_UI_TICK: std::time::Duration = std::time::Duration::from_millis(80);
 const MIN_OVERLAY_WIDTH: f32 = 420.0;
 const MIN_OVERLAY_HEIGHT: f32 = 92.0;
+const DEFAULT_DESKTOP_LYRICS_BACKGROUND_OPACITY: f32 = 0.22;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LyricsUiKey {
@@ -47,7 +48,11 @@ impl MusicApp {
             return;
         }
         if let Some(window) = existing {
-            let _ = window.update(cx, |_view, window, _cx| window.show_window());
+            let always_on_top = self.config.desktop_lyrics.always_on_top;
+            let _ = window.update(cx, |_view, window, _cx| {
+                window.show_window();
+                crate::window_platform::configure_desktop_lyrics_window(window, always_on_top)
+            });
             return;
         }
 
@@ -66,8 +71,8 @@ impl MusicApp {
             titlebar: None,
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(MIN_OVERLAY_WIDTH), px(MIN_OVERLAY_HEIGHT))),
-            // Windows uses a borderless popup and applies HWND_TOPMOST explicitly below. Other
-            // platforms keep the previous popup/normal behavior until they have a native adapter.
+            // Windows always uses a borderless popup and then applies TOOLWINDOW/NOACTIVATE on the
+            // native HWND. Other platforms retain the existing popup/normal topmost semantics.
             kind: if cfg!(windows) || config.always_on_top {
                 WindowKind::PopUp
             } else {
@@ -88,12 +93,15 @@ impl MusicApp {
                 let always_on_top = config.always_on_top;
                 let applied = window
                     .update(cx, |_view, window, _cx| {
-                        crate::window_platform::set_always_on_top(window, always_on_top)
+                        crate::window_platform::configure_desktop_lyrics_window(
+                            window,
+                            always_on_top,
+                        )
                     })
                     .unwrap_or(false);
                 #[cfg(windows)]
                 if !applied {
-                    tracing::warn!("桌面歌词 HWND 置顶状态应用失败");
+                    tracing::warn!("桌面歌词 HWND 独立窗口样式应用失败");
                 }
             }
             Err(error) => {
@@ -163,6 +171,17 @@ impl MusicApp {
 
     pub(crate) fn toggle_desktop_lyrics_two_line(&mut self, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.two_line = !self.config.desktop_lyrics.two_line;
+        self.save_config();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_desktop_lyrics_background(&mut self, cx: &mut Context<Self>) {
+        self.config.desktop_lyrics.background_opacity =
+            if self.config.desktop_lyrics.background_opacity > 0.01 {
+                0.0
+            } else {
+                DEFAULT_DESKTOP_LYRICS_BACKGROUND_OPACITY
+            };
         self.save_config();
         cx.notify();
     }
@@ -360,6 +379,7 @@ impl MusicApp {
             u64::from(config.inactive_color),
             u64::from(config.translation_color),
             u64::from(config.font_size.to_bits()),
+            u64::from(config.background_opacity.to_bits()),
             config.show_translation as u64,
             config.two_line as u64,
             config.locked as u64,
@@ -402,11 +422,13 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
                 if changed
                     && let Some(window) = find_overlay_window(cx)
                 {
-                    // Transparent surfaces cannot leave the previous lyric's damage outside the
-                    // new glyph bounds. Refresh invalidates the whole overlay window and forces a
-                    // transparent clear before repaint; the main application window remains on its
-                    // normal retained/partial redraw path.
-                    let _ = window.update(cx, |_view, window, _view_cx| window.refresh());
+                    // The overlay view reads its state from MusicApp. Notify the view entity first
+                    // so a track/line/config change rebuilds the retained element tree, then force
+                    // a full transparent-surface refresh so old glyph damage cannot survive.
+                    let _ = window.update(cx, |_view, window, view_cx| {
+                        view_cx.notify();
+                        window.refresh();
+                    });
                 }
                 true
             })?;
