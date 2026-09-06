@@ -1,7 +1,9 @@
 mod artwork;
 mod audio;
 mod audio_policy;
+mod desktop_lyrics;
 mod gpu;
+mod hotkeys;
 mod library;
 pub mod logger;
 mod lyrics;
@@ -38,6 +40,7 @@ fn main() -> Result<()> {
         (config, base_dir)
     });
     audio_policy::set_audio_runtime_policy(audio_policy::policy_from_config(&config));
+    hotkeys::set_enabled(config.lyrics_shortcuts.enabled);
 
     // 3. 初始化包含滚动归档和 debug 级别的 Tracing 日志系统
     let _log_guard = logger::init_logging(&config.log, &base_dir);
@@ -73,17 +76,20 @@ fn main() -> Result<()> {
             options.window_background = gpui::WindowBackgroundAppearance::Opaque;
         }
 
-        let result = cx.open_window(options, |_, cx| cx.new(|_| MusicApp::new(true)));
+        let main_window = match cx.open_window(options, |_, cx| cx.new(|_| MusicApp::new(true))) {
+            Ok(window) => window,
+            Err(error) => {
+                tracing::error!("打开音栖岛窗口失败: {error:#}");
+                cx.quit();
+                return;
+            }
+        };
 
-        if let Err(error) = result {
-            tracing::error!("打开音栖岛窗口失败: {error:#}");
-            cx.quit();
-            return;
-        }
-
+        desktop_lyrics::start_ui_service(main_window, cx);
         cx.activate(true);
     });
 
+    hotkeys::shutdown();
     Ok(())
 }
 
