@@ -41,6 +41,7 @@ pub enum RepeatMode {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct EqSettings {
     pub enabled: bool,
     pub preamp_db: f32,
@@ -58,12 +59,23 @@ impl Default for EqSettings {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SpatialSettings {
     pub enabled: bool,
+    /// Mid/side stereo width. 0 keeps the image narrow, 1 enables the maximum safe widening.
     pub width: f32,
+    /// Early-reflection/decorrelation depth.
     pub depth: f32,
+    /// Perceptual listener distance. Also drives high-frequency air absorption.
     pub distance: f32,
+    /// Wet/dry amount of the spatial processor.
     pub mix: f32,
+    /// Controlled inter-channel feed for headphone compatibility and center stability.
+    pub crossfeed: f32,
+    /// Early-room reflection size/amount.
+    pub room_size: f32,
+    /// Interaural delay/decorrelation amount used by the 3D stage.
+    pub immersive_3d: f32,
 }
 
 impl Default for SpatialSettings {
@@ -74,6 +86,9 @@ impl Default for SpatialSettings {
             depth: 0.35,
             distance: 0.2,
             mix: 0.5,
+            crossfeed: 0.08,
+            room_size: 0.15,
+            immersive_3d: 0.10,
         }
     }
 }
