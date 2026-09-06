@@ -1,8 +1,12 @@
 mod artwork;
 mod audio;
+#[path = "audio_debug_window_v2.rs"]
 mod audio_debug_window;
 mod audio_policy;
-mod desktop_lyrics;
+mod desktop_lyrics {
+    use gpui::BorrowAppContext;
+    include!("desktop_lyrics.rs");
+}
 mod global_shortcuts;
 mod gpu;
 mod hotkeys;
@@ -86,9 +90,8 @@ fn main() -> Result<()> {
         desktop_lyrics::start_ui_service(main_window.clone(), cx);
         global_shortcuts::start_ui_service(main_window.clone(), cx);
 
-        // Audio Laboratory is an explicit runtime diagnostic surface. It is opened from
-        // Settings instead of command-line/debug-build startup so normal playback never
-        // pays analyzer/UI cost unless the user asks for it.
+        // Audio Laboratory is explicitly opened from Settings. Keep the analyzer disabled
+        // on normal startup so the playback hot path has no debug-analysis overhead.
         audio::set_audio_debug_enabled(false);
 
         // 主窗口是进程生命周期所有者。桌面歌词/Audio Laboratory 都只是辅助窗口，
