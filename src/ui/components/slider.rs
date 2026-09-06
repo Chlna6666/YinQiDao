@@ -208,7 +208,9 @@ pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -
 ///
 /// Mouse-down immediately applies the pointed value so a normal click never depends on a later
 /// mouse-up being delivered to the same retained element. Movement beyond the small threshold
-/// promotes the same press into a drag; only real drags run `on_drag_end` on release.
+/// promotes the same press into a drag. Each drag movement is also committed immediately so the
+/// application never keeps a stale drag-only display override if retained reconstruction loses the
+/// final mouse-up event; mouse-up still commits the exact final pointer position.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -235,6 +237,7 @@ pub fn interactive_slider(
     let id_for_up_out = id_string;
     let click_for_down = on_click;
     let drag_for_move = on_drag;
+    let drag_end_for_move = on_drag_end.clone();
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
 
@@ -275,10 +278,9 @@ pub fn interactive_slider(
                 mark_pointer_dragging(&id_for_move, cx);
             }
             if let Some(bounds) = *bounds_for_move.borrow() {
-                (drag_for_move)(
-                    ratio_from_position(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+                let ratio = ratio_from_position(event.position.x, bounds, style.thumb_size);
+                (drag_for_move)(ratio, cx);
+                (drag_end_for_move)(ratio, cx);
             }
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
