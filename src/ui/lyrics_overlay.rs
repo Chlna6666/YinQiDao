@@ -69,7 +69,7 @@ impl gpui::Render for DesktopLyricsView {
             .flex()
             .flex_col()
             .justify_center()
-            .gap(px(4.0));
+            .gap(px(3.0));
 
         lyrics = match config.alignment {
             DesktopLyricsAlignment::Left => lyrics.items_start(),
@@ -82,7 +82,7 @@ impl gpui::Render for DesktopLyricsView {
             config.alignment,
             config.font_size,
             config.active_color,
-            gpui::FontWeight::BOLD,
+            gpui::FontWeight::SEMIBOLD,
             1.0,
         ));
 
@@ -90,41 +90,43 @@ impl gpui::Render for DesktopLyricsView {
             lyrics = lyrics.child(aligned_line(
                 translation,
                 config.alignment,
-                (config.font_size * 0.54).max(13.0),
+                (config.font_size * 0.52).max(13.0),
                 config.translation_color,
                 gpui::FontWeight::MEDIUM,
-                0.92,
+                0.90,
             ));
         }
         if let Some(next) = next {
             lyrics = lyrics.child(aligned_line(
                 next,
                 config.alignment,
-                (config.font_size * 0.68).max(15.0),
+                (config.font_size * 0.66).max(15.0),
                 config.inactive_color,
-                gpui::FontWeight::SEMIBOLD,
-                0.64,
+                gpui::FontWeight::MEDIUM,
+                0.70,
             ));
         }
         if let Some(next_translation) = next_translation {
             lyrics = lyrics.child(aligned_line(
                 next_translation,
                 config.alignment,
-                (config.font_size * 0.46).max(12.0),
+                (config.font_size * 0.44).max(12.0),
                 config.translation_color,
                 gpui::FontWeight::NORMAL,
-                0.52,
+                0.58,
             ));
         }
 
         let toolbar = div()
             .absolute()
-            .top(px(8.0))
+            .top(px(7.0))
             .right(px(8.0))
             .flex()
             .items_center()
             .gap(px(5.0))
             .window_control_area(WindowControlArea::Client)
+            .opacity(0.32)
+            .hover(|style| style.opacity(1.0))
             .child(toolbar_button(
                 "desktop-lyrics-lock",
                 if config.locked { "解锁" } else { "锁定" },
@@ -154,22 +156,17 @@ impl gpui::Render for DesktopLyricsView {
                 },
             ));
 
+        // The native window is already alpha-transparent. Do not paint a full-window translucent
+        // black rectangle here; doing so made the entire overlay look like a dark floating panel
+        // and amplified subpixel text fringes on Windows composition surfaces.
         let mut root = div()
             .id("desktop-lyrics-root")
             .size_full()
             .relative()
             .overflow_hidden()
-            .rounded_xl()
-            .border_1()
-            .border_color(hsla(0.0, 0.0, 1.0, 0.10))
-            .bg(hsla(
-                0.0,
-                0.0,
-                0.0,
-                config.background_opacity.clamp(0.0, 0.85),
-            ))
+            .bg(hsla(0.0, 0.0, 0.0, 0.0))
             .px(px(24.0))
-            .py(px(14.0))
+            .py(px(12.0))
             .child(lyrics)
             .child(toolbar);
 
@@ -226,12 +223,11 @@ fn toolbar_button(
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .bg(hsla(0.0, 0.0, 0.0, 0.34))
+        .bg(hsla(0.0, 0.0, 0.0, 0.42))
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(0xff_ff_ff))
-        .opacity(0.62)
-        .hover(|style| style.opacity(1.0).bg(hsla(0.0, 0.0, 0.0, 0.56)))
+        .hover(|style| style.bg(hsla(0.0, 0.0, 0.0, 0.64)))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
             handler(event, window, cx);
