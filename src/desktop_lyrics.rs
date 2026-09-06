@@ -1,6 +1,6 @@
 use gpui::{
-    App, AppContext, Bounds, Context, Timer, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, point, px, size,
+    App, AppContext, Bounds, Context, Global, Timer, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, point, px, size,
 };
 
 use crate::{
@@ -13,6 +13,13 @@ const LYRICS_UI_TICK: std::time::Duration = std::time::Duration::from_millis(80)
 const MIN_OVERLAY_WIDTH: f32 = 420.0;
 const MIN_OVERLAY_HEIGHT: f32 = 92.0;
 const DEFAULT_DESKTOP_LYRICS_BACKGROUND_OPACITY: f32 = 0.22;
+
+#[derive(Default)]
+struct DesktopLyricsWindowState {
+    window: Option<WindowHandle<DesktopLyricsView>>,
+}
+
+impl Global for DesktopLyricsWindowState {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LyricsUiKey {
@@ -40,21 +47,40 @@ pub(crate) enum LyricsColorTarget {
 
 impl MusicApp {
     pub(crate) fn sync_desktop_lyrics_window(&mut self, cx: &mut Context<Self>) {
-        let existing = find_overlay_window(cx);
+        ensure_window_state(cx);
+
         if !self.config.desktop_lyrics.visible {
+            let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                state.window.take()
+            });
             if let Some(window) = existing {
                 let _ = window.update(cx, |_view, window, _cx| window.remove_window());
             }
+            remove_untracked_overlay_windows(cx);
             return;
         }
+
+        let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            state.window.clone()
+        });
         if let Some(window) = existing {
             let always_on_top = self.config.desktop_lyrics.always_on_top;
-            let _ = window.update(cx, |_view, window, _cx| {
-                window.show_window();
-                crate::window_platform::configure_desktop_lyrics_window(window, always_on_top)
+            if window
+                .update(cx, |_view, window, _cx| {
+                    window.show_window();
+                    crate::window_platform::configure_desktop_lyrics_window(window, always_on_top)
+                })
+                .is_ok()
+            {
+                return;
+            }
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                state.window = None;
             });
-            return;
         }
+
+        // 旧版本可能遗留未登记窗口。打开新的唯一实例前先清理，避免可见=true 时重复创建。
+        remove_untracked_overlay_windows(cx);
 
         let config = self.config.desktop_lyrics.clone();
         let width = config.width.clamp(MIN_OVERLAY_WIDTH, 1_600.0);
@@ -71,8 +97,6 @@ impl MusicApp {
             titlebar: None,
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(MIN_OVERLAY_WIDTH), px(MIN_OVERLAY_HEIGHT))),
-            // Windows always uses a borderless popup and then applies TOOLWINDOW/NOACTIVATE on the
-            // native HWND. Other platforms retain the existing popup/normal topmost semantics.
             kind: if cfg!(windows) || config.always_on_top {
                 WindowKind::PopUp
             } else {
@@ -90,6 +114,9 @@ impl MusicApp {
             cx.new(|_| DesktopLyricsView::new(parent))
         }) {
             Ok(window) => {
+                cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                    state.window = Some(window.clone());
+                });
                 let always_on_top = config.always_on_top;
                 let applied = window
                     .update(cx, |_view, window, _cx| {
@@ -113,9 +140,14 @@ impl MusicApp {
     }
 
     fn recreate_desktop_lyrics_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(window) = find_overlay_window(cx) {
+        ensure_window_state(cx);
+        let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            state.window.take()
+        });
+        if let Some(window) = existing {
             let _ = window.update(cx, |_view, window, _cx| window.remove_window());
         }
+        remove_untracked_overlay_windows(cx);
         if self.config.desktop_lyrics.visible {
             self.sync_desktop_lyrics_window(cx);
         }
@@ -131,6 +163,10 @@ impl MusicApp {
     pub(crate) fn desktop_lyrics_window_closed(&mut self, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.visible = false;
         self.save_config();
+        ensure_window_state(cx);
+        cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            state.window = None;
+        });
         cx.notify();
     }
 
@@ -146,14 +182,20 @@ impl MusicApp {
         self.save_config();
 
         #[cfg(windows)]
-        if let Some(overlay) = find_overlay_window(cx) {
-            let applied = overlay
-                .update(cx, |_view, window, _cx| {
-                    crate::window_platform::set_always_on_top(window, always_on_top)
-                })
-                .unwrap_or(false);
-            if !applied {
-                self.status = "桌面歌词置顶状态应用失败".into();
+        {
+            ensure_window_state(cx);
+            let overlay = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                state.window.clone()
+            });
+            if let Some(overlay) = overlay {
+                let applied = overlay
+                    .update(cx, |_view, window, _cx| {
+                        crate::window_platform::set_always_on_top(window, always_on_top)
+                    })
+                    .unwrap_or(false);
+                if !applied {
+                    self.status = "桌面歌词置顶状态应用失败".into();
+                }
             }
         }
 
@@ -400,6 +442,7 @@ impl MusicApp {
 }
 
 pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App) {
+    ensure_window_state(cx);
     cx.spawn(async move |cx| -> anyhow::Result<()> {
         let mut last_key: Option<LyricsUiKey> = None;
         loop {
@@ -417,18 +460,26 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
                     last_key = Some(key);
                 });
                 if result.is_err() {
+                    shutdown(cx);
                     return false;
                 }
-                if changed
-                    && let Some(window) = find_overlay_window(cx)
-                {
-                    // The overlay view reads its state from MusicApp. Notify the view entity first
-                    // so a track/line/config change rebuilds the retained element tree, then force
-                    // a full transparent-surface refresh so old glyph damage cannot survive.
-                    let _ = window.update(cx, |_view, window, view_cx| {
-                        view_cx.notify();
-                        window.refresh();
-                    });
+                if changed {
+                    let window = cx
+                        .try_global::<DesktopLyricsWindowState>()
+                        .and_then(|state| state.window.clone());
+                    if let Some(window) = window {
+                        if window
+                            .update(cx, |_view, window, view_cx| {
+                                view_cx.notify();
+                                window.refresh();
+                            })
+                            .is_err()
+                        {
+                            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                                state.window = None;
+                            });
+                        }
+                    }
                 }
                 true
             })?;
@@ -441,10 +492,32 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
     .detach();
 }
 
-fn find_overlay_window(cx: &App) -> Option<WindowHandle<DesktopLyricsView>> {
-    cx.windows()
+pub(crate) fn shutdown(cx: &mut App) {
+    ensure_window_state(cx);
+    let tracked = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+        state.window.take()
+    });
+    if let Some(window) = tracked {
+        let _ = window.update(cx, |_view, window, _cx| window.remove_window());
+    }
+    remove_untracked_overlay_windows(cx);
+}
+
+fn ensure_window_state(cx: &mut App) {
+    if !cx.has_global::<DesktopLyricsWindowState>() {
+        cx.set_global(DesktopLyricsWindowState::default());
+    }
+}
+
+fn remove_untracked_overlay_windows(cx: &mut App) {
+    let overlays: Vec<_> = cx
+        .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<DesktopLyricsView>())
+        .filter_map(|window| window.downcast::<DesktopLyricsView>())
+        .collect();
+    for overlay in overlays {
+        let _ = overlay.update(cx, |_view, window, _cx| window.remove_window());
+    }
 }
 
 fn hash_text(text: &str) -> u64 {
