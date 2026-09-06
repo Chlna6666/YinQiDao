@@ -1,7 +1,7 @@
 mod eq;
 mod spatial;
 
-pub use eq::{EQ_FREQUENCIES, EqPreset, clamp_eq};
+pub use eq::{EqPreset, clamp_eq};
 pub use spatial::{SpatialPreset, clamp_spatial};
 
 use crate::model::{EqSettings, SpatialSettings};
