@@ -32,15 +32,6 @@ fn mini_clock_visible(parent: &WeakEntity<MusicApp>, cx: &gpui::App) -> bool {
         .unwrap_or(false)
 }
 
-// ============================================================================
-// 底部常驻播放器
-//
-// 播放进度与时间是独立 retained 子视图。它们不能继续使用两个 10Hz notify 循环：
-// 在旧版 GPUI targeted repaint 下，这会让静态页面不断进入 retained replay，播放时显著
-// 增加输入分发与 frame 提交竞争。进度限制为 4Hz，时间限制为 1Hz；沉浸舞台覆盖 dock 时
-// 两个子视图完全停止 notify，只保留轻量 timer wakeup。
-// ============================================================================
-
 pub(super) struct PlaybackProgress {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
@@ -241,9 +232,7 @@ pub(super) fn mini_player(
     let track = snapshot.current_track.as_ref();
     let track_id = track.map(|track| track.id);
     let title = track.map_or("等待播放", |track| track.title.as_str());
-    let artist = track.map_or("点击曲库开启音乐旅程", |track| {
-        track.artist.as_str()
-    });
+    let artist = track.map_or("点击曲库开启音乐旅程", |track| track.artist.as_str());
     let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
     let app_entity = cx.entity().downgrade();
 
@@ -481,9 +470,7 @@ pub(super) fn mini_player(
                                         .active(|style| style.scale(0.92))
                                         .child(themed_icon(
                                             match snapshot.repeat {
-                                                RepeatMode::Off | RepeatMode::All => {
-                                                    lucide_icons::icon_repeat()
-                                                }
+                                                RepeatMode::Off | RepeatMode::All => lucide_icons::icon_repeat(),
                                                 RepeatMode::One => lucide_icons::icon_repeat_1(),
                                             },
                                             15.0,
@@ -514,37 +501,36 @@ pub(super) fn mini_player(
                         .gap_3()
                         .child(
                             div()
-                                .id("mini-lyrics-btn")
+                                .id("mini-desktop-lyrics-btn")
                                 .size(px(30.0))
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
                                 .cursor_pointer()
-                                .bg(if app.page == AppPage::Player || app.stage_open {
+                                .bg(if app.config.desktop_lyrics.visible {
                                     theme::accent_red_muted()
                                 } else {
                                     hsla(0.0, 0.0, 0.0, 0.0)
                                 })
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(if app.config.desktop_lyrics.visible {
+                                    ACCENT_RED
+                                } else {
+                                    rgb(0x78_7f_8c)
+                                })
                                 .hover(|style| style.bg(theme::bg_hover()))
                                 .transition(press_transition())
                                 .active(|style| style.scale(0.92))
-                                .child(themed_icon(
-                                    lucide_icons::icon_captions(),
-                                    16.0,
-                                    if app.page == AppPage::Player || app.stage_open {
-                                        ACCENT_RED.into()
-                                    } else {
-                                        hsla(220.0, 0.08, 0.50, 1.0)
-                                    },
-                                ))
                                 .on_mouse_down(
                                     gpui::MouseButton::Left,
                                     cx.listener(|this, _, _, cx| {
                                         cx.stop_propagation();
-                                        this.toggle_stage(cx);
+                                        this.toggle_desktop_lyrics_visible(cx);
                                     }),
-                                ),
+                                )
+                                .child("词"),
                         )
                         .child(
                             div()
@@ -633,19 +619,10 @@ pub(super) fn mini_player(
                                             let view = app_entity.clone();
                                             move |ratio, cx| {
                                                 let _ = view.update(cx, |this, cx| {
-                                                    if this.drag_target == Some(DragTarget::Volume)
-                                                    {
-                                                        this.update_drag_ratio(
-                                                            DragTarget::Volume,
-                                                            ratio,
-                                                            cx,
-                                                        );
+                                                    if this.drag_target == Some(DragTarget::Volume) {
+                                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
                                                     } else {
-                                                        this.begin_drag(
-                                                            DragTarget::Volume,
-                                                            ratio,
-                                                            cx,
-                                                        );
+                                                        this.begin_drag(DragTarget::Volume, ratio, cx);
                                                     }
                                                     this.send(PlayerCommand::SetVolume(ratio));
                                                 });
@@ -655,19 +632,10 @@ pub(super) fn mini_player(
                                             let view = app_entity.clone();
                                             move |ratio, cx| {
                                                 let _ = view.update(cx, |this, cx| {
-                                                    if this.drag_target == Some(DragTarget::Volume)
-                                                    {
-                                                        this.update_drag_ratio(
-                                                            DragTarget::Volume,
-                                                            ratio,
-                                                            cx,
-                                                        );
+                                                    if this.drag_target == Some(DragTarget::Volume) {
+                                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
                                                     } else {
-                                                        this.begin_drag(
-                                                            DragTarget::Volume,
-                                                            ratio,
-                                                            cx,
-                                                        );
+                                                        this.begin_drag(DragTarget::Volume, ratio, cx);
                                                     }
                                                     this.commit_drag(cx);
                                                     this.pending_volume_ratio = None;
@@ -726,7 +694,6 @@ fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl
         .into_any_element()
 }
 
-// 保留独立 NowPlaying 窗口 API，旧舞台实现已经由 player_stage.rs 取代。
 #[allow(dead_code)]
 pub struct NowPlaying {
     engine: Option<Arc<AudioEngine>>,
@@ -781,20 +748,12 @@ impl Render for NowPlaying {
         let snapshot = self
             .engine
             .as_ref()
-            .map_or_else(crate::model::PlayerSnapshot::default, |engine| {
-                engine.snapshot()
-            });
+            .map_or_else(crate::model::PlayerSnapshot::default, |engine| engine.snapshot());
         let track = snapshot.current_track.as_ref();
         let title = track.map_or("等待播放", |track| track.title.as_str());
-        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| {
-            track.artist.as_str()
-        });
+        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| track.artist.as_str());
         let artwork = self.artwork.clone();
-        let bg = if self.dynamic_blur {
-            rgb(0x11131c)
-        } else {
-            rgb(0x0e0f16)
-        };
+        let bg = if self.dynamic_blur { rgb(0x11131c) } else { rgb(0x0e0f16) };
 
         div()
             .size_full()
