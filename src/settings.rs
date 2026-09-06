@@ -260,25 +260,36 @@ impl ConfigStore {
                 self.save(&migrated)?;
                 Ok(migrated)
             }
-            version if version > CURRENT_CONFIG_SCHEMA_VERSION => bail!(
-                "配置版本 v{version} 高于当前程序支持的 v{}，请升级音栖岛后再打开",
-                CURRENT_CONFIG_SCHEMA_VERSION
-            ),
-            version => bail!(
-                "不支持的配置版本 v{version}；当前支持迁移 v1 -> v{}",
-                CURRENT_CONFIG_SCHEMA_VERSION
-            ),
+            version => {
+                // MusicApp::new() intentionally remains infallible. Returning Err here would be
+                // swallowed by its fallback and the next save could overwrite a newer config.
+                // Preserve the foreign schema number in a guarded runtime config instead: the app
+                // can start with safe defaults, while save() refuses any downgrade write.
+                tracing::error!(
+                    schema_version = version,
+                    supported = CURRENT_CONFIG_SCHEMA_VERSION,
+                    "检测到当前程序不支持的 config.toml 版本，进入只读配置保护态"
+                );
+                let mut guarded = AppConfig::default();
+                guarded.schema_version = version;
+                Ok(guarded)
+            }
         }
     }
 
     pub fn save(&self, config: &AppConfig) -> Result<()> {
+        if config.schema_version != CURRENT_CONFIG_SCHEMA_VERSION {
+            bail!(
+                "拒绝写入 config.toml：运行时配置版本为 v{}，当前程序只允许写入 v{}",
+                config.schema_version,
+                CURRENT_CONFIG_SCHEMA_VERSION
+            );
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("创建配置目录失败: {}", parent.display()))?;
         }
-        let mut persisted = config.clone();
-        persisted.schema_version = CURRENT_CONFIG_SCHEMA_VERSION;
-        let content = toml::to_string_pretty(&persisted).context("序列化配置失败")?;
+        let content = toml::to_string_pretty(config).context("序列化配置失败")?;
         fs::write(&self.path, content)
             .with_context(|| format!("写入配置失败: {}", self.path.display()))
     }
@@ -388,12 +399,16 @@ mix = 0.6
     }
 
     #[test]
-    fn future_config_version_is_rejected() {
+    fn future_config_version_is_guarded_and_never_overwritten() {
         let path = temp_path("future");
         let store = ConfigStore::from_path(path.clone());
-        fs::write(&path, "schema_version = 999\n").expect("future write");
-        let error = store.load().expect_err("future version must fail");
-        assert!(error.to_string().contains("高于当前程序支持"));
+        let original = "schema_version = 999\nvolume = 0.12\n";
+        fs::write(&path, original).expect("future write");
+
+        let guarded = store.load().expect("future config should enter guarded mode");
+        assert_eq!(guarded.schema_version, 999);
+        assert!(store.save(&guarded).is_err());
+        assert_eq!(fs::read_to_string(&path).expect("preserved"), original);
         fs::remove_file(path).expect("cleanup");
     }
 }
