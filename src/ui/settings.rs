@@ -225,7 +225,7 @@ fn smart_audio_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
                     .items_center()
                     .justify_between()
                     .gap_4()
-                    .child(label_block("当前识别", current_profile.as_str()))
+                    .child(label_block("当前识别", current_profile))
                     .child(value_badge(if app.config.smart_audio.enabled {
                         "自动应用"
                     } else {
@@ -831,7 +831,7 @@ fn log_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
         "Debug 模式输出音频 DSP、解码、Smart Cue、网络与 GPUI 详细跟踪信息",
         toggle_row(
             "Debug 详细日志",
-            subtitle.as_str(),
+            subtitle,
             "settings-debug-log",
             debug,
             cx.listener(|this, _, _, cx| this.toggle_debug_log(cx)),
@@ -871,7 +871,8 @@ fn card(title: &str, subtitle: &str, content: impl IntoElement) -> impl IntoElem
         .child(content)
 }
 
-fn label_block(title: &str, subtitle: &str) -> impl IntoElement {
+fn label_block(title: &str, subtitle: impl Into<SharedString>) -> impl IntoElement {
+    let subtitle = subtitle.into();
     div()
         .flex()
         .flex_col()
@@ -887,7 +888,7 @@ fn label_block(title: &str, subtitle: &str) -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(TEXT_TERTIARY)
-                .child(subtitle.to_owned()),
+                .child(subtitle),
         )
 }
 
@@ -1019,11 +1020,7 @@ fn toggle_switch(
         .p(px(3.0))
         .rounded_full()
         .cursor_pointer()
-        .bg(if active {
-            ACCENT_RED.into()
-        } else {
-            rgb(0xd8_db_e2).into()
-        })
+        .bg(if active { ACCENT_RED } else { rgb(0xd8_db_e2) })
         .flex()
         .when(active, |style| style.justify_end())
         .when(!active, |style| style.justify_start())
@@ -1041,7 +1038,7 @@ fn toggle_switch(
 
 fn toggle_row(
     title: &str,
-    subtitle: &str,
+    subtitle: impl Into<SharedString>,
     id: impl Into<gpui::ElementId>,
     active: bool,
     handler: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
