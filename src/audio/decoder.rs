@@ -39,6 +39,7 @@ pub struct DecodedChunk {
 #[derive(Clone, Debug)]
 pub struct AudioFormatInfo {
     pub sample_rate: u32,
+    pub total_frames: Option<u64>,
     #[cfg(test)]
     pub channels: u16,
 }
@@ -74,7 +75,7 @@ impl DecoderStream {
                 path: path.to_path_buf(),
                 reason: error.to_string(),
             })?;
-        let (track_id, codec_params) = {
+        let (track_id, codec_params, total_frames) = {
             let track = format
                 .default_track(TrackType::Audio)
                 .ok_or_else(|| DecodeError::MissingTrack(path.to_path_buf()))?;
@@ -84,10 +85,11 @@ impl DecoderStream {
                 .and_then(|params| params.audio())
                 .cloned()
                 .ok_or_else(|| DecodeError::MissingTrack(path.to_path_buf()))?;
-            (track.id, codec_params)
+            (track.id, codec_params, track.num_frames)
         };
         let info = AudioFormatInfo {
             sample_rate: codec_params.sample_rate.unwrap_or(48_000),
+            total_frames,
             #[cfg(test)]
             channels: codec_params
                 .channels
@@ -113,6 +115,13 @@ impl DecoderStream {
     #[cfg(test)]
     pub fn info(&self) -> &AudioFormatInfo {
         &self.info
+    }
+
+    pub fn duration(&self) -> Option<Duration> {
+        let frames = self.info.total_frames?;
+        Some(Duration::from_secs_f64(
+            frames as f64 / f64::from(self.info.sample_rate.max(1)),
+        ))
     }
 
     pub fn next_chunk(&mut self) -> Result<Option<DecodedChunk>, DecodeError> {
@@ -283,6 +292,9 @@ mod tests {
         let info = probe_file(&path).expect("probe");
         assert_eq!(info.sample_rate, 8_000);
         assert_eq!(info.channels, 1);
+        assert_eq!(info.total_frames, Some(4));
+        let decoder = DecoderStream::open(&path).expect("decoder");
+        assert_eq!(decoder.duration(), Some(Duration::from_micros(500)));
         let decoded = decode_to_pcm(&path).expect("decode");
         assert_eq!(decoded.samples.len(), 4);
         assert!(decoded.samples.iter().any(|sample| sample.abs() > 0.1));
