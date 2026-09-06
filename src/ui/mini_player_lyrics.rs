@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, Entity, IntoElement, div, hsla, prelude::*, px, rgb};
 
 use super::{
     player_legacy::{self, PlaybackProgress, PlaybackTime},
@@ -6,6 +6,8 @@ use super::{
     theme,
 };
 
+/// Active mini-player facade. The normal player no longer embeds lyric text; the only integration
+/// is a NetEase-style `词` button that controls the independent desktop lyric window.
 pub(super) fn mini_player(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
@@ -13,49 +15,48 @@ pub(super) fn mini_player(
     playback_time: Entity<PlaybackTime>,
 ) -> impl IntoElement {
     let base = player_legacy::mini_player(app, cx, playback_progress, playback_time);
-    let config = &app.config.desktop_lyrics;
-    let display = config
-        .show_in_player
-        .then(|| app.desktop_lyrics_display())
-        .flatten();
+    let visible = app.config.desktop_lyrics.visible;
 
-    let mut root = div().w_full().flex().flex_col();
-    if let Some(display) = display {
-        let mut text = div()
-            .min_w(px(0.0))
-            .max_w(px(820.0))
-            .text_sm()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(config.active_color & 0x00ff_ffff))
-            .truncate()
-            .child(display.current);
-        if config.show_translation
-            && let Some(translation) = display.translation
-        {
-            text = text.child(
-                div()
-                    .ml_2()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(rgb(config.translation_color & 0x00ff_ffff))
-                    .child(format!(" · {translation}")),
-            );
-        }
-        root = root.child(
+    div()
+        .w_full()
+        .relative()
+        .child(base)
+        // The legacy mini player already reserves this slot for its captions/stage button. Draw
+        // the desktop-lyrics control above that slot so the active facade owns the behavior without
+        // duplicating the complete player layout.
+        .child(
             div()
-                .id("normal-player-current-lyric")
-                .w_full()
-                .h(px(30.0))
-                .flex_none()
+                .id("mini-desktop-lyrics-btn")
+                .absolute()
+                .top(px(23.0))
+                .right(px(172.0))
+                .size(px(30.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .px_6()
-                .bg(theme::BG_CANVAS)
-                .border_t_1()
-                .border_color(theme::BORDER_HAIRLINE)
-                .child(text),
-        );
-    }
-    root.child(base)
+                .rounded_full()
+                .cursor_pointer()
+                .bg(if visible {
+                    theme::accent_red_muted()
+                } else {
+                    hsla(0.0, 0.0, 0.0, 0.0)
+                })
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if visible {
+                    rgb(0xff_3b_5c)
+                } else {
+                    rgb(0x78_7f_8c)
+                })
+                .hover(|style| style.bg(theme::bg_hover()))
+                .active(|style| style.scale(0.92))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_desktop_lyrics_visible(cx);
+                    }),
+                )
+                .child("词"),
+        )
 }
