@@ -1439,20 +1439,23 @@ impl AudioWorker {
             self.maybe_begin_crossfade(position)?;
         }
 
-        let mut reported_position = position;
+        let mut handoff_tail_frames = None;
         if let Some(mut crossfade) = self.crossfade.take() {
+            let transition_before = crossfade.transition_frames;
+            let total_transition_frames = crossfade.total_frames;
+            let chunk_frames = self.processed_samples.len() / 2;
             match crossfade.mix_into(&mut self.processed_samples)? {
                 CrossfadeMixOutcome::Continue => {
                     self.crossfade = Some(crossfade);
                 }
                 CrossfadeMixOutcome::Complete => {
+                    let transition_frames_in_chunk = total_transition_frames
+                        .saturating_sub(transition_before)
+                        .min(chunk_frames as u64) as usize;
+                    let frames_after_boundary =
+                        chunk_frames.saturating_sub(transition_frames_in_chunk);
                     self.crossfade = Some(crossfade);
-                    let pending_chunk_frames = self.processed_samples.len() as u64 / 2;
-                    if let Some(next_position) =
-                        self.complete_crossfade(pending_chunk_frames, false)
-                    {
-                        reported_position = next_position;
-                    }
+                    handoff_tail_frames = Some(frames_after_boundary);
                 }
                 CrossfadeMixOutcome::NextExhausted => {
                     tracing::warn!(
@@ -1467,7 +1470,56 @@ impl AudioWorker {
             self.apply_fade_out(position);
         }
 
-        self.push_processed_samples(reported_position)
+        let decode_generation = self.decode_generation;
+        if !self.push_processed_samples(position)? {
+            return Ok(false);
+        }
+
+        if let Some(frames_after_boundary) = handoff_tail_frames
+            && self.decode_generation == decode_generation
+            && self.crossfade.is_some()
+            && self.state == PlaybackState::Playing
+        {
+            // complete_crossfade() used to run before this mixed buffer was even submitted to the
+            // CPAL ring. That reset the visible track/progress while the user had only just begun
+            // hearing the overlap. Wait until the consumer is at the actual crossfade boundary.
+            // Keep a small amount of next-track PCM queued so the handoff itself cannot underrun.
+            let preroll_frames = (u64::from(self.output_rate.max(1)) * 20 / 1_000).max(1) as usize;
+            let target_samples = frames_after_boundary
+                .saturating_add(preroll_frames)
+                .saturating_mul(2);
+            let deadline = Instant::now() + Duration::from_millis(500);
+
+            while self.producer.occupied_len() > target_samples {
+                if !self.handle_commands() {
+                    return Ok(false);
+                }
+                if self.decode_generation != decode_generation
+                    || self.crossfade.is_none()
+                    || self.state != PlaybackState::Playing
+                {
+                    return Ok(true);
+                }
+                if Instant::now() >= deadline {
+                    tracing::warn!(
+                        queued_frames = self.producer.occupied_len() / 2,
+                        frames_after_boundary,
+                        "等待交叉淡化可听边界超时，暂不提前切换下一曲状态"
+                    );
+                    return Ok(true);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            tracing::debug!(
+                queued_frames = self.producer.occupied_len() / 2,
+                frames_after_boundary,
+                "声卡已接近交叉淡化结束边界，提交下一曲播放状态"
+            );
+            let _ = self.complete_crossfade(0, false);
+        }
+
+        Ok(true)
     }
 
     fn push_processed_samples(&mut self, position: Duration) -> Result<bool, DecodeError> {
