@@ -1,8 +1,10 @@
+#![cfg_attr(windows, allow(unsafe_code))]
+
 #[cfg(windows)]
 pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
     use std::ffi::c_void;
 
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use raw_window_handle::RawWindowHandle;
 
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
@@ -22,7 +24,10 @@ pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
         ) -> i32;
     }
 
-    let Ok(handle) = window.window_handle() else {
+    // `gpui::Window` also exposes an inherent `window_handle()` that returns GPUI's
+    // `AnyWindowHandle`. Use the raw-window-handle trait explicitly so we get the native
+    // Win32 handle rather than accidentally resolving the inherent method.
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
         return false;
     };
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
@@ -37,6 +42,8 @@ pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
     };
     let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
 
+    // SAFETY: `hwnd` comes from the live GPUI window's Win32 raw handle. `SetWindowPos` does not
+    // retain either pointer, and NOMOVE/NOSIZE/NOACTIVATE ensure this call only changes Z-order.
     unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) != 0 }
 }
 
