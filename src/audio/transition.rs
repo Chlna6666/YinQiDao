@@ -148,12 +148,6 @@ fn has_sustained_leading_audio(windows: &[(u64, f64)]) -> bool {
         .any(|group| group.iter().all(|(_, rms)| *rms >= FLOOR_RMS))
 }
 
-pub(crate) fn equal_power_gains(progress: f32) -> (f32, f32) {
-    let progress = progress.clamp(0.0, 1.0);
-    let angle = progress * FRAC_PI_2;
-    (angle.cos(), angle.sin())
-}
-
 pub(crate) fn fade_out_gain(progress: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
     (progress * FRAC_PI_2).cos()
@@ -190,14 +184,6 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn equal_power_curve_keeps_endpoints_exact() {
-        assert_eq!(equal_power_gains(0.0), (1.0, 0.0));
-        let end = equal_power_gains(1.0);
-        assert!(end.0.abs() < 1.0e-6);
-        assert!((end.1 - 1.0).abs() < 1.0e-6);
-    }
 
     #[test]
     fn fade_curves_are_monotonic_at_halfway() {
