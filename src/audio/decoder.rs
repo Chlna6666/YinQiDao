@@ -40,6 +40,7 @@ pub struct DecodedChunk {
 pub struct AudioFormatInfo {
     pub sample_rate: u32,
     pub total_frames: Option<u64>,
+    pub container_duration: Option<Duration>,
     #[cfg(test)]
     pub channels: u16,
 }
@@ -75,7 +76,7 @@ impl DecoderStream {
                 path: path.to_path_buf(),
                 reason: error.to_string(),
             })?;
-        let (track_id, codec_params, total_frames) = {
+        let (track_id, codec_params, total_frames, container_duration) = {
             let track = format
                 .default_track(TrackType::Audio)
                 .ok_or_else(|| DecodeError::MissingTrack(path.to_path_buf()))?;
@@ -85,11 +86,20 @@ impl DecoderStream {
                 .and_then(|params| params.audio())
                 .cloned()
                 .ok_or_else(|| DecodeError::MissingTrack(path.to_path_buf()))?;
-            (track.id, codec_params, track.num_frames)
+            let container_duration = match (track.time_base, track.duration) {
+                (Some(time_base), Some(duration)) => time_base.calc_duration(duration).and_then(|time| {
+                    let seconds = time.as_secs_f64();
+                    (seconds.is_finite() && seconds > 0.0)
+                        .then(|| Duration::from_secs_f64(seconds))
+                }),
+                _ => None,
+            };
+            (track.id, codec_params, track.num_frames, container_duration)
         };
         let info = AudioFormatInfo {
             sample_rate: codec_params.sample_rate.unwrap_or(48_000),
             total_frames,
+            container_duration,
             #[cfg(test)]
             channels: codec_params
                 .channels
@@ -118,10 +128,14 @@ impl DecoderStream {
     }
 
     pub fn duration(&self) -> Option<Duration> {
-        let frames = self.info.total_frames?;
-        Some(Duration::from_secs_f64(
-            frames as f64 / f64::from(self.info.sample_rate.max(1)),
-        ))
+        self.info
+            .total_frames
+            .map(|frames| {
+                Duration::from_secs_f64(
+                    frames as f64 / f64::from(self.info.sample_rate.max(1)),
+                )
+            })
+            .or(self.info.container_duration)
     }
 
     pub fn next_chunk(&mut self) -> Result<Option<DecodedChunk>, DecodeError> {
