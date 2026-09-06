@@ -107,6 +107,7 @@ struct PreloadedChunk {
     samples: Vec<f32>,
     sample_rate: u32,
     channels: u16,
+    /// Playback position at the end of this chunk.
     position: Duration,
 }
 
@@ -251,13 +252,13 @@ impl PreloadCoordinator {
                 request = latest;
             }
 
-            let mut decoder = match DecoderStream::open(&request.track.path) {
-                Ok(decoder) => decoder,
-                Err(_) => continue,
-            };
             let smart_cue = if request.use_smart_cue {
+                let mut analysis_decoder = match DecoderStream::open(&request.track.path) {
+                    Ok(decoder) => decoder,
+                    Err(_) => continue,
+                };
                 match analyze_smart_cue(
-                    &mut decoder,
+                    &mut analysis_decoder,
                     &request.track,
                     request.max_smart_cue_ms,
                 ) {
@@ -268,10 +269,6 @@ impl PreloadCoordinator {
                             error = %error,
                             "Smart Cue 分析失败，回退到歌曲起点"
                         );
-                        decoder = match DecoderStream::open(&request.track.path) {
-                            Ok(decoder) => decoder,
-                            Err(_) => continue,
-                        };
                         SmartCue::default()
                     }
                 }
@@ -279,16 +276,22 @@ impl PreloadCoordinator {
                 SmartCue::default()
             };
 
-            let mut samples = Vec::new();
-            let first_chunk = match decoder.next_chunk_into(&mut samples) {
-                Ok(Some((sample_rate, channels))) => Some(PreloadedChunk {
-                    samples,
-                    sample_rate,
-                    channels,
-                    position: decoder.position(),
-                }),
-                Ok(None) => None,
+            // Do not reuse the analysis decoder and do not depend on container seeking. Reopen the
+            // file, decode forward, and trim PCM to the exact cue frame in the background worker.
+            let mut decoder = match DecoderStream::open(&request.track.path) {
+                Ok(decoder) => decoder,
                 Err(_) => continue,
+            };
+            let first_chunk = match prepare_preloaded_chunk(&mut decoder, smart_cue.position) {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    tracing::debug!(
+                        track_id = request.track.id,
+                        error = %error,
+                        "下一曲 PCM 入点准备失败"
+                    );
+                    continue;
+                }
             };
 
             if self.closed.load(Ordering::Acquire)
@@ -312,6 +315,49 @@ impl PreloadCoordinator {
     }
 }
 
+fn prepare_preloaded_chunk(
+    decoder: &mut DecoderStream,
+    cue: Duration,
+) -> Result<Option<PreloadedChunk>, DecodeError> {
+    let mut samples = Vec::new();
+    loop {
+        let chunk_start = decoder.position();
+        let Some((sample_rate, channels)) = decoder.next_chunk_into(&mut samples)? else {
+            return Ok(None);
+        };
+        let chunk_end = decoder.position();
+        if cue >= chunk_end {
+            continue;
+        }
+
+        if cue > chunk_start {
+            let skip = cue - chunk_start;
+            let skip_frames = ((skip.as_nanos().saturating_mul(u128::from(sample_rate.max(1))))
+                / 1_000_000_000_u128)
+                .min(usize::MAX as u128) as usize;
+            let channels_usize = usize::from(channels.max(1));
+            let skip_samples = skip_frames
+                .saturating_mul(channels_usize)
+                .min(samples.len());
+            if skip_samples >= samples.len() {
+                continue;
+            }
+            if skip_samples > 0 {
+                let remaining = samples.len() - skip_samples;
+                samples.copy_within(skip_samples.., 0);
+                samples.truncate(remaining);
+            }
+        }
+
+        return Ok(Some(PreloadedChunk {
+            samples,
+            sample_rate,
+            channels,
+            position: chunk_end,
+        }));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CrossfadeMixOutcome {
     Continue,
@@ -331,8 +377,8 @@ struct CrossfadeState {
     transition_frames: u64,
     next_frames_consumed: u64,
     total_frames: u64,
-    current_gain: f32,
-    next_gain: f32,
+    phase_cos: f32,
+    phase_sin: f32,
     rotation_cos: f32,
     rotation_sin: f32,
     cue: SmartCue,
@@ -347,7 +393,7 @@ impl CrossfadeState {
         total_frames: u64,
     ) -> Self {
         let total_frames = total_frames.max(1);
-        let (current_gain, next_gain, rotation_cos, rotation_sin) = if total_frames <= 1 {
+        let (phase_cos, phase_sin, rotation_cos, rotation_sin) = if total_frames <= 1 {
             (0.0, 1.0, 1.0, 0.0)
         } else {
             let step = FRAC_PI_2 / (total_frames - 1) as f32;
@@ -366,8 +412,8 @@ impl CrossfadeState {
             transition_frames: 0,
             next_frames_consumed: 0,
             total_frames,
-            current_gain,
-            next_gain,
+            phase_cos,
+            phase_sin,
             rotation_cos,
             rotation_sin,
             cue: preloaded.smart_cue,
@@ -422,8 +468,6 @@ impl CrossfadeState {
 
     fn mix_into(&mut self, current: &mut [f32]) -> Result<CrossfadeMixOutcome, DecodeError> {
         self.ensure_samples(current.len())?;
-        // Do not partially fade the current chunk if the next decoder cannot provide a complete
-        // matching chunk. Partial mutation followed by fallback causes an audible gain step.
         if self.available_samples() < current.len() {
             return Ok(CrossfadeMixOutcome::NextExhausted);
         }
@@ -435,10 +479,15 @@ impl CrossfadeState {
             let next_right = self.buffered_samples[next_index + 1];
             self.buffer_cursor += 2;
 
+            // cos²/sin² keeps gain_a + gain_b == 1. Unlike equal-power 0.707/0.707, correlated
+            // material cannot gain +3 dB at the midpoint, so no second limiter is needed here.
             let (current_gain, next_gain) = if self.transition_frames >= self.total_frames {
                 (0.0, 1.0)
             } else {
-                (self.current_gain, self.next_gain)
+                (
+                    self.phase_cos * self.phase_cos,
+                    self.phase_sin * self.phase_sin,
+                )
             };
             let index = frame * 2;
             current[index] = mix_crossfade_sample(
@@ -458,15 +507,15 @@ impl CrossfadeState {
             if self.transition_frames < self.total_frames {
                 self.transition_frames = self.transition_frames.saturating_add(1);
                 if self.transition_frames >= self.total_frames {
-                    self.current_gain = 0.0;
-                    self.next_gain = 1.0;
+                    self.phase_cos = 0.0;
+                    self.phase_sin = 1.0;
                 } else {
-                    let next_current = self.current_gain * self.rotation_cos
-                        - self.next_gain * self.rotation_sin;
-                    let next_next = self.next_gain * self.rotation_cos
-                        + self.current_gain * self.rotation_sin;
-                    self.current_gain = next_current;
-                    self.next_gain = next_next;
+                    let next_cos = self.phase_cos * self.rotation_cos
+                        - self.phase_sin * self.rotation_sin;
+                    let next_sin = self.phase_sin * self.rotation_cos
+                        + self.phase_cos * self.rotation_sin;
+                    self.phase_cos = next_cos;
+                    self.phase_sin = next_sin;
                 }
             }
         }
@@ -493,7 +542,7 @@ impl CrossfadeState {
         if self.transition_frames >= self.total_frames {
             1.0
         } else {
-            self.next_gain.clamp(0.0, 1.0)
+            (self.phase_sin * self.phase_sin).clamp(0.0, 1.0)
         }
     }
 
@@ -507,9 +556,7 @@ impl CrossfadeState {
 
 #[inline]
 fn mix_crossfade_sample(current: f32, next: f32, current_gain: f32, next_gain: f32) -> f32 {
-    // Each stream is already limited by its own AudioProcessor. A second tanh here changed the
-    // timbre even at progress=0. Clamp only the rare correlated peak above full scale.
-    (current * current_gain + next * next_gain).clamp(-1.0, 1.0)
+    current * current_gain + next * next_gain
 }
 
 pub struct AudioEngine {
@@ -1290,6 +1337,8 @@ impl AudioWorker {
                 self.prefetched_chunk = preloaded.first_chunk;
                 Ok(preloaded.decoder)
             } else {
+                // Smart Cue belongs only to an in-flight crossfade. If the crossfade could not start,
+                // normal automatic/manual opening must preserve the song's original beginning.
                 self.prefetched_chunk = None;
                 DecoderStream::open(&track.path)
             }
@@ -1324,6 +1373,23 @@ impl AudioWorker {
                 false
             }
         }
+    }
+
+    fn current_playable_duration_ms(&self) -> u64 {
+        if let Some(duration) = self.decoder.as_ref().and_then(DecoderStream::duration) {
+            let ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+            if ms > 0 {
+                return ms;
+            }
+        }
+        self.current_track
+            .and_then(|track_id| {
+                self.tracks
+                    .read()
+                    .ok()
+                    .and_then(|tracks| tracks.get(&track_id).map(|track| track.duration_ms))
+            })
+            .unwrap_or(0)
     }
 
     fn decode_next(&mut self) -> Result<bool, DecodeError> {
@@ -1459,15 +1525,8 @@ impl AudioWorker {
         if Some(next_track_id) == self.current_track {
             return Ok(());
         }
-        let duration_ms = self
-            .current_track
-            .and_then(|track_id| {
-                self.tracks
-                    .read()
-                    .ok()
-                    .and_then(|tracks| tracks.get(&track_id).map(|track| track.duration_ms))
-            })
-            .unwrap_or(0);
+
+        let duration_ms = self.current_playable_duration_ms();
         if duration_ms == 0 {
             return Ok(());
         }
@@ -1479,6 +1538,7 @@ impl AudioWorker {
         if remaining_at_chunk_start > self.transition.duration_ms {
             return Ok(());
         }
+
         let Some(preloaded) = self.preloader.take(next_track_id) else {
             return Ok(());
         };
@@ -1491,8 +1551,14 @@ impl AudioWorker {
             return Ok(());
         };
         let cue_ms = preloaded.smart_cue.position.as_millis() as u64;
-        let next_available_ms = if next_track.duration_ms > 0 {
-            next_track.duration_ms.saturating_sub(cue_ms)
+        let next_duration_ms = preloaded
+            .decoder
+            .duration()
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .filter(|duration| *duration > 0)
+            .unwrap_or(next_track.duration_ms);
+        let next_available_ms = if next_duration_ms > 0 {
+            next_duration_ms.saturating_sub(cue_ms)
         } else {
             u64::MAX
         };
@@ -1500,8 +1566,6 @@ impl AudioWorker {
             return Ok(());
         }
         let (next_eq, next_spatial) = self.effective_processing_for_track(&next_track);
-        // Never extend a late-start transition beyond the actual remaining current audio. The old
-        // MIN_TRANSITION floor could ask for 250 ms with only ~30 ms left and then jump gains at EOF.
         let total_ms = self
             .transition
             .duration_ms
@@ -1512,6 +1576,7 @@ impl AudioWorker {
         tracing::debug!(
             current_track = ?self.current_track,
             next_track = next_track_id,
+            playable_duration_ms = duration_ms,
             duration_ms = total_ms,
             cue_ms,
             cue_confidence = preloaded.smart_cue.confidence,
@@ -1574,8 +1639,6 @@ impl AudioWorker {
             self.fade_in_start_gain = 0.0;
         }
 
-        // Worker position is ahead of the hardware by the ring-buffer backlog. Rebase the next-track
-        // clock conservatively so progress does not jump forward before queued crossfade PCM is heard.
         let queued_frames = self.producer.occupied_len() as u64 / 2;
         let not_yet_audible = queued_frames.saturating_add(pending_chunk_frames);
         let next_position_frames = self.duration_to_output_frames(next_position);
@@ -1604,15 +1667,7 @@ impl AudioWorker {
             return;
         }
         let fade_ms = (self.transition.duration_ms / 2).max(MIN_TRANSITION_MS / 2);
-        let duration_ms = self
-            .current_track
-            .and_then(|track_id| {
-                self.tracks
-                    .read()
-                    .ok()
-                    .and_then(|tracks| tracks.get(&track_id).map(|track| track.duration_ms))
-            })
-            .unwrap_or(0);
+        let duration_ms = self.current_playable_duration_ms();
         if duration_ms == 0 {
             return;
         }
@@ -1672,6 +1727,7 @@ impl AudioWorker {
                 fade_in_ms.saturating_mul(u64::from(self.output_rate.max(1))) / 1_000;
             self.fade_in_elapsed_frames = 0;
             self.fade_in_start_gain = 0.0;
+            tracing::debug!(fade_in_ms, "下一曲淡入已准备");
         }
     }
 
