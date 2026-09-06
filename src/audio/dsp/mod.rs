@@ -6,6 +6,10 @@ pub use spatial::{SpatialPreset, clamp_spatial};
 
 use crate::model::{EqSettings, SpatialSettings};
 
+use super::debug::{
+    AudioDebugMonitorMode, audio_debug_enabled, audio_debug_monitor_mode,
+    capture_audio_debug_frame,
+};
 use eq::EqProcessor;
 use spatial::Spatializer;
 
@@ -130,6 +134,8 @@ pub struct AudioProcessor {
     pub(crate) spatial: Spatializer,
     volume: f32,
     stereo_scratch: Vec<f32>,
+    source_debug_scratch: Vec<f32>,
+    eq_debug_scratch: Vec<f32>,
     resampler: StreamingLinearResampler,
 }
 
@@ -141,6 +147,8 @@ impl AudioProcessor {
             spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
             stereo_scratch: Vec::new(),
+            source_debug_scratch: Vec::new(),
+            eq_debug_scratch: Vec::new(),
             resampler: StreamingLinearResampler::new(sample_rate),
         }
     }
@@ -160,6 +168,10 @@ impl AudioProcessor {
         output: &mut Vec<f32>,
     ) {
         let output_rate = self.eq.sample_rate();
+
+        // Decode-domain multichannel audio is reduced to a binaural stereo reference before the
+        // player EQ. In particular this keeps AV3A 7.1.4 / 12ch content from silently dropping
+        // channels 3..12 as the old frame[0]/frame[1] fallback did.
         to_stereo_into(input, input_channels, &mut self.stereo_scratch);
         self.resampler.process_into(
             &self.stereo_scratch,
@@ -167,16 +179,56 @@ impl AudioProcessor {
             output_rate,
             output,
         );
+
+        let debug_enabled = audio_debug_enabled();
+        if debug_enabled {
+            copy_reuse(output, &mut self.source_debug_scratch);
+        }
+
         self.eq.process(output);
+        if debug_enabled {
+            copy_reuse(output, &mut self.eq_debug_scratch);
+        }
+
         self.spatial.process(output);
+
+        if debug_enabled {
+            capture_audio_debug_frame(
+                &self.source_debug_scratch,
+                &self.eq_debug_scratch,
+                output,
+                output_rate,
+            );
+
+            // A/B/C is a real listening comparison, not just a graph selector. Selection happens
+            // before the common volume stage so loudness differences are not introduced by three
+            // independent output gains.
+            match audio_debug_monitor_mode() {
+                AudioDebugMonitorMode::Source => {
+                    output.clear();
+                    output.extend_from_slice(&self.source_debug_scratch);
+                }
+                AudioDebugMonitorMode::PostEq => {
+                    output.clear();
+                    output.extend_from_slice(&self.eq_debug_scratch);
+                }
+                AudioDebugMonitorMode::PostSpatial => {}
+            }
+        }
+
         let gain = perceptual_volume_gain(self.volume);
         for sample in output {
-            // Normal PCM must stay linear. The previous unconditional tanh both coloured every
-            // sample and was expensive enough to increase underrun risk during dual-stream
-            // crossfades. Only constrain actual overs here; output conversion also guards bounds.
+            // Normal PCM must stay linear. Only constrain true overs here; the output conversion
+            // performs the final device-format guard as well.
             *sample = (*sample * gain).clamp(-1.0, 1.0);
         }
     }
+}
+
+#[inline]
+fn copy_reuse(source: &[f32], destination: &mut Vec<f32>) {
+    destination.clear();
+    destination.extend_from_slice(source);
 }
 
 pub(crate) fn perceptual_volume_gain(volume: f32) -> f32 {
@@ -189,18 +241,113 @@ fn to_stereo_into(input: &[f32], channels: u16, output: &mut Vec<f32>) {
     let frames = input.len() / channels;
     output.clear();
     output.reserve(frames.saturating_mul(2));
-    for frame in input.chunks_exact(channels) {
-        match channels {
-            1 => {
-                output.push(frame[0]);
-                output.push(frame[0]);
+
+    match channels {
+        1 => {
+            for sample in input.iter().take(frames) {
+                output.push(*sample);
+                output.push(*sample);
             }
-            _ => {
-                output.push(frame[0]);
-                output.push(frame[1]);
+        }
+        2 => output.extend_from_slice(&input[..frames.saturating_mul(2)]),
+        _ => binaural_downmix_into(input, channels, output),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Speaker {
+    azimuth_deg: f32,
+    elevation_deg: f32,
+    gain: f32,
+    rear: bool,
+}
+
+const LAYOUT_7_1_4: [Speaker; 12] = [
+    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg:  30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
+    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
+    Speaker { azimuth_deg:  145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
+    Speaker { azimuth_deg:  -90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
+    Speaker { azimuth_deg:   90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
+    Speaker { azimuth_deg:  -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg:   35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker { azimuth_deg:  145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+];
+
+const LAYOUT_5_1_4: [Speaker; 10] = [
+    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg:  30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
+    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
+    Speaker { azimuth_deg: -125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
+    Speaker { azimuth_deg:  125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
+    Speaker { azimuth_deg:  -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg:   35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker { azimuth_deg:  145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+];
+
+fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
+    let frames = input.len() / channels;
+    for frame in input.chunks_exact(channels).take(frames) {
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+        let mut energy = 0.0_f32;
+
+        for (index, sample) in frame.iter().copied().enumerate() {
+            let speaker = speaker_for_channel(channels, index);
+            let (mut left_gain, mut right_gain) = equal_power_pan(speaker.azimuth_deg);
+
+            let elevation = (1.0 - speaker.elevation_deg.abs() / 180.0 * 0.18).clamp(0.78, 1.0);
+            if speaker.rear {
+                let crossfeed = 0.12;
+                let l = left_gain;
+                let r = right_gain;
+                left_gain = l * (1.0 - crossfeed) + r * crossfeed;
+                right_gain = r * (1.0 - crossfeed) + l * crossfeed;
+            }
+
+            let gain = speaker.gain * elevation;
+            left += sample * left_gain * gain;
+            right += sample * right_gain * gain;
+            energy += gain * gain;
+        }
+
+        let normalization = (2.0 / energy.max(2.0)).sqrt() * 0.94;
+        output.push((left * normalization).clamp(-1.5, 1.5));
+        output.push((right * normalization).clamp(-1.5, 1.5));
+    }
+}
+
+fn speaker_for_channel(channels: usize, index: usize) -> Speaker {
+    match channels {
+        12 => LAYOUT_7_1_4[index.min(LAYOUT_7_1_4.len() - 1)],
+        10 => LAYOUT_5_1_4[index.min(LAYOUT_5_1_4.len() - 1)],
+        _ => {
+            let azimuth = -180.0 + (index as f32 + 0.5) * (360.0 / channels as f32);
+            Speaker {
+                azimuth_deg: azimuth,
+                elevation_deg: 0.0,
+                gain: 0.72,
+                rear: azimuth.abs() > 100.0,
             }
         }
     }
+}
+
+fn equal_power_pan(azimuth_deg: f32) -> (f32, f32) {
+    let folded = if azimuth_deg > 90.0 {
+        180.0 - azimuth_deg
+    } else if azimuth_deg < -90.0 {
+        -180.0 - azimuth_deg
+    } else {
+        azimuth_deg
+    };
+    let pan = (folded / 90.0).clamp(-1.0, 1.0);
+    (((1.0 - pan) * 0.5).sqrt(), ((1.0 + pan) * 0.5).sqrt())
 }
 
 #[cfg(test)]
@@ -235,6 +382,19 @@ mod tests {
         assert_eq!(output.as_ptr(), output_ptr);
         assert_eq!(output.capacity(), output_capacity);
         assert_eq!(processor.stereo_scratch.capacity(), scratch_capacity);
+    }
+
+    #[test]
+    fn multichannel_binaural_reference_keeps_non_front_channels() {
+        let mut input = vec![0.0_f32; 12 * 8];
+        for frame in input.chunks_exact_mut(12) {
+            frame[2] = 0.5;
+            frame[10] = 0.3;
+        }
+        let mut output = Vec::new();
+        to_stereo_into(&input, 12, &mut output);
+        assert_eq!(output.len(), 16);
+        assert!(output.iter().any(|sample| sample.abs() > 0.01));
     }
 
     #[test]
