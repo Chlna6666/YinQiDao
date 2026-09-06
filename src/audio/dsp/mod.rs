@@ -10,21 +10,148 @@ use eq::EqProcessor;
 use spatial::Spatializer;
 
 #[derive(Clone, Debug)]
+struct StreamingLinearResampler {
+    input_rate: u32,
+    output_rate: u32,
+    input_frames: u64,
+    next_source_position: f64,
+    previous_frame: Option<[f32; 2]>,
+}
+
+impl StreamingLinearResampler {
+    fn new(output_rate: u32) -> Self {
+        Self {
+            input_rate: 0,
+            output_rate: output_rate.max(1),
+            input_frames: 0,
+            next_source_position: 0.0,
+            previous_frame: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input_rate = 0;
+        self.input_frames = 0;
+        self.next_source_position = 0.0;
+        self.previous_frame = None;
+    }
+
+    fn configure(&mut self, input_rate: u32, output_rate: u32) {
+        let input_rate = input_rate.max(1);
+        let output_rate = output_rate.max(1);
+        if self.input_rate != input_rate || self.output_rate != output_rate {
+            self.input_rate = input_rate;
+            self.output_rate = output_rate;
+            self.input_frames = 0;
+            self.next_source_position = 0.0;
+            self.previous_frame = None;
+        }
+    }
+
+    fn process_into(
+        &mut self,
+        input: &[f32],
+        input_rate: u32,
+        output_rate: u32,
+        output: &mut Vec<f32>,
+    ) {
+        let input_rate = input_rate.max(1);
+        let output_rate = output_rate.max(1);
+        if input_rate == output_rate {
+            self.reset();
+            self.output_rate = output_rate;
+            output.clear();
+            output.extend_from_slice(input);
+            return;
+        }
+
+        self.configure(input_rate, output_rate);
+        output.clear();
+
+        let frames = input.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        let estimated_frames = ((frames as u64)
+            .saturating_mul(u64::from(output_rate))
+            .saturating_add(u64::from(input_rate) - 1)
+            / u64::from(input_rate))
+            .saturating_add(2) as usize;
+        output.reserve(estimated_frames.saturating_mul(2));
+
+        let base_frame = self.input_frames;
+        let last_frame = base_frame.saturating_add(frames as u64 - 1);
+        let source_step = f64::from(input_rate) / f64::from(output_rate);
+        const EPSILON: f64 = 1.0e-9;
+
+        while self.next_source_position <= last_frame as f64 + EPSILON {
+            let source_floor = self.next_source_position.floor();
+            let source_index = source_floor.max(0.0) as u64;
+            let fraction = (self.next_source_position - source_floor).clamp(0.0, 1.0);
+
+            let Some(first) = self.frame_at(input, base_frame, source_index) else {
+                break;
+            };
+            let second = if fraction <= EPSILON {
+                first
+            } else {
+                let Some(next) = self.frame_at(input, base_frame, source_index.saturating_add(1))
+                else {
+                    break;
+                };
+                next
+            };
+
+            output.push(first[0] + (second[0] - first[0]) * fraction as f32);
+            output.push(first[1] + (second[1] - first[1]) * fraction as f32);
+            self.next_source_position += source_step;
+        }
+
+        let last_index = (frames - 1) * 2;
+        self.previous_frame = Some([input[last_index], input[last_index + 1]]);
+        self.input_frames = self.input_frames.saturating_add(frames as u64);
+    }
+
+    fn frame_at(&self, input: &[f32], base_frame: u64, absolute_index: u64) -> Option<[f32; 2]> {
+        if absolute_index < base_frame {
+            return (absolute_index.saturating_add(1) == base_frame)
+                .then_some(self.previous_frame)
+                .flatten();
+        }
+        let relative = absolute_index.saturating_sub(base_frame) as usize;
+        let sample_index = relative.checked_mul(2)?;
+        Some([*input.get(sample_index)?, *input.get(sample_index + 1)?])
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct AudioProcessor {
     pub(crate) eq: EqProcessor,
     pub(crate) spatial: Spatializer,
     volume: f32,
     stereo_scratch: Vec<f32>,
+    resampler: StreamingLinearResampler,
 }
 
 impl AudioProcessor {
     pub fn new(sample_rate: u32, eq: EqSettings, spatial: SpatialSettings, volume: f32) -> Self {
+        let sample_rate = sample_rate.max(1);
         Self {
             eq: EqProcessor::new(sample_rate, eq),
             spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
             stereo_scratch: Vec::new(),
+            resampler: StreamingLinearResampler::new(sample_rate),
         }
+    }
+
+    pub(crate) fn reset_stream(&mut self) {
+        let sample_rate = self.eq.sample_rate();
+        let eq_settings = self.eq.settings().clone();
+        let spatial_settings = self.spatial.settings().clone();
+        self.eq = EqProcessor::new(sample_rate, eq_settings);
+        self.spatial = Spatializer::new(sample_rate, spatial_settings);
+        self.resampler.reset();
     }
 
     #[cfg(test)]
@@ -42,12 +169,13 @@ impl AudioProcessor {
         output: &mut Vec<f32>,
     ) {
         let output_rate = self.eq.sample_rate();
-        if input_rate == output_rate {
-            to_stereo_into(input, input_channels, output);
-        } else {
-            to_stereo_into(input, input_channels, &mut self.stereo_scratch);
-            resample_linear_into(&self.stereo_scratch, input_rate, output_rate, output);
-        }
+        to_stereo_into(input, input_channels, &mut self.stereo_scratch);
+        self.resampler.process_into(
+            &self.stereo_scratch,
+            input_rate,
+            output_rate,
+            output,
+        );
         self.eq.process(output);
         self.spatial.process(output);
         let gain = perceptual_volume_gain(self.volume);
@@ -77,29 +205,6 @@ fn to_stereo_into(input: &[f32], channels: u16, output: &mut Vec<f32>) {
                 output.push(frame[0]);
                 output.push(frame[1]);
             }
-        }
-    }
-}
-
-fn resample_linear_into(input: &[f32], input_rate: u32, output_rate: u32, output: &mut Vec<f32>) {
-    if input_rate == output_rate || input.len() < 4 {
-        output.clear();
-        output.extend_from_slice(input);
-        return;
-    }
-    let input_frames = input.len() / 2;
-    let output_frames = ((input_frames as u64 * output_rate as u64) / input_rate as u64) as usize;
-    output.clear();
-    output.reserve(output_frames.saturating_mul(2));
-    for output_frame in 0..output_frames {
-        let source_position = output_frame as f32 * input_rate as f32 / output_rate as f32;
-        let source_frame = source_position.floor() as usize;
-        let next_frame = (source_frame + 1).min(input_frames - 1);
-        let fraction = source_position.fract();
-        for channel in 0..2 {
-            let first = input[source_frame * 2 + channel];
-            let second = input[next_frame * 2 + channel];
-            output.push(first + (second - first) * fraction);
         }
     }
 }
@@ -136,6 +241,39 @@ mod tests {
         assert_eq!(output.as_ptr(), output_ptr);
         assert_eq!(output.capacity(), output_capacity);
         assert_eq!(processor.stereo_scratch.capacity(), scratch_capacity);
+    }
+
+    #[test]
+    fn streaming_resampler_matches_one_shot_timeline_across_chunk_boundaries() {
+        let mut input = Vec::new();
+        for frame in 0..257 {
+            let value = frame as f32 / 257.0;
+            input.extend_from_slice(&[value, -value]);
+        }
+
+        let mut one_shot = StreamingLinearResampler::new(48_000);
+        let mut expected = Vec::new();
+        one_shot.process_into(&input, 44_100, 48_000, &mut expected);
+
+        let mut streaming = StreamingLinearResampler::new(48_000);
+        let mut actual = Vec::new();
+        let mut chunk = Vec::new();
+        for range in [0..74, 74..161, 161..257] {
+            chunk.clear();
+            streaming.process_into(
+                &input[range.start * 2..range.end * 2],
+                44_100,
+                48_000,
+                &mut chunk,
+            );
+            actual.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(left, right)| (left - right).abs() < 1.0e-5));
     }
 
     #[test]
