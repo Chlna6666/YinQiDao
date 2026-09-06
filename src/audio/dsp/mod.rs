@@ -145,15 +145,6 @@ impl AudioProcessor {
         }
     }
 
-    pub(crate) fn reset_stream(&mut self) {
-        let sample_rate = self.eq.sample_rate();
-        let eq_settings = self.eq.settings().clone();
-        let spatial_settings = self.spatial.settings().clone();
-        self.eq = EqProcessor::new(sample_rate, eq_settings);
-        self.spatial = Spatializer::new(sample_rate, spatial_settings);
-        self.resampler.reset();
-    }
-
     #[cfg(test)]
     pub fn process(&mut self, input: &[f32], input_rate: u32, input_channels: u16) -> Vec<f32> {
         let mut output = Vec::new();
@@ -259,7 +250,6 @@ mod tests {
         let mut actual = Vec::new();
         let mut chunk = Vec::new();
         for range in [0..74, 74..161, 161..257] {
-            chunk.clear();
             streaming.process_into(
                 &input[range.start * 2..range.end * 2],
                 44_100,
