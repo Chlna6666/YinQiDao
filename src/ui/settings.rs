@@ -906,7 +906,7 @@ fn step_row(
         .items_center()
         .justify_between()
         .gap_5()
-        .child(label_block(title, subtitle))
+        .child(label_block(title, subtitle.to_owned()))
         .child(
             div()
                 .flex()
