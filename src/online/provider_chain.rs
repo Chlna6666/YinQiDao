@@ -432,7 +432,7 @@ fn albums_compatible(expected: &str, actual: &str) -> bool {
 fn cover_version_flags(value: &str) -> u32 {
     let normalized = normalize_identity(value);
     let mut flags = 0u32;
-    for (index, term) in COVER_VERSION_TERMS.iter().enumerate() {
+    for (index, &term) in COVER_VERSION_TERMS.iter().enumerate() {
         if normalized.contains(term) {
             flags |= 1u32 << index;
         }
