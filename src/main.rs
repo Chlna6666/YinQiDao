@@ -1,5 +1,6 @@
 mod artwork;
 mod audio;
+mod audio_policy;
 mod gpu;
 mod library;
 pub mod logger;
@@ -7,6 +8,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod preferences;
 pub mod runtime;
 mod settings;
 mod ui;
@@ -35,6 +37,7 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         (config, base_dir)
     });
+    audio_policy::set_audio_runtime_policy(audio_policy::policy_from_config(&config));
 
     // 3. 初始化包含滚动归档和 debug 级别的 Tracing 日志系统
     let _log_guard = logger::init_logging(&config.log, &base_dir);
