@@ -39,7 +39,7 @@ pub(super) fn mini_player(
                 .bg(if visible {
                     theme::accent_red_muted()
                 } else {
-                    rgb(0xff_ff_ff)
+                    rgb(0xff_ff_ff).into()
                 })
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
