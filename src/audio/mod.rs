@@ -1,5 +1,6 @@
 mod command_queue;
 mod decoder;
+#[path = "dsp/mod.rs"]
 mod dsp;
 #[allow(dead_code)]
 mod engine;
