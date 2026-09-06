@@ -11,6 +11,7 @@ mod provider_chain;
 mod providers;
 
 const USER_AGENT: &str = "YinQiDao/0.1.0 (https://github.com/Chlna6666)";
+const LRCLIB_MIN_IDENTITY_SCORE: i32 = 75;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetadataMatch {
@@ -229,7 +230,8 @@ impl OnlineServices {
             return Ok(Some(lyrics_doc_from_response(lyrics)));
         }
 
-        // 2. 精准匹配未命中时，自动回退到 LRCLIB 搜索接口 /api/search
+        // 2. 精准匹配未命中时，搜索返回的是候选集合，必须再次做本地身份验证。
+        // 旧逻辑只选择“时长最接近”的项目，同长度的翻唱/Live/完全不同歌曲都可能误绑。
         let search_query = format!("{title} {artist}");
         let search_res = self
             .client
@@ -242,23 +244,30 @@ impl OnlineServices {
             && res.status().is_success()
             && let Ok(list) = res.json::<Vec<LrcLibResponse>>().await
         {
-            // 优先选择包含同步歌词且时长偏差在 6 秒之内的候选项
             let target_sec = duration_sec as f64;
             let best = list
-                .iter()
+                .into_iter()
                 .filter(|item| {
                     item.synced_lyrics.is_some() || item.plain_lyrics.is_some() || item.instrumental
                 })
-                .min_by(|a, b| {
-                    let diff_a = a.duration.map_or(999.0, |d| (d - target_sec).abs());
-                    let diff_b = b.duration.map_or(999.0, |d| (d - target_sec).abs());
-                    diff_a
-                        .partial_cmp(&diff_b)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                .filter_map(|item| {
+                    let identity = lrclib_identity_score(title, artist, album, target_sec, &item);
+                    (identity >= LRCLIB_MIN_IDENTITY_SCORE).then(|| {
+                        let quality = if item.synced_lyrics.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                            2
+                        } else if item.plain_lyrics.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                            1
+                        } else {
+                            0
+                        };
+                        (identity, quality, item)
+                    })
+                })
+                .max_by_key(|(identity, quality, _)| (*identity, *quality));
 
-            if let Some(matched) = best {
-                return Ok(Some(lyrics_doc_from_response(matched.clone())));
+            if let Some((identity, _, matched)) = best {
+                tracing::debug!(identity, source = "LRCLIB", "采用通过身份校验的歌词候选");
+                return Ok(Some(lyrics_doc_from_response(matched)));
             }
         }
 
@@ -297,6 +306,102 @@ impl OnlineServices {
 
 fn escape_query(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn lrclib_identity_score(
+    expected_title: &str,
+    expected_artist: &str,
+    expected_album: &str,
+    expected_duration_sec: f64,
+    candidate: &LrcLibResponse,
+) -> i32 {
+    let title = candidate.track_name.as_deref().unwrap_or_default();
+    let artist = candidate.artist_name.as_deref().unwrap_or_default();
+    let album = candidate.album_name.as_deref().unwrap_or_default();
+
+    let title_score = lrclib_text_similarity(expected_title, title) * 45 / 100;
+    let artist_score = lrclib_text_similarity(expected_artist, artist) * 30 / 100;
+    let album_score = if is_unknown_metadata(expected_album) {
+        5
+    } else {
+        lrclib_text_similarity(expected_album, album) * 10 / 100
+    };
+    let duration_score = candidate.duration.map_or(0, |duration| {
+        let delta = (duration - expected_duration_sec).abs();
+        if delta <= 2.0 {
+            15
+        } else if delta <= 4.0 {
+            10
+        } else if delta <= 6.0 {
+            5
+        } else {
+            -20
+        }
+    });
+
+    (title_score + artist_score + album_score + duration_score).clamp(0, 100)
+}
+
+fn lrclib_text_similarity(expected: &str, actual: &str) -> i32 {
+    let expected = normalize_identity_text(expected);
+    let actual = normalize_identity_text(actual);
+    if expected.is_empty() || actual.is_empty() {
+        return 0;
+    }
+    if expected == actual {
+        return 100;
+    }
+
+    let expected_len = expected.chars().count();
+    let actual_len = actual.chars().count();
+    let shorter = expected_len.min(actual_len);
+    let longer = expected_len.max(actual_len).max(1);
+    let containment = if expected.contains(&actual) || actual.contains(&expected) {
+        70 + ((shorter * 25) / longer) as i32
+    } else {
+        0
+    };
+    containment.max(identity_edit_similarity(&expected, &actual))
+}
+
+fn identity_edit_similarity(expected: &str, actual: &str) -> i32 {
+    let left = expected.chars().collect::<Vec<_>>();
+    let right = actual.chars().collect::<Vec<_>>();
+    let max_len = left.len().max(right.len());
+    if max_len == 0 {
+        return 100;
+    }
+
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_char) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.iter().enumerate() {
+            let substitution = usize::from(left_char != right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    let distance = previous[right.len()];
+    (((max_len - distance) * 100) / max_len) as i32
+}
+
+fn normalize_identity_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_unknown_metadata(value: &str) -> bool {
+    matches!(
+        normalize_identity_text(value).as_str(),
+        "" | "未知专辑" | "unknownalbum" | "unknown"
+    )
 }
 
 #[derive(Deserialize)]
@@ -381,6 +486,9 @@ struct Release {
 #[serde(rename_all = "camelCase")]
 struct LrcLibResponse {
     instrumental: bool,
+    track_name: Option<String>,
+    artist_name: Option<String>,
+    album_name: Option<String>,
     plain_lyrics: Option<String>,
     synced_lyrics: Option<String>,
     duration: Option<f64>,
@@ -425,5 +533,33 @@ mod tests {
         assert_eq!(metadata.artist, "Artist");
         assert_eq!(metadata.album, "Album");
         assert_eq!(metadata.release_mbid.as_deref(), Some("release-id"));
+    }
+
+    #[test]
+    fn lrclib_search_rejects_same_duration_wrong_song() {
+        let wrong = LrcLibResponse {
+            instrumental: false,
+            track_name: Some("完全不同的歌".into()),
+            artist_name: Some("另一个歌手".into()),
+            album_name: Some("另一张专辑".into()),
+            plain_lyrics: Some("歌词".into()),
+            synced_lyrics: None,
+            duration: Some(180.0),
+        };
+        assert!(lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &wrong) < LRCLIB_MIN_IDENTITY_SCORE);
+    }
+
+    #[test]
+    fn lrclib_search_accepts_normalized_identity() {
+        let matched = LrcLibResponse {
+            instrumental: false,
+            track_name: Some("晴天".into()),
+            artist_name: Some("周杰伦".into()),
+            album_name: Some("叶惠美".into()),
+            plain_lyrics: None,
+            synced_lyrics: Some("[00:01.00]故事的小黄花".into()),
+            duration: Some(180.8),
+        };
+        assert!(lrclib_identity_score("晴天", "周杰伦", "叶惠美", 180.0, &matched) >= LRCLIB_MIN_IDENTITY_SCORE);
     }
 }
