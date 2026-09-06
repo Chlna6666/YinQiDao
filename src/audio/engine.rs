@@ -276,8 +276,6 @@ impl PreloadCoordinator {
                 SmartCue::default()
             };
 
-            // Do not reuse the analysis decoder and do not depend on container seeking. Reopen the
-            // file, decode forward, and trim PCM to the exact cue frame in the background worker.
             let mut decoder = match DecoderStream::open(&request.track.path) {
                 Ok(decoder) => decoder,
                 Err(_) => continue,
@@ -479,8 +477,6 @@ impl CrossfadeState {
             let next_right = self.buffered_samples[next_index + 1];
             self.buffer_cursor += 2;
 
-            // cos²/sin² keeps gain_a + gain_b == 1. Unlike equal-power 0.707/0.707, correlated
-            // material cannot gain +3 dB at the midpoint, so no second limiter is needed here.
             let (current_gain, next_gain) = if self.transition_frames >= self.total_frames {
                 (0.0, 1.0)
             } else {
@@ -1337,8 +1333,6 @@ impl AudioWorker {
                 self.prefetched_chunk = preloaded.first_chunk;
                 Ok(preloaded.decoder)
             } else {
-                // Smart Cue belongs only to an in-flight crossfade. If the crossfade could not start,
-                // normal automatic/manual opening must preserve the song's original beginning.
                 self.prefetched_chunk = None;
                 DecoderStream::open(&track.path)
             }
@@ -1394,7 +1388,16 @@ impl AudioWorker {
 
     fn decode_next(&mut self) -> Result<bool, DecodeError> {
         if !self.transition_carry.is_empty() {
+            // `processed_samples` still contains the previous mixed chunk after it has already been
+            // pushed into the CPAL ring. Swapping without clearing used to put that old chunk back
+            // into `transition_carry`, so every subsequent decode iteration ping-ponged the two
+            // buffers forever and replayed stale PCM after a crossfade handoff.
+            //
+            // Clear only the length (retain the allocation), then swap. The carry becomes empty and
+            // is consumed exactly once; the following iteration resumes the next-track decoder.
+            self.processed_samples.clear();
             std::mem::swap(&mut self.processed_samples, &mut self.transition_carry);
+            debug_assert!(self.transition_carry.is_empty());
             self.apply_pending_fade_in();
             let position = self
                 .transition_carry_position
@@ -1480,10 +1483,6 @@ impl AudioWorker {
             && self.crossfade.is_some()
             && self.state == PlaybackState::Playing
         {
-            // complete_crossfade() used to run before this mixed buffer was even submitted to the
-            // CPAL ring. That reset the visible track/progress while the user had only just begun
-            // hearing the overlap. Wait until the consumer is at the actual crossfade boundary.
-            // Keep a small amount of next-track PCM queued so the handoff itself cannot underrun.
             let preroll_frames = (u64::from(self.output_rate.max(1)) * 20 / 1_000).max(1) as usize;
             let target_samples = frames_after_boundary
                 .saturating_add(preroll_frames)
