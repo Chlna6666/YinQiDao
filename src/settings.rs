@@ -4,9 +4,11 @@ use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{EqSettings, RepeatMode, SpatialSettings, TrackId};
+use crate::model::{
+    EqSettings, RepeatMode, SmartAudioSettings, SpatialSettings, TrackId, TrackTransitionSettings,
+};
 
-pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -22,6 +24,10 @@ pub struct AppConfig {
     pub eq: EqSettings,
     #[serde(default)]
     pub spatial: SpatialSettings,
+    #[serde(default)]
+    pub smart_audio: SmartAudioSettings,
+    #[serde(default)]
+    pub transition: TrackTransitionSettings,
     #[serde(default)]
     pub repeat: RepeatMode,
     #[serde(default)]
@@ -54,6 +60,68 @@ pub struct LogConfig {
     pub file_logging: bool,
     #[serde(default = "default_max_archives")]
     pub max_archives: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AppConfigV2 {
+    #[serde(default)]
+    music_dirs: Vec<PathBuf>,
+    #[serde(default = "default_volume")]
+    volume: f32,
+    #[serde(default)]
+    output_device: Option<String>,
+    #[serde(default)]
+    eq: EqSettings,
+    #[serde(default)]
+    spatial: SpatialSettings,
+    #[serde(default)]
+    repeat: RepeatMode,
+    #[serde(default)]
+    shuffle: bool,
+    #[serde(default)]
+    queue: Arc<Vec<TrackId>>,
+    #[serde(default)]
+    current_track: Option<TrackId>,
+    #[serde(default)]
+    position_ms: u64,
+    #[serde(default = "default_dynamic_blur")]
+    dynamic_blur: bool,
+    #[serde(default = "default_blur_radius")]
+    blur_radius: f32,
+    #[serde(default = "default_enabled")]
+    online_metadata: bool,
+    #[serde(default = "default_enabled")]
+    online_lyrics: bool,
+    #[serde(default)]
+    acoustid_api_key: Option<String>,
+    #[serde(default)]
+    log: LogConfig,
+}
+
+impl AppConfigV2 {
+    fn migrate(self) -> AppConfig {
+        AppConfig {
+            schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
+            music_dirs: self.music_dirs,
+            volume: self.volume,
+            output_device: self.output_device,
+            eq: self.eq,
+            spatial: self.spatial,
+            smart_audio: SmartAudioSettings::default(),
+            transition: TrackTransitionSettings::default(),
+            repeat: self.repeat,
+            shuffle: self.shuffle,
+            queue: self.queue,
+            current_track: self.current_track,
+            position_ms: self.position_ms,
+            dynamic_blur: self.dynamic_blur,
+            blur_radius: self.blur_radius,
+            online_metadata: self.online_metadata,
+            online_lyrics: self.online_lyrics,
+            acoustid_api_key: self.acoustid_api_key,
+            log: self.log,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -131,6 +199,8 @@ impl AppConfigV1 {
                 mix: self.spatial.mix,
                 ..spatial_defaults
             },
+            smart_audio: SmartAudioSettings::default(),
+            transition: TrackTransitionSettings::default(),
             repeat: self.repeat,
             shuffle: self.shuffle,
             queue: self.queue,
@@ -193,6 +263,8 @@ impl Default for AppConfig {
             output_device: None,
             eq: EqSettings::default(),
             spatial: SpatialSettings::default(),
+            smart_audio: SmartAudioSettings::default(),
+            transition: TrackTransitionSettings::default(),
             repeat: RepeatMode::Off,
             shuffle: false,
             queue: Arc::new(Vec::new()),
@@ -247,10 +319,15 @@ impl ConfigStore {
             .unwrap_or(1);
 
         match schema_version {
-            CURRENT_CONFIG_SCHEMA_VERSION => {
-                let config: AppConfig = toml::from_str(&content)
-                    .with_context(|| format!("解析配置失败: {}", self.path.display()))?;
-                Ok(config)
+            CURRENT_CONFIG_SCHEMA_VERSION => toml::from_str(&content)
+                .with_context(|| format!("解析配置失败: {}", self.path.display())),
+            2 => {
+                let legacy: AppConfigV2 = toml::from_str(&content)
+                    .with_context(|| format!("解析 v2 配置失败: {}", self.path.display()))?;
+                let migrated = legacy.migrate();
+                self.backup_legacy_config(&content, 2)?;
+                self.save(&migrated)?;
+                Ok(migrated)
             }
             1 => {
                 let legacy: AppConfigV1 = toml::from_str(&content)
@@ -261,10 +338,6 @@ impl ConfigStore {
                 Ok(migrated)
             }
             version => {
-                // MusicApp::new() intentionally remains infallible. Returning Err here would be
-                // swallowed by its fallback and the next save could overwrite a newer config.
-                // Preserve the foreign schema number in a guarded runtime config instead: the app
-                // can start with safe defaults, while save() refuses any downgrade write.
                 tracing::error!(
                     schema_version = version,
                     supported = CURRENT_CONFIG_SCHEMA_VERSION,
@@ -315,7 +388,7 @@ mod tests {
     use std::{env, fs, time::SystemTime};
 
     use super::*;
-    use crate::model::SpatialMotionMode;
+    use crate::model::{SpatialMotionMode, TransitionMode};
 
     fn temp_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -329,47 +402,45 @@ mod tests {
     fn config_round_trip_restores_professional_audio_preferences() {
         let path = temp_path("config");
         let store = ConfigStore::from_path(path.clone());
-        let eq = EqSettings {
-            enabled: true,
-            preamp_db: -2.5,
-            bands_db: [0.0, 0.0, 0.0, 0.0, 5.5, 0.0, 0.0, 0.0, 0.0, 0.0],
-        };
-        let mut spatial = SpatialSettings::default();
-        spatial.enabled = true;
-        spatial.motion_mode = SpatialMotionMode::Orbit360;
-        spatial.motion_speed_hz = 0.07;
-        spatial.motion_intensity = 0.9;
-        let config = AppConfig {
-            volume: 0.42,
-            queue: Arc::new(vec![3, 8, 13]),
-            current_track: Some(8),
-            position_ms: 12_345,
-            eq,
-            spatial,
-            ..AppConfig::default()
-        };
+        let mut config = AppConfig::default();
+        config.volume = 0.42;
+        config.queue = Arc::new(vec![3, 8, 13]);
+        config.current_track = Some(8);
+        config.position_ms = 12_345;
+        config.eq.enabled = true;
+        config.eq.preamp_db = -2.5;
+        config.eq.bands_db[4] = 5.5;
+        config.spatial.enabled = true;
+        config.spatial.motion_mode = SpatialMotionMode::Orbit360;
+        config.spatial.motion_speed_hz = 0.07;
+        config.spatial.motion_intensity = 0.9;
+        config.smart_audio.enabled = true;
+        config.smart_audio.intensity = 0.72;
+        config.transition.enabled = true;
+        config.transition.mode = TransitionMode::Crossfade;
+        config.transition.duration_ms = 4_200;
         store.save(&config).expect("save");
 
         let restored = store.load().expect("load");
         assert_eq!(restored.schema_version, CURRENT_CONFIG_SCHEMA_VERSION);
-        assert!((restored.volume - 0.42).abs() < f32::EPSILON);
-        assert_eq!(restored.queue.as_slice(), &[3, 8, 13]);
-        assert_eq!(restored.current_track, Some(8));
-        assert_eq!(restored.position_ms, 12_345);
+        assert!(restored.smart_audio.enabled);
+        assert!((restored.smart_audio.intensity - 0.72).abs() < f32::EPSILON);
+        assert!(restored.transition.enabled);
+        assert_eq!(restored.transition.mode, TransitionMode::Crossfade);
+        assert_eq!(restored.transition.duration_ms, 4_200);
         assert_eq!(restored.eq.bands_db[4], 5.5);
-        assert_eq!(restored.eq.preamp_db, -2.5);
         assert_eq!(restored.spatial.motion_mode, SpatialMotionMode::Orbit360);
-        assert!((restored.spatial.motion_intensity - 0.9).abs() < f32::EPSILON);
         fs::remove_file(path).expect("cleanup");
     }
 
     #[test]
-    fn unversioned_v1_config_is_backed_up_migrated_and_rewritten() {
-        let path = temp_path("legacy");
+    fn v2_config_is_backed_up_migrated_and_rewritten() {
+        let path = temp_path("v2");
         let store = ConfigStore::from_path(path.clone());
         fs::write(
             &path,
-            r#"volume = 0.66
+            r#"schema_version = 2
+volume = 0.66
 online_metadata = true
 online_lyrics = true
 
@@ -379,18 +450,27 @@ width = 0.7
 depth = 0.4
 distance = 0.2
 mix = 0.6
+crossfeed = 0.08
+room_size = 0.15
+immersive_3d = 0.1
+motion_mode = "static"
+motion_speed_hz = 0.08
+motion_radius = 0.65
+motion_intensity = 0.0
+clockwise = true
 "#,
         )
-        .expect("legacy write");
+        .expect("v2 write");
 
         let migrated = store.load().expect("migrate");
-        assert_eq!(migrated.schema_version, CURRENT_CONFIG_SCHEMA_VERSION);
-        assert_eq!(migrated.spatial.motion_mode, SpatialMotionMode::Static);
+        assert_eq!(migrated.schema_version, 3);
         assert_eq!(migrated.spatial.width, 0.7);
+        assert!(!migrated.smart_audio.enabled);
+        assert!(!migrated.transition.enabled);
         let rewritten = fs::read_to_string(&path).expect("rewritten");
-        assert!(rewritten.contains("schema_version = 2"));
+        assert!(rewritten.contains("schema_version = 3"));
         let backup = path.with_file_name(format!(
-            "{}.v1.bak",
+            "{}.v2.bak",
             path.file_name().and_then(|name| name.to_str()).unwrap()
         ));
         assert!(backup.exists());
@@ -399,16 +479,14 @@ mix = 0.6
     }
 
     #[test]
-    fn future_config_version_is_guarded_and_never_overwritten() {
+    fn future_config_version_is_preserved_in_read_only_mode() {
         let path = temp_path("future");
         let store = ConfigStore::from_path(path.clone());
-        let original = "schema_version = 999\nvolume = 0.12\n";
-        fs::write(&path, original).expect("future write");
-
-        let guarded = store.load().expect("future config should enter guarded mode");
+        fs::write(&path, "schema_version = 999\n").expect("future write");
+        let guarded = store.load().expect("guarded load");
         assert_eq!(guarded.schema_version, 999);
         assert!(store.save(&guarded).is_err());
-        assert_eq!(fs::read_to_string(&path).expect("preserved"), original);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "schema_version = 999\n");
         fs::remove_file(path).expect("cleanup");
     }
 }
