@@ -2,6 +2,7 @@ mod artwork;
 mod audio;
 mod audio_policy;
 mod desktop_lyrics;
+mod global_shortcuts;
 mod gpu;
 mod hotkeys;
 mod library;
@@ -86,6 +87,7 @@ fn main() -> Result<()> {
         };
 
         desktop_lyrics::start_ui_service(main_window, cx);
+        global_shortcuts::start_ui_service(main_window, cx);
         cx.activate(true);
     });
 
