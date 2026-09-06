@@ -13,6 +13,5 @@ mod transition;
 pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::AudioEngine;
-pub use smart_profile::{SmartAudioDecision, SmartAudioProfileKind, classify as classify_smart_audio, resolve_smart_audio};
+pub use smart_profile::classify as classify_smart_audio;
 pub(crate) use fingerprint::fingerprint_file;
-pub(crate) use transition::{SmartCue, analyze_smart_cue, equal_power_gains, fade_in_gain, fade_out_gain};
