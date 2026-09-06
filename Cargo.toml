@@ -51,9 +51,6 @@ souvlaki = "0.8.3"
 gpui-router = "0.3.0"
 rayon = "1.10"
 
-[build-dependencies]
-embed-resource = "3.0.11"
-
 [target.'cfg(windows)'.dependencies]
 gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "c2a9b3e9da292ee0f58d6c1e47f1cc3b35dbf23d", default-features = false, features = [
     "windows-manifest",
