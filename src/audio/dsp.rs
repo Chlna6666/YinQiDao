@@ -6,6 +6,9 @@ pub const EQ_FREQUENCIES: [f32; 10] = [
     31.0, 62.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
 ];
 
+const GRAPHIC_EQ_Q: f32 = std::f32::consts::SQRT_2;
+const MAX_SPATIAL_DELAY_SECONDS: f32 = 0.040;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EqPreset {
     Flat,
@@ -37,6 +40,105 @@ impl EqPreset {
             preamp_db: 0.0,
             bands_db,
         }
+    }
+
+    pub fn matches(self, settings: &EqSettings) -> bool {
+        let preset = self.settings();
+        preset
+            .bands_db
+            .iter()
+            .zip(settings.bands_db.iter())
+            .all(|(left, right)| (left - right).abs() <= 0.01)
+            && (preset.preamp_db - settings.preamp_db).abs() <= 0.01
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpatialPreset {
+    Studio,
+    Wide,
+    Headphones,
+    Cinema,
+    Immersive3d,
+}
+
+impl SpatialPreset {
+    pub const ALL: [Self; 5] = [
+        Self::Studio,
+        Self::Wide,
+        Self::Headphones,
+        Self::Cinema,
+        Self::Immersive3d,
+    ];
+
+    pub fn settings(self) -> SpatialSettings {
+        match self {
+            Self::Studio => SpatialSettings {
+                enabled: true,
+                width: 0.52,
+                depth: 0.18,
+                distance: 0.04,
+                mix: 0.38,
+                crossfeed: 0.06,
+                room_size: 0.10,
+                immersive_3d: 0.06,
+            },
+            Self::Wide => SpatialSettings {
+                enabled: true,
+                width: 0.78,
+                depth: 0.30,
+                distance: 0.06,
+                mix: 0.58,
+                crossfeed: 0.04,
+                room_size: 0.18,
+                immersive_3d: 0.24,
+            },
+            Self::Headphones => SpatialSettings {
+                enabled: true,
+                width: 0.62,
+                depth: 0.24,
+                distance: 0.10,
+                mix: 0.52,
+                crossfeed: 0.28,
+                room_size: 0.12,
+                immersive_3d: 0.32,
+            },
+            Self::Cinema => SpatialSettings {
+                enabled: true,
+                width: 0.84,
+                depth: 0.58,
+                distance: 0.18,
+                mix: 0.72,
+                crossfeed: 0.08,
+                room_size: 0.60,
+                immersive_3d: 0.56,
+            },
+            Self::Immersive3d => SpatialSettings {
+                enabled: true,
+                width: 0.92,
+                depth: 0.72,
+                distance: 0.20,
+                mix: 0.82,
+                crossfeed: 0.12,
+                room_size: 0.72,
+                immersive_3d: 0.88,
+            },
+        }
+    }
+
+    pub fn matches(self, settings: &SpatialSettings) -> bool {
+        let preset = self.settings();
+        [
+            (preset.width, settings.width),
+            (preset.depth, settings.depth),
+            (preset.distance, settings.distance),
+            (preset.mix, settings.mix),
+            (preset.crossfeed, settings.crossfeed),
+            (preset.room_size, settings.room_size),
+            (preset.immersive_3d, settings.immersive_3d),
+        ]
+        .into_iter()
+        .all(|(left, right)| (left - right).abs() <= 0.01)
     }
 }
 
@@ -72,7 +174,7 @@ impl Biquad {
         }
         let a = 10.0_f32.powf(gain_db / 40.0);
         let omega = 2.0 * PI * frequency / sample_rate;
-        let alpha = omega.sin() / (2.0 * 1.0);
+        let alpha = omega.sin() / (2.0 * GRAPHIC_EQ_Q);
         let cos = omega.cos();
         let b0 = 1.0 + alpha * a;
         let b1 = -2.0 * cos;
@@ -109,7 +211,7 @@ pub struct EqProcessor {
 impl EqProcessor {
     pub fn new(sample_rate: u32, settings: EqSettings) -> Self {
         let mut processor = Self {
-            settings,
+            settings: clamp_eq(settings),
             sample_rate: sample_rate.max(1) as f32,
             left: [Biquad::default(); 10],
             right: [Biquad::default(); 10],
@@ -156,17 +258,35 @@ impl EqProcessor {
 #[derive(Clone, Debug)]
 pub struct Spatializer {
     settings: SpatialSettings,
+    sample_rate: f32,
+    delay_left: Vec<f32>,
+    delay_right: Vec<f32>,
+    delay_cursor: usize,
+    lowpass_left: f32,
+    lowpass_right: f32,
 }
 
 impl Spatializer {
-    pub fn new(settings: SpatialSettings) -> Self {
+    pub fn new(sample_rate: u32, settings: SpatialSettings) -> Self {
+        let sample_rate = sample_rate.max(1) as f32;
+        let delay_frames = (sample_rate * MAX_SPATIAL_DELAY_SECONDS).ceil() as usize + 2;
         Self {
             settings: clamp_spatial(settings),
+            sample_rate,
+            delay_left: vec![0.0; delay_frames.max(8)],
+            delay_right: vec![0.0; delay_frames.max(8)],
+            delay_cursor: 0,
+            lowpass_left: 0.0,
+            lowpass_right: 0.0,
         }
     }
 
     pub fn set_settings(&mut self, settings: SpatialSettings) {
+        let was_enabled = self.settings.enabled;
         self.settings = clamp_spatial(settings);
+        if was_enabled && !self.settings.enabled {
+            self.reset_state();
+        }
     }
 
     #[cfg(test)]
@@ -174,23 +294,94 @@ impl Spatializer {
         &self.settings
     }
 
-    pub fn process(&self, samples: &mut [f32]) {
+    pub fn process(&mut self, samples: &mut [f32]) {
         if !self.settings.enabled {
             return;
         }
-        let width = 0.35 + self.settings.width * 1.65;
-        let depth = 1.0 - self.settings.depth * 0.45;
-        let distance = 1.0 - self.settings.distance * 0.55;
+
+        let width = self.settings.width;
+        let depth = self.settings.depth;
+        let distance = self.settings.distance;
         let mix = self.settings.mix;
+        let crossfeed = self.settings.crossfeed;
+        let room_size = self.settings.room_size;
+        let immersive_3d = self.settings.immersive_3d;
+
+        let width_gain = 0.72 + width * 1.38;
+        let crossfeed_gain = crossfeed * 0.22;
+        let attenuation = 1.0 - distance * 0.28;
+        let cutoff_hz = 19_000.0 - distance * 13_000.0;
+        let lowpass_decay = (-2.0 * PI * cutoff_hz / self.sample_rate).exp();
+        let lowpass_input = 1.0 - lowpass_decay;
+        let reflection_gain =
+            (depth * 0.11 + room_size * 0.12 + immersive_3d * 0.09).clamp(0.0, 0.28);
+
+        let base_delay_seconds = 0.0035 + room_size * 0.016 + depth * 0.006;
+        let left_delay = (base_delay_seconds * self.sample_rate).round() as usize;
+        let right_delay = ((base_delay_seconds + immersive_3d * 0.0018) * self.sample_rate)
+            .round() as usize;
+        let delay_len = self.delay_left.len();
+        let left_delay = left_delay.clamp(1, delay_len - 1);
+        let right_delay = right_delay.clamp(1, delay_len - 1);
+
         for frame in samples.as_chunks_mut::<2>().0 {
-            let mid = (frame[0] + frame[1]) * 0.5;
-            let side = (frame[0] - frame[1]) * 0.5;
-            let widened_left = (mid + side * width) * depth * distance;
-            let widened_right = (mid - side * width) * depth * distance;
-            let crossfeed = (1.0 - mix) * 0.5;
-            frame[0] = widened_left * mix + widened_right * crossfeed;
-            frame[1] = widened_right * mix + widened_left * crossfeed;
+            let dry_left = frame[0];
+            let dry_right = frame[1];
+
+            let mid = (dry_left + dry_right) * 0.5;
+            let side = (dry_left - dry_right) * 0.5;
+            let mut widened_left = mid + side * width_gain;
+            let mut widened_right = mid - side * width_gain;
+
+            if crossfeed_gain > 0.0 {
+                let left = widened_left;
+                let right = widened_right;
+                widened_left = left * (1.0 - crossfeed_gain) + right * crossfeed_gain;
+                widened_right = right * (1.0 - crossfeed_gain) + left * crossfeed_gain;
+            }
+
+            if distance > 0.001 {
+                self.lowpass_left =
+                    widened_left * lowpass_input + self.lowpass_left * lowpass_decay;
+                self.lowpass_right =
+                    widened_right * lowpass_input + self.lowpass_right * lowpass_decay;
+                widened_left = self.lowpass_left;
+                widened_right = self.lowpass_right;
+            } else {
+                self.lowpass_left = widened_left;
+                self.lowpass_right = widened_right;
+            }
+
+            let left_read = (self.delay_cursor + delay_len - left_delay) % delay_len;
+            let right_read = (self.delay_cursor + delay_len - right_delay) % delay_len;
+            let reflected_left = self.delay_right[right_read];
+            let reflected_right = self.delay_left[left_read];
+
+            self.delay_left[self.delay_cursor] = widened_left;
+            self.delay_right[self.delay_cursor] = widened_right;
+            self.delay_cursor += 1;
+            if self.delay_cursor == delay_len {
+                self.delay_cursor = 0;
+            }
+
+            let spatial_left =
+                (widened_left * (1.0 - reflection_gain) + reflected_left * reflection_gain)
+                    * attenuation;
+            let spatial_right =
+                (widened_right * (1.0 - reflection_gain) + reflected_right * reflection_gain)
+                    * attenuation;
+
+            frame[0] = dry_left * (1.0 - mix) + spatial_left * mix;
+            frame[1] = dry_right * (1.0 - mix) + spatial_right * mix;
         }
+    }
+
+    fn reset_state(&mut self) {
+        self.delay_left.fill(0.0);
+        self.delay_right.fill(0.0);
+        self.delay_cursor = 0;
+        self.lowpass_left = 0.0;
+        self.lowpass_right = 0.0;
     }
 }
 
@@ -206,7 +397,7 @@ impl AudioProcessor {
     pub fn new(sample_rate: u32, eq: EqSettings, spatial: SpatialSettings, volume: f32) -> Self {
         Self {
             eq: EqProcessor::new(sample_rate, eq),
-            spatial: Spatializer::new(spatial),
+            spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
             stereo_scratch: Vec::new(),
         }
@@ -243,7 +434,7 @@ impl AudioProcessor {
 }
 
 pub fn clamp_eq(mut settings: EqSettings) -> EqSettings {
-    settings.preamp_db = settings.preamp_db.clamp(-24.0, 24.0);
+    settings.preamp_db = settings.preamp_db.clamp(-24.0, 12.0);
     for band in &mut settings.bands_db {
         *band = band.clamp(-12.0, 12.0);
     }
@@ -255,6 +446,9 @@ pub fn clamp_spatial(mut settings: SpatialSettings) -> SpatialSettings {
     settings.depth = settings.depth.clamp(0.0, 1.0);
     settings.distance = settings.distance.clamp(0.0, 1.0);
     settings.mix = settings.mix.clamp(0.0, 1.0);
+    settings.crossfeed = settings.crossfeed.clamp(0.0, 1.0);
+    settings.room_size = settings.room_size.clamp(0.0, 1.0);
+    settings.immersive_3d = settings.immersive_3d.clamp(0.0, 1.0);
     settings
 }
 
@@ -375,17 +569,46 @@ mod tests {
     }
 
     #[test]
-    fn spatializer_clamps_parameters_and_changes_width() {
+    fn spatializer_clamps_all_professional_parameters() {
         let settings = SpatialSettings {
             enabled: true,
             width: 2.0,
             depth: -1.0,
             distance: 2.0,
             mix: 0.8,
+            crossfeed: 4.0,
+            room_size: -2.0,
+            immersive_3d: 3.0,
         };
-        let spatializer = Spatializer::new(settings);
+        let spatializer = Spatializer::new(48_000, settings);
         assert_eq!(spatializer.settings().width, 1.0);
-        spatializer.process(&mut [1.0, 0.0]);
-        assert_ne!(spatializer.settings().width, 0.0);
+        assert_eq!(spatializer.settings().depth, 0.0);
+        assert_eq!(spatializer.settings().crossfeed, 1.0);
+        assert_eq!(spatializer.settings().room_size, 0.0);
+        assert_eq!(spatializer.settings().immersive_3d, 1.0);
+    }
+
+    #[test]
+    fn immersive_preset_produces_a_decorrelated_stereo_tail() {
+        let mut spatializer = Spatializer::new(48_000, SpatialPreset::Immersive3d.settings());
+        let mut samples = vec![0.0; 8_192];
+        samples[0] = 1.0;
+        spatializer.process(&mut samples);
+        assert!(samples.as_chunks::<2>().0.iter().any(|frame| {
+            (frame[0] - frame[1]).abs() > 1e-5
+        }));
+    }
+
+    #[test]
+    fn preset_matching_distinguishes_custom_settings() {
+        let mut spatial = SpatialPreset::Studio.settings();
+        assert!(SpatialPreset::Studio.matches(&spatial));
+        spatial.room_size += 0.1;
+        assert!(!SpatialPreset::Studio.matches(&spatial));
+
+        let mut eq = EqPreset::Pop.settings();
+        assert!(EqPreset::Pop.matches(&eq));
+        eq.bands_db[3] += 0.5;
+        assert!(!EqPreset::Pop.matches(&eq));
     }
 }
