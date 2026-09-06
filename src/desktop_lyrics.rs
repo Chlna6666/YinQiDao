@@ -20,7 +20,6 @@ pub(crate) struct LyricsUiKey {
     content_hash: u64,
     style_hash: u64,
     desktop_visible: bool,
-    show_in_player: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +66,9 @@ impl MusicApp {
             titlebar: None,
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(MIN_OVERLAY_WIDTH), px(MIN_OVERLAY_HEIGHT))),
-            kind: if config.always_on_top {
+            // Windows uses a borderless popup and applies HWND_TOPMOST explicitly below. Other
+            // platforms keep the previous popup/normal behavior until they have a native adapter.
+            kind: if cfg!(windows) || config.always_on_top {
                 WindowKind::PopUp
             } else {
                 WindowKind::Normal
@@ -80,12 +81,26 @@ impl MusicApp {
             ..Default::default()
         };
 
-        if let Err(error) = cx.open_window(options, move |_, cx| {
+        match cx.open_window(options, move |_, cx| {
             cx.new(|_| DesktopLyricsView::new(parent))
         }) {
-            self.status = format!("打开桌面歌词失败：{error:#}");
-            self.config.desktop_lyrics.visible = false;
-            self.save_config();
+            Ok(window) => {
+                let always_on_top = config.always_on_top;
+                let applied = window
+                    .update(cx, |_view, window, _cx| {
+                        crate::window_platform::set_always_on_top(window, always_on_top)
+                    })
+                    .unwrap_or(false);
+                #[cfg(windows)]
+                if !applied {
+                    tracing::warn!("桌面歌词 HWND 置顶状态应用失败");
+                }
+            }
+            Err(error) => {
+                self.status = format!("打开桌面歌词失败：{error:#}");
+                self.config.desktop_lyrics.visible = false;
+                self.save_config();
+            }
         }
     }
 
@@ -119,8 +134,24 @@ impl MusicApp {
 
     pub(crate) fn toggle_desktop_lyrics_topmost(&mut self, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.always_on_top = !self.config.desktop_lyrics.always_on_top;
+        let always_on_top = self.config.desktop_lyrics.always_on_top;
         self.save_config();
+
+        #[cfg(windows)]
+        if let Some(overlay) = find_overlay_window(cx) {
+            let applied = overlay
+                .update(cx, |_view, window, _cx| {
+                    crate::window_platform::set_always_on_top(window, always_on_top)
+                })
+                .unwrap_or(false);
+            if !applied {
+                self.status = "桌面歌词置顶状态应用失败".into();
+            }
+        }
+
+        #[cfg(not(windows))]
         self.recreate_desktop_lyrics_window(cx);
+
         cx.notify();
     }
 
@@ -132,12 +163,6 @@ impl MusicApp {
 
     pub(crate) fn toggle_desktop_lyrics_two_line(&mut self, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.two_line = !self.config.desktop_lyrics.two_line;
-        self.save_config();
-        cx.notify();
-    }
-
-    pub(crate) fn toggle_player_lyrics(&mut self, cx: &mut Context<Self>) {
-        self.config.desktop_lyrics.show_in_player = !self.config.desktop_lyrics.show_in_player;
         self.save_config();
         cx.notify();
     }
@@ -221,9 +246,9 @@ impl MusicApp {
         crate::hotkeys::set_enabled(self.config.lyrics_shortcuts.enabled);
         self.save_config();
         self.status = if self.config.lyrics_shortcuts.enabled {
-            "桌面歌词系统快捷键已启用".into()
+            "系统级全局快捷键已启用".into()
         } else {
-            "桌面歌词系统快捷键已关闭".into()
+            "系统级全局快捷键已关闭".into()
         };
         cx.notify();
     }
@@ -334,7 +359,6 @@ impl MusicApp {
             u64::from(config.inactive_color),
             u64::from(config.translation_color),
             u64::from(config.font_size.to_bits()),
-            u64::from(config.background_opacity.to_bits()),
             config.show_translation as u64,
             config.two_line as u64,
             config.locked as u64,
@@ -350,7 +374,6 @@ impl MusicApp {
             content_hash,
             style_hash,
             desktop_visible: config.visible,
-            show_in_player: config.show_in_player,
         }
     }
 }
@@ -370,9 +393,6 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
                     app.sync_desktop_lyrics_window(app_cx);
                     let key = app.lyrics_ui_key();
                     changed = last_key.as_ref() != Some(&key);
-                    if changed && app.config.desktop_lyrics.show_in_player {
-                        app_cx.notify();
-                    }
                     last_key = Some(key);
                 });
                 if result.is_err() {
