@@ -49,6 +49,7 @@ impl OnlineServices {
         &self,
         track: &Track,
         fetch_lyrics: bool,
+        fetch_artwork: bool,
     ) -> Result<Option<EnrichmentResult>> {
         // Search every provider before committing to an identity. The previous first-match-wins
         // chain allowed a weak result from an early provider to hide a much stronger candidate
@@ -156,13 +157,15 @@ impl OnlineServices {
             None
         };
 
-        // Artwork is resolved independently from the metadata winner. A provider can identify the
-        // correct recording while lacking cover art, while another provider has the same identity
-        // and a better album image. Local embedded/sidecar artwork still wins in the UI layer; this
-        // resolver is only the online fallback.
-        let (artwork, artwork_key) = self
-            .resolve_online_artwork(track, &matched, &candidates)
-            .await;
+        // Artwork is resolved independently from the metadata winner, but only after the local
+        // artwork loader has explicitly requested an online fallback. This prevents ordinary
+        // metadata/lyrics enrichment from replacing a local artwork_key in persistent storage.
+        let (artwork, artwork_key) = if fetch_artwork {
+            self.resolve_online_artwork(track, &matched, &candidates)
+                .await
+        } else {
+            (None, None)
+        };
 
         Ok(Some(EnrichmentResult {
             metadata: Some(metadata),
