@@ -1,14 +1,71 @@
 #![cfg_attr(windows, allow(unsafe_code))]
 
 #[cfg(windows)]
-pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
-    use std::ffi::c_void;
+use std::ffi::c_void;
 
+#[cfg(windows)]
+fn native_hwnd(window: &gpui::Window) -> Option<*mut c_void> {
     use raw_window_handle::RawWindowHandle;
 
+    // `gpui::Window` also has an inherent `window_handle()` returning GPUI's logical handle.
+    // Call raw-window-handle explicitly so this always resolves to the native Win32 HWND.
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.hwnd.get() as *mut c_void)
+}
+
+#[cfg(windows)]
+fn remove_overlay_non_client_chrome(hwnd: *mut c_void) {
+    const DWMWA_NCRENDERING_POLICY: u32 = 2;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+
+    const DWMNCRP_DISABLED: u32 = 1;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            attribute: u32,
+            value: *const c_void,
+            value_size: u32,
+        ) -> i32;
+    }
+
+    fn apply(hwnd: *mut c_void, attribute: u32, value: &u32) {
+        // SAFETY: `hwnd` is obtained from a live GPUI Win32 window. DWM copies the fixed-size u32
+        // attribute value during this call and does not retain the pointer.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                (value as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+
+    // A desktop lyric surface is fully client-drawn and alpha-composited. Native non-client
+    // rendering only adds a border/rounded frame/drop shadow around otherwise transparent pixels.
+    apply(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_DISABLED);
+    apply(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &DWMWCP_DONOTROUND,
+    );
+    apply(hwnd, DWMWA_BORDER_COLOR, &DWMWA_COLOR_NONE);
+}
+
+#[cfg(windows)]
+pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
     const SWP_NOOWNERZORDER: u32 = 0x0200;
 
     #[link(name = "user32")]
@@ -24,26 +81,21 @@ pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
         ) -> i32;
     }
 
-    // `gpui::Window` also exposes an inherent `window_handle()` that returns GPUI's
-    // `AnyWindowHandle`. Use the raw-window-handle trait explicitly so we get the native
-    // Win32 handle rather than accidentally resolving the inherent method.
-    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+    let Some(hwnd) = native_hwnd(window) else {
         return false;
     };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return false;
-    };
+    remove_overlay_non_client_chrome(hwnd);
 
-    let hwnd = handle.hwnd.get() as *mut c_void;
     let insert_after = if enabled {
         (-1_isize) as *mut c_void // HWND_TOPMOST
     } else {
         (-2_isize) as *mut c_void // HWND_NOTOPMOST
     };
-    let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    let flags =
+        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER;
 
-    // SAFETY: `hwnd` comes from the live GPUI window's Win32 raw handle. `SetWindowPos` does not
-    // retain either pointer, and NOMOVE/NOSIZE/NOACTIVATE ensure this call only changes Z-order.
+    // SAFETY: `hwnd` comes from the live GPUI window. SetWindowPos does not retain either handle;
+    // NOMOVE/NOSIZE/NOACTIVATE keep this operation limited to z-order and frame recomputation.
     unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) != 0 }
 }
 
