@@ -31,6 +31,7 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         .child(smart_audio_group(app, cx))
         .child(eq_group(app, cx))
         .child(spatial_group(app, cx))
+        .child(audio_laboratory_group(app, cx))
         .child(track_transition_group(app, cx))
         .child(desktop_lyrics_group(app, cx))
         .child(global_shortcuts_group(app, cx))
@@ -536,6 +537,37 @@ fn spatial_parameter_row(
         cx.listener(move |this, _, _, cx| {
             this.adjust_manual_spatial(control, delta, cx)
         }),
+    )
+}
+
+fn audio_laboratory_group(_app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
+    let enabled = crate::audio::audio_debug_enabled();
+    card(
+        "Audio Laboratory · 专业音频分析",
+        "实时对比 SOURCE / POST-EQ / POST-SPATIAL。关闭后停止频谱、LUFS、True Peak 与历史采样，不给正常播放热路径增加分析开销",
+        toggle_row(
+            "显示独立分析窗口",
+            if enabled {
+                "分析器正在运行"
+            } else {
+                "仅在需要 A/B/C、频谱、相位和响度诊断时开启"
+            },
+            "settings-audio-laboratory-toggle",
+            enabled,
+            cx.listener(|this, _, _, cx| {
+                if crate::audio::audio_debug_enabled() {
+                    crate::audio_debug_window::shutdown(cx);
+                    this.status = "Audio Laboratory 已关闭".into();
+                } else if let Err(error) = crate::audio_debug_window::open(cx) {
+                    crate::audio::set_audio_debug_enabled(false);
+                    this.status = format!("打开 Audio Laboratory 失败：{error:#}");
+                    tracing::warn!(error = %error, "Audio Laboratory 窗口打开失败");
+                } else {
+                    this.status = "Audio Laboratory 已打开".into();
+                }
+                cx.notify();
+            }),
+        ),
     )
 }
 

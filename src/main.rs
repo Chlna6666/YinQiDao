@@ -90,14 +90,16 @@ fn main() -> Result<()> {
         // on normal startup so the playback hot path has no debug-analysis overhead.
         audio::set_audio_debug_enabled(false);
 
-        // 主窗口是进程生命周期所有者。桌面歌词/Audio Laboratory 都只是辅助窗口，
-        // 关闭主窗口后必须同步销毁，不能继续让 GPUI event loop 存活。
-        let lifecycle_main = main_window.clone();
+        // 主窗口是进程生命周期所有者。on_window_closed 会对任意辅助窗口触发，因此不能
+        // 用 main_window.update() 的成功与否判断主窗口是否死亡：主窗口事件回调期间的重入
+        // 借用同样会让 update() 失败，并会把“关闭桌面歌词”误判成“关闭主程序”。
+        let main_window_id = main_window.window_id();
         cx.on_window_closed(move |cx| {
-            if lifecycle_main
-                .update(cx, |_app, _window, _cx| ())
-                .is_err()
-            {
+            let main_still_open = cx
+                .windows()
+                .into_iter()
+                .any(|window| window.window_id() == main_window_id);
+            if !main_still_open {
                 desktop_lyrics::shutdown(cx);
                 audio_debug_window::shutdown(cx);
                 cx.quit();

@@ -152,8 +152,9 @@ impl gpui::Render for DesktopLyricsView {
             root = root.child(liquid_glass_surface(background_opacity, interacting));
         }
 
-        // Win32 会先解析原生 Drag hit-test，再分发 GPUI mouse listener，因此拖动区域绝不能
-        // 覆盖右侧控制栏。保留 224px CLIENT lane 后，锁定/翻译/设置/关闭不会再被 HTCAPTION 抢走。
+        // Win32 原生 hit-test 由几何上最具体的 WindowControlArea 决定。未锁定时只给
+        // 左侧主体注册 Drag，右侧 224px 永久保留给按钮和菜单；文字绘制层本身不再注册
+        // Client，否则它会覆盖下面的 Drag hitbox，造成“显示未锁定但仍完全拖不动”。
         if !config.locked {
             root = root.child(
                 div()
@@ -174,7 +175,6 @@ impl gpui::Render for DesktopLyricsView {
                 .px(px(24.0))
                 .py(px(12.0))
                 .flex()
-                .window_control_area(WindowControlArea::Client)
                 .child(lyrics),
         );
 

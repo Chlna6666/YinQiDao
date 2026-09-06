@@ -13,10 +13,7 @@ mod player_facade;
 mod player_stage;
 use player_facade as player;
 pub mod route;
-#[path = "settings_audio_lab.rs"]
 mod settings;
-#[path = "settings.rs"]
-mod settings_impl;
 mod shell;
 pub mod theme;
 
