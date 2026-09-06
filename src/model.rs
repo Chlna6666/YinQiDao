@@ -121,6 +121,62 @@ impl Default for SpatialSettings {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SmartAudioSettings {
+    /// Automatically choose EQ/spatial parameters from track metadata on track changes.
+    pub enabled: bool,
+    /// 0 keeps the manual baseline, 1 applies the complete automatically selected profile.
+    pub intensity: f32,
+}
+
+impl Default for SmartAudioSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.85,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionMode {
+    #[default]
+    Direct,
+    FadeOutIn,
+    Crossfade,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TrackTransitionSettings {
+    /// Global switch. Disabled always behaves like Direct.
+    pub enabled: bool,
+    pub mode: TransitionMode,
+    /// Total transition duration. Crossfade overlaps both tracks for this amount of time.
+    pub duration_ms: u64,
+    /// Analyze the beginning of a preloaded next track and start at a stable musical onset.
+    pub smart_cue: bool,
+    /// Never skip more than this much audio even if the detected onset is later.
+    pub max_smart_cue_ms: u64,
+    /// Manual Next/Previous remain immediate unless explicitly enabled.
+    pub apply_to_manual_skip: bool,
+}
+
+impl Default for TrackTransitionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: TransitionMode::Crossfade,
+            duration_ms: 3_500,
+            smart_cue: true,
+            max_smart_cue_ms: 3_500,
+            apply_to_manual_skip: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LibraryTab {
     #[default]
