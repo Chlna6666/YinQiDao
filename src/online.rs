@@ -88,7 +88,8 @@ impl OnlineServices {
         };
 
         let metadata = if let Some(recording_mbid) = recording_mbid {
-            self.lookup_recording(&recording_mbid).await?
+            self.lookup_recording(&recording_mbid, Some(track.album.as_str()))
+                .await?
         } else {
             self.search_recording(track).await?
         };
@@ -181,10 +182,14 @@ impl OnlineServices {
             .recordings
             .into_iter()
             .find(|candidate| candidate.is_confident_match(track))
-            .map(Recording::into_metadata))
+            .map(|recording| recording.into_metadata(Some(track.album.as_str()))))
     }
 
-    async fn lookup_recording(&self, recording_mbid: &str) -> Result<Option<MetadataMatch>> {
+    async fn lookup_recording(
+        &self,
+        recording_mbid: &str,
+        preferred_album: Option<&str>,
+    ) -> Result<Option<MetadataMatch>> {
         self.wait_for_musicbrainz().await;
         let url = format!("https://musicbrainz.org/ws/2/recording/{recording_mbid}");
         let response = self
@@ -204,7 +209,7 @@ impl OnlineServices {
                 .json::<Recording>()
                 .await
                 .context("解析 MusicBrainz 录音信息失败")?
-                .into_metadata(),
+                .into_metadata(preferred_album),
         ))
     }
 
@@ -470,8 +475,8 @@ impl Recording {
         self.score >= 90 && duration_matches
     }
 
-    fn into_metadata(self) -> MetadataMatch {
-        let release = self.releases.into_iter().next();
+    fn into_metadata(self, preferred_album: Option<&str>) -> MetadataMatch {
+        let release = select_release(self.releases, preferred_album);
         MetadataMatch {
             title: self.title,
             artist: self
@@ -489,6 +494,15 @@ impl Recording {
             release_date: None,
         }
     }
+}
+
+fn select_release(releases: Vec<Release>, preferred_album: Option<&str>) -> Option<Release> {
+    let Some(preferred_album) = preferred_album.filter(|album| !is_unknown_metadata(album)) else {
+        return releases.into_iter().next();
+    };
+    releases
+        .into_iter()
+        .max_by_key(|release| lrclib_text_similarity(preferred_album, &release.title))
 }
 
 #[derive(Deserialize)]
@@ -541,7 +555,7 @@ mod tests {
     #[test]
     fn musicbrainz_response_maps_artist_release_and_ids() {
         let response: RecordingSearchResponse = serde_json::from_str(
-            r#"{"recordings":[{"id":"recording-id","title":"Song","score":99,"length":180000,"artist-credit":[{"name":"Artist"}],"releases":[{"id":"release-id","title":"Album"}]}]}"#,
+            r#"{"recordings":[{"id":"recording-id","title":"Song","score":99,"length":180000,"artist-credit":[{"name":"Artist"}],"releases":[{"id":"single-id","title":"Single"},{"id":"release-id","title":"Album"}]}]}"#,
         )
         .expect("response");
         let metadata = response
@@ -549,7 +563,7 @@ mod tests {
             .into_iter()
             .next()
             .unwrap()
-            .into_metadata();
+            .into_metadata(Some("Album"));
         assert_eq!(metadata.artist, "Artist");
         assert_eq!(metadata.album, "Album");
         assert_eq!(metadata.release_mbid.as_deref(), Some("release-id"));
