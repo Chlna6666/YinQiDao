@@ -35,8 +35,6 @@ impl EqPreset {
             Self::Classical => [3.0, 2.0, 1.0, 0.0, -1.0, -1.0, 0.0, 2.0, 3.0, 3.0],
         };
         EqSettings {
-            // Preset selection and processor enable are separate concepts. Flat means 0 dB,
-            // not bypass; the explicit UI switch controls bypass.
             enabled: true,
             preamp_db: 0.0,
             bands_db,
@@ -135,6 +133,10 @@ impl EqProcessor {
 
     pub(crate) fn sample_rate(&self) -> u32 {
         self.sample_rate as u32
+    }
+
+    pub(crate) fn settings(&self) -> &EqSettings {
+        &self.settings
     }
 
     pub(crate) fn set_settings(&mut self, settings: EqSettings) {
