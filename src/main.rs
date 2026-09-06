@@ -86,11 +86,10 @@ fn main() -> Result<()> {
         desktop_lyrics::start_ui_service(main_window.clone(), cx);
         global_shortcuts::start_ui_service(main_window.clone(), cx);
 
-        if audio_debug_window::requested()
-            && let Err(error) = audio_debug_window::open(cx)
-        {
-            tracing::warn!(error = %error, "Audio Laboratory debug 窗口打开失败");
-        }
+        // Audio Laboratory is an explicit runtime diagnostic surface. It is opened from
+        // Settings instead of command-line/debug-build startup so normal playback never
+        // pays analyzer/UI cost unless the user asks for it.
+        audio::set_audio_debug_enabled(false);
 
         // 主窗口是进程生命周期所有者。桌面歌词/Audio Laboratory 都只是辅助窗口，
         // 关闭主窗口后必须同步销毁，不能继续让 GPUI event loop 存活。
