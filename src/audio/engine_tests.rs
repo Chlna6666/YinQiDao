@@ -386,3 +386,36 @@ fn restore_track_sets_queue_index_and_paused_state() {
 
     let _ = fs::remove_file(track_path);
 }
+
+#[test]
+fn fade_out_in_reduces_pcm_in_the_real_tail_window() {
+    let (mut worker, _consumer, _command_tx, _flush, _paused) = test_worker(8);
+    let mut current = test_track(1, std::path::PathBuf::new());
+    current.duration_ms = 1_000;
+    worker.tracks.write().unwrap().insert(1, current);
+    worker.queue = Arc::new(vec![1, 2]);
+    worker.queue_index = 0;
+    worker.current_track = Some(1);
+    worker.transition = TrackTransitionSettings {
+        enabled: true,
+        mode: TransitionMode::FadeOutIn,
+        duration_ms: 1_000,
+        ..TrackTransitionSettings::default()
+    };
+    // 100 ms stereo chunk ending exactly at the one-second track boundary.
+    worker.processed_samples = vec![1.0; 8_000 / 10 * 2];
+
+    worker.apply_fade_out(Duration::from_millis(1_000));
+
+    assert!(worker.processed_samples[0] < 0.4);
+    assert!(worker.processed_samples[worker.processed_samples.len() - 1] < 0.01);
+}
+
+#[test]
+fn smooth_crossfade_does_not_boost_correlated_material() {
+    let mixed = mix_crossfade_sample(0.8, 0.8, 0.5, 0.5);
+    assert!((mixed - 0.8).abs() < 1.0e-6);
+
+    let opposite = mix_crossfade_sample(0.8, -0.8, 0.5, 0.5);
+    assert!(opposite.abs() < 1.0e-6);
+}
