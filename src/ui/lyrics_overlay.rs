@@ -12,6 +12,7 @@ use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
+const CONTROL_LANE_WIDTH: f32 = 224.0;
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -139,8 +140,6 @@ impl gpui::Render for DesktopLyricsView {
             .size_full()
             .relative()
             .overflow_hidden()
-            // The root must stay CLIENT. A full-window native Drag area on the ancestor wins the
-            // hit test before toolbar buttons, which is why the old close button could be blocked.
             .window_control_area(WindowControlArea::Client)
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if this.hovered != *hovered {
@@ -153,14 +152,16 @@ impl gpui::Render for DesktopLyricsView {
             root = root.child(liquid_glass_surface(background_opacity, interacting));
         }
 
-        // Keep dragging as a sibling hit-test layer instead of applying Drag to the whole root.
-        // Toolbar/settings are painted after this layer with Client + occlude, so native dragging
-        // never steals their mouse-down events.
+        // Win32 会先解析原生 Drag hit-test，再分发 GPUI mouse listener，因此拖动区域绝不能
+        // 覆盖右侧控制栏。保留 224px CLIENT lane 后，锁定/翻译/设置/关闭不会再被 HTCAPTION 抢走。
         if !config.locked {
             root = root.child(
                 div()
                     .absolute()
-                    .inset_0()
+                    .left(px(0.0))
+                    .right(px(CONTROL_LANE_WIDTH))
+                    .top(px(0.0))
+                    .bottom(px(0.0))
                     .window_control_area(WindowControlArea::Drag)
                     .cursor_move(),
             );
@@ -223,8 +224,7 @@ impl gpui::Render for DesktopLyricsView {
                     "desktop-lyrics-close",
                     "×",
                     move |_, window, cx| {
-                        // Persist visibility first. Removing the window before changing the parent
-                        // left the periodic sync service enough time to recreate the overlay.
+                        // 先撤销 visible 与唯一 handle，再请求 native close，周期同步服务不会复活窗口。
                         let _ = close_parent.update(cx, |app, app_cx| {
                             app.desktop_lyrics_window_closed(app_cx);
                         });
@@ -445,28 +445,25 @@ fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
             .inset_0()
             .into_any_element()
         }
-        Err(_error) => {
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
-                .bg(hsla(0.0, 0.0, 0.18, opacity))
-                .into_any_element()
-        }
+        Err(_error) => div()
+            .absolute()
+            .inset_0()
+            .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
+            .bg(hsla(0.0, 0.0, 0.18, opacity))
+            .into_any_element(),
     }
 }
 
 fn lyrics_liquid_glass_mesh() -> Result<Arc<GpuMesh3d>, String> {
     static MESH: OnceLock<Result<Arc<GpuMesh3d>, String>> = OnceLock::new();
-    MESH
-        .get_or_init(|| {
-            let result = build_lyrics_liquid_glass_mesh();
-            if let Err(error) = &result {
-                tracing::warn!(error = %error, "桌面歌词 Liquid Glass shader 不可用，回退透明灰背景");
-            }
-            result
-        })
-        .clone()
+    MESH.get_or_init(|| {
+        let result = build_lyrics_liquid_glass_mesh();
+        if let Err(error) = &result {
+            tracing::warn!(error = %error, "桌面歌词 Liquid Glass shader 不可用，回退透明灰背景");
+        }
+        result
+    })
+    .clone()
 }
 
 fn build_lyrics_liquid_glass_mesh() -> Result<Arc<GpuMesh3d>, String> {
