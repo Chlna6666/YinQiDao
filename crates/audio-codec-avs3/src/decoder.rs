@@ -4,7 +4,7 @@ use yinqidao_codec_core::{
 
 use crate::{
     Av3aSampleEntry, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
-    DynamicMetadataPrefix, StaticMetadataPrefix, TnsSideBoundary, TransformType,
+    DynamicMetadataPrefix, StaticMetadataPrefix, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
     core::{parse_core_side_prefix_at, parse_core_transform_type_at},
     dynamic_metadata::parse_dynamic_metadata_at,
@@ -16,10 +16,10 @@ use crate::{
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Container/config, AATF framing, full-rate routing, dynamic Audio Vivid L1/L2 metadata and the
-/// deterministic prefix of `DecodeCoreSideBits()` are parsed without native decoders. TNS Huffman
-/// coefficient tables, BWE/group/QC side information and inverse quantization remain the next
-/// normative milestones before PCM synthesis.
+/// Container/config, AATF framing, full-rate routing, dynamic Audio Vivid L1/L2 metadata,
+/// FdShaping and complete TNS Huffman side information are parsed without native decoders.
+/// Static `BasicL1()`, BWE/group/QC, range decoding and inverse quantization remain the next
+/// normative boundaries before PCM synthesis.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -325,28 +325,17 @@ impl AudioDecoder for Avs3Decoder {
         self.last_first_transform_type = first_transform_type;
         self.last_frame_header = Some(header);
 
-        match (method, metadata_boundary, core_side_prefix) {
+        match (method, metadata_boundary) {
             (
                 AudioCodingMethod::GeneralFullRate,
                 Some(MetadataBoundary::StaticPresent { .. }),
-                _,
             ) => Err(CodecError::Unsupported(
                 "AVS3-P3 BasicL1/VrExt static metadata body decoding is not implemented yet",
             )),
-            (
-                AudioCodingMethod::GeneralFullRate,
-                _,
-                Some(CoreSidePrefix {
-                    tns: TnsSideBoundary::HuffmanCodes { .. },
-                    ..
-                }),
-            ) => Err(CodecError::Unsupported(
-                "AVS3-P3 TNS Huffman coefficient tables B.25-B.32 are not implemented yet",
-            )),
-            (AudioCodingMethod::GeneralFullRate, _, _) => Err(CodecError::Unsupported(
+            (AudioCodingMethod::GeneralFullRate, _) => Err(CodecError::Unsupported(
                 "AVS3-P3 BWE/group/QC and entropy synthesis is not implemented yet",
             )),
-            (AudioCodingMethod::Lossless, _, _) => Err(CodecError::Unsupported(
+            (AudioCodingMethod::Lossless, _) => Err(CodecError::Unsupported(
                 "AVS3-P3 ll_raw_data_block lossless synthesis is not implemented yet",
             )),
         }
