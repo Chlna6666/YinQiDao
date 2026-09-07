@@ -38,6 +38,7 @@ mod range;
 mod range_tables;
 mod synthesis;
 mod tns;
+mod tns_synthesis;
 
 pub use allocation::{McBitAllocation, allocate_multichannel_bytes, lfe_allocation_bytes};
 pub use base_neural::{
@@ -140,3 +141,4 @@ pub use tns::{
     TNS_REFLECTION_COEFFICIENTS, TnsFilterSideInfo, TnsSideInfo,
     parse_tns_side_info_at, reflection_coefficient,
 };
+pub use tns_synthesis::{TnsSynthesisWorkspace, apply_inverse_tns};
