@@ -4,6 +4,7 @@
 //! synthesis and future object/HOA rendering can evolve independently and be tested on desktop
 //! and mobile targets. No FFmpeg process or native codec DLL is required by this crate.
 
+mod allocation;
 mod bitreader;
 mod bwe;
 mod config;
@@ -13,13 +14,16 @@ mod decoder;
 mod dynamic_metadata;
 mod frame;
 mod ga;
+mod ga_frame;
 mod group;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
+mod qc;
 mod synthesis;
 mod tns;
 
+pub use allocation::{McBitAllocation, allocate_multichannel_bytes, lfe_allocation_bytes};
 pub use bwe::{
     BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at,
 };
@@ -42,6 +46,9 @@ pub use dynamic_metadata::{
 };
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
+pub use ga_frame::{
+    GaChannelSideInfo, GaMultichannelFrameSideInfo, parse_multichannel_frame_side_info,
+};
 pub use group::{GroupSideInfo, parse_group_bits_at};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
@@ -53,6 +60,7 @@ pub use multichannel::{
     MultichannelPairSideInfo, MultichannelSideInfo, channel_pair_index_bits,
     parse_multichannel_side_info_at,
 };
+pub use qc::{BitRange, QcSideInfo, parse_qc_side_info_at, qc_fixed_header_bits};
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
 };
