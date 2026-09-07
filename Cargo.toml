@@ -14,6 +14,7 @@ members = [
     "crates/lucide-gpui",
     "crates/audio-simd",
     "crates/audio-codec-core",
+    "crates/audio-codec-registry",
     "crates/audio-codec-avs3",
 ]
 
