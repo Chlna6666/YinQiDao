@@ -7,7 +7,7 @@ Current layout:
 - `audio-codec-core`: decoder/frame/stream contracts shared by non-Symphonia codecs.
 - `audio-codec-registry`: canonical routing/capability metadata. A codec appearing here does **not** mean its decoder is complete; maturity is explicit.
 - `audio-simd`: runtime-dispatched kernels shared by codecs and DSP.
-- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work from ISO-BMFF probing through AVS3 frame/QC parsing and range-decoder infrastructure.
+- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work from ISO-BMFF probing through AVS3 frame/QC parsing, entropy decoding and neural-runtime infrastructure.
 
 ## CPU dispatch policy
 
@@ -49,13 +49,15 @@ Implemented in pure Rust:
 13. Normative Basic/Low-Complexity feature-scale and noise-filling parameter dequantization helpers.
 14. Normative B.1 context range models, exact binary32 B.8 standard-deviation thresholds and lower-bound/clamped B.9 row selection.
 15. Context/hyper-prior entropy decoding into signed integer latent tensors in `position × context-channel` order, with a reusable allocation-free workspace API.
-16. Cross-platform SIMD synthesis primitives in `audio-simd` for overlap-add, transform windows and filter/prediction dot products.
+16. The table-15 three-layer context-decoder transposed-CNN runtime (3/3/3 kernels, 2/2/1 strides, 16 channels, ReLU/ReLU/linear) with reusable workspaces and SIMD dot-product inner reductions.
+17. Cross-platform SIMD synthesis/neural primitives in `audio-simd` for overlap-add, transform windows, filtering and convolution reductions.
 
 Still intentionally unsupported for production playback:
 
 - full Basic static metadata (`BasicL1()` / VR extension) bodies;
 - the complete 64-row normative B.9 base CDF data and base-latent range decoding;
-- context/base neural-network weights, latent quantizer parameters and inverse transforms;
+- B.2-B.7 context-network weights/biases, latent quantizer parameters and full context-network conformance output;
+- base decoder neural-network weights and inverse transform;
 - complete inverse quantization/noise-filling reconstruction into MDCT spectra;
 - stereo inverse M/S and multichannel MCAC reconstruction;
 - post synthesis: inverse TNS/BWE/FD shaping, degrouping and IMDCT;
@@ -63,6 +65,6 @@ Still intentionally unsupported for production playback:
 - `ll_raw_data_block()` lossless reconstruction;
 - normative CRC verification.
 
-The range engine is deliberately model-agnostic. CDF/model data must come from the normative AVS3 tables or properly licensed project-owned data; code or model blobs from public mirrors without an explicit compatible license are not copied into this repository.
+The range/neural engines are deliberately model-data agnostic. CDF/model data must come from the normative AVS3 tables or properly licensed project-owned data; code or model blobs from public mirrors without an explicit compatible license are not copied into this repository.
 
 AVS3 remains `InDevelopment` in the codec registry until real AV3A samples and official/reference conformance vectors pass end-to-end PCM regression tests. The transitional external AV3A backend must not be removed before that point.

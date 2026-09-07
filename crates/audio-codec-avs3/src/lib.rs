@@ -1,8 +1,9 @@
 //! Pure-Rust AVS3-P3 / AV3A codec work for YinQiDao.
 //!
 //! The crate is deliberately split from the player so container parsing, bitstream syntax,
-//! entropy/range decoding, synthesis and future object/HOA rendering can evolve independently and
-//! be tested on desktop and mobile targets. No FFmpeg process or native codec DLL is required.
+//! entropy/range decoding, neural reconstruction, synthesis and future object/HOA rendering can
+//! evolve independently and be tested on desktop and mobile targets. No FFmpeg process or native
+//! codec DLL is required.
 
 mod allocation;
 mod bitreader;
@@ -21,6 +22,7 @@ mod inverse_qc;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
+mod neural;
 mod qc;
 mod range;
 mod range_tables;
@@ -68,6 +70,12 @@ pub use metadata_prefix::{
 pub use multichannel::{
     MultichannelPairSideInfo, MultichannelSideInfo, channel_pair_index_bits,
     parse_multichannel_side_info_at,
+};
+pub use neural::{
+    CONTEXT_CHANNELS, CONTEXT_INPUT_POSITIONS, CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_SPEC,
+    CONTEXT_LAYER_3_SPEC, CONTEXT_OUTPUT_POSITIONS, ContextDecoderParams, ContextDecoderWorkspace,
+    ConvTranspose1dParams, ConvTranspose1dSpec, NeuralActivation, conv1d_transpose_same,
+    decode_context_network,
 };
 pub use qc::{BitRange, QcSideInfo, parse_qc_side_info_at, qc_fixed_header_bits};
 pub use range::{
