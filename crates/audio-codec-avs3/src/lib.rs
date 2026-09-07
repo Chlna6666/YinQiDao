@@ -12,6 +12,7 @@ mod decoder;
 mod frame;
 mod ga;
 mod metadata;
+mod metadata_prefix;
 mod synthesis;
 
 pub use config::{
@@ -25,6 +26,11 @@ pub use decoder::Avs3Decoder;
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
+pub use metadata_prefix::{
+    DynamicChannelPrefix, DynamicMetadataPrefix, StaticMetadataPrefix,
+    parse_dynamic_channel_prefix_at, parse_dynamic_metadata_prefix_at,
+    parse_static_metadata_prefix_at,
+};
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
 };
