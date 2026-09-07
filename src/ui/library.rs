@@ -4,7 +4,7 @@ use gpui::{
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity, Window, div,
     hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list,
 };
-use lucide_gpui::icons as lucide_icons;
+use lucide_gpui::icon;
 
 use crate::model::{LibraryTab, Track, TrackId};
 
@@ -124,7 +124,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 })
                                 .cursor_pointer()
                                 .child(themed_icon(
-                                    lucide_icons::icon_search(),
+                                    icon!(search),
                                     15.0,
                                     if app.search_active {
                                         ACCENT_RED.into()
@@ -157,7 +157,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                         .rounded_full()
                                         .bg(theme::bg_hover())
                                         .child(themed_icon(
-                                            lucide_icons::icon_x(),
+                                            icon!(x),
                                             10.0,
                                             TEXT_SECONDARY.into(),
                                         ))
@@ -188,7 +188,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .transition(press_transition())
                                 .active(|s| s.scale(0.96))
                                 .child(themed_icon(
-                                    lucide_icons::icon_folder_plus(),
+                                    icon!(folder_plus),
                                     15.0,
                                     ACCENT_RED.into(),
                                 ))
@@ -214,7 +214,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 .bg(rgb(0xec_ee_f2))
                 .child(segmented_tab_item(
                     "歌曲",
-                    lucide_icons::icon_music(),
+                    icon!(music),
                     app.library_tab == LibraryTab::Songs,
                     app_listener(view, |this, _, _, cx| {
                         this.show_library_tab(LibraryTab::Songs, cx)
@@ -222,7 +222,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 ))
                 .child(segmented_tab_item(
                     "专辑",
-                    lucide_icons::icon_disc_3(),
+                    icon!(disc_3),
                     app.library_tab == LibraryTab::Albums,
                     app_listener(view, |this, _, _, cx| {
                         this.show_library_tab(LibraryTab::Albums, cx)
@@ -230,7 +230,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 ))
                 .child(segmented_tab_item(
                     "艺术家",
-                    lucide_icons::icon_users_round(),
+                    icon!(users_round),
                     app.library_tab == LibraryTab::Artists,
                     app_listener(view, |this, _, _, cx| {
                         this.show_library_tab(LibraryTab::Artists, cx)
@@ -238,7 +238,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 ))
                 .child(segmented_tab_item(
                     "播放队列",
-                    lucide_icons::icon_list_music(),
+                    icon!(list_music),
                     app.library_tab == LibraryTab::Playlists,
                     app_listener(view, |this, _, _, cx| {
                         this.show_library_tab(LibraryTab::Playlists, cx)
@@ -407,7 +407,7 @@ fn song_table_row(
             .items_center()
             .justify_center()
             .child(themed_icon(
-                lucide_icons::icon_music(),
+                icon!(music),
                 16.0,
                 hsla(0.0, 0.0, 1.0, 0.85),
             ))
@@ -507,7 +507,7 @@ fn song_table_row(
                     .rounded_full()
                     .hover(|s| s.bg(theme::bg_active()))
                     .child(themed_icon(
-                        lucide_icons::icon_plus(),
+                        icon!(plus),
                         14.0,
                         hsla(220.0, 0.08, 0.50, 1.0),
                     ))
@@ -593,7 +593,7 @@ fn album_poster_card(
             .items_center()
             .justify_center()
             .child(themed_icon(
-                lucide_icons::icon_disc_3(),
+                icon!(disc_3),
                 48.0,
                 hsla(0.0, 0.0, 1.0, 0.80),
             ))
@@ -639,7 +639,7 @@ fn album_poster_card(
                                 .items_center()
                                 .justify_center()
                                 .child(themed_icon(
-                                    lucide_icons::icon_play(),
+                                    icon!(play),
                                     22.0,
                                     hsla(0.0, 0.0, 1.0, 1.0),
                                 )),
@@ -751,7 +751,7 @@ fn artist_circle_card(
                         .items_center()
                         .justify_center()
                         .child(themed_icon(
-                            lucide_icons::icon_users_round(),
+                            icon!(users_round),
                             44.0,
                             hsla(0.0, 0.0, 1.0, 0.85),
                         )),
@@ -798,7 +798,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .border_1()
             .border_color(BORDER_CARD)
             .child(themed_icon(
-                lucide_icons::icon_list_music(),
+                icon!(list_music),
                 36.0,
                 TEXT_TERTIARY.into(),
             ))
@@ -1006,7 +1006,7 @@ fn queue_item_row(
                         .rounded_full()
                         .hover(|s| s.bg(theme::bg_active()))
                         .child(themed_icon(
-                            lucide_icons::icon_x(),
+                            icon!(x),
                             14.0,
                             TEXT_TERTIARY.into(),
                         ))

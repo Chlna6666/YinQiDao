@@ -9,7 +9,7 @@ use gpui::{
     TransitionProperty, StatefulInteractiveElement as _, div, hsla, img, linear_color_stop,
     linear_gradient, point, prelude::*, px, rgb,
 };
-use lucide_gpui::icons as lucide_icons;
+use lucide_gpui::icon;
 
 use crate::{
     audio::PlayerCommand,
@@ -159,7 +159,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
             .items_center()
             .justify_center()
             .child(themed_icon(
-                lucide_icons::icon_disc_3(),
+                icon!(disc_3),
                 96.0,
                 hsla(0.0, 0.0, 1.0, 0.7),
             ))
@@ -234,7 +234,7 @@ fn stage_lyrics(
             .justify_center()
             .gap_3()
             .child(themed_icon(
-                lucide_icons::icon_music(),
+                icon!(music),
                 36.0,
                 hsla(0.0, 0.0, 1.0, 0.25),
             ))
@@ -497,7 +497,7 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
         )
         .child(control_button(
             "stage-prev-btn",
-            lucide_icons::icon_skip_back(),
+            icon!(skip_back),
             cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.wake_stage_controls_immediately(cx);
@@ -517,9 +517,9 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                 .active(|style| style.scale(0.95))
                 .child(themed_icon(
                     if playing {
-                        lucide_icons::icon_pause()
+                        icon!(pause)
                     } else {
-                        lucide_icons::icon_play()
+                        icon!(play)
                     },
                     22.0,
                     hsla(0.0, 0.0, 1.0, 1.0),
@@ -535,7 +535,7 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
         )
         .child(control_button(
             "stage-next-btn",
-            lucide_icons::icon_skip_forward(),
+            icon!(skip_forward),
             cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.wake_stage_controls_immediately(cx);
@@ -558,11 +558,11 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
                         .cursor_pointer()
                         .child(themed_icon(
                             if volume <= 0.001 {
-                                lucide_icons::icon_volume_x()
+                                icon!(volume_x)
                             } else if volume < 0.5 {
-                                lucide_icons::icon_volume_1()
+                                icon!(volume_1)
                             } else {
-                                lucide_icons::icon_volume_2()
+                                icon!(volume_2)
                             },
                             16.0,
                             hsla(0.0, 0.0, 1.0, 0.82),

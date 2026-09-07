@@ -6,7 +6,7 @@ use gpui::{
     StatefulInteractiveElement as _, Timer, WeakEntity, Window, div, hsla, img, linear_color_stop,
     linear_gradient, prelude::*, px, rgb,
 };
-use lucide_gpui::icons as lucide_icons;
+use lucide_gpui::icon;
 
 use crate::{
     audio::{AudioEngine, PlayerCommand},
@@ -316,7 +316,7 @@ pub(super) fn mini_player(
                                 .transition(press_transition())
                                 .active(|style| style.scale(0.92))
                                 .child(themed_icon(
-                                    lucide_icons::icon_heart(),
+                                    icon!(heart),
                                     15.0,
                                     hsla(220.0, 0.08, 0.60, 1.0),
                                 )),
@@ -351,7 +351,7 @@ pub(super) fn mini_player(
                                         .transition(press_transition())
                                         .active(|style| style.scale(0.92))
                                         .child(themed_icon(
-                                            lucide_icons::icon_shuffle(),
+                                            icon!(shuffle),
                                             15.0,
                                             if snapshot.shuffle {
                                                 ACCENT_RED.into()
@@ -380,7 +380,7 @@ pub(super) fn mini_player(
                                         .transition(press_transition())
                                         .active(|style| style.scale(0.92))
                                         .child(themed_icon(
-                                            lucide_icons::icon_skip_back(),
+                                            icon!(skip_back),
                                             18.0,
                                             hsla(220.0, 0.10, 0.35, 1.0),
                                         ))
@@ -411,9 +411,9 @@ pub(super) fn mini_player(
                                         .active(|style| style.scale(0.94))
                                         .child(themed_icon(
                                             if is_playing {
-                                                lucide_icons::icon_pause()
+                                                icon!(pause)
                                             } else {
-                                                lucide_icons::icon_play()
+                                                icon!(play)
                                             },
                                             18.0,
                                             hsla(0.0, 0.0, 1.0, 1.0),
@@ -439,7 +439,7 @@ pub(super) fn mini_player(
                                         .transition(press_transition())
                                         .active(|style| style.scale(0.92))
                                         .child(themed_icon(
-                                            lucide_icons::icon_skip_forward(),
+                                            icon!(skip_forward),
                                             18.0,
                                             hsla(220.0, 0.10, 0.35, 1.0),
                                         ))
@@ -470,8 +470,8 @@ pub(super) fn mini_player(
                                         .active(|style| style.scale(0.92))
                                         .child(themed_icon(
                                             match snapshot.repeat {
-                                                RepeatMode::Off | RepeatMode::All => lucide_icons::icon_repeat(),
-                                                RepeatMode::One => lucide_icons::icon_repeat_1(),
+                                                RepeatMode::Off | RepeatMode::All => icon!(repeat),
+                                                RepeatMode::One => icon!(repeat_1),
                                             },
                                             15.0,
                                             if snapshot.repeat != RepeatMode::Off {
@@ -554,7 +554,7 @@ pub(super) fn mini_player(
                                 .transition(press_transition())
                                 .active(|style| style.scale(0.92))
                                 .child(themed_icon(
-                                    lucide_icons::icon_list_music(),
+                                    icon!(list_music),
                                     16.0,
                                     if app.page == AppPage::Library
                                         && app.library_tab == LibraryTab::Playlists
@@ -583,11 +583,11 @@ pub(super) fn mini_player(
                                         .cursor_pointer()
                                         .child(themed_icon(
                                             if app.config.volume < 0.01 {
-                                                lucide_icons::icon_volume_x()
+                                                icon!(volume_x)
                                             } else if app.config.volume < 0.5 {
-                                                lucide_icons::icon_volume_1()
+                                                icon!(volume_1)
                                             } else {
-                                                lucide_icons::icon_volume_2()
+                                                icon!(volume_2)
                                             },
                                             16.0,
                                             hsla(220.0, 0.08, 0.50, 1.0),
@@ -687,7 +687,7 @@ fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl
         .items_center()
         .justify_center()
         .child(themed_icon(
-            lucide_icons::icon_disc_3(),
+            icon!(disc_3),
             22.0,
             hsla(0.0, 0.0, 1.0, 0.85),
         ))
@@ -788,7 +788,7 @@ impl Render for NowPlaying {
                             .items_center()
                             .justify_center()
                             .child(themed_icon(
-                                lucide_icons::icon_disc_3(),
+                                icon!(disc_3),
                                 96.0,
                                 hsla(0.0, 0.0, 1.0, 0.75),
                             ))

@@ -15,7 +15,7 @@ use gpui::{
     px, relative, rgb, size,
 };
 use gpui_tokio::Tokio;
-use lucide_gpui::icons as lucide_icons;
+use lucide_gpui::icon;
 
 use crate::lyrics::LyricsDocument;
 use crate::{
@@ -2247,7 +2247,7 @@ impl MusicApp {
                                         }),
                                     )
                                     .child(theme::themed_icon(
-                                        lucide_icons::icon_eye_off(),
+                                        icon!(eye_off),
                                         14.0,
                                         hsla(0.0, 0.0, 1.0, 0.90),
                                     ))
@@ -2283,7 +2283,7 @@ impl MusicApp {
                                         }),
                                     )
                                     .child(theme::themed_icon(
-                                        lucide_icons::icon_chevron_down(),
+                                        icon!(chevron_down),
                                         14.0,
                                         hsla(0.0, 0.0, 1.0, 0.90),
                                     ))
@@ -2601,7 +2601,7 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                         .rounded_lg()
                         .bg(theme::ACCENT_RED)
                         .child(theme::themed_icon(
-                            lucide_icons::icon_audio_waveform(),
+                            icon!(audio_waveform),
                             18.0,
                             hsla(0.0, 0.0, 1.0, 1.0),
                         )),
@@ -2643,7 +2643,7 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .transition(theme::press_transition())
                 .active(|s| s.scale(0.98))
                 .child(theme::themed_icon(
-                    lucide_icons::icon_search(),
+                    icon!(search),
                     14.0,
                     hsla(220.0, 0.07, 0.50, 1.0),
                 ))
@@ -2670,13 +2670,13 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .child(sidebar_section_header("探索"))
                 .child(sidebar_item(
                     "发现",
-                    lucide_icons::icon_compass(),
+                    icon!(compass),
                     app.page == AppPage::Home,
                     cx.listener(|this, _, _, cx| this.show_page(AppPage::Home, cx)),
                 ))
                 .child(sidebar_item(
                     "歌曲",
-                    lucide_icons::icon_music(),
+                    icon!(music),
                     app.page == AppPage::Library && app.library_tab == LibraryTab::Songs,
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Songs, cx)),
                 )),
@@ -2689,19 +2689,19 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .child(sidebar_section_header("音乐库"))
                 .child(sidebar_item(
                     "专辑",
-                    lucide_icons::icon_disc_3(),
+                    icon!(disc_3),
                     app.page == AppPage::Library && app.library_tab == LibraryTab::Albums,
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Albums, cx)),
                 ))
                 .child(sidebar_item(
                     "艺术家",
-                    lucide_icons::icon_users_round(),
+                    icon!(users_round),
                     app.page == AppPage::Library && app.library_tab == LibraryTab::Artists,
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Artists, cx)),
                 ))
                 .child(sidebar_item(
                     "播放队列",
-                    lucide_icons::icon_list_music(),
+                    icon!(list_music),
                     app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Playlists, cx)),
                 )),
@@ -2714,7 +2714,7 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .child(sidebar_section_header("系统"))
                 .child(sidebar_item(
                     "偏好设置",
-                    lucide_icons::icon_settings(),
+                    icon!(settings),
                     app.page == AppPage::Settings,
                     cx.listener(|this, _, _, cx| this.show_page(AppPage::Settings, cx)),
                 )),

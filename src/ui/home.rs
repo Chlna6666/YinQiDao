@@ -4,7 +4,7 @@ use gpui::{
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity, div, hsla,
     img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
-use lucide_gpui::icons as lucide_icons;
+use lucide_gpui::icon;
 
 use crate::model::Track;
 
@@ -99,7 +99,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .transition(press_transition())
                         .active(|s| s.scale(0.96))
                         .child(themed_icon(
-                            lucide_icons::icon_folder_plus(),
+                            icon!(folder_plus),
                             16.0,
                             ACCENT_RED.into(),
                         ))
@@ -132,7 +132,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .transition(press_transition())
                         .active(|s| s.scale(0.96))
                         .child(themed_icon(
-                            lucide_icons::icon_refresh_cw(),
+                            icon!(refresh_cw),
                             15.0,
                             hsla(220.0, 0.08, 0.50, 1.0),
                         ))
@@ -172,17 +172,17 @@ fn stats_overview(app: &MusicApp) -> impl IntoElement {
         .child(stat_badge(
             "歌曲总计",
             &format!("{track_count} 首"),
-            lucide_icons::icon_music(),
+            icon!(music),
         ))
         .child(stat_badge(
             "已收录专辑",
             &format!("{album_count} 张"),
-            lucide_icons::icon_disc_3(),
+            icon!(disc_3),
         ))
         .child(stat_badge(
             "艺术家",
             &format!("{artist_count} 位"),
-            lucide_icons::icon_users_round(),
+            icon!(users_round),
         ))
 }
 
@@ -291,7 +291,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
             .items_center()
             .justify_center()
             .child(themed_icon(
-                lucide_icons::icon_disc_3(),
+                icon!(disc_3),
                 42.0,
                 hsla(0.0, 0.0, 1.0, 0.80),
             ))
@@ -338,7 +338,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                                 .items_center()
                                 .justify_center()
                                 .child(themed_icon(
-                                    lucide_icons::icon_play(),
+                                    icon!(play),
                                     20.0,
                                     hsla(0.0, 0.0, 1.0, 1.0),
                                 )),
@@ -449,7 +449,7 @@ pub(super) fn track_row(
             .items_center()
             .justify_center()
             .child(themed_icon(
-                lucide_icons::icon_music(),
+                icon!(music),
                 18.0,
                 hsla(0.0, 0.0, 1.0, 0.85),
             ))
@@ -532,7 +532,7 @@ pub(super) fn track_row(
                         .rounded_full()
                         .hover(|s| s.bg(theme::bg_active()))
                         .child(themed_icon(
-                            lucide_icons::icon_plus(),
+                            icon!(plus),
                             14.0,
                             hsla(220.0, 0.08, 0.50, 1.0),
                         ))
@@ -578,7 +578,7 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
                 .items_center()
                 .justify_center()
                 .child(themed_icon(
-                    lucide_icons::icon_folder_open(),
+                    icon!(folder_open),
                     28.0,
                     ACCENT_RED.into(),
                 )),
@@ -612,7 +612,7 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
                 .transition(press_transition())
                 .active(|s| s.scale(0.96))
                 .child(themed_icon(
-                    lucide_icons::icon_folder_plus(),
+                    icon!(folder_plus),
                     16.0,
                     hsla(0.0, 0.0, 1.0, 1.0),
                 ))

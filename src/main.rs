@@ -7,6 +7,9 @@ mod global_shortcuts;
 mod gpu;
 mod hotkeys;
 mod library;
+mod lucide_assets {
+    include!(concat!(env!("OUT_DIR"), "/lucide_assets.rs"));
+}
 pub mod logger;
 mod lyrics;
 pub mod media_controls;
@@ -51,6 +54,7 @@ fn main() -> Result<()> {
 
     ensure_gpui_outside_tokio_runtime()?;
 
+    lucide_assets::install();
     let app = Application::new().with_assets(lucide_gpui::Assets);
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, io_handle);

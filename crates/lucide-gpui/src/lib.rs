@@ -1,54 +1,54 @@
 use anyhow::anyhow;
 use gpui::{AssetSource, Result, SharedString};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::{borrow::Cow, sync::OnceLock};
 
-pub struct Assets;
+pub struct StaticAsset {
+    pub path: &'static str,
+    pub bytes: &'static [u8],
+}
 
-pub(crate) mod registry {
-    use super::*;
-
-    fn registry() -> &'static RwLock<HashMap<&'static str, &'static [u8]>> {
-        static REGISTRY: OnceLock<RwLock<HashMap<&'static str, &'static [u8]>>> = OnceLock::new();
-        REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
-    }
-
-    pub fn register(path: &'static str, bytes: &'static [u8]) {
-        if let Ok(mut map) = registry().write() {
-            map.insert(path, bytes);
-        }
-    }
-
-    pub fn get(path: &str) -> Option<&'static [u8]> {
-        let map = registry().read().ok()?;
-        map.get(path).copied()
-    }
-
-    pub fn list(prefix: &str) -> Vec<SharedString> {
-        let map = match registry().read() {
-            Ok(map) => map,
-            Err(_) => return Vec::new(),
-        };
-        map.keys()
-            .filter(|key| key.starts_with(prefix))
-            .map(|key| SharedString::from(*key))
-            .collect()
+impl StaticAsset {
+    #[must_use]
+    pub const fn new(path: &'static str, bytes: &'static [u8]) -> Self {
+        Self { path, bytes }
     }
 }
 
+static ASSETS: OnceLock<&'static [StaticAsset]> = OnceLock::new();
+
+pub fn install_assets(assets: &'static [StaticAsset]) {
+    let _ = ASSETS.set(assets);
+}
+
+fn assets() -> &'static [StaticAsset] {
+    ASSETS.get().copied().unwrap_or(&[])
+}
+
+fn asset(path: &str) -> Option<&'static StaticAsset> {
+    let assets = assets();
+    assets
+        .binary_search_by(|asset| asset.path.cmp(path))
+        .ok()
+        .map(|index| &assets[index])
+}
+
+pub struct Assets;
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(registry::get(path).map(Cow::Borrowed))
+        Ok(asset(path).map(|asset| Cow::Borrowed(asset.bytes)))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         if path.is_empty() || path == "lucide" || path == "lucide/" {
-            return Ok(registry::list("lucide/"));
+            return Ok(assets()
+                .iter()
+                .map(|asset| SharedString::from(asset.path))
+                .collect());
         }
 
-        if registry::get(path).is_some() {
-            return Ok(vec![SharedString::from(path.to_string())]);
+        if asset(path).is_some() {
+            return Ok(vec![SharedString::from(path.to_owned())]);
         }
 
         if path.starts_with("lucide/") || path == "lucide" {
@@ -59,11 +59,9 @@ impl AssetSource for Assets {
     }
 }
 
-// `icons_gen.rs` is emitted by this crate's build.rs into OUT_DIR, so ordinary Rust module file
-// resolution cannot name it. Keep the generated boundary isolated here; hand-written code must use
-// normal `mod name;` declarations and must not depend back on this module.
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/icons_gen.rs"));
+#[macro_export]
+macro_rules! icon {
+    ($name:ident) => {
+        concat!("lucide/", stringify!($name), ".svg")
+    };
 }
-
-pub use generated::icons;
