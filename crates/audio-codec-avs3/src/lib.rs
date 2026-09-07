@@ -118,7 +118,10 @@ pub use ga_mono_neural::{
     BasicMonoNeuralWorkspace, decode_basic_mono_neural_mdct,
     parse_and_decode_basic_mono_neural_mdct,
 };
-pub use ga_mono_post::{BasicMonoPreFdWorkspace, parse_decode_basic_mono_pre_fd};
+pub use ga_mono_post::{
+    BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pcm,
+    parse_decode_basic_mono_pre_fd,
+};
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
 };
