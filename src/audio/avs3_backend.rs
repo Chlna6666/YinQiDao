@@ -1,19 +1,16 @@
-use std::{
-    error::Error,
-    fmt,
-    io,
-    time::Duration,
-};
+use std::{error::Error, fmt, io, time::Duration};
 
 use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, Avs3Decoder};
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
+
+const AVS3_FRAME_SAMPLES_PER_CHANNEL: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) enum Av3aRustError {
     Io(io::Error),
     Codec(CodecError),
     UnexpectedStatus,
-    InvalidMonoFrame,
+    InvalidFrame,
 }
 
 impl fmt::Display for Av3aRustError {
@@ -22,7 +19,7 @@ impl fmt::Display for Av3aRustError {
             Self::Io(error) => write!(formatter, "AV3A ISO-BMFF 读取失败: {error}"),
             Self::Codec(error) => write!(formatter, "AVS3-P3 解码失败: {error}"),
             Self::UnexpectedStatus => formatter.write_str("AVS3-P3 完整 sample 未产生 PCM frame"),
-            Self::InvalidMonoFrame => formatter.write_str("AVS3-P3 Basic mono 输出几何不合法"),
+            Self::InvalidFrame => formatter.write_str("AVS3-P3 Basic mono/stereo 输出几何不合法"),
         }
     }
 }
@@ -32,7 +29,7 @@ impl Error for Av3aRustError {
         match self {
             Self::Io(error) => Some(error),
             Self::Codec(error) => Some(error),
-            Self::UnexpectedStatus | Self::InvalidMonoFrame => None,
+            Self::UnexpectedStatus | Self::InvalidFrame => None,
         }
     }
 }
@@ -49,11 +46,12 @@ impl From<CodecError> for Av3aRustError {
     }
 }
 
-/// Player-side pure-Rust AV3A backend for the currently complete Basic-profile mono path.
+/// Player-side pure-Rust AV3A backend for complete Basic-profile mono/stereo paths.
 ///
 /// The first compressed sample is decoded once during capability probing and retained as the
-/// first output frame. This avoids decoding frame zero twice while still allowing unsupported
-/// AVS3 profiles/layouts to fall back to the transitional process backend before playback starts.
+/// first output frame. Unsupported AVS3 profiles/layouts (including MCR stereo) therefore fall
+/// back to the transitional process backend before playback starts without decoding frame zero
+/// twice for supported streams.
 pub(crate) struct Av3aRustBackend {
     demuxer: Av3aIsoBmffDemuxer,
     decoder: Avs3Decoder,
@@ -71,7 +69,7 @@ impl Av3aRustBackend {
         mut demuxer: Av3aIsoBmffDemuxer,
     ) -> Result<Option<Self>, Av3aRustError> {
         let entry = demuxer.sample_entry().clone();
-        if entry.channels != 1 || entry.decoder_config.is_empty() {
+        if !matches!(entry.channels, 1 | 2) || entry.decoder_config.is_empty() {
             return Ok(None);
         }
 
@@ -96,11 +94,10 @@ impl Av3aRustBackend {
             Err(CodecError::Unsupported(_)) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        if frame.channels != 1 || frame.samples.len() != 1024 {
-            return Err(Av3aRustError::InvalidMonoFrame);
-        }
+        validate_frame_geometry(&frame)?;
 
         let sample_rate = frame.sample_rate.max(1);
+        let channels = frame.channels;
         Ok(Some(Self {
             demuxer,
             decoder,
@@ -108,7 +105,7 @@ impl Av3aRustBackend {
             frame,
             first_frame_ready: true,
             sample_rate,
-            channels: 1,
+            channels,
             sample_count,
             duration,
         }))
@@ -147,8 +144,9 @@ impl Av3aRustBackend {
             };
             match self.decoder.decode_packet(&self.packet, &mut self.frame)? {
                 DecodeStatus::FrameReady => {
-                    if self.frame.channels != 1 || self.frame.samples.len() != 1024 {
-                        return Err(Av3aRustError::InvalidMonoFrame);
+                    validate_frame_geometry(&self.frame)?;
+                    if self.frame.channels != self.channels || self.frame.sample_rate != self.sample_rate {
+                        return Err(Av3aRustError::InvalidFrame);
                     }
                     std::mem::swap(samples, &mut self.frame.samples);
                     return Ok(true);
@@ -170,4 +168,14 @@ impl Av3aRustBackend {
         self.first_frame_ready = false;
         self.demuxer.position()
     }
+}
+
+fn validate_frame_geometry(frame: &AudioFrame) -> Result<(), Av3aRustError> {
+    if !matches!(frame.channels, 1 | 2)
+        || frame.samples.len()
+            != AVS3_FRAME_SAMPLES_PER_CHANNEL.saturating_mul(usize::from(frame.channels))
+    {
+        return Err(Av3aRustError::InvalidFrame);
+    }
+    Ok(())
 }
