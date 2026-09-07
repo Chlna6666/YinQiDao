@@ -22,6 +22,7 @@ mod core;
 mod decoder;
 mod dynamic_metadata;
 mod entropy;
+mod fd_lsf;
 mod frame;
 mod ga;
 mod ga_frame;
@@ -97,6 +98,10 @@ pub use dynamic_metadata::{
 pub use entropy::{
     decode_base_latents, decode_base_latents_into, decode_context_latents,
     decode_context_latents_into,
+};
+pub use fd_lsf::{
+    FD_SHAPING_SFB_BOUNDARIES, FD_SHAPING_SUBBANDS, LSF_MEAN, LSF_ORDER,
+    LsfCodebook, LsfCodebooks, dequantize_lsf,
 };
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
