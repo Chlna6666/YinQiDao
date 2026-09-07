@@ -13,6 +13,7 @@ mod base_params;
 mod base_pipeline;
 mod bitreader;
 mod bwe;
+mod bwe_synthesis;
 mod config;
 mod container;
 mod context_params;
@@ -60,6 +61,9 @@ pub use base_pipeline::{
 };
 pub use bwe::{
     BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at,
+};
+pub use bwe_synthesis::{
+    BweSynthesisWorkspace, BweWhiteningRng, apply_bwe_synthesis,
 };
 pub use config::{
     AudioCodingMethod, Avs3SpecificConfig, ChannelConfiguration, CodingProfile, ContentType,
