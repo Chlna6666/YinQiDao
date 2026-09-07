@@ -2,7 +2,6 @@ use yinqidao_codec_core::CodecError;
 
 use crate::bitreader::BitReader;
 
-/// AVS3-P3 coding method carried by the `audio_codec_id` nibble.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AudioCodingMethod {
     Lossless,
@@ -111,7 +110,6 @@ impl From<u8> for QuantizationResolution {
     }
 }
 
-/// Channel configuration indices from T/UWA 009.1-2023 / GY/T 363-2023 Annex A.8.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelConfiguration {
     Mono,
@@ -163,10 +161,6 @@ impl ChannelConfiguration {
     }
 }
 
-/// Full-rate sample-rate indices defined by the current Audio Vivid Annex A table.
-///
-/// Keep the raw index even when it is reserved so older/non-conforming streams can still be
-/// diagnosed without silently assigning them a made-up rate.
 pub const fn full_rate_sample_rate(index: u8) -> Option<u32> {
     match index {
         0x0 => Some(192_000),
@@ -185,9 +179,9 @@ pub struct GeneralFullRateConfig {
     pub content_type: ContentType,
     pub channel_number_index: Option<u8>,
     pub channel_configuration: Option<ChannelConfiguration>,
+    /// Semantic number of objects. The `dca3` field already carries the actual count.
     pub number_objects: Option<u8>,
-    /// The configuration field already carries the semantic HOA order (the AATF bitstream stores
-    /// `order`, where `order + 1` is the actual order).
+    /// Semantic HOA order. `dca3.hoa_order` equals AATF `order + 1`.
     pub hoa_order: Option<u8>,
     pub total_bitrate_kbps: u16,
     pub resolution: QuantizationResolution,
@@ -233,10 +227,6 @@ impl Avs3SpecificConfig {
     }
 }
 
-/// Parse the payload of the mandatory `dca3` CA3SpecificBox.
-///
-/// Syntax follows the Audio Vivid ISO-BMFF carriage specification: a 4-bit `audio_codec_id`
-/// followed by either Avs3AudioGASpecificConfig (id 2) or Avs3AudioLLSpecificConfig (id 1).
 pub fn parse_dca3(payload: &[u8]) -> Result<Avs3SpecificConfig, CodecError> {
     let mut reader = BitReader::new(payload);
     let audio_codec_id = reader.read_bits(4)? as u8;
@@ -252,7 +242,7 @@ pub fn parse_dca3(payload: &[u8]) -> Result<Avs3SpecificConfig, CodecError> {
 fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRateConfig, CodecError> {
     let sampling_frequency_index = reader.read_bits(4)? as u8;
     let nn_type = NeuralNetworkType::from(reader.read_bits(3)? as u8);
-    reader.skip_bits(1)?; // reserved
+    reader.skip_bits(1)?;
     let content_type = ContentType::parse(reader.read_bits(4)? as u8)?;
 
     let mut channel_number_index = None;
@@ -280,7 +270,7 @@ fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRate
             reader.skip_bits(1)?;
         }
         ContentType::Hoa => {
-            hoa_order = Some(reader.read_bits(4)? as u8);
+            hoa_order = Some((reader.read_bits(4)? as u8).saturating_add(1));
         }
     }
 
@@ -375,26 +365,49 @@ mod tests {
     #[test]
     fn parses_full_rate_7_1_4_config() {
         let mut writer = BitWriter::new();
-        writer.push(2, 4); // audio_codec_id
-        writer.push(3, 4); // 44.1 kHz
-        writer.push(1, 3); // low-complexity NN
+        writer.push(2, 4);
+        writer.push(3, 4);
+        writer.push(1, 3);
         writer.push(0, 1);
-        writer.push(0, 4); // channel content
-        writer.push(0xA, 7); // 7.1.4
+        writer.push(0, 4);
+        writer.push(0xA, 7);
         writer.push(0, 1);
         writer.push(832, 16);
-        writer.push(2, 2); // 24-bit
+        writer.push(2, 2);
         writer.push(0, 6);
 
         let Avs3SpecificConfig::GeneralFullRate(config) = parse_dca3(&writer.bytes).unwrap() else {
             panic!("full-rate config");
         };
         assert_eq!(config.sample_rate, Some(44_100));
-        assert_eq!(config.channel_configuration, Some(ChannelConfiguration::Surround7_1_4));
+        assert_eq!(
+            config.channel_configuration,
+            Some(ChannelConfiguration::Surround7_1_4)
+        );
         assert_eq!(config.channel_configuration.unwrap().channels(), Some(12));
         assert_eq!(config.total_bitrate_kbps, 832);
         assert_eq!(config.resolution.bits_per_sample(), Some(24));
         assert_eq!(config.content_type.coding_profile(), CodingProfile::Basic);
+    }
+
+    #[test]
+    fn normalizes_dca3_hoa_order_to_semantic_order() {
+        let mut writer = BitWriter::new();
+        writer.push(2, 4);
+        writer.push(2, 4);
+        writer.push(0, 3);
+        writer.push(0, 1);
+        writer.push(3, 4);
+        writer.push(2, 4); // AATF order value 2 means third-order HOA.
+        writer.push(768, 16);
+        writer.push(2, 2);
+        writer.push(0, 2);
+
+        let Avs3SpecificConfig::GeneralFullRate(config) = parse_dca3(&writer.bytes).unwrap() else {
+            panic!("full-rate config");
+        };
+        assert_eq!(config.content_type, ContentType::Hoa);
+        assert_eq!(config.hoa_order, Some(3));
     }
 
     #[test]
