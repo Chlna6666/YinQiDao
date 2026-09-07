@@ -4,6 +4,15 @@ use crate::{GroupSideInfo, MultichannelSideInfo, NeuralNetworkType, qc_fixed_hea
 
 const SAFE_CHANNEL_BYTES: usize = 8;
 
+/// Interoperability ceiling used by the published UWA/Huawei AVS3 reference codec.
+///
+/// `BIT_FRAME_MAX` is defined there as `256000 * FRAME_LEN / 48000` bits. With the normative
+/// 48-kHz 1024-sample frame this becomes 5461 bits, and the multichannel allocator applies the
+/// integer byte ceiling `BIT_FRAME_MAX / 8 = 682`. GY/T 363-2023 requires redistribution above a
+/// single-channel upper limit but does not publish the numeric value, so this is deliberately
+/// labelled as an interoperability parameter rather than an Annex constant.
+pub const MC_CHANNEL_MAX_BYTES: usize = (256_000usize * 1024 / 48_000) / 8;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McBitAllocation {
     pub channel_bytes: Vec<usize>,
@@ -35,16 +44,82 @@ pub fn lfe_allocation_bytes(
     })
 }
 
-/// Perform multichannel allocation through section 7.6.3.2 steps 1..4.
+/// Redistribute bytes above the reference-codec single-channel ceiling.
+///
+/// Only active non-LFE channels participate. A capped channel is removed from the Q6 ratio sum and
+/// its excess is distributed proportionally to the remaining active channels. Integer remainder
+/// follows the reference allocator and is assigned to the channel that had the largest allocation
+/// after the first ratio pass. The outer loop then handles any newly over-limit uncapped channel.
+fn apply_reference_channel_cap(
+    channel_bytes: &mut [usize],
+    active: &[(usize, u8)],
+    most_bits_channel: usize,
+) -> Result<(), CodecError> {
+    if active.is_empty() {
+        return Ok(());
+    }
+
+    let mut used = vec![false; channel_bytes.len()];
+    let mut ratio_sum: usize = active.iter().map(|(_, ratio)| usize::from(*ratio)).sum();
+
+    for _ in 0..active.len() {
+        let Some(&(capped_channel, capped_ratio)) = active
+            .iter()
+            .find(|(channel, _)| channel_bytes[*channel] > MC_CHANNEL_MAX_BYTES && !used[*channel])
+        else {
+            break;
+        };
+
+        let excess = channel_bytes[capped_channel] - MC_CHANNEL_MAX_BYTES;
+        channel_bytes[capped_channel] = MC_CHANNEL_MAX_BYTES;
+        used[capped_channel] = true;
+        ratio_sum = ratio_sum
+            .checked_sub(usize::from(capped_ratio))
+            .ok_or(CodecError::Internal(
+                "multichannel cap ratio sum underflow".into(),
+            ))?;
+
+        if excess == 0 {
+            continue;
+        }
+        if ratio_sum == 0 {
+            return Err(CodecError::InvalidData(
+                "multichannel payload cannot satisfy the per-channel byte ceiling",
+            ));
+        }
+
+        let mut distributed = 0usize;
+        for &(channel, ratio) in active {
+            if used[channel] {
+                continue;
+            }
+            let extra = excess.saturating_mul(usize::from(ratio)) / ratio_sum;
+            channel_bytes[channel] = channel_bytes[channel].saturating_add(extra);
+            distributed = distributed.saturating_add(extra);
+        }
+        if distributed > excess {
+            return Err(CodecError::Internal(
+                "multichannel cap redistribution exceeded its byte pool".into(),
+            ));
+        }
+
+        // Keep reference-codec integer remainder behaviour for bitstream interoperability.
+        channel_bytes[most_bits_channel] = channel_bytes[most_bits_channel]
+            .saturating_add(excess - distributed);
+    }
+
+    Ok(())
+}
+
+/// Perform multichannel allocation through section 7.6.3.2 steps 1..5.
 ///
 /// `remaining_payload_bits` starts immediately after `DecodeMcSideBits()`. Future fixed QC fields
 /// are removed before byte allocation. Eight safe bytes are reserved for every non-LFE channel;
-/// LFE receives its bitrate-dependent fixed allocation. The remaining bytes are distributed twice
-/// with the transmitted Q6 ratios, then integer remainder goes to the largest active allocation.
-///
-/// The public text mentions a final per-channel upper-limit redistribution step but does not give a
-/// numeric cap in section 7.6.3.2. This parser intentionally does not invent one; conformance work
-/// must source that cap from an authoritative table/reference implementation before production use.
+/// LFE receives its bitrate-dependent fixed allocation. Remaining bytes are distributed twice with
+/// the transmitted Q6 ratios, integer remainder goes to the largest first-pass allocation, then
+/// the published reference codec's 682-byte single-channel ceiling is applied with proportional
+/// redistribution. This last numeric ceiling is an interoperability parameter because the standard
+/// text specifies the redistribution step but omits the ceiling value.
 pub fn allocate_multichannel_bytes(
     remaining_payload_bits: usize,
     nn_type: NeuralNetworkType,
@@ -128,13 +203,20 @@ pub fn allocate_multichannel_bytes(
         ));
     }
 
+    let mut most_bits_channel = active.first().map(|(channel, _)| *channel);
     if !active.is_empty() {
+        // First proportional pass uses the whole post-safe-byte pool.
         let first_pool = pool;
         let mut distributed = 0_usize;
+        let mut largest_first_pass = 0usize;
         for &(channel, ratio) in &active {
             let extra = first_pool.saturating_mul(usize::from(ratio)) / 64;
             channel_bytes[channel] = channel_bytes[channel].saturating_add(extra);
             distributed = distributed.saturating_add(extra);
+            if channel_bytes[channel] > largest_first_pass {
+                largest_first_pass = channel_bytes[channel];
+                most_bits_channel = Some(channel);
+            }
         }
         if distributed > pool {
             return Err(CodecError::InvalidData(
@@ -143,6 +225,7 @@ pub fn allocate_multichannel_bytes(
         }
         pool -= distributed;
 
+        // Reference allocator applies the same Q6 ratios to the first-pass integer remainder.
         let second_pool = pool;
         let mut distributed_second = 0_usize;
         for &(channel, ratio) in &active {
@@ -158,11 +241,7 @@ pub fn allocate_multichannel_bytes(
         pool -= distributed_second;
 
         if pool != 0 {
-            let target = active
-                .iter()
-                .map(|(channel, _)| *channel)
-                .max_by_key(|channel| channel_bytes[*channel])
-                .expect("active channel list checked non-empty");
+            let target = most_bits_channel.expect("active channel list checked non-empty");
             channel_bytes[target] = channel_bytes[target].saturating_add(pool);
             pool = 0;
         }
@@ -173,6 +252,11 @@ pub fn allocate_multichannel_bytes(
             "multichannel frame has allocatable bytes but no active non-LFE channel",
         ));
     }
+
+    if let Some(most_bits_channel) = most_bits_channel {
+        apply_reference_channel_cap(&mut channel_bytes, &active, most_bits_channel)?;
+    }
+
     if channel_bytes.iter().sum::<usize>() != available_bytes {
         return Err(CodecError::Internal(
             "McBitsAllocation did not conserve available bytes".into(),
@@ -216,6 +300,11 @@ mod tests {
     }
 
     #[test]
+    fn reference_single_channel_ceiling_is_682_bytes() {
+        assert_eq!(MC_CHANNEL_MAX_BYTES, 682);
+    }
+
+    #[test]
     fn lfe_thresholds_use_exact_channel_pair_rate() {
         assert_eq!(lfe_allocation_bytes(300, 10).unwrap(), 10);
         assert_eq!(lfe_allocation_bytes(320, 10).unwrap(), 15);
@@ -245,6 +334,24 @@ mod tests {
         assert_eq!(allocation.lfe_bytes, Some(20));
         assert_eq!(allocation.channel_bytes[3], 20);
         assert_eq!(allocation.trailing_bits, 0);
+    }
+
+    #[test]
+    fn cap_redistribution_matches_reference_allocator_geometry() {
+        let groups = groups(3);
+        let side = side(&[40, 12, 12]);
+        let qc_bits = groups.len() * 19;
+        let allocation = allocate_multichannel_bytes(
+            qc_bits + 1_200 * 8,
+            NeuralNetworkType::Basic,
+            &groups,
+            &side,
+            768,
+            None,
+        )
+        .unwrap();
+        assert_eq!(allocation.channel_bytes, vec![682, 259, 259]);
+        assert_eq!(allocation.channel_bytes.iter().sum::<usize>(), 1_200);
     }
 
     #[test]
