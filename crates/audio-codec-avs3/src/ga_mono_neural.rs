@@ -2,17 +2,17 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{
     BASE_OUTPUT_POSITIONS, BasePipelineWorkspace, BweConfig, ContextPipelineWorkspace,
-    GaMonoFrameSideInfo, NeuralNetworkType, NoiseFillingRng, decode_basic_base_to_mdct_normative,
-    decode_context_and_select_base_models_default, parse_mono_frame_side_info,
+    GaChannelSideInfo, GaMonoFrameSideInfo, NeuralNetworkType, NoiseFillingRng,
+    decode_basic_base_to_mdct_normative, decode_context_and_select_base_models_default,
+    parse_mono_frame_side_info,
 };
 
 const BASE_MODEL_VALUES: usize = 64 * 16;
 
-/// Reusable scratch/state for the basic-profile mono hyper-prior path.
+/// Reusable scratch/state for one Basic-profile coded channel's hyper-prior path.
 ///
-/// The 1024-value context output and B.9 model-index map are kept directly in the decoder-owned
-/// workspace. Context/base neural workspaces retain their internal buffers across frames and the
-/// noise-filling PRNG is decoder-local, avoiding global RNG contention and per-frame allocation.
+/// The historical type name is retained because mono was the first caller; the workspace itself is
+/// channel-generic and is also reused independently for both downmixed stereo channels.
 #[derive(Debug)]
 pub struct BasicMonoNeuralWorkspace {
     context: ContextPipelineWorkspace,
@@ -54,38 +54,35 @@ fn noise_fill_line_count(bwe_config: Option<BweConfig>) -> Result<usize, CodecEr
         Some(config) => config.target_tiles[0]
             .map(usize::from)
             .ok_or(CodecError::InvalidData(
-                "mono BWE configuration is missing its start line",
+                "BWE configuration is missing its start line",
             )),
         None => Ok(BASE_OUTPUT_POSITIONS),
     }
 }
 
-/// Decode one already-parsed basic-profile mono QC payload to the 1024-point neural MDCT spectrum.
+/// Decode one already-parsed Basic-profile coded channel to the 1024-point neural MDCT spectrum.
 ///
-/// Data flow:
-/// `contextBitstream -> context range decode -> inverse quantization -> B.2..B.7 -> B.8 -> B.9
-/// -> base range decode -> inverse quantization/noise filling/scale -> B.10..B.23 -> MDCT`.
-///
-/// `side` and both entropy ranges reference `payload` directly, so the function copies no coded
-/// payload bytes. All mutable scratch is retained in `workspace` across frames.
-pub fn decode_basic_mono_neural_mdct(
+/// This is the common zero-copy neural execution boundary shared by mono and the two downmixed
+/// channels in conventional stereo. All mutable scratch remains decoder-owned and reusable.
+pub fn decode_basic_channel_neural_mdct(
     payload: &[u8],
-    side: &GaMonoFrameSideInfo,
+    channel: &GaChannelSideInfo,
+    bwe_config: Option<BweConfig>,
     workspace: &mut BasicMonoNeuralWorkspace,
     output: &mut [f32],
 ) -> Result<(), CodecError> {
     if output.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
-            "basic mono neural output must contain 1024 MDCT coefficients",
+            "basic channel neural output must contain 1024 MDCT coefficients",
         ));
     }
 
-    let qc = &side.channel.qc;
+    let qc = &channel.qc;
     let is_feat_amplified = qc.is_feat_amplified.ok_or(CodecError::InvalidData(
-        "basic mono QC is missing isFeatAmplified",
+        "basic channel QC is missing isFeatAmplified",
     ))?;
     let scale_q_idx = qc.scale_q_idx.ok_or(CodecError::InvalidData(
-        "basic mono QC is missing scaleQIdx",
+        "basic channel QC is missing scaleQIdx",
     ))?;
 
     decode_context_and_select_base_models_default(
@@ -100,8 +97,8 @@ pub fn decode_basic_mono_neural_mdct(
         payload,
         qc.base_bitstream,
         &workspace.model_indices,
-        noise_fill_line_count(side.bwe_config)?,
-        side.channel.group,
+        noise_fill_line_count(bwe_config)?,
+        channel.group,
         qc.nf_param_q_idx,
         is_feat_amplified,
         scale_q_idx,
@@ -111,11 +108,24 @@ pub fn decode_basic_mono_neural_mdct(
     )
 }
 
+/// Decode one already-parsed basic-profile mono QC payload to the 1024-point neural MDCT spectrum.
+pub fn decode_basic_mono_neural_mdct(
+    payload: &[u8],
+    side: &GaMonoFrameSideInfo,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    decode_basic_channel_neural_mdct(
+        payload,
+        &side.channel,
+        side.bwe_config,
+        workspace,
+        output,
+    )
+}
+
 /// Parse the complete mono syntax through QC and immediately execute the built-in Basic neural
 /// inverse-QC model. This is the thin production front-end intended for `Avs3Decoder`.
-///
-/// The returned side-info owns only parsed scalar metadata; context/base entropy payloads remain
-/// zero-copy bit ranges into `payload`.
 pub fn parse_and_decode_basic_mono_neural_mdct(
     payload: &[u8],
     core_bit_offset: usize,
