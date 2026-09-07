@@ -4,6 +4,27 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{StereoCouplingSideInfo, StereoSideInfo};
 
+/// Shared orthonormal inverse M/S primitive used by stereo and multichannel MCAC upmixing.
+///
+/// Each frequency line is independent, so both inputs may be overwritten in place without scratch.
+pub(crate) fn inverse_ms_pair(
+    channel_zero: &mut [f32],
+    channel_one: &mut [f32],
+) -> Result<(), CodecError> {
+    if channel_zero.len() != channel_one.len() {
+        return Err(CodecError::InvalidData(
+            "inverse M/S spectra must have identical lengths",
+        ));
+    }
+    for (mid, side) in channel_zero.iter_mut().zip(channel_one.iter_mut()) {
+        let m = *mid;
+        let s = *side;
+        *mid = FRAC_1_SQRT_2 * (m + s);
+        *side = FRAC_1_SQRT_2 * (m - s);
+    }
+    Ok(())
+}
+
 /// Apply the normative >32-kb/s dual-channel stereo inverse M/S and inverse ILD transform in place.
 ///
 /// `channel_zero`/`channel_one` are the two downmixed spectra produced by inverse QC. When `isMs`
@@ -45,6 +66,8 @@ pub fn apply_stereo_ms_upmix(
         ));
     }
 
+    inverse_ms_pair(channel_zero, channel_one)?;
+
     // Annex D.10/D.11 quantizes L/(L+R) to 1..15. Algebraically the decoder's formula (10)
     // recovers the amplitude ratio as 16 / IldQIdx - 1.
     let level_ratio = 16.0 / f32::from(ild) - 1.0;
@@ -52,18 +75,15 @@ pub fn apply_stereo_ms_upmix(
         return Err(CodecError::InvalidData("invalid stereo inverse-ILD ratio"));
     }
 
-    for (mid, side) in channel_zero.iter_mut().zip(channel_one.iter_mut()) {
-        let m = *mid;
-        let s = *side;
-        let mut left = FRAC_1_SQRT_2 * (m + s);
-        let mut right = FRAC_1_SQRT_2 * (m - s);
-        if level_ratio > 1.0 {
-            right *= level_ratio;
-        } else if level_ratio < 1.0 {
-            left *= level_ratio.recip();
+    if level_ratio > 1.0 {
+        for right in channel_one {
+            *right *= level_ratio;
         }
-        *mid = left;
-        *side = right;
+    } else if level_ratio < 1.0 {
+        let left_scale = level_ratio.recip();
+        for left in channel_zero {
+            *left *= left_scale;
+        }
     }
     Ok(())
 }
@@ -81,6 +101,17 @@ mod tests {
             },
             next_bit_offset: 0,
         }
+    }
+
+    #[test]
+    fn shared_inverse_ms_primitive_is_orthonormal() {
+        let mut mid = [1.0_f32, 1.0];
+        let mut side = [1.0_f32, -1.0];
+        inverse_ms_pair(&mut mid, &mut side).unwrap();
+        assert!((mid[0] - 2.0_f32.sqrt()).abs() < 1.0e-6);
+        assert!(side[0].abs() < 1.0e-6);
+        assert!(mid[1].abs() < 1.0e-6);
+        assert!((side[1] - 2.0_f32.sqrt()).abs() < 1.0e-6);
     }
 
     #[test]

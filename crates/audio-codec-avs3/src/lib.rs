@@ -38,6 +38,7 @@ mod group;
 mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
+mod mcac_synthesis;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
@@ -142,6 +143,10 @@ pub use inverse_qc::{
     noise_filling_parameter,
 };
 pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
+pub use mcac_synthesis::{
+    MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor,
+    resolve_multichannel_pair_index,
+};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
     DynamicChannelPrefix, DynamicMetadataPrefix, StaticMetadataPrefix,
