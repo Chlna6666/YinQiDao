@@ -132,21 +132,28 @@ fn add_stage2<const N: usize>(
     Ok(())
 }
 
-/// Apply the interoperable AVS3 LSF ordering guard before LSF -> LSP conversion.
+/// Apply the AVS3 decoder LSF ordering guard before LSF -> LSP conversion.
 ///
-/// The first coefficient is clamped to 50 Hz, each following coefficient is only moved upward when
-/// required to retain a 50-Hz separation, and the final coefficient is capped at 23,950 Hz. The
-/// last cap intentionally does not propagate backward: that is the decoder-side behavior used by
-/// the published AVS3 implementation and avoids the previous non-interoperable reverse pass.
+/// The normative/reference decoder performs two ordered passes: first enforce the 50-Hz minimum
+/// gap from low to high frequency, then constrain the top coefficient to Nyquist-50 Hz and
+/// propagate the same gap backwards. Keeping both passes is required for bitstream interoperability
+/// on edge codewords.
 fn stabilize_lsf(lsf: &mut [f32; LSF_ORDER]) {
-    lsf[0] = lsf[0].max(LSF_MIN_GAP_HZ);
-    for index in 0..LSF_ORDER - 1 {
-        let minimum_next = lsf[index] + LSF_MIN_GAP_HZ;
-        if lsf[index + 1] < minimum_next {
-            lsf[index + 1] = minimum_next;
+    let mut minimum = LSF_MIN_GAP_HZ;
+    for value in lsf.iter_mut() {
+        if *value < minimum {
+            *value = minimum;
         }
+        minimum = *value + LSF_MIN_GAP_HZ;
     }
-    lsf[LSF_ORDER - 1] = lsf[LSF_ORDER - 1].min(LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ);
+
+    let mut maximum = LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ;
+    for value in lsf.iter_mut().rev() {
+        if *value > maximum {
+            *value = maximum;
+        }
+        maximum = *value - LSF_MIN_GAP_HZ;
+    }
 }
 
 /// Decode the 16-dimensional LSF vector used by inverse frequency-domain spectrum shaping.
@@ -205,15 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn lsf_stabilization_matches_forward_only_decoder_semantics() {
-        let mut lsf = [0.0_f32; LSF_ORDER];
-        for (index, value) in lsf.iter_mut().enumerate() {
-            *value = 23_800.0 + index as f32 * 100.0;
-        }
+    fn lsf_stabilization_matches_two_pass_decoder_semantics() {
+        let mut lsf = [25_000.0_f32; LSF_ORDER];
         stabilize_lsf(&mut lsf);
-        assert_eq!(lsf[0], 23_800.0);
-        assert_eq!(lsf[14], 25_200.0);
-        assert_eq!(lsf[15], 23_950.0);
+        assert_eq!(lsf[LSF_ORDER - 1], 23_950.0);
+        assert_eq!(lsf[0], 23_200.0);
+        assert!(lsf.windows(2).all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ));
     }
 
     #[test]
@@ -243,7 +247,7 @@ mod tests {
         };
         let mut output = [0.0_f32; LSF_ORDER];
         dequantize_lsf(&side, codebooks, &mut output).unwrap();
-        assert!(output[0] >= LSF_MIN_GAP_HZ);
+        assert!(output.windows(2).all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ));
         assert!(output[15] <= LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ);
     }
 
