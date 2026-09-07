@@ -1,17 +1,17 @@
 # YinQiDao audio codec crates
 
-The player keeps Symphonia as the primary Rust decoder for formats it already handles well. Codecs or container features outside Symphonia are implemented as independent crates so they can be tested, fuzzed and optimized without coupling them to GPUI.
+The player keeps Symphonia as the primary Rust decoder for formats it already handles well. Codecs or container features outside Symphonia are implemented as independent pure-Rust crates so they can be tested, fuzzed and optimized without coupling them to GPUI.
 
 Current layout:
 
 - `audio-codec-core`: decoder/frame/stream contracts shared by non-Symphonia codecs.
 - `audio-codec-registry`: canonical routing/capability metadata. A codec appearing here does **not** mean its decoder is complete; maturity is explicit.
 - `audio-simd`: runtime-dispatched kernels shared by codecs and DSP.
-- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, GA codec routing, metadata boundaries and the fixed core-side transform selector, and exposes SIMD synthesis primitives.
+- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work from ISO-BMFF probing through AVS3 frame/QC parsing and range-decoder infrastructure.
 
 ## CPU dispatch policy
 
-Portable release binaries must not require `-C target-cpu=native`. Hot kernels select the fastest implementation that is legal for the running CPU.
+Portable release binaries must not require `-C target-cpu=native`. Hot kernels select the fastest implementation legal for the running CPU.
 
 | Target family | Baseline | Accelerated path |
 | --- | --- | --- |
@@ -24,37 +24,43 @@ Portable release binaries must not require `-C target-cpu=native`. Hot kernels s
 | macOS Apple Silicon | AArch64 | NEON |
 | Android ARMv7 / other Rust targets | portable scalar | scalar until a stable Rust 1.89-safe runtime NEON path is available |
 
-Shared SIMD kernels currently cover gain/clamp, overlap-add/channel accumulation, vector/window multiplication and dot products. Architecture-specific `unsafe` stays inside `audio-simd`; codec crates remain mostly safe Rust.
+Shared SIMD kernels cover gain/clamp, overlap-add/channel accumulation, vector/window multiplication and dot products. Architecture-specific `unsafe` stays inside `audio-simd`; codec crates remain mostly safe Rust.
 
 ## Non-Symphonia codec roadmap
 
-The registry currently tracks AVS3-P3/AV3A/Audio Vivid, Monkey's Audio, WavPack, Opus, Musepack, AC-3, E-AC-3 and DTS Core. New decoder crates are created only when an actual parser/decoder milestone exists and is tested; the repository does not add empty crates merely to advertise a format.
+The registry tracks AVS3-P3/AV3A/Audio Vivid, Monkey's Audio, WavPack, Opus, Musepack, AC-3, E-AC-3 and DTS Core. New decoder crates are created only when an actual parser/decoder milestone exists and is tested; the repository does not add empty crates merely to advertise a format.
 
 ## AVS3 milestone status
 
 Implemented in pure Rust:
 
 1. ISO-BMFF `av3a` AudioSampleEntry probing and raw `dca3` extraction.
-2. `CA3SpecificBox` parsing for `audio_codec_id=1` (lossless) and `audio_codec_id=2` (general full-rate).
-3. General full-rate configuration parsing for channel, object, mixed and HOA content.
-4. AATF `0xFFF` syncword, codec id, ancillary flag, NN type, coding profile, sampling-frequency signalling, CRC fields, channel/object/HOA layout fields, resolution and bitrate indices.
-5. 7.1.4 / 5.1.4 / 7.1.2 / FOA / HOA channel-index mapping from the normative Annex A table.
-6. Validation that AATF coding method, sample rate, content profile, channel index and object counts agree with `dca3` where both are available.
-7. General full-rate `codecFormat` routing without touching compressed spectral data: mono, stereo, multichannel and HOA are selected from AATF profile/layout fields; mixed bed+objects always enters the multichannel path.
-8. Safe extraction of the raw coded block after the AATF header/CRC/alignment boundary.
-9. Bit-accurate `Avs3MetadataDec()` boundary handling for the fixed flags. When both flags are zero, the first core-side field begins at bit offset 2; no byte-alignment assumption is made. If static/dynamic metadata is present the decoder stops before its variable payload rather than guessing a length.
-10. Arbitrary-bit-position reading and the fixed 2-bit `transformType` prefix of `DecodeCoreSideBits()` with long, short, cut-in and cut-out window modes.
+2. `CA3SpecificBox` parsing for lossless and general-full-rate AVS3-P3.
+3. AATF synchronization/header parsing and cross-validation against `dca3`.
+4. Channel/object/mixed/HOA profile routing and normative channel-layout resolution including 7.1.4.
+5. Bit-accurate metadata boundaries plus complete dynamic Audio Vivid L1/L2 object metadata parsing.
+6. Core side information: transform/window type, FD shaping VQ, complete two-filter TNS Huffman decode and reflection-coefficient lookup.
+7. BWE enable/configuration tables and BWE side-information parsing for mono/stereo/multichannel modes.
+8. Spectrum GroupBits, multichannel pair/ILD/silence/ratio side information and frame-major channel ordering.
+9. Multichannel bit allocation through the published safe-channel/LFE/Q6-ratio steps, with byte-conservation checks and without inventing the unpublished final per-channel cap.
+10. Complete `DecodeQcBits()` parsing into zero-copy context/base bit ranges for Basic and Low-Complexity NN modes.
+11. A 32-bit AVS3 range-decoder engine with 16-bit renormalization, 16-bit CDF precision, 4-bit signed overflow extension and zero-extension of omitted trailing bytes.
+12. Zero-copy range-byte windows that consume byte-counted QC payloads starting at arbitrary packet bit offsets.
+13. Normative Basic/Low-Complexity feature-scale and noise-filling parameter dequantization helpers.
+14. Cross-platform SIMD synthesis primitives in `audio-simd` for overlap-add, transform windows and filter/prediction dot products.
 
-Still intentionally unsupported:
+Still intentionally unsupported for production playback:
 
-- `Avs3SmDec()` / `Avs3DmDec()` static and dynamic metadata payload bodies;
-- the variable FdShaping/TNS/BWE portions of `DecodeCoreSideBits()`;
-- `DecodeGroupBits()` / stereo / multichannel / HOA side information;
-- range/entropy decoding and inverse quantization;
-- inverse transform, TNS/BWE and post synthesis;
-- stereo/multichannel reconstruction;
-- object metadata rendering and HOA spatial decoding;
+- full Basic static metadata (`BasicL1()` / VR extension) bodies;
+- normative B.1/B.8/B.9 probability/standard-deviation tables wired into context/base latent range decoding;
+- context/base decoding neural-network weights and inverse transforms;
+- complete inverse quantization/noise-filling reconstruction into MDCT spectra;
+- stereo inverse M/S and multichannel MCAC reconstruction;
+- post synthesis: inverse TNS/BWE/FD shaping, degrouping and IMDCT;
+- HOA side information, HOA byte splitting and spatial reconstruction;
 - `ll_raw_data_block()` lossless reconstruction;
 - normative CRC verification.
 
-The player must not report AVS3 as a complete decoder until the raw-data-block paths pass official/reference conformance and regression vectors. The temporary external AV3A backend can only be removed after that point.
+The range engine is deliberately model-agnostic. CDF/model data must come from the normative AVS3 tables or properly licensed project-owned data; code from public mirrors without an explicit compatible license is not copied into this repository.
+
+AVS3 remains `InDevelopment` in the codec registry until real AV3A samples and official/reference conformance vectors pass end-to-end PCM regression tests. The transitional external AV3A backend must not be removed before that point.

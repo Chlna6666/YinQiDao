@@ -1,8 +1,8 @@
 //! Pure-Rust AVS3-P3 / AV3A codec work for YinQiDao.
 //!
 //! The crate is deliberately split from the player so container parsing, bitstream syntax,
-//! synthesis and future object/HOA rendering can evolve independently and be tested on desktop
-//! and mobile targets. No FFmpeg process or native codec DLL is required by this crate.
+//! entropy/range decoding, synthesis and future object/HOA rendering can evolve independently and
+//! be tested on desktop and mobile targets. No FFmpeg process or native codec DLL is required.
 
 mod allocation;
 mod bitreader;
@@ -16,10 +16,12 @@ mod frame;
 mod ga;
 mod ga_frame;
 mod group;
+mod inverse_qc;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
 mod qc;
+mod range;
 mod synthesis;
 mod tns;
 
@@ -50,6 +52,10 @@ pub use ga_frame::{
     GaChannelSideInfo, GaMultichannelFrameSideInfo, parse_multichannel_frame_side_info,
 };
 pub use group::{GroupSideInfo, parse_group_bits_at};
+pub use inverse_qc::{
+    basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,
+    noise_filling_parameter,
+};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
     DynamicChannelPrefix, DynamicMetadataPrefix, StaticMetadataPrefix,
@@ -61,6 +67,9 @@ pub use multichannel::{
     parse_multichannel_side_info_at,
 };
 pub use qc::{BitRange, QcSideInfo, parse_qc_side_info_at, qc_fixed_header_bits};
+pub use range::{
+    RANGE_DEFAULT_PRECISION, RANGE_OVERFLOW_WIDTH, RangeByteWindow, RangeDecoder, RangeModel,
+};
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
 };
