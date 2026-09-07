@@ -132,22 +132,21 @@ fn add_stage2<const N: usize>(
     Ok(())
 }
 
+/// Apply the interoperable AVS3 LSF ordering guard before LSF -> LSP conversion.
+///
+/// The first coefficient is clamped to 50 Hz, each following coefficient is only moved upward when
+/// required to retain a 50-Hz separation, and the final coefficient is capped at 23,950 Hz. The
+/// last cap intentionally does not propagate backward: that is the decoder-side behavior used by
+/// the published AVS3 implementation and avoids the previous non-interoperable reverse pass.
 fn stabilize_lsf(lsf: &mut [f32; LSF_ORDER]) {
-    let mut minimum = LSF_MIN_GAP_HZ;
-    for value in lsf.iter_mut() {
-        if *value < minimum {
-            *value = minimum;
+    lsf[0] = lsf[0].max(LSF_MIN_GAP_HZ);
+    for index in 0..LSF_ORDER - 1 {
+        let minimum_next = lsf[index] + LSF_MIN_GAP_HZ;
+        if lsf[index + 1] < minimum_next {
+            lsf[index + 1] = minimum_next;
         }
-        minimum = *value + LSF_MIN_GAP_HZ;
     }
-
-    let mut maximum = LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ;
-    for value in lsf.iter_mut().rev() {
-        if *value > maximum {
-            *value = maximum;
-        }
-        maximum = *value - LSF_MIN_GAP_HZ;
-    }
+    lsf[LSF_ORDER - 1] = lsf[LSF_ORDER - 1].min(LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ);
 }
 
 /// Decode the 16-dimensional LSF vector used by inverse frequency-domain spectrum shaping.
@@ -176,9 +175,6 @@ pub fn dequantize_lsf(
         return Err(CodecError::InvalidData("inverse-quantized LSF contains a non-finite value"));
     }
 
-    // The interoperable decoder constrains adjacent LSFs to a 50-Hz minimum gap before the
-    // LSF->LSP conversion. Keeping the stabilization here prevents unstable LPC polynomials even
-    // for damaged streams or edge codewords.
     stabilize_lsf(output);
     Ok(())
 }
@@ -209,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn lsf_stabilization_matches_forward_only_decoder_semantics() {
+        let mut lsf = [0.0_f32; LSF_ORDER];
+        for (index, value) in lsf.iter_mut().enumerate() {
+            *value = 23_800.0 + index as f32 * 100.0;
+        }
+        stabilize_lsf(&mut lsf);
+        assert_eq!(lsf[0], 23_800.0);
+        assert_eq!(lsf[14], 25_200.0);
+        assert_eq!(lsf[15], 23_950.0);
+    }
+
+    #[test]
     fn high_precision_split_vq_maps_all_seven_indices_without_search() {
         let h11 = table(256, 9, 1.0);
         let h12 = table(256, 7, 2.0);
@@ -235,7 +243,6 @@ mod tests {
         };
         let mut output = [0.0_f32; LSF_ORDER];
         dequantize_lsf(&side, codebooks, &mut output).unwrap();
-        assert!(output.windows(2).all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ));
         assert!(output[0] >= LSF_MIN_GAP_HZ);
         assert!(output[15] <= LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ);
     }

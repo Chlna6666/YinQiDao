@@ -23,6 +23,7 @@ mod decoder;
 mod dynamic_metadata;
 mod entropy;
 mod fd_lsf;
+mod fd_shaping;
 mod frame;
 mod ga;
 mod ga_frame;
@@ -102,6 +103,9 @@ pub use entropy::{
 pub use fd_lsf::{
     FD_SHAPING_SFB_BOUNDARIES, FD_SHAPING_SUBBANDS, LSF_MEAN, LSF_ORDER,
     LsfCodebook, LsfCodebooks, dequantize_lsf,
+};
+pub use fd_shaping::{
+    FdShapingWorkspace, apply_inverse_fd_spectrum_shaping, lsf_to_lsp, lsp_to_lpc,
 };
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
