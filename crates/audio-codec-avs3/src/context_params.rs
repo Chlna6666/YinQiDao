@@ -1,13 +1,14 @@
 mod b2;
+mod b4;
 
 pub use b2::CONTEXT_LAYER_1_KERNEL;
+pub use b4::CONTEXT_LAYER_2_KERNEL;
 
 // GY/T 363-2023 / T/UWA 009.1-2023 Annex B context-decoder parameters.
 //
-// B.2 is kept in a dedicated data module because its kernel contains 3 * 16 * 16 exact binary32
-// coefficients. Tables B.3, B.5 and B.7 are stored here as exact IEEE-754 binary32 bit patterns.
-// B.4 and B.6 remain intentionally absent until their complete 768-value tables pass the same
-// length and sentinel validation.
+// B.2 and B.4 are kept in dedicated data modules because each kernel contains 3 * 16 * 16 exact
+// binary32 coefficients. Tables B.3, B.5 and B.7 are stored here as exact IEEE-754 bit patterns.
+// B.6 remains intentionally absent until its complete 768-value table passes the same validation.
 
 pub const CONTEXT_LAYER_1_BIAS: [f32; 16] = [
     f32::from_bits(0x3E5B_9B84), f32::from_bits(0xC031_AE93),
@@ -49,6 +50,7 @@ mod tests {
     #[test]
     fn annex_b_context_parameter_shapes_are_exact() {
         assert_eq!(CONTEXT_LAYER_1_KERNEL.len(), 3 * 16 * 16);
+        assert_eq!(CONTEXT_LAYER_2_KERNEL.len(), 3 * 16 * 16);
         assert_eq!(CONTEXT_LAYER_1_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_2_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_3_BIAS.len(), 16);
