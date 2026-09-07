@@ -3,19 +3,22 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    Av3aSampleEntry, TransformType,
+    Av3aSampleEntry, DynamicMetadataPrefix, StaticMetadataPrefix, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
     core::parse_core_transform_type_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::{GaDecodePlan, coded_payload},
     metadata::{MetadataBoundary, parse_metadata_boundary},
+    metadata_prefix::{parse_dynamic_metadata_prefix_at, parse_static_metadata_prefix_at},
 };
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Container/config, normative AATF framing, general full-rate routing and the fixed metadata/core
-/// prefixes are implemented. The next milestone is consuming static/dynamic Audio Vivid metadata
-/// and the variable FdShaping/TNS/BWE portions of `DecodeCoreSideBits()` before range decoding.
+/// Container/config, normative AATF framing, general full-rate routing and fixed metadata/core
+/// prefixes are implemented. Static metadata reaches `BasicL1()` and dynamic metadata reaches the
+/// first object's `muteFlag/transChRef` envelope without guessing variable-size metadata bodies.
+/// The next codec milestone is consuming those metadata bodies and the FdShaping/TNS/BWE side
+/// information before range decoding and inverse quantization.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -23,6 +26,8 @@ pub struct Avs3Decoder {
     last_frame_header: Option<AatfFrameHeader>,
     last_decode_plan: Option<GaDecodePlan>,
     last_metadata_boundary: Option<MetadataBoundary>,
+    last_static_metadata_prefix: Option<StaticMetadataPrefix>,
+    last_dynamic_metadata_prefix: Option<DynamicMetadataPrefix>,
     last_first_transform_type: Option<TransformType>,
     packets_seen: u64,
 }
@@ -56,6 +61,8 @@ impl Avs3Decoder {
             last_frame_header: None,
             last_decode_plan: None,
             last_metadata_boundary: None,
+            last_static_metadata_prefix: None,
+            last_dynamic_metadata_prefix: None,
             last_first_transform_type: None,
             packets_seen: 0,
         })
@@ -79,6 +86,14 @@ impl Avs3Decoder {
 
     pub fn last_metadata_boundary(&self) -> Option<MetadataBoundary> {
         self.last_metadata_boundary
+    }
+
+    pub fn last_static_metadata_prefix(&self) -> Option<StaticMetadataPrefix> {
+        self.last_static_metadata_prefix
+    }
+
+    pub fn last_dynamic_metadata_prefix(&self) -> Option<DynamicMetadataPrefix> {
+        self.last_dynamic_metadata_prefix
     }
 
     pub fn last_first_transform_type(&self) -> Option<TransformType> {
@@ -179,25 +194,57 @@ impl AudioDecoder for Avs3Decoder {
         self.validate_frame_against_config(&header)?;
         let method = header.coding_method;
 
-        let (decode_plan, metadata_boundary, first_transform_type) =
-            if method == AudioCodingMethod::GeneralFullRate {
-                let plan = GaDecodePlan::from_header(&header)?;
-                let payload = coded_payload(packet, &header)?;
-                if payload.is_empty() {
-                    return Err(CodecError::Truncated);
-                }
-                let metadata = parse_metadata_boundary(payload)?;
-                let transform = match metadata {
-                    MetadataBoundary::None { core_bit_offset } => {
-                        Some(parse_core_transform_type_at(payload, core_bit_offset)?)
+        let (
+            decode_plan,
+            metadata_boundary,
+            static_metadata_prefix,
+            dynamic_metadata_prefix,
+            first_transform_type,
+        ) = if method == AudioCodingMethod::GeneralFullRate {
+            let plan = GaDecodePlan::from_header(&header)?;
+            let payload = coded_payload(packet, &header)?;
+            if payload.is_empty() {
+                return Err(CodecError::Truncated);
+            }
+            let metadata = parse_metadata_boundary(payload)?;
+
+            match metadata {
+                MetadataBoundary::None { core_bit_offset } => (
+                    Some(plan),
+                    Some(metadata),
+                    None,
+                    None,
+                    Some(parse_core_transform_type_at(payload, core_bit_offset)?),
+                ),
+                MetadataBoundary::StaticPresent { static_bit_offset } => {
+                    let prefix = parse_static_metadata_prefix_at(payload, static_bit_offset)?;
+                    if !prefix.basic_level_supported() {
+                        return Err(CodecError::Unsupported(
+                            "reserved AVS3 basic static metadata level",
+                        ));
                     }
-                    MetadataBoundary::StaticPresent { .. }
-                    | MetadataBoundary::DynamicPresent { .. } => None,
-                };
-                (Some(plan), Some(metadata), transform)
-            } else {
-                (None, None, None)
-            };
+                    (Some(plan), Some(metadata), Some(prefix), None, None)
+                }
+                MetadataBoundary::DynamicPresent { dynamic_bit_offset } => {
+                    let object_channels = header.object_channels().ok_or(CodecError::InvalidData(
+                        "dynamic Audio Vivid metadata present without object channels",
+                    ))?;
+                    let prefix = parse_dynamic_metadata_prefix_at(
+                        payload,
+                        dynamic_bit_offset,
+                        object_channels,
+                    )?;
+                    if !prefix.dm_level_supported() {
+                        return Err(CodecError::Unsupported(
+                            "reserved AVS3 dynamic metadata level",
+                        ));
+                    }
+                    (Some(plan), Some(metadata), None, Some(prefix), None)
+                }
+            }
+        } else {
+            (None, None, None, None, None)
+        };
 
         self.packets_seen = self.packets_seen.saturating_add(1);
         output.clear_for(
@@ -209,6 +256,8 @@ impl AudioDecoder for Avs3Decoder {
         );
         self.last_decode_plan = decode_plan;
         self.last_metadata_boundary = metadata_boundary;
+        self.last_static_metadata_prefix = static_metadata_prefix;
+        self.last_dynamic_metadata_prefix = dynamic_metadata_prefix;
         self.last_first_transform_type = first_transform_type;
         self.last_frame_header = Some(header);
 
@@ -217,13 +266,13 @@ impl AudioDecoder for Avs3Decoder {
                 AudioCodingMethod::GeneralFullRate,
                 Some(MetadataBoundary::StaticPresent { .. }),
             ) => Err(CodecError::Unsupported(
-                "AVS3-P3 static Audio Vivid metadata decoding is not implemented yet",
+                "AVS3-P3 BasicL1/VrExt static metadata body decoding is not implemented yet",
             )),
             (
                 AudioCodingMethod::GeneralFullRate,
                 Some(MetadataBoundary::DynamicPresent { .. }),
             ) => Err(CodecError::Unsupported(
-                "AVS3-P3 dynamic Audio Vivid metadata decoding is not implemented yet",
+                "AVS3-P3 Avs3DmL1Dec/Avs3DmL2Dec body decoding is not implemented yet",
             )),
             (AudioCodingMethod::GeneralFullRate, Some(MetadataBoundary::None { .. })) => {
                 Err(CodecError::Unsupported(
@@ -247,6 +296,8 @@ impl AudioDecoder for Avs3Decoder {
         self.last_frame_header = None;
         self.last_decode_plan = None;
         self.last_metadata_boundary = None;
+        self.last_static_metadata_prefix = None;
+        self.last_dynamic_metadata_prefix = None;
         self.last_first_transform_type = None;
         self.packets_seen = 0;
     }
@@ -273,5 +324,7 @@ mod tests {
         assert_eq!(decoder.packets_seen(), 0);
         assert_eq!(decoder.last_decode_plan(), None);
         assert_eq!(decoder.last_metadata_boundary(), None);
+        assert_eq!(decoder.last_static_metadata_prefix(), None);
+        assert_eq!(decoder.last_dynamic_metadata_prefix(), None);
     }
 }
