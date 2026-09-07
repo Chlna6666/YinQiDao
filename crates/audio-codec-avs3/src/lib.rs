@@ -15,6 +15,7 @@ mod ga;
 mod metadata;
 mod metadata_prefix;
 mod synthesis;
+mod tns;
 
 pub use config::{
     AudioCodingMethod, Avs3SpecificConfig, ChannelConfiguration, CodingProfile, ContentType,
@@ -43,4 +44,8 @@ pub use metadata_prefix::{
 };
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
+};
+pub use tns::{
+    TNS_REFLECTION_COEFFICIENTS, TnsFilterSideInfo, TnsSideInfo,
+    parse_tns_side_info_at, reflection_coefficient,
 };
