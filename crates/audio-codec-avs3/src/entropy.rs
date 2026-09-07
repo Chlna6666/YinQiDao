@@ -1,7 +1,8 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BitRange, CONTEXT_RANGE_MODEL_COUNT, RangeByteWindow, RangeDecoder, context_range_model,
+    BASE_RANGE_MODEL_COUNT, BitRange, CONTEXT_RANGE_MODEL_COUNT, RangeByteWindow, RangeDecoder,
+    base_range_model, context_range_model,
 };
 
 /// Decode the context/hyper-prior latent in the normative flattened order:
@@ -61,9 +62,51 @@ pub fn decode_context_latents_into(
     Ok(())
 }
 
+/// Decode the base/VAE latent stream with the per-value B.9 row indices predicted by the context
+/// decoder and table-B.8 selector.
+pub fn decode_base_latents(
+    packet: &[u8],
+    range: BitRange,
+    model_indices: &[u8],
+) -> Result<Vec<i32>, CodecError> {
+    let mut output = vec![0_i32; model_indices.len()];
+    decode_base_latents_into(packet, range, model_indices, &mut output)?;
+    Ok(output)
+}
+
+/// Allocation-free base entropy decoder for reusable frame workspaces.
+pub fn decode_base_latents_into(
+    packet: &[u8],
+    range: BitRange,
+    model_indices: &[u8],
+    output: &mut [i32],
+) -> Result<(), CodecError> {
+    if output.len() != model_indices.len() {
+        return Err(CodecError::InvalidData(
+            "base latent output length does not match model-index tensor",
+        ));
+    }
+    if model_indices
+        .iter()
+        .any(|&index| usize::from(index) >= BASE_RANGE_MODEL_COUNT)
+    {
+        return Err(CodecError::InvalidData(
+            "base latent model index exceeds table B.9",
+        ));
+    }
+
+    let input = RangeByteWindow::new(packet, range)?;
+    let mut decoder = RangeDecoder::new(input);
+    for (slot, &index) in output.iter_mut().zip(model_indices) {
+        *slot = decoder.decode_value(base_range_model(usize::from(index))?)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BASE_RANGE_MODEL_OFFSETS;
 
     #[test]
     fn zero_extended_stream_decodes_first_symbol_of_each_context_model() {
@@ -112,5 +155,34 @@ mod tests {
 
         let mut output = [0_i32; 3];
         assert!(decode_context_latents_into(&[], range, 1, 4, &mut output).is_err());
+    }
+
+    #[test]
+    fn zero_extended_base_stream_uses_exact_b9_offsets() {
+        let indices = [0_u8, 10, 57, 59, 63];
+        let decoded = decode_base_latents(
+            &[],
+            BitRange {
+                bit_offset: 0,
+                bit_len: 0,
+            },
+            &indices,
+        )
+        .unwrap();
+        let expected = indices.map(|index| BASE_RANGE_MODEL_OFFSETS[usize::from(index)]);
+        assert_eq!(decoded.as_slice(), &expected);
+    }
+
+    #[test]
+    fn base_decoder_validates_shape_and_model_indices_before_decode() {
+        let range = BitRange {
+            bit_offset: 0,
+            bit_len: 0,
+        };
+        let mut wrong_len = [0_i32; 1];
+        assert!(decode_base_latents_into(&[], range, &[0, 1], &mut wrong_len).is_err());
+
+        let mut output = [0_i32; 1];
+        assert!(decode_base_latents_into(&[], range, &[64], &mut output).is_err());
     }
 }

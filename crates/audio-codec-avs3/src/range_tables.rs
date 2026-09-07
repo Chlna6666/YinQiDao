@@ -2,6 +2,17 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{RANGE_DEFAULT_PRECISION, RangeModel};
 
+mod b9_01_46;
+mod b9_47_52;
+mod b9_53_55;
+mod b9_56_57;
+mod b9_58_59;
+mod b9_60;
+mod b9_61;
+mod b9_62;
+mod b9_63;
+mod b9_64;
+
 pub const CONTEXT_RANGE_MODEL_COUNT: usize = 16;
 pub const BASE_RANGE_MODEL_COUNT: usize = 64;
 
@@ -32,6 +43,16 @@ pub const BASE_STDDEV_THRESHOLD_BITS: [u32; BASE_RANGE_MODEL_COUNT] = [
     0x43800000,
 ];
 
+// GY/T 363-2023 table B.9 signed symbol offsets. Keep these explicit rather than deriving them
+// from CDF length so table transcription errors cannot silently alter the reconstructed integer.
+pub const BASE_RANGE_MODEL_OFFSETS: [i32; BASE_RANGE_MODEL_COUNT] = [
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, -2, -2, -2, -2, -3,
+    -3, -3, -3, -4, -4, -5, -5, -6, -7, -7, -8, -9, -10, -12, -13, -15,
+    -17, -19, -21, -24, -27, -31, -35, -39, -44, -50, -56, -64, -72, -81,
+    -92, -104, -117, -132, -150, -169, -191, -216, -245, -277, -313, -354,
+    -400, -452, -511, -578, -654, -739,
+];
+
 pub fn context_range_model(index: usize) -> Result<RangeModel<'static>, CodecError> {
     let cdf: &'static [u32] = match index {
         4 => &CONTEXT_CDF_5,
@@ -46,6 +67,34 @@ pub fn context_range_model(index: usize) -> Result<RangeModel<'static>, CodecErr
     RangeModel::new(
         cdf,
         centered_signed_offset(cdf.len())?,
+        RANGE_DEFAULT_PRECISION,
+    )
+}
+
+/// Return one exact table-B.9 base distribution.
+///
+/// `index` is zero-based: index 0 selects row 1 and index 63 selects row 64.
+pub fn base_range_model(index: usize) -> Result<RangeModel<'static>, CodecError> {
+    let cdf: &'static [u32] = match index {
+        0..=45 => b9_01_46::ROWS[index],
+        46..=51 => b9_47_52::ROWS[index - 46],
+        52..=54 => b9_53_55::ROWS[index - 52],
+        55..=56 => b9_56_57::ROWS[index - 55],
+        57..=58 => b9_58_59::ROWS[index - 57],
+        59 => b9_60::ROWS[0],
+        60 => b9_61::ROWS[0],
+        61 => b9_62::ROWS[0],
+        62 => b9_63::ROWS[0],
+        63 => b9_64::ROWS[0],
+        _ => {
+            return Err(CodecError::InvalidData(
+                "base range-model index exceeds table B.9",
+            ));
+        }
+    };
+    RangeModel::new(
+        cdf,
+        BASE_RANGE_MODEL_OFFSETS[index],
         RANGE_DEFAULT_PRECISION,
     )
 }
@@ -103,6 +152,34 @@ mod tests {
         assert_eq!(context_range_model(4).unwrap().offset(), -19);
         assert_eq!(context_range_model(12).unwrap().offset(), -7);
         assert!(context_range_model(16).is_err());
+    }
+
+    #[test]
+    fn all_b9_models_satisfy_range_contract_and_explicit_offsets() {
+        for (index, expected_offset) in BASE_RANGE_MODEL_OFFSETS.iter().copied().enumerate() {
+            let model = base_range_model(index).unwrap();
+            assert_eq!(model.precision(), 16);
+            assert_eq!(model.offset(), expected_offset);
+            assert_eq!(model.cumulative().first(), Some(&0));
+            assert_eq!(model.cumulative().last(), Some(&65_536));
+            assert!(model.cumulative().windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        assert!(base_range_model(BASE_RANGE_MODEL_COUNT).is_err());
+    }
+
+    #[test]
+    fn b9_large_rows_keep_normative_shape_and_offsets() {
+        let row_58 = base_range_model(57).unwrap();
+        assert_eq!(row_58.cumulative().len(), 711);
+        assert_eq!(row_58.offset(), -354);
+
+        let row_60 = base_range_model(59).unwrap();
+        assert_eq!(row_60.cumulative().len(), 907);
+        assert_eq!(row_60.offset(), -452);
+
+        let row_64 = base_range_model(63).unwrap();
+        assert_eq!(row_64.cumulative().len(), 1_481);
+        assert_eq!(row_64.offset(), -739);
     }
 
     #[test]
