@@ -318,17 +318,15 @@ mod tests {
 
     #[test]
     fn parses_envelopes_and_three_whitening_levels() {
-        // numSfb=2: 3, 65. numTiles=3: OFF, MID, HIGH.
-        let bits = [
-            0b0000011_0,
-            0b1000001_0,
-            0b1_0_1_1_0000,
-        ];
+        // Packed bitstream: env=3 (7), env=65 (7), OFF=0, MID=10, HIGH=11.
+        // 0000011 1000001 0 10 11 -> 00000111 00000101 01100000.
+        let bits = [0b0000_0111, 0b0000_0101, 0b0110_0000];
         let info = parse_bwe_side_info_at(&bits, 0, 2, 3).unwrap();
         assert_eq!(info.envelope_indices[0], Some(3));
         assert_eq!(info.envelope_indices[1], Some(65));
         assert_eq!(info.whitening_levels[0], Some(WhiteningLevel::Off));
         assert_eq!(info.whitening_levels[1], Some(WhiteningLevel::Mid));
         assert_eq!(info.whitening_levels[2], Some(WhiteningLevel::High));
+        assert_eq!(info.next_bit_offset, 19);
     }
 }
