@@ -22,13 +22,20 @@ impl TransformType {
     }
 }
 
-/// Parse only the fixed prefix of AVS3 core decoder side information.
-///
-/// `DecodeCoreSideBits()` starts with a 2-bit `transformType`, followed by variable-sized
-/// FdShaping/TNS/BWE side information. The variable sections are intentionally not skipped here:
-/// their exact syntax must be implemented before a caller can locate `DecodeGroupBits()` safely.
+/// Parse only the fixed prefix of AVS3 core decoder side information at bit offset zero.
 pub fn parse_core_transform_type(core_side_bits: &[u8]) -> Result<TransformType, CodecError> {
-    let mut reader = BitReader::new(core_side_bits);
+    parse_core_transform_type_at(core_side_bits, 0)
+}
+
+/// Parse `transformType` from an arbitrary bit position in a GA payload.
+///
+/// This is required because `Avs3MetadataDec()` is bit-packed: a frame with neither static nor
+/// dynamic metadata enters `DecodeCoreSideBits()` at bit offset 2 rather than a byte boundary.
+pub fn parse_core_transform_type_at(
+    bytes: &[u8],
+    bit_offset: usize,
+) -> Result<TransformType, CodecError> {
+    let mut reader = BitReader::with_bit_position(bytes, bit_offset)?;
     Ok(TransformType::from_bits(reader.read_bits(2)? as u8))
 }
 
@@ -42,6 +49,15 @@ mod tests {
         assert_eq!(parse_core_transform_type(&[0b01_000000]).unwrap(), TransformType::Short);
         assert_eq!(parse_core_transform_type(&[0b10_000000]).unwrap(), TransformType::CutIn);
         assert_eq!(parse_core_transform_type(&[0b11_000000]).unwrap(), TransformType::CutOut);
+    }
+
+    #[test]
+    fn reads_transform_after_two_metadata_flags_without_repacking() {
+        // smFlag=0, dmFlag=0, transformType=10 (cut-in).
+        assert_eq!(
+            parse_core_transform_type_at(&[0b00_10_1111], 2).unwrap(),
+            TransformType::CutIn
+        );
     }
 
     #[test]

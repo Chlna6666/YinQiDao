@@ -11,6 +11,13 @@ impl<'a> BitReader<'a> {
         Self { bytes, bit_pos: 0 }
     }
 
+    pub(crate) fn with_bit_position(bytes: &'a [u8], bit_pos: usize) -> Result<Self, CodecError> {
+        if bit_pos > bytes.len().saturating_mul(8) {
+            return Err(CodecError::Truncated);
+        }
+        Ok(Self { bytes, bit_pos })
+    }
+
     pub(crate) fn bits_remaining(&self) -> usize {
         self.bytes.len().saturating_mul(8).saturating_sub(self.bit_pos)
     }
@@ -69,5 +76,22 @@ mod tests {
         assert_eq!(reader.read_bits(8).unwrap(), 0b0110_0001);
         assert_eq!(reader.bits_remaining(), 0);
         assert_eq!(reader.position_bits(), 16);
+    }
+
+    #[test]
+    fn starts_at_arbitrary_bit_offset() {
+        let bytes = [0b1101_0110, 0b1010_0000];
+        let mut reader = BitReader::with_bit_position(&bytes, 3).unwrap();
+        assert_eq!(reader.read_bits(5).unwrap(), 0b1_0110);
+        assert_eq!(reader.read_bits(4).unwrap(), 0b1010);
+        assert_eq!(reader.position_bits(), 12);
+    }
+
+    #[test]
+    fn rejects_start_past_end() {
+        assert!(matches!(
+            BitReader::with_bit_position(&[0], 9),
+            Err(CodecError::Truncated)
+        ));
     }
 }

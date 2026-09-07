@@ -3,23 +3,27 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    Av3aSampleEntry,
+    Av3aSampleEntry, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
+    core::parse_core_transform_type_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::{GaDecodePlan, coded_payload},
+    metadata::{MetadataBoundary, parse_metadata_boundary},
 };
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Container/config, normative AATF framing and general full-rate decode routing are implemented.
-/// The next milestone is consuming Audio Vivid metadata and the core side-information syntax before
-/// range/entropy decoding. Until then the decoder deliberately stops at the raw coded block.
+/// Container/config, normative AATF framing, general full-rate routing and the fixed metadata/core
+/// prefixes are implemented. The next milestone is consuming static/dynamic Audio Vivid metadata
+/// and the variable FdShaping/TNS/BWE portions of `DecodeCoreSideBits()` before range decoding.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
     specific_config: Option<Avs3SpecificConfig>,
     last_frame_header: Option<AatfFrameHeader>,
     last_decode_plan: Option<GaDecodePlan>,
+    last_metadata_boundary: Option<MetadataBoundary>,
+    last_first_transform_type: Option<TransformType>,
     packets_seen: u64,
 }
 
@@ -51,6 +55,8 @@ impl Avs3Decoder {
             specific_config,
             last_frame_header: None,
             last_decode_plan: None,
+            last_metadata_boundary: None,
+            last_first_transform_type: None,
             packets_seen: 0,
         })
     }
@@ -69,6 +75,14 @@ impl Avs3Decoder {
 
     pub fn last_decode_plan(&self) -> Option<GaDecodePlan> {
         self.last_decode_plan
+    }
+
+    pub fn last_metadata_boundary(&self) -> Option<MetadataBoundary> {
+        self.last_metadata_boundary
+    }
+
+    pub fn last_first_transform_type(&self) -> Option<TransformType> {
+        self.last_first_transform_type
     }
 
     pub fn packets_seen(&self) -> u64 {
@@ -136,11 +150,7 @@ impl Avs3Decoder {
                         ));
                     }
                 }
-                ContentType::Hoa => {
-                    // The dca3 `hoa_order` field is validated once its semantic +1 normalization
-                    // is shared with all container variants. The profile and sample rate are still
-                    // checked here, so malformed channel/object routing cannot cross into HOA.
-                }
+                ContentType::Hoa => {}
             }
         }
         Ok(())
@@ -169,15 +179,25 @@ impl AudioDecoder for Avs3Decoder {
         self.validate_frame_against_config(&header)?;
         let method = header.coding_method;
 
-        let decode_plan = if method == AudioCodingMethod::GeneralFullRate {
-            let plan = GaDecodePlan::from_header(&header)?;
-            if coded_payload(packet, &header)?.is_empty() {
-                return Err(CodecError::Truncated);
-            }
-            Some(plan)
-        } else {
-            None
-        };
+        let (decode_plan, metadata_boundary, first_transform_type) =
+            if method == AudioCodingMethod::GeneralFullRate {
+                let plan = GaDecodePlan::from_header(&header)?;
+                let payload = coded_payload(packet, &header)?;
+                if payload.is_empty() {
+                    return Err(CodecError::Truncated);
+                }
+                let metadata = parse_metadata_boundary(payload)?;
+                let transform = match metadata {
+                    MetadataBoundary::None { core_bit_offset } => {
+                        Some(parse_core_transform_type_at(payload, core_bit_offset)?)
+                    }
+                    MetadataBoundary::StaticPresent { .. }
+                    | MetadataBoundary::DynamicPresent { .. } => None,
+                };
+                (Some(plan), Some(metadata), transform)
+            } else {
+                (None, None, None)
+            };
 
         self.packets_seen = self.packets_seen.saturating_add(1);
         output.clear_for(
@@ -188,13 +208,32 @@ impl AudioDecoder for Avs3Decoder {
                 .unwrap_or(self.info.channels),
         );
         self.last_decode_plan = decode_plan;
+        self.last_metadata_boundary = metadata_boundary;
+        self.last_first_transform_type = first_transform_type;
         self.last_frame_header = Some(header);
 
-        match method {
-            AudioCodingMethod::GeneralFullRate => Err(CodecError::Unsupported(
-                "AVS3-P3 metadata/core-side/range synthesis is not implemented yet",
+        match (method, metadata_boundary) {
+            (
+                AudioCodingMethod::GeneralFullRate,
+                Some(MetadataBoundary::StaticPresent { .. }),
+            ) => Err(CodecError::Unsupported(
+                "AVS3-P3 static Audio Vivid metadata decoding is not implemented yet",
             )),
-            AudioCodingMethod::Lossless => Err(CodecError::Unsupported(
+            (
+                AudioCodingMethod::GeneralFullRate,
+                Some(MetadataBoundary::DynamicPresent { .. }),
+            ) => Err(CodecError::Unsupported(
+                "AVS3-P3 dynamic Audio Vivid metadata decoding is not implemented yet",
+            )),
+            (AudioCodingMethod::GeneralFullRate, Some(MetadataBoundary::None { .. })) => {
+                Err(CodecError::Unsupported(
+                    "AVS3-P3 FdShaping/TNS/BWE and entropy synthesis is not implemented yet",
+                ))
+            }
+            (AudioCodingMethod::GeneralFullRate, None) => Err(CodecError::Internal(
+                "general full-rate frame lost metadata parser state".into(),
+            )),
+            (AudioCodingMethod::Lossless, _) => Err(CodecError::Unsupported(
                 "AVS3-P3 ll_raw_data_block lossless synthesis is not implemented yet",
             )),
         }
@@ -207,6 +246,8 @@ impl AudioDecoder for Avs3Decoder {
     fn reset(&mut self) {
         self.last_frame_header = None;
         self.last_decode_plan = None;
+        self.last_metadata_boundary = None;
+        self.last_first_transform_type = None;
         self.packets_seen = 0;
     }
 }
@@ -231,5 +272,6 @@ mod tests {
         );
         assert_eq!(decoder.packets_seen(), 0);
         assert_eq!(decoder.last_decode_plan(), None);
+        assert_eq!(decoder.last_metadata_boundary(), None);
     }
 }

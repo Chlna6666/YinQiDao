@@ -11,6 +11,7 @@ mod core;
 mod decoder;
 mod frame;
 mod ga;
+mod metadata;
 mod synthesis;
 
 pub use config::{
@@ -19,10 +20,11 @@ pub use config::{
     full_rate_sample_rate, parse_dca3,
 };
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
-pub use core::{TransformType, parse_core_transform_type};
+pub use core::{TransformType, parse_core_transform_type, parse_core_transform_type_at};
 pub use decoder::Avs3Decoder;
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
+pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
 };

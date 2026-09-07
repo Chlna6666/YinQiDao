@@ -7,7 +7,7 @@ Current layout:
 - `audio-codec-core`: decoder/frame/stream contracts shared by non-Symphonia codecs.
 - `audio-codec-registry`: canonical routing/capability metadata. A codec appearing here does **not** mean its decoder is complete; maturity is explicit.
 - `audio-simd`: runtime-dispatched kernels shared by codecs and DSP.
-- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, general full-rate codec routing and fixed core-side transform selection, and exposes SIMD synthesis primitives.
+- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, GA codec routing, metadata boundaries and the fixed core-side transform selector, and exposes SIMD synthesis primitives.
 
 ## CPU dispatch policy
 
@@ -24,29 +24,11 @@ Portable release binaries must not require `-C target-cpu=native`. Hot kernels s
 | macOS Apple Silicon | AArch64 | NEON |
 | Android ARMv7 / other Rust targets | portable scalar | scalar until a stable Rust 1.89-safe runtime NEON path is available |
 
-Shared SIMD kernels currently cover:
-
-- gain + PCM safety clamp;
-- overlap/add and channel/object accumulation;
-- transform/window vector multiply;
-- dot products used by transform, prediction and filter-bank code.
-
-The intent is to keep architecture-specific `unsafe` code inside `audio-simd`; codec crates remain mostly safe Rust and call stable slice-based kernels.
+Shared SIMD kernels currently cover gain/clamp, overlap-add/channel accumulation, vector/window multiplication and dot products. Architecture-specific `unsafe` stays inside `audio-simd`; codec crates remain mostly safe Rust.
 
 ## Non-Symphonia codec roadmap
 
-The registry currently tracks:
-
-- AVS3-P3 / AV3A / Audio Vivid;
-- Monkey's Audio / APE;
-- WavPack;
-- Opus;
-- Musepack;
-- AC-3;
-- E-AC-3;
-- DTS Core.
-
-New decoder crates should be created only when an actual parser/decoder milestone is implemented and tested. Do not add empty crates merely to make the format list look complete.
+The registry currently tracks AVS3-P3/AV3A/Audio Vivid, Monkey's Audio, WavPack, Opus, Musepack, AC-3, E-AC-3 and DTS Core. New decoder crates are created only when an actual parser/decoder milestone exists and is tested; the repository does not add empty crates merely to advertise a format.
 
 ## AVS3 milestone status
 
@@ -60,11 +42,12 @@ Implemented in pure Rust:
 6. Validation that AATF coding method, sample rate, content profile, channel index and object counts agree with `dca3` where both are available.
 7. General full-rate `codecFormat` routing without touching compressed spectral data: mono, stereo, multichannel and HOA are selected from AATF profile/layout fields; mixed bed+objects always enters the multichannel path.
 8. Safe extraction of the raw coded block after the AATF header/CRC/alignment boundary.
-9. The fixed 2-bit `transformType` prefix of `DecodeCoreSideBits()` with long, short, cut-in and cut-out window modes.
+9. Bit-accurate `Avs3MetadataDec()` boundary handling for the fixed flags. When both flags are zero, the first core-side field begins at bit offset 2; no byte-alignment assumption is made. If static/dynamic metadata is present the decoder stops before its variable payload rather than guessing a length.
+10. Arbitrary-bit-position reading and the fixed 2-bit `transformType` prefix of `DecodeCoreSideBits()` with long, short, cut-in and cut-out window modes.
 
 Still intentionally unsupported:
 
-- `Avs3MetadataDec()` and metadata-length tracking at the beginning of `ga_co_raw_data_block()`;
+- `Avs3SmDec()` / `Avs3DmDec()` static and dynamic metadata payload bodies;
 - the variable FdShaping/TNS/BWE portions of `DecodeCoreSideBits()`;
 - `DecodeGroupBits()` / stereo / multichannel / HOA side information;
 - range/entropy decoding and inverse quantization;
