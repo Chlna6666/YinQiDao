@@ -7,6 +7,16 @@ description = "音栖岛：一款基于 GPUI 的音乐播放器"
 license = "GPL-3.0-or-later"
 publish = false
 
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/lucide-gpui",
+    "crates/audio-simd",
+    "crates/audio-codec-core",
+    "crates/audio-codec-avs3",
+]
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
@@ -45,6 +55,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 lucide-gpui = { path = "crates/lucide-gpui" }
+yinqidao-audio-simd = { path = "crates/audio-simd" }
+yinqidao-codec-avs3 = { path = "crates/audio-codec-avs3" }
 
 gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "37c8276655aee1337c9c0d0cfe97b464dc492198" }
 souvlaki = "0.8.3"

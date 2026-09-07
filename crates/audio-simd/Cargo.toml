@@ -1,0 +1,11 @@
+[package]
+name = "yinqidao-audio-simd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+description = "Cross-platform runtime-dispatched SIMD kernels for YinQiDao audio codecs and DSP"
+publish = false
+
+[lib]
+path = "src/lib.rs"

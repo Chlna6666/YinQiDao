@@ -217,11 +217,10 @@ impl AudioProcessor {
         }
 
         let gain = perceptual_volume_gain(self.volume);
-        for sample in output {
-            // Normal PCM must stay linear. Only constrain true overs here; the output conversion
-            // performs the final device-format guard as well.
-            *sample = (*sample * gain).clamp(-1.0, 1.0);
-        }
+        // Gain + final PCM guard is a hot per-sample operation. Route it through the shared SIMD
+        // crate so the same AVX2/SSE2/NEON dispatch used by future pure-Rust codecs also benefits
+        // ordinary Symphonia playback without requiring target-cpu=native binaries.
+        yinqidao_audio_simd::gain_clamp_in_place(output, gain);
     }
 }
 
