@@ -5,6 +5,7 @@
 //! and mobile targets. No FFmpeg process or native codec DLL is required by this crate.
 
 mod bitreader;
+mod bwe;
 mod config;
 mod container;
 mod core;
@@ -17,6 +18,9 @@ mod metadata_prefix;
 mod synthesis;
 mod tns;
 
+pub use bwe::{
+    BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at,
+};
 pub use config::{
     AudioCodingMethod, Avs3SpecificConfig, ChannelConfiguration, CodingProfile, ContentType,
     GeneralFullRateConfig, LosslessConfig, NeuralNetworkType, QuantizationResolution,
