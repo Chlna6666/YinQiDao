@@ -11,10 +11,6 @@ use crate::{
 const BASE_MODEL_VALUES: usize = 64 * 16;
 
 /// Reusable scratch/state for one AVS3 neural-coded channel's hyper-prior path.
-///
-/// The historical type name is retained for API compatibility. The workspace is channel-generic:
-/// Basic uses the base decoder CNN workspace, while Low Complexity owns a smaller direct-latent
-/// workspace. Both profiles share context decoding, model selection and deterministic noise state.
 #[derive(Debug)]
 pub struct BasicMonoNeuralWorkspace {
     context: ContextPipelineWorkspace,
@@ -64,22 +60,22 @@ fn noise_fill_line_count(bwe_config: Option<BweConfig>) -> Result<usize, CodecEr
     }
 }
 
-/// Decode one already-parsed Basic or Low-Complexity coded channel to a 1024-line MDCT spectrum.
-///
-/// Context entropy decoding/model selection is common. Basic then runs the normative base decoder
-/// CNN; LC directly emits the inverse-scaled 64x16 latent tensor, as specified by
-/// `MdctDequantDecodeHyperLc` in the public reference implementation.
-pub fn decode_channel_neural_mdct(
+fn decode_channel_neural_mdct_with_noise_lines_impl(
     nn_type: NeuralNetworkType,
     payload: &[u8],
     channel: &GaChannelSideInfo,
-    bwe_config: Option<BweConfig>,
+    num_lines_noise_fill: usize,
     workspace: &mut BasicMonoNeuralWorkspace,
     output: &mut [f32],
 ) -> Result<(), CodecError> {
     if output.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
             "AVS3 channel neural output must contain 1024 MDCT coefficients",
+        ));
+    }
+    if num_lines_noise_fill > BASE_OUTPUT_POSITIONS {
+        return Err(CodecError::InvalidData(
+            "AVS3 neural noise-fill line count exceeds MDCT geometry",
         ));
     }
 
@@ -92,7 +88,6 @@ pub fn decode_channel_neural_mdct(
         &mut workspace.model_indices,
     )?;
 
-    let num_lines_noise_fill = noise_fill_line_count(bwe_config)?;
     match nn_type {
         NeuralNetworkType::Basic => {
             let is_feat_amplified = qc.is_feat_amplified.ok_or(CodecError::InvalidData(
@@ -150,7 +145,47 @@ pub fn decode_channel_neural_mdct(
     }
 }
 
-/// Compatibility wrapper for callers that are known to carry Basic QC syntax.
+/// Decode a parsed channel while explicitly supplying its normative noise-fill line boundary.
+///
+/// Channel-based profiles derive this from BWE (or 1024 when BWE is disabled). HOA additionally
+/// has bitrate rows whose core line boundary is below 1024 even with BWE disabled.
+pub fn decode_channel_neural_mdct_with_noise_fill_lines(
+    nn_type: NeuralNetworkType,
+    payload: &[u8],
+    channel: &GaChannelSideInfo,
+    num_lines_noise_fill: usize,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    decode_channel_neural_mdct_with_noise_lines_impl(
+        nn_type,
+        payload,
+        channel,
+        num_lines_noise_fill,
+        workspace,
+        output,
+    )
+}
+
+/// Decode one already-parsed Basic or Low-Complexity coded channel to a 1024-line MDCT spectrum.
+pub fn decode_channel_neural_mdct(
+    nn_type: NeuralNetworkType,
+    payload: &[u8],
+    channel: &GaChannelSideInfo,
+    bwe_config: Option<BweConfig>,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    decode_channel_neural_mdct_with_noise_lines_impl(
+        nn_type,
+        payload,
+        channel,
+        noise_fill_line_count(bwe_config)?,
+        workspace,
+        output,
+    )
+}
+
 pub fn decode_basic_channel_neural_mdct(
     payload: &[u8],
     channel: &GaChannelSideInfo,
@@ -168,7 +203,6 @@ pub fn decode_basic_channel_neural_mdct(
     )
 }
 
-/// Decode one already-parsed Basic-profile mono QC payload.
 pub fn decode_basic_mono_neural_mdct(
     payload: &[u8],
     side: &GaMonoFrameSideInfo,
@@ -185,7 +219,6 @@ pub fn decode_basic_mono_neural_mdct(
     )
 }
 
-/// Decode one already-parsed Low-Complexity mono QC payload.
 pub fn decode_low_complexity_mono_neural_mdct(
     payload: &[u8],
     side: &GaMonoFrameSideInfo,
@@ -202,7 +235,6 @@ pub fn decode_low_complexity_mono_neural_mdct(
     )
 }
 
-/// Parse mono syntax through QC and execute the selected built-in neural inverse-QC profile.
 pub fn parse_and_decode_mono_neural_mdct(
     nn_type: NeuralNetworkType,
     payload: &[u8],
@@ -230,7 +262,6 @@ pub fn parse_and_decode_mono_neural_mdct(
     Ok(side)
 }
 
-/// Compatibility Basic-profile mono front-end.
 pub fn parse_and_decode_basic_mono_neural_mdct(
     payload: &[u8],
     core_bit_offset: usize,

@@ -28,6 +28,7 @@ mod fd_shaping;
 mod frame;
 mod ga;
 mod ga_frame;
+mod ga_hoa_pcm;
 mod ga_multichannel_pcm;
 mod ga_mono;
 mod ga_mono_neural;
@@ -124,6 +125,9 @@ pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use ga_frame::{
     GaChannelSideInfo, GaMultichannelFrameSideInfo, parse_multichannel_frame_side_info,
 };
+pub use ga_hoa_pcm::{
+    HoaTransportSynthesisWorkspace, apply_inverse_hoa_dmx, decode_hoa_transport_frame,
+};
 pub use ga_multichannel_pcm::{
     BasicMultichannelSynthesisWorkspace, MC_LFE_RESERVED_LINES,
     apply_multichannel_lfe_restriction, parse_decode_basic_multichannel_pcm,
@@ -133,8 +137,8 @@ pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use ga_mono_neural::{
     BasicMonoNeuralWorkspace, decode_basic_channel_neural_mdct,
     decode_basic_mono_neural_mdct, decode_channel_neural_mdct,
-    decode_low_complexity_mono_neural_mdct, parse_and_decode_basic_mono_neural_mdct,
-    parse_and_decode_mono_neural_mdct,
+    decode_channel_neural_mdct_with_noise_fill_lines, decode_low_complexity_mono_neural_mdct,
+    parse_and_decode_basic_mono_neural_mdct, parse_and_decode_mono_neural_mdct,
 };
 pub use ga_mono_pcm::{parse_decode_basic_mono_pcm, parse_decode_mono_pcm};
 pub use ga_mono_post::{
