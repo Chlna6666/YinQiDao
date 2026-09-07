@@ -1,8 +1,13 @@
-// GY/T 363-2023 / T/UWA 009.1-2023 Annex B context-decoder bias parameters.
+mod b2;
+
+pub use b2::CONTEXT_LAYER_1_KERNEL;
+
+// GY/T 363-2023 / T/UWA 009.1-2023 Annex B context-decoder parameters.
 //
-// Tables B.3, B.5 and B.7 are stored as exact IEEE-754 binary32 bit patterns. The three
-// convolution kernels (B.2/B.4/B.6) are intentionally kept in separate data modules because each
-// contains 3 * 16 * 16 coefficients and is being transcribed/validated independently.
+// B.2 is kept in a dedicated data module because its kernel contains 3 * 16 * 16 exact binary32
+// coefficients. Tables B.3, B.5 and B.7 are stored here as exact IEEE-754 binary32 bit patterns.
+// B.4 and B.6 remain intentionally absent until their complete 768-value tables pass the same
+// length and sentinel validation.
 
 pub const CONTEXT_LAYER_1_BIAS: [f32; 16] = [
     f32::from_bits(0x3E5B_9B84), f32::from_bits(0xC031_AE93),
@@ -42,7 +47,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn annex_b_context_bias_shapes_are_exact() {
+    fn annex_b_context_parameter_shapes_are_exact() {
+        assert_eq!(CONTEXT_LAYER_1_KERNEL.len(), 3 * 16 * 16);
         assert_eq!(CONTEXT_LAYER_1_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_2_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_3_BIAS.len(), 16);
