@@ -1,7 +1,7 @@
+mod avs3_backend;
 mod command_queue;
 mod debug;
 mod decoder;
-#[path = "dsp/mod.rs"]
 mod dsp;
 #[allow(dead_code)]
 mod engine;

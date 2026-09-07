@@ -57,6 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 lucide-gpui = { path = "crates/lucide-gpui" }
 yinqidao-audio-simd = { path = "crates/audio-simd" }
+yinqidao-codec-core = { path = "crates/audio-codec-core" }
 yinqidao-codec-avs3 = { path = "crates/audio-codec-avs3" }
 
 gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "37c8276655aee1337c9c0d0cfe97b464dc492198" }

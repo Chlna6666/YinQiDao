@@ -16,7 +16,9 @@ use symphonia::core::{
     meta::MetadataOptions,
 };
 use thiserror::Error;
-use yinqidao_codec_avs3::probe_av3a_path;
+use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, probe_av3a_path};
+
+use super::avs3_backend::Av3aRustBackend;
 
 const AV3A_PCM_FRAMES_PER_CHUNK: usize = 1024;
 
@@ -32,7 +34,7 @@ pub enum DecodeError {
     Decode { path: PathBuf, reason: String },
     #[error("音频定位失败 {path}: {reason}")]
     Seek { path: PathBuf, reason: String },
-    #[error("检测到 AV3A / Audio Vivid 音频，但没有可用的 AVS3-P3 解码后端。请将 YINQIDAO_AVS3_DECODER 指向带 libarcdav3a/AVS3AudioDec 支持的 FFmpeg 可执行文件: {0}")]
+    #[error("检测到 AV3A / Audio Vivid 音频，但当前 pure-Rust 路径尚不支持该 profile/layout，且没有可用的 FFmpeg fallback: {0}")]
     Av3aBackend(PathBuf),
 }
 
@@ -57,9 +59,8 @@ struct SymphoniaBackend {
     track_id: u32,
 }
 
-/// Transitional backend kept only until `yinqidao-codec-avs3` implements the normative AVS3-P3
-/// entropy/transform synthesis path. Container detection already lives in the pure-Rust crate so
-/// this process backend can later be removed without touching player-side probing again.
+/// Transitional fallback for AVS3 profiles/layouts that are not yet implemented by the pure-Rust
+/// decoder. Basic mono prefers `Av3aRustBackend`; this process path remains for stereo/MC/HOA/LC.
 struct Av3aProcessBackend {
     executable: OsString,
     path: PathBuf,
@@ -188,7 +189,8 @@ impl Drop for Av3aProcessBackend {
 
 enum DecoderBackend {
     Symphonia(SymphoniaBackend),
-    Av3a(Av3aProcessBackend),
+    Av3aRust(Av3aRustBackend),
+    Av3aProcess(Av3aProcessBackend),
 }
 
 pub struct DecoderStream {
@@ -205,6 +207,56 @@ impl DecoderStream {
             source,
         })?;
         if let Some(entry) = av3a {
+            match Av3aIsoBmffDemuxer::open(path) {
+                Ok(Some(demuxer)) => match Av3aRustBackend::from_demuxer(demuxer) {
+                    Ok(Some(backend)) => {
+                        let sample_rate = backend.sample_rate();
+                        let channels = backend.channels();
+                        let sample_count = backend.sample_count();
+                        let duration = backend.duration();
+                        tracing::info!(
+                            path = %path.display(),
+                            sample_rate,
+                            channels,
+                            sample_count,
+                            "AV3A / Audio Vivid 已启用 pure-Rust Basic mono 解码"
+                        );
+                        return Ok(Self {
+                            path: path.to_path_buf(),
+                            backend: DecoderBackend::Av3aRust(backend),
+                            info: AudioFormatInfo {
+                                sample_rate,
+                                total_frames: None,
+                                container_duration: Some(duration),
+                                channels,
+                            },
+                            decoded_frames: 0,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(DecodeError::Decode {
+                            path: path.to_path_buf(),
+                            reason: error.to_string(),
+                        });
+                    }
+                },
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        reason = %error,
+                        "AV3A 容器超出当前 pure-Rust demux 支持范围，回退外部后端"
+                    );
+                }
+                Err(error) => {
+                    return Err(DecodeError::Probe {
+                        path: path.to_path_buf(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+
             let sample_rate = entry.sample_rate;
             let channels = entry.channels;
             let executable = resolve_av3a_decoder()
@@ -225,11 +277,11 @@ impl DecoderStream {
                 sample_rate,
                 channels,
                 dca3_bytes = entry.decoder_config.len(),
-                "检测到 AV3A / Audio Vivid，容器解析已切换到 pure-Rust codec crate"
+                "AV3A / Audio Vivid 当前 profile/layout 使用 FFmpeg fallback"
             );
             return Ok(Self {
                 path: path.to_path_buf(),
-                backend: DecoderBackend::Av3a(backend),
+                backend: DecoderBackend::Av3aProcess(backend),
                 info: AudioFormatInfo {
                     sample_rate,
                     total_frames: None,
@@ -388,7 +440,16 @@ impl DecoderStream {
                 };
                 break decoded_to_f32_into(decoded, samples);
             },
-            DecoderBackend::Av3a(backend) => {
+            DecoderBackend::Av3aRust(backend) => {
+                if !backend.next_chunk_into(samples).map_err(|error| DecodeError::Decode {
+                    path: self.path.clone(),
+                    reason: error.to_string(),
+                })? {
+                    return Ok(None);
+                }
+                (backend.sample_rate(), backend.channels())
+            }
+            DecoderBackend::Av3aProcess(backend) => {
                 if !backend.next_chunk_into(samples)? {
                     return Ok(None);
                 }
@@ -403,7 +464,7 @@ impl DecoderStream {
     }
 
     pub fn seek(&mut self, position: Duration) -> Result<(), DecodeError> {
-        match &mut self.backend {
+        let resolved_position = match &mut self.backend {
             DecoderBackend::Symphonia(backend) => {
                 let time = symphonia::core::units::Time::try_from_secs_f64(position.as_secs_f64())
                     .ok_or_else(|| DecodeError::Seek {
@@ -424,12 +485,17 @@ impl DecoderStream {
                         reason: error.to_string(),
                     })?;
                 backend.decoder.reset();
+                position
             }
-            DecoderBackend::Av3a(backend) => backend.restart(position)?,
-        }
+            DecoderBackend::Av3aRust(backend) => backend.seek(position),
+            DecoderBackend::Av3aProcess(backend) => {
+                backend.restart(position)?;
+                position
+            }
+        };
 
         self.decoded_frames =
-            (position.as_secs_f64() * self.info.sample_rate.max(1) as f64) as u64;
+            (resolved_position.as_secs_f64() * self.info.sample_rate.max(1) as f64) as u64;
         Ok(())
     }
 
