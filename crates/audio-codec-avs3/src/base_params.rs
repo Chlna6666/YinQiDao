@@ -1,12 +1,9 @@
-use yinqidao_codec_core::CodecError;
-
 use crate::{
     BASE_LAYER_1_SPEC, BASE_LAYER_2_SPEC, BASE_LAYER_3_SPEC, BASE_LAYER_4_SPEC,
     BaseDecoderParams, ConvTranspose1dParams, IgdnParams,
 };
 
-/// GY/T 363-2023 table B.10 contains 5 * 8 * 16 binary32 kernel coefficients.
-pub const BASE_LAYER_1_KERNEL_VALUES: usize = 5 * 8 * 16;
+pub use crate::base_b10::BASE_LAYER_1_KERNEL;
 
 // GY/T 363-2023 Annex B, tables B.11..B.23.
 //
@@ -130,24 +127,13 @@ pub const BASE_LAYER_4_BIAS: [f32; 1] = [
     f32::from_bits(0x3ED0954F),
 ];
 
-/// Build the normative basic-profile base decoder with the already-landed B.11..B.23 parameters.
-///
-/// B.10 is intentionally supplied explicitly until all 640 first-layer kernel values have been
-/// independently transcribed and cross-checked. This prevents partially verified model data from
-/// becoming an implicit decoder default.
-pub fn base_decoder_params_with_layer1_kernel<'a>(
-    layer_1_kernel: &'a [f32],
-) -> Result<BaseDecoderParams<'a>, CodecError> {
-    if layer_1_kernel.len() != BASE_LAYER_1_KERNEL_VALUES {
-        return Err(CodecError::InvalidData(
-            "base layer-1 kernel must contain 640 table-B.10 values",
-        ));
-    }
-
-    Ok(BaseDecoderParams {
+/// Return the complete normative basic-profile base decoder parameters from Annex B tables
+/// B.10..B.23. All returned slices point directly at static binary32 tables.
+pub fn base_decoder_params() -> BaseDecoderParams<'static> {
+    BaseDecoderParams {
         layer_1: ConvTranspose1dParams {
             spec: BASE_LAYER_1_SPEC,
-            kernel: layer_1_kernel,
+            kernel: &BASE_LAYER_1_KERNEL,
             bias: &BASE_LAYER_1_BIAS,
         },
         igdn_1: IgdnParams {
@@ -177,7 +163,7 @@ pub fn base_decoder_params_with_layer1_kernel<'a>(
             kernel: &BASE_LAYER_4_KERNEL,
             bias: &BASE_LAYER_4_BIAS,
         },
-    })
+    }
 }
 
 #[cfg(test)]
@@ -186,51 +172,46 @@ mod tests {
 
     #[test]
     fn annex_b_parameter_shapes_match_base_decoder_geometry() {
+        assert_eq!(BASE_LAYER_1_KERNEL.len(), 5 * 8 * 16);
         assert_eq!(BASE_LAYER_1_BIAS.len(), 8);
         assert_eq!(BASE_LAYER_1_IGDN_BETA.len(), 8);
         assert_eq!(BASE_LAYER_1_IGDN_GAMMA.len(), 8 * 8);
-
         assert_eq!(BASE_LAYER_2_KERNEL.len(), 5 * 4 * 8);
         assert_eq!(BASE_LAYER_2_BIAS.len(), 4);
         assert_eq!(BASE_LAYER_2_IGDN_BETA.len(), 4);
         assert_eq!(BASE_LAYER_2_IGDN_GAMMA.len(), 4 * 4);
-
         assert_eq!(BASE_LAYER_3_KERNEL.len(), 5 * 2 * 4);
         assert_eq!(BASE_LAYER_3_BIAS.len(), 2);
         assert_eq!(BASE_LAYER_3_IGDN_BETA.len(), 2);
         assert_eq!(BASE_LAYER_3_IGDN_GAMMA.len(), 2 * 2);
-
         assert_eq!(BASE_LAYER_4_KERNEL.len(), 5 * 1 * 2);
         assert_eq!(BASE_LAYER_4_BIAS.len(), 1);
     }
 
     #[test]
     fn annex_b_binary32_sentinels_are_exact() {
+        assert_eq!(BASE_LAYER_1_KERNEL[0].to_bits(), 0x3A2C_F468);
+        assert_eq!(BASE_LAYER_1_KERNEL[639].to_bits(), 0x3AA8_2E4B);
         assert_eq!(BASE_LAYER_1_BIAS[0].to_bits(), 0xBB75_AFD7);
         assert_eq!(BASE_LAYER_1_IGDN_BETA[7].to_bits(), 0x405C_CF5D);
         assert_eq!(BASE_LAYER_1_IGDN_GAMMA[0].to_bits(), 0x3421_1F54);
-
         assert_eq!(BASE_LAYER_2_KERNEL[0].to_bits(), 0xBF40_404B);
         assert_eq!(BASE_LAYER_2_KERNEL[159].to_bits(), 0xBD59_BE7C);
         assert_eq!(BASE_LAYER_2_IGDN_GAMMA[15].to_bits(), 0x34A0_565B);
-
         assert_eq!(BASE_LAYER_3_KERNEL[0].to_bits(), 0xBE5C_740F);
         assert_eq!(BASE_LAYER_3_KERNEL[39].to_bits(), 0x3D1C_5608);
         assert_eq!(BASE_LAYER_3_IGDN_GAMMA[2].to_bits(), 0x2DAF_37F6);
-
         assert_eq!(BASE_LAYER_4_KERNEL[0].to_bits(), 0xC002_293D);
         assert_eq!(BASE_LAYER_4_KERNEL[9].to_bits(), 0xBDE7_9DF1);
         assert_eq!(BASE_LAYER_4_BIAS[0].to_bits(), 0x3ED0_954F);
     }
 
     #[test]
-    fn b10_is_required_at_exact_normative_length() {
-        let exact = [0.0_f32; BASE_LAYER_1_KERNEL_VALUES];
-        let params = base_decoder_params_with_layer1_kernel(&exact).unwrap();
-        assert_eq!(params.layer_1.kernel.len(), BASE_LAYER_1_KERNEL_VALUES);
-        assert_eq!(params.layer_2.kernel.len(), BASE_LAYER_2_KERNEL.len());
-
-        let short = [0.0_f32; BASE_LAYER_1_KERNEL_VALUES - 1];
-        assert!(base_decoder_params_with_layer1_kernel(&short).is_err());
+    fn complete_annex_b_constructor_uses_only_static_tables() {
+        let params = base_decoder_params();
+        assert_eq!(params.layer_1.kernel.as_ptr(), BASE_LAYER_1_KERNEL.as_ptr());
+        assert_eq!(params.layer_2.kernel.as_ptr(), BASE_LAYER_2_KERNEL.as_ptr());
+        assert_eq!(params.layer_3.kernel.as_ptr(), BASE_LAYER_3_KERNEL.as_ptr());
+        assert_eq!(params.layer_4.kernel.as_ptr(), BASE_LAYER_4_KERNEL.as_ptr());
     }
 }

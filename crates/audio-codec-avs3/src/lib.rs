@@ -6,6 +6,7 @@
 //! codec DLL is required.
 
 mod allocation;
+mod base_b10;
 mod base_neural;
 mod base_params;
 mod base_pipeline;
@@ -41,10 +42,10 @@ pub use base_neural::{
 };
 pub use base_params::{
     BASE_LAYER_1_BIAS, BASE_LAYER_1_IGDN_BETA, BASE_LAYER_1_IGDN_GAMMA,
-    BASE_LAYER_1_KERNEL_VALUES, BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA,
+    BASE_LAYER_1_KERNEL, BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA,
     BASE_LAYER_2_IGDN_GAMMA, BASE_LAYER_2_KERNEL, BASE_LAYER_3_BIAS,
     BASE_LAYER_3_IGDN_BETA, BASE_LAYER_3_IGDN_GAMMA, BASE_LAYER_3_KERNEL,
-    BASE_LAYER_4_BIAS, BASE_LAYER_4_KERNEL, base_decoder_params_with_layer1_kernel,
+    BASE_LAYER_4_BIAS, BASE_LAYER_4_KERNEL, base_decoder_params,
 };
 pub use base_pipeline::{
     BasePipelineWorkspace, NoiseFillingRng, apply_base_noise_filling_in_place,
