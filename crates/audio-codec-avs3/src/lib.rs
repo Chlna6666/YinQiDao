@@ -9,6 +9,7 @@ mod config;
 mod container;
 mod core;
 mod decoder;
+mod dynamic_metadata;
 mod frame;
 mod ga;
 mod metadata;
@@ -23,6 +24,11 @@ pub use config::{
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
 pub use core::{TransformType, parse_core_transform_type, parse_core_transform_type_at};
 pub use decoder::Avs3Decoder;
+pub use dynamic_metadata::{
+    CartesianExtent, ChannelLock, DynamicLevel1, DynamicLevel2, DynamicMetadata,
+    DynamicObjectMetadata, ObjectDivergence, ObjectPosition, PolarExtent,
+    parse_dynamic_metadata_at,
+};
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
