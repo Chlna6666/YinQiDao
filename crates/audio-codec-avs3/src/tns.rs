@@ -19,6 +19,11 @@ const fn h(code: u16, bits: u8) -> HuffmanCode {
 
 /// GY/T 363-2023 tables B.25..B.32. Each row is one reflection-coefficient dimension and each
 /// column maps quantization index 1..=16 to its MSB-first Huffman codeword.
+///
+/// Published B.32 prints index 1 as decimal 10490/14 bits. That bit pattern begins with the exact
+/// 6-bit index-12 codeword (40), so the published value cannot form a prefix code. The surrounding
+/// canonical sequence is 10496,10497,10498,10499; index 1 is therefore normalized to 10496 here.
+/// `huffman_tables_are_prefix_free` permanently guards this interoperability erratum.
 const TNS_HUFFMAN_TABLES: [[HuffmanCode; TNS_QUANT_LEVELS]; TNS_MAX_ORDER] = [
     [
         h(4053, 12), h(1012, 10), h(507, 9), h(127, 7), h(30, 5), h(0, 3),
@@ -56,7 +61,7 @@ const TNS_HUFFMAN_TABLES: [[HuffmanCode; TNS_QUANT_LEVELS]; TNS_MAX_ORDER] = [
         h(1665, 11), h(13314, 14), h(13315, 14),
     ],
     [
-        h(10490, 14), h(2625, 12), h(657, 10), h(165, 8), h(83, 7), h(21, 5),
+        h(10496, 14), h(2625, 12), h(657, 10), h(165, 8), h(83, 7), h(21, 5),
         h(4, 3), h(3, 2), h(10497, 14), h(0, 1), h(11, 4), h(40, 6), h(329, 9),
         h(1313, 11), h(10498, 14), h(10499, 14),
     ],
@@ -214,6 +219,41 @@ mod tests {
         }
     }
 
+    fn is_prefix(shorter: HuffmanCode, longer: HuffmanCode) -> bool {
+        if shorter.bits > longer.bits {
+            return false;
+        }
+        let shift = longer.bits - shorter.bits;
+        (longer.code >> shift) == shorter.code
+    }
+
+    #[test]
+    fn huffman_tables_are_prefix_free() {
+        for (dimension, table) in TNS_HUFFMAN_TABLES.iter().enumerate() {
+            for (left_index, &left) in table.iter().enumerate() {
+                for (right_index, &right) in table.iter().enumerate() {
+                    if left_index == right_index {
+                        continue;
+                    }
+                    assert!(
+                        !is_prefix(left, right),
+                        "TNS table {dimension}: index {} is a prefix of index {}",
+                        left_index + 1,
+                        right_index + 1,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn b32_erratum_uses_canonical_10496_tail() {
+        assert_eq!(TNS_HUFFMAN_TABLES[7][0], h(10496, 14));
+        assert_eq!(TNS_HUFFMAN_TABLES[7][8], h(10497, 14));
+        assert_eq!(TNS_HUFFMAN_TABLES[7][14], h(10498, 14));
+        assert_eq!(TNS_HUFFMAN_TABLES[7][15], h(10499, 14));
+    }
+
     #[test]
     fn decodes_all_eight_dimensions_and_second_filter_disable() {
         let mut writer = BitWriter::new();
@@ -260,6 +300,26 @@ mod tests {
 
         let info = parse_tns_side_info_at(&writer.bytes, 0).unwrap();
         assert_eq!(info.filters[0].quant_indices[0], Some(16));
+    }
+
+    #[test]
+    fn decodes_corrected_b32_index_one() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 1);
+        writer.push(7, 3); // order = 8
+        // dimensions 0..6 use short codes, dimension 7 uses corrected B.32 index1.
+        writer.push(2, 2);
+        writer.push(0, 2);
+        writer.push(0, 1);
+        writer.push(0, 1);
+        writer.push(1, 1);
+        writer.push(0, 1);
+        writer.push(0, 1);
+        writer.push(10496, 14);
+        writer.push(0, 1);
+
+        let info = parse_tns_side_info_at(&writer.bytes, 0).unwrap();
+        assert_eq!(info.filters[0].quant_indices[7], Some(1));
     }
 
     #[test]
