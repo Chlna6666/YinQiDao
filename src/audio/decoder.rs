@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
     time::Duration,
@@ -16,9 +16,8 @@ use symphonia::core::{
     meta::MetadataOptions,
 };
 use thiserror::Error;
+use yinqidao_codec_avs3::probe_av3a_path;
 
-const AV3A_PROBE_PREFIX_BYTES: u64 = 1024 * 1024;
-const AV3A_PROBE_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const AV3A_PCM_FRAMES_PER_CHUNK: usize = 1024;
 
 #[derive(Debug, Error)]
@@ -58,6 +57,9 @@ struct SymphoniaBackend {
     track_id: u32,
 }
 
+/// Transitional backend kept only until `yinqidao-codec-avs3` implements the normative AVS3-P3
+/// entropy/transform synthesis path. Container detection already lives in the pure-Rust crate so
+/// this process backend can later be removed without touching player-side probing again.
 struct Av3aProcessBackend {
     executable: OsString,
     path: PathBuf,
@@ -198,11 +200,13 @@ pub struct DecoderStream {
 
 impl DecoderStream {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
-        let av3a = probe_av3a_sample_entry(path).map_err(|source| DecodeError::Open {
+        let av3a = probe_av3a_path(path).map_err(|source| DecodeError::Open {
             path: path.to_path_buf(),
             source,
         })?;
-        if let Some((sample_rate, channels)) = av3a {
+        if let Some(entry) = av3a {
+            let sample_rate = entry.sample_rate;
+            let channels = entry.channels;
             let executable = resolve_av3a_decoder()
                 .ok_or_else(|| DecodeError::Av3aBackend(path.to_path_buf()))?;
             let backend = Av3aProcessBackend::open(
@@ -220,7 +224,8 @@ impl DecoderStream {
                 path = %path.display(),
                 sample_rate,
                 channels,
-                "检测到 AV3A / Audio Vivid，启用 AVS3-P3 外部解码后端"
+                dca3_bytes = entry.decoder_config.len(),
+                "检测到 AV3A / Audio Vivid，容器解析已切换到 pure-Rust codec crate"
             );
             return Ok(Self {
                 path: path.to_path_buf(),
@@ -497,58 +502,6 @@ fn spawn_av3a_process(
     Ok((child, stdout))
 }
 
-fn probe_av3a_sample_entry(path: &Path) -> io::Result<Option<(u32, u16)>> {
-    let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
-    let mut regions = Vec::new();
-
-    let prefix_len = length.min(AV3A_PROBE_PREFIX_BYTES) as usize;
-    let mut prefix = vec![0_u8; prefix_len];
-    file.read_exact(&mut prefix)?;
-    regions.push(prefix);
-
-    if length > AV3A_PROBE_PREFIX_BYTES {
-        let tail_len = length.min(AV3A_PROBE_TAIL_BYTES) as usize;
-        file.seek(SeekFrom::End(-(tail_len as i64)))?;
-        let mut tail = vec![0_u8; tail_len];
-        file.read_exact(&mut tail)?;
-        regions.push(tail);
-    }
-
-    for region in regions {
-        if let Some(info) = av3a_entry_from_bytes(&region) {
-            return Ok(Some(info));
-        }
-    }
-    Ok(None)
-}
-
-fn av3a_entry_from_bytes(bytes: &[u8]) -> Option<(u32, u16)> {
-    let mut fallback = false;
-    for (position, window) in bytes.windows(4).enumerate() {
-        if window != b"av3a" {
-            continue;
-        }
-        fallback = true;
-        if position + 32 > bytes.len() {
-            continue;
-        }
-        let channels = u16::from_be_bytes([bytes[position + 20], bytes[position + 21]]);
-        let sample_rate_fixed = u32::from_be_bytes([
-            bytes[position + 28],
-            bytes[position + 29],
-            bytes[position + 30],
-            bytes[position + 31],
-        ]);
-        let sample_rate = sample_rate_fixed >> 16;
-        if (1..=32).contains(&channels) && (8_000..=384_000).contains(&sample_rate) {
-            return Some((sample_rate, channels));
-        }
-    }
-
-    fallback.then_some((48_000, 2))
-}
-
 #[cfg(test)]
 pub fn probe_file(path: &Path) -> Result<AudioFormatInfo, DecodeError> {
     Ok(DecoderStream::open(path)?.info().clone())
@@ -584,6 +537,7 @@ mod tests {
     use std::{fs, time::SystemTime};
 
     use super::*;
+    use yinqidao_codec_avs3::probe_av3a_bytes;
 
     fn pcm_wav() -> Vec<u8> {
         let samples = [0i16, 8_000, -8_000, 0];
@@ -633,7 +587,8 @@ mod tests {
         bytes[8..12].copy_from_slice(b"av3a");
         bytes[28..30].copy_from_slice(&12_u16.to_be_bytes());
         bytes[36..40].copy_from_slice(&(44_100_u32 << 16).to_be_bytes());
-        assert_eq!(av3a_entry_from_bytes(&bytes), Some((44_100, 12)));
+        let entry = probe_av3a_bytes(&bytes).expect("av3a");
+        assert_eq!((entry.sample_rate, entry.channels), (44_100, 12));
     }
 
     #[test]
