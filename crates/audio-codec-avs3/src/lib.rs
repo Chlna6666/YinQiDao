@@ -8,6 +8,7 @@
 mod allocation;
 mod base_b10;
 mod base_neural;
+mod base_normative;
 mod base_params;
 mod base_pipeline;
 mod bitreader;
@@ -40,6 +41,7 @@ pub use base_neural::{
     BASE_LAYER_3_SPEC, BASE_LAYER_4_SPEC, BASE_OUTPUT_POSITIONS, BaseDecoderParams,
     BaseDecoderWorkspace, IgdnParams, apply_igdn_in_place, decode_base_network,
 };
+pub use base_normative::decode_basic_base_to_mdct_normative;
 pub use base_params::{
     BASE_LAYER_1_BIAS, BASE_LAYER_1_IGDN_BETA, BASE_LAYER_1_IGDN_GAMMA,
     BASE_LAYER_1_KERNEL, BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA,
