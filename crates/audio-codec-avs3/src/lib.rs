@@ -45,6 +45,7 @@ mod qc;
 mod quantizer_params;
 mod range;
 mod range_tables;
+mod stereo_synthesis;
 mod synthesis;
 mod tns;
 mod tns_synthesis;
@@ -169,6 +170,7 @@ pub use range_tables::{
     CONTEXT_RANGE_MODEL_COUNT, base_range_model, base_stddev_threshold, context_range_model,
     select_base_range_model_index,
 };
+pub use stereo_synthesis::apply_stereo_ms_upmix;
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
 };
