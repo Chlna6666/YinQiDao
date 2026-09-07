@@ -103,7 +103,9 @@ pub use ga_mono_neural::{
     BasicMonoNeuralWorkspace, decode_basic_mono_neural_mdct,
     parse_and_decode_basic_mono_neural_mdct,
 };
-pub use group::{GroupSideInfo, parse_group_bits_at};
+pub use group::{
+    GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
+};
 pub use inverse_qc::{
     basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,
     noise_filling_parameter,
