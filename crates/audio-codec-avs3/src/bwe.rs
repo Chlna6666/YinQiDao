@@ -15,6 +15,8 @@ pub enum BweMode {
     /// the equivalent-stereo bitrate calculation. A channel bed with one LFE subtracts that LFE;
     /// object channels are ordinary full-band signals and remain in the count.
     Multichannel { non_lfe_channels: u16 },
+    /// HOA uses dedicated bitrate tables selected by ambisonic order instead of equivalent CPE rate.
+    Hoa { order: u8 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +26,7 @@ pub enum WhiteningLevel {
     High,
 }
 
-/// Tables 28..42 collapsed into the one configuration selected for the current bitrate/mode.
+/// Tables 28..42 plus the HOA BWE tables collapsed into the configuration selected for a frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BweConfig {
     pub mode: BweMode,
@@ -48,8 +50,10 @@ pub struct BweSideInfo {
 }
 
 impl BweConfig {
-    /// Resolve the normative BWE enable condition and tables for mono/stereo/multichannel modes.
-    /// Returns `None` when BWE is disabled by bitrate.
+    /// Resolve the normative BWE enable condition and tables for channel-based and HOA modes.
+    ///
+    /// HOA group enable/disable is determined by [`crate::HoaConfig`]. When an HOA group enables
+    /// BWE this function resolves its order/total-bitrate-specific frequency geometry.
     pub fn for_bitrate(mode: BweMode, total_bitrate_kbps: u32) -> Result<Option<Self>, CodecError> {
         match mode {
             BweMode::Mono => {
@@ -70,8 +74,6 @@ impl BweConfig {
                         "multichannel BWE requires at least one non-LFE channel",
                     ));
                 }
-                // Equivalent stereo rate = total / nonLfeChannels * 2. Keep it rational to avoid
-                // threshold changes from integer/floating-point rounding.
                 let numerator = u64::from(total_bitrate_kbps).saturating_mul(2);
                 let denominator = u64::from(non_lfe_channels);
                 if numerator > 128_u64.saturating_mul(denominator) {
@@ -79,6 +81,7 @@ impl BweConfig {
                 }
                 Ok(Some(multichannel_config(numerator, denominator)))
             }
+            BweMode::Hoa { order } => Ok(Some(hoa_config(order, total_bitrate_kbps)?)),
         }
     }
 
@@ -233,6 +236,67 @@ fn multichannel_config(rate_num: u64, rate_den: u64) -> BweConfig {
     }
 }
 
+fn hoa_config(order: u8, rate: u32) -> Result<BweConfig, CodecError> {
+    let mode = BweMode::Hoa { order };
+    let config = match (order, rate) {
+        (1, 0..=128) => make_config(
+            mode,
+            &[384, 448, 512, 576, 672, 736, 832],
+            &[384, 512, 672, 832],
+            &[96, 144, 192],
+            &[0, 2, 4, 6],
+        ),
+        (1, 192) => make_config(
+            mode,
+            &[544, 608, 672, 736, 832],
+            &[544, 672, 832],
+            &[144, 192],
+            &[0, 2, 4],
+        ),
+        (1, 256) => make_config(
+            mode,
+            &[672, 736, 832],
+            &[672, 832],
+            &[192],
+            &[0, 2],
+        ),
+        (2, 192) => make_config(
+            mode,
+            &[352, 416, 480, 544, 736],
+            &[352, 480, 736],
+            &[64, 96],
+            &[0, 2, 4],
+        ),
+        (2, 256) | (3, 256 | 320 | 384) => make_config(
+            mode,
+            &[384, 448, 512, 576, 672, 736, 832],
+            &[384, 512, 672, 832],
+            &[96, 144, 192],
+            &[0, 2, 4, 6],
+        ),
+        (2, 320) | (3, 512) => make_config(
+            mode,
+            &[544, 608, 672, 736, 832],
+            &[544, 672, 832],
+            &[144, 192],
+            &[0, 2, 4],
+        ),
+        (2, 384 | 480) | (3, 640 | 896) => make_config(
+            mode,
+            &[672, 736, 832],
+            &[672, 832],
+            &[192],
+            &[0, 2],
+        ),
+        _ => {
+            return Err(CodecError::Unsupported(
+                "unsupported AVS3 HOA BWE order/bitrate combination",
+            ));
+        }
+    };
+    Ok(config)
+}
+
 fn make_config(
     mode: BweMode,
     sfb: &[u16],
@@ -279,17 +343,13 @@ mod tests {
 
     #[test]
     fn mono_tables_follow_normative_rate_bands() {
-        let low = BweConfig::for_bitrate(BweMode::Mono, 32)
-            .unwrap()
-            .unwrap();
+        let low = BweConfig::for_bitrate(BweMode::Mono, 32).unwrap().unwrap();
         assert_eq!(low.num_sfb, 6);
         assert_eq!(low.num_tiles, 3);
         assert_eq!(low.sfb_boundaries[0], Some(352));
         assert_eq!(low.sfb_boundaries[6], Some(768));
 
-        let high = BweConfig::for_bitrate(BweMode::Mono, 96)
-            .unwrap()
-            .unwrap();
+        let high = BweConfig::for_bitrate(BweMode::Mono, 96).unwrap().unwrap();
         assert_eq!(high.num_sfb, 2);
         assert_eq!(high.num_tiles, 1);
         assert_eq!(high.target_tiles[0], Some(672));
@@ -304,22 +364,43 @@ mod tests {
 
     #[test]
     fn multichannel_uses_exact_equivalent_stereo_ratio() {
-        // 832 kb/s 7.1.4 has 11 non-LFE channels: 832*2/11 ~=151.3 kb/s, so BWE is off.
         let mode = BweMode::Multichannel {
             non_lfe_channels: 11,
         };
         assert!(BweConfig::for_bitrate(mode, 832).unwrap().is_none());
-
-        // 704*2/11 = 128 exactly: enabled at the normative boundary.
         let edge = BweConfig::for_bitrate(mode, 704).unwrap().unwrap();
         assert_eq!(edge.num_sfb, 2);
         assert_eq!(edge.num_tiles, 1);
     }
 
     #[test]
+    fn hoa_tables_cover_all_four_frequency_geometries() {
+        let elow = BweConfig::for_bitrate(BweMode::Hoa { order: 2 }, 192)
+            .unwrap()
+            .unwrap();
+        assert_eq!((elow.num_sfb, elow.num_tiles), (4, 2));
+        assert_eq!(elow.sfb_boundaries[0], Some(352));
+        assert_eq!(elow.sfb_boundaries[4], Some(736));
+
+        let low = BweConfig::for_bitrate(BweMode::Hoa { order: 3 }, 384)
+            .unwrap()
+            .unwrap();
+        assert_eq!((low.num_sfb, low.num_tiles), (6, 3));
+        assert_eq!(low.sfb_boundaries[0], Some(384));
+
+        let middle = BweConfig::for_bitrate(BweMode::Hoa { order: 3 }, 512)
+            .unwrap()
+            .unwrap();
+        assert_eq!(middle.sfb_boundaries[0], Some(544));
+
+        let high = BweConfig::for_bitrate(BweMode::Hoa { order: 3 }, 896)
+            .unwrap()
+            .unwrap();
+        assert_eq!(high.sfb_boundaries[0], Some(672));
+    }
+
+    #[test]
     fn parses_envelopes_and_three_whitening_levels() {
-        // Packed bitstream: env=3 (7), env=65 (7), OFF=0, MID=10, HIGH=11.
-        // 0000011 1000001 0 10 11 -> 00000111 00000101 01100000.
         let bits = [0b0000_0111, 0b0000_0101, 0b0110_0000];
         let info = parse_bwe_side_info_at(&bits, 0, 2, 3).unwrap();
         assert_eq!(info.envelope_indices[0], Some(3));

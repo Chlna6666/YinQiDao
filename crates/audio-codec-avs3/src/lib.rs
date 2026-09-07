@@ -36,6 +36,7 @@ mod ga_mono_post;
 mod ga_stereo;
 mod ga_stereo_pcm;
 mod group;
+mod hoa_side;
 mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
@@ -151,6 +152,13 @@ pub use ga_stereo_pcm::{
 };
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
+};
+pub use hoa_side::{
+    HOA_BASIS_TABLE_LEN, HOA_NO_ILD_INDEX, HOA_SCALE_FACTOR_BANDS, HOA_SFB_BOUNDARIES,
+    GaHoaFrameSideInfo, HoaBitAllocation, HoaConfig, HoaDmxMode, HoaGroupConfig,
+    HoaGroupSideInfo, HoaPairSideInfo, HoaSideInfo, MAX_HOA_BASIS, MAX_HOA_GROUP_PAIRS,
+    MAX_HOA_GROUPS, allocate_hoa_bytes, hoa_pair_index_bits, parse_hoa_frame_side_info,
+    parse_hoa_side_info_at, resolve_hoa_pair_index,
 };
 pub use imdct_synthesis::{Avs3SynthesisWorkspace, synthesize_mdct_frame};
 pub use inverse_qc::{
