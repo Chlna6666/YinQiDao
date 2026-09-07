@@ -19,7 +19,7 @@ impl fmt::Display for Av3aRustError {
             Self::Io(error) => write!(formatter, "AV3A ISO-BMFF 读取失败: {error}"),
             Self::Codec(error) => write!(formatter, "AVS3-P3 解码失败: {error}"),
             Self::UnexpectedStatus => formatter.write_str("AVS3-P3 完整 sample 未产生 PCM frame"),
-            Self::InvalidFrame => formatter.write_str("AVS3-P3 Basic mono/stereo 输出几何不合法"),
+            Self::InvalidFrame => formatter.write_str("AVS3-P3 Basic transport PCM 输出几何不合法"),
         }
     }
 }
@@ -46,12 +46,14 @@ impl From<CodecError> for Av3aRustError {
     }
 }
 
-/// Player-side pure-Rust AV3A backend for complete Basic-profile mono/stereo paths.
+/// Player-side pure-Rust AV3A backend for complete Basic-profile transport PCM paths.
 ///
 /// The first compressed sample is decoded once during capability probing and retained as the
-/// first output frame. Unsupported AVS3 profiles/layouts (including MCR stereo) therefore fall
-/// back to the transitional process backend before playback starts without decoding frame zero
-/// twice for supported streams.
+/// first output frame. Unsupported AVS3 modes (including MCR stereo, low-complexity neural coding,
+/// HOA and lossless) therefore fall back to the transitional process backend before playback
+/// starts without decoding frame zero twice for supported streams. Multichannel Basic frames stay
+/// N-channel through the codec boundary; the existing player DSP performs the configured
+/// multichannel-to-binaural/stereo reduction before device output.
 pub(crate) struct Av3aRustBackend {
     demuxer: Av3aIsoBmffDemuxer,
     decoder: Avs3Decoder,
@@ -69,7 +71,7 @@ impl Av3aRustBackend {
         mut demuxer: Av3aIsoBmffDemuxer,
     ) -> Result<Option<Self>, Av3aRustError> {
         let entry = demuxer.sample_entry().clone();
-        if !matches!(entry.channels, 1 | 2) || entry.decoder_config.is_empty() {
+        if entry.decoder_config.is_empty() {
             return Ok(None);
         }
 
@@ -171,11 +173,38 @@ impl Av3aRustBackend {
 }
 
 fn validate_frame_geometry(frame: &AudioFrame) -> Result<(), Av3aRustError> {
-    if !matches!(frame.channels, 1 | 2)
-        || frame.samples.len()
-            != AVS3_FRAME_SAMPLES_PER_CHANNEL.saturating_mul(usize::from(frame.channels))
-    {
+    if frame.channels == 0 {
+        return Err(Av3aRustError::InvalidFrame);
+    }
+    let expected_samples = AVS3_FRAME_SAMPLES_PER_CHANNEL
+        .checked_mul(usize::from(frame.channels))
+        .ok_or(Av3aRustError::InvalidFrame)?;
+    if frame.samples.len() != expected_samples {
         return Err(Av3aRustError::InvalidFrame);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(channels: u16, samples: usize) -> AudioFrame {
+        AudioFrame {
+            samples: vec![0.0; samples],
+            sample_rate: 48_000,
+            channels,
+        }
+    }
+
+    #[test]
+    fn accepts_basic_multichannel_frame_geometry() {
+        assert!(validate_frame_geometry(&frame(12, 12 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_channel_and_misaligned_frames() {
+        assert!(validate_frame_geometry(&frame(0, 0)).is_err());
+        assert!(validate_frame_geometry(&frame(6, 6 * AVS3_FRAME_SAMPLES_PER_CHANNEL - 1)).is_err());
+    }
 }
