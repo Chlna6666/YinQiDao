@@ -3,23 +3,34 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    Av3aSampleEntry, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
-    DynamicMetadataPrefix, StaticMetadataPrefix, TransformType,
+    Av3aSampleEntry, BweConfig, BweMode, BweSideInfo, ChannelConfiguration, CoreSidePrefix,
+    DynamicChannelPrefix, DynamicMetadata, DynamicMetadataPrefix, StaticMetadataPrefix,
+    TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
     core::{parse_core_side_prefix_at, parse_core_transform_type_at},
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
-    ga::{GaDecodePlan, coded_payload},
+    ga::{GaCodecFormat, GaDecodePlan, coded_payload},
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ParsedBwe {
+    /// `Some(false)` means normatively disabled by bitrate, `Some(true)` means side information was
+    /// consumed, and `None` means the current mode has not yet been resolved (currently HOA).
+    present: Option<bool>,
+    config: Option<BweConfig>,
+    side_info: Option<BweSideInfo>,
+    next_bit_offset: Option<usize>,
+}
+
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
 /// Container/config, AATF framing, full-rate routing, dynamic Audio Vivid L1/L2 metadata,
-/// FdShaping and complete TNS Huffman side information are parsed without native decoders.
-/// Static `BasicL1()`, BWE/group/QC, range decoding and inverse quantization remain the next
-/// normative boundaries before PCM synthesis.
+/// FdShaping, complete TNS Huffman data and mono/stereo/multichannel BWE side information are
+/// parsed without native decoders. Static `BasicL1()`, HOA BWE, Group/Stereo/MC/QC, range decoding
+/// and inverse quantization remain the next normative boundaries before PCM synthesis.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -32,6 +43,10 @@ pub struct Avs3Decoder {
     last_dynamic_metadata: Option<DynamicMetadata>,
     last_core_side_prefix: Option<CoreSidePrefix>,
     last_first_transform_type: Option<TransformType>,
+    last_bwe_present: Option<bool>,
+    last_bwe_config: Option<BweConfig>,
+    last_bwe_side_info: Option<BweSideInfo>,
+    last_after_bwe_bit_offset: Option<usize>,
     packets_seen: u64,
 }
 
@@ -69,6 +84,10 @@ impl Avs3Decoder {
             last_dynamic_metadata: None,
             last_core_side_prefix: None,
             last_first_transform_type: None,
+            last_bwe_present: None,
+            last_bwe_config: None,
+            last_bwe_side_info: None,
+            last_after_bwe_bit_offset: None,
             packets_seen: 0,
         })
     }
@@ -113,6 +132,22 @@ impl Avs3Decoder {
         self.last_first_transform_type
     }
 
+    pub fn last_bwe_present(&self) -> Option<bool> {
+        self.last_bwe_present
+    }
+
+    pub fn last_bwe_config(&self) -> Option<BweConfig> {
+        self.last_bwe_config
+    }
+
+    pub fn last_bwe_side_info(&self) -> Option<BweSideInfo> {
+        self.last_bwe_side_info
+    }
+
+    pub fn last_after_bwe_bit_offset(&self) -> Option<usize> {
+        self.last_after_bwe_bit_offset
+    }
+
     pub fn packets_seen(&self) -> u64 {
         self.packets_seen
     }
@@ -140,6 +175,58 @@ impl Avs3Decoder {
             .map(|low_bitrate| parse_core_side_prefix_at(payload, core_bit_offset, low_bitrate))
             .transpose()?;
         Ok((transform, prefix))
+    }
+
+    fn parse_bwe_after_core(
+        &self,
+        payload: &[u8],
+        header: &AatfFrameHeader,
+        plan: GaDecodePlan,
+        core: CoreSidePrefix,
+    ) -> Result<ParsedBwe, CodecError> {
+        let Avs3SpecificConfig::GeneralFullRate(config) = self.specific_config.as_ref().ok_or(
+            CodecError::InvalidData("BWE resolution requires dca3 general-full-rate configuration"),
+        )? else {
+            return Ok(ParsedBwe::default());
+        };
+
+        let mode = match plan.format {
+            GaCodecFormat::Mono => BweMode::Mono,
+            GaCodecFormat::Stereo => BweMode::Stereo,
+            GaCodecFormat::Multichannel => {
+                let channels = plan.output_channels.ok_or(CodecError::InvalidData(
+                    "multichannel BWE is missing output channel count",
+                ))?;
+                let non_lfe_channels = if channel_configuration_has_lfe(header.channel_configuration)
+                {
+                    channels.saturating_sub(1)
+                } else {
+                    channels
+                };
+                BweMode::Multichannel { non_lfe_channels }
+            }
+            // HOA uses its own tables 31/35/39/43 and is intentionally not treated as ordinary
+            // multichannel audio; returning unresolved prevents silently consuming the wrong bits.
+            GaCodecFormat::Hoa => return Ok(ParsedBwe::default()),
+        };
+
+        let Some(bwe_config) = BweConfig::for_bitrate(mode, u32::from(config.total_bitrate_kbps))?
+        else {
+            return Ok(ParsedBwe {
+                present: Some(false),
+                config: None,
+                side_info: None,
+                next_bit_offset: Some(core.next_bit_offset),
+            });
+        };
+
+        let side_info = bwe_config.parse_side_info(payload, core.next_bit_offset)?;
+        Ok(ParsedBwe {
+            present: Some(true),
+            config: Some(bwe_config),
+            side_info: Some(side_info),
+            next_bit_offset: Some(side_info.next_bit_offset),
+        })
     }
 
     fn validate_frame_against_config(&self, header: &AatfFrameHeader) -> Result<(), CodecError> {
@@ -210,6 +297,20 @@ impl Avs3Decoder {
     }
 }
 
+fn channel_configuration_has_lfe(configuration: Option<ChannelConfiguration>) -> bool {
+    matches!(
+        configuration,
+        Some(
+            ChannelConfiguration::Surround5_1
+                | ChannelConfiguration::Surround7_1
+                | ChannelConfiguration::Surround5_1_2
+                | ChannelConfiguration::Surround5_1_4
+                | ChannelConfiguration::Surround7_1_2
+                | ChannelConfiguration::Surround7_1_4
+        )
+    )
+}
+
 impl AudioDecoder for Avs3Decoder {
     fn codec_id(&self) -> CodecId {
         CodecId::Avs3
@@ -240,6 +341,7 @@ impl AudioDecoder for Avs3Decoder {
             dynamic_metadata,
             core_side_prefix,
             first_transform_type,
+            parsed_bwe,
         ) = if method == AudioCodingMethod::GeneralFullRate {
             let plan = GaDecodePlan::from_header(&header)?;
             let payload = coded_payload(packet, &header)?;
@@ -251,6 +353,10 @@ impl AudioDecoder for Avs3Decoder {
             match metadata {
                 MetadataBoundary::None { core_bit_offset } => {
                     let (transform, core) = self.parse_core_prefix(payload, core_bit_offset, plan)?;
+                    let bwe = core
+                        .map(|core| self.parse_bwe_after_core(payload, &header, plan, core))
+                        .transpose()?
+                        .unwrap_or_default();
                     (
                         Some(plan),
                         Some(metadata),
@@ -259,6 +365,7 @@ impl AudioDecoder for Avs3Decoder {
                         None,
                         core,
                         Some(transform),
+                        bwe,
                     )
                 }
                 MetadataBoundary::StaticPresent { static_bit_offset } => {
@@ -268,7 +375,16 @@ impl AudioDecoder for Avs3Decoder {
                             "reserved AVS3 basic static metadata level",
                         ));
                     }
-                    (Some(plan), Some(metadata), Some(prefix), None, None, None, None)
+                    (
+                        Some(plan),
+                        Some(metadata),
+                        Some(prefix),
+                        None,
+                        None,
+                        None,
+                        None,
+                        ParsedBwe::default(),
+                    )
                 }
                 MetadataBoundary::DynamicPresent { dynamic_bit_offset } => {
                     let object_channels = header.object_channels().ok_or(CodecError::InvalidData(
@@ -293,6 +409,10 @@ impl AudioDecoder for Avs3Decoder {
                     };
                     let (transform, core) =
                         self.parse_core_prefix(payload, decoded.core_bit_offset, plan)?;
+                    let bwe = core
+                        .map(|core| self.parse_bwe_after_core(payload, &header, plan, core))
+                        .transpose()?
+                        .unwrap_or_default();
                     (
                         Some(plan),
                         Some(metadata),
@@ -301,11 +421,21 @@ impl AudioDecoder for Avs3Decoder {
                         Some(decoded),
                         core,
                         Some(transform),
+                        bwe,
                     )
                 }
             }
         } else {
-            (None, None, None, None, None, None, None)
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ParsedBwe::default(),
+            )
         };
 
         self.packets_seen = self.packets_seen.saturating_add(1);
@@ -323,6 +453,10 @@ impl AudioDecoder for Avs3Decoder {
         self.last_dynamic_metadata = dynamic_metadata;
         self.last_core_side_prefix = core_side_prefix;
         self.last_first_transform_type = first_transform_type;
+        self.last_bwe_present = parsed_bwe.present;
+        self.last_bwe_config = parsed_bwe.config;
+        self.last_bwe_side_info = parsed_bwe.side_info;
+        self.last_after_bwe_bit_offset = parsed_bwe.next_bit_offset;
         self.last_frame_header = Some(header);
 
         match (method, metadata_boundary) {
@@ -332,8 +466,13 @@ impl AudioDecoder for Avs3Decoder {
             ) => Err(CodecError::Unsupported(
                 "AVS3-P3 BasicL1/VrExt static metadata body decoding is not implemented yet",
             )),
+            (AudioCodingMethod::GeneralFullRate, _) if self.last_bwe_present.is_none() => {
+                Err(CodecError::Unsupported(
+                    "AVS3-P3 HOA BWE configuration is not implemented yet",
+                ))
+            }
             (AudioCodingMethod::GeneralFullRate, _) => Err(CodecError::Unsupported(
-                "AVS3-P3 BWE/group/QC and entropy synthesis is not implemented yet",
+                "AVS3-P3 group/stereo-or-multichannel/QC and entropy synthesis is not implemented yet",
             )),
             (AudioCodingMethod::Lossless, _) => Err(CodecError::Unsupported(
                 "AVS3-P3 ll_raw_data_block lossless synthesis is not implemented yet",
@@ -354,6 +493,10 @@ impl AudioDecoder for Avs3Decoder {
         self.last_dynamic_metadata = None;
         self.last_core_side_prefix = None;
         self.last_first_transform_type = None;
+        self.last_bwe_present = None;
+        self.last_bwe_config = None;
+        self.last_bwe_side_info = None;
+        self.last_after_bwe_bit_offset = None;
         self.packets_seen = 0;
     }
 }
@@ -361,6 +504,17 @@ impl AudioDecoder for Avs3Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_lfe_only_for_bed_layouts_that_define_one() {
+        assert!(channel_configuration_has_lfe(Some(
+            ChannelConfiguration::Surround7_1_4
+        )));
+        assert!(!channel_configuration_has_lfe(Some(
+            ChannelConfiguration::Stereo
+        )));
+        assert!(!channel_configuration_has_lfe(None));
+    }
 
     #[test]
     fn rejects_non_aatf_packet_before_decode_stage() {
@@ -383,5 +537,6 @@ mod tests {
         assert_eq!(decoder.last_dynamic_metadata_prefix(), None);
         assert!(decoder.last_dynamic_metadata().is_none());
         assert_eq!(decoder.last_core_side_prefix(), None);
+        assert_eq!(decoder.last_bwe_present(), None);
     }
 }
