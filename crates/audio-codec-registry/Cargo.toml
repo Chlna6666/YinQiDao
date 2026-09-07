@@ -1,0 +1,14 @@
+[package]
+name = "yinqidao-codec-registry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+description = "Registry and capability metadata for YinQiDao pure-Rust non-Symphonia codecs"
+publish = false
+
+[dependencies]
+yinqidao-codec-core = { path = "../audio-codec-core" }
+
+[lib]
+path = "src/lib.rs"
