@@ -7,6 +7,7 @@
 
 mod allocation;
 mod base_neural;
+mod base_params;
 mod base_pipeline;
 mod bitreader;
 mod bwe;
@@ -37,6 +38,13 @@ pub use base_neural::{
     BASE_INPUT_CHANNELS, BASE_INPUT_POSITIONS, BASE_LAYER_1_SPEC, BASE_LAYER_2_SPEC,
     BASE_LAYER_3_SPEC, BASE_LAYER_4_SPEC, BASE_OUTPUT_POSITIONS, BaseDecoderParams,
     BaseDecoderWorkspace, IgdnParams, apply_igdn_in_place, decode_base_network,
+};
+pub use base_params::{
+    BASE_LAYER_1_BIAS, BASE_LAYER_1_IGDN_BETA, BASE_LAYER_1_IGDN_GAMMA,
+    BASE_LAYER_1_KERNEL_VALUES, BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA,
+    BASE_LAYER_2_IGDN_GAMMA, BASE_LAYER_2_KERNEL, BASE_LAYER_3_BIAS,
+    BASE_LAYER_3_IGDN_BETA, BASE_LAYER_3_IGDN_GAMMA, BASE_LAYER_3_KERNEL,
+    BASE_LAYER_4_BIAS, BASE_LAYER_4_KERNEL, base_decoder_params_with_layer1_kernel,
 };
 pub use base_pipeline::{
     BasePipelineWorkspace, NoiseFillingRng, apply_base_noise_filling_in_place,
