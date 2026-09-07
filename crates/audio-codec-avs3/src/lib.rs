@@ -32,6 +32,7 @@ mod ga_mono;
 mod ga_mono_neural;
 mod ga_mono_pcm;
 mod ga_mono_post;
+mod ga_stereo;
 mod group;
 mod imdct_synthesis;
 mod inverse_qc;
@@ -128,6 +129,10 @@ pub use ga_mono_neural::{
 pub use ga_mono_pcm::parse_decode_basic_mono_pcm;
 pub use ga_mono_post::{
     BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pre_fd,
+};
+pub use ga_stereo::{
+    GaStereoFrameSideInfo, StereoCouplingSideInfo, StereoSideInfo,
+    allocate_stereo_ms_bytes, parse_stereo_frame_side_info, parse_stereo_side_info_at,
 };
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
