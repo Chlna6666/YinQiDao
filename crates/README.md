@@ -7,7 +7,7 @@ Current layout:
 - `audio-codec-core`: decoder/frame/stream contracts shared by non-Symphonia codecs.
 - `audio-codec-registry`: canonical routing/capability metadata. A codec appearing here does **not** mean its decoder is complete; maturity is explicit.
 - `audio-simd`: runtime-dispatched kernels shared by codecs and DSP.
-- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, and exposes SIMD synthesis primitives.
+- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, general full-rate codec routing and fixed core-side transform selection, and exposes SIMD synthesis primitives.
 
 ## CPU dispatch policy
 
@@ -57,11 +57,16 @@ Implemented in pure Rust:
 3. General full-rate configuration parsing for channel, object, mixed and HOA content.
 4. AATF `0xFFF` syncword, codec id, ancillary flag, NN type, coding profile, sampling-frequency signalling, CRC fields, channel/object/HOA layout fields, resolution and bitrate indices.
 5. 7.1.4 / 5.1.4 / 7.1.2 / FOA / HOA channel-index mapping from the normative Annex A table.
-6. Validation that the AATF coding method and known sample rate agree with `dca3` before entering the codec payload.
+6. Validation that AATF coding method, sample rate, content profile, channel index and object counts agree with `dca3` where both are available.
+7. General full-rate `codecFormat` routing without touching compressed spectral data: mono, stereo, multichannel and HOA are selected from AATF profile/layout fields; mixed bed+objects always enters the multichannel path.
+8. Safe extraction of the raw coded block after the AATF header/CRC/alignment boundary.
+9. The fixed 2-bit `transformType` prefix of `DecodeCoreSideBits()` with long, short, cut-in and cut-out window modes.
 
 Still intentionally unsupported:
 
-- `ga_co_raw_data_block()` metadata/core side-bit demultiplexing;
+- `Avs3MetadataDec()` and metadata-length tracking at the beginning of `ga_co_raw_data_block()`;
+- the variable FdShaping/TNS/BWE portions of `DecodeCoreSideBits()`;
+- `DecodeGroupBits()` / stereo / multichannel / HOA side information;
 - range/entropy decoding and inverse quantization;
 - inverse transform, TNS/BWE and post synthesis;
 - stereo/multichannel reconstruction;
