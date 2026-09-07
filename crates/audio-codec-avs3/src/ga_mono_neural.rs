@@ -2,8 +2,8 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{
     BASE_OUTPUT_POSITIONS, BasePipelineWorkspace, BweConfig, ContextPipelineWorkspace,
-    GaMonoFrameSideInfo, NoiseFillingRng, decode_basic_base_to_mdct_normative,
-    decode_context_and_select_base_models_default,
+    GaMonoFrameSideInfo, NeuralNetworkType, NoiseFillingRng, decode_basic_base_to_mdct_normative,
+    decode_context_and_select_base_models_default, parse_mono_frame_side_info,
 };
 
 const BASE_MODEL_VALUES: usize = 64 * 16;
@@ -27,11 +27,11 @@ impl BasicMonoNeuralWorkspace {
         Self::default()
     }
 
-    pub fn context_stddev(&self) -> &[f32; BASE_MODEL_VALUES] {
+    pub fn context_stddev(&self) -> &[f32] {
         &self.context_stddev
     }
 
-    pub fn model_indices(&self) -> &[u8; BASE_MODEL_VALUES] {
+    pub fn model_indices(&self) -> &[u8] {
         &self.model_indices
     }
 }
@@ -111,6 +111,30 @@ pub fn decode_basic_mono_neural_mdct(
     )
 }
 
+/// Parse the complete mono syntax through QC and immediately execute the built-in Basic neural
+/// inverse-QC model. This is the thin production front-end intended for `Avs3Decoder`.
+///
+/// The returned side-info owns only parsed scalar metadata; context/base entropy payloads remain
+/// zero-copy bit ranges into `payload`.
+pub fn parse_and_decode_basic_mono_neural_mdct(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<GaMonoFrameSideInfo, CodecError> {
+    let side = parse_mono_frame_side_info(
+        payload,
+        core_bit_offset,
+        NeuralNetworkType::Basic,
+        low_bitrate_precision,
+        bwe_config,
+    )?;
+    decode_basic_mono_neural_mdct(payload, &side, workspace, output)?;
+    Ok(side)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +152,20 @@ mod tests {
             .expect("32 kb/s mono enables BWE");
         let expected = usize::from(config.target_tiles[0].unwrap());
         assert_eq!(noise_fill_line_count(Some(config)).unwrap(), expected);
+    }
+
+    #[test]
+    fn parse_and_decode_frontend_rejects_truncated_core_before_neural_work() {
+        let mut workspace = BasicMonoNeuralWorkspace::new();
+        let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
+        assert!(parse_and_decode_basic_mono_neural_mdct(
+            &[],
+            0,
+            false,
+            None,
+            &mut workspace,
+            &mut output,
+        )
+        .is_err());
     }
 }
