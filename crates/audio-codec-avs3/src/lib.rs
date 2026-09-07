@@ -24,6 +24,7 @@ mod entropy;
 mod frame;
 mod ga;
 mod ga_frame;
+mod ga_mono;
 mod group;
 mod inverse_qc;
 mod metadata;
@@ -89,6 +90,7 @@ pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use ga_frame::{
     GaChannelSideInfo, GaMultichannelFrameSideInfo, parse_multichannel_frame_side_info,
 };
+pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use group::{GroupSideInfo, parse_group_bits_at};
 pub use inverse_qc::{
     basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,
