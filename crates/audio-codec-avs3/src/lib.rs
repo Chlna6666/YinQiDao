@@ -10,6 +10,7 @@ mod bitreader;
 mod bwe;
 mod config;
 mod container;
+mod context_pipeline;
 mod core;
 mod decoder;
 mod dynamic_metadata;
@@ -39,6 +40,11 @@ pub use config::{
     full_rate_sample_rate, parse_dca3,
 };
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
+pub use context_pipeline::{
+    ContextModelParams, ContextPipelineWorkspace, decode_context_and_select_base_models,
+    decode_context_stddev_into, dequantize_context_latents_into,
+    select_base_range_models_into,
+};
 pub use core::{
     CoreSidePrefix, FdShapingSideInfo, TnsSideBoundary, TransformType,
     parse_core_side_prefix_at, parse_core_transform_type, parse_core_transform_type_at,
