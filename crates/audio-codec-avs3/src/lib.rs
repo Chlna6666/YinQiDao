@@ -22,7 +22,10 @@ pub use config::{
     full_rate_sample_rate, parse_dca3,
 };
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
-pub use core::{TransformType, parse_core_transform_type, parse_core_transform_type_at};
+pub use core::{
+    FdShapingSideInfo, TnsSideBoundary, TransformType, parse_core_transform_type,
+    parse_core_transform_type_at, parse_fd_shaping_at, parse_tns_boundary_at,
+};
 pub use decoder::Avs3Decoder;
 pub use dynamic_metadata::{
     CartesianExtent, ChannelLock, DynamicLevel1, DynamicLevel2, DynamicMetadata,
