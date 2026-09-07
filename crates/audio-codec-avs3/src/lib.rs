@@ -28,6 +28,7 @@ mod fd_shaping;
 mod frame;
 mod ga;
 mod ga_frame;
+mod ga_multichannel_pcm;
 mod ga_mono;
 mod ga_mono_neural;
 mod ga_mono_pcm;
@@ -119,6 +120,10 @@ pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_h
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use ga_frame::{
     GaChannelSideInfo, GaMultichannelFrameSideInfo, parse_multichannel_frame_side_info,
+};
+pub use ga_multichannel_pcm::{
+    BasicMultichannelSynthesisWorkspace, MC_LFE_RESERVED_LINES,
+    apply_multichannel_lfe_restriction, parse_decode_basic_multichannel_pcm,
 };
 pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use ga_mono_neural::{
