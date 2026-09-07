@@ -6,7 +6,6 @@ mod library;
 pub(crate) mod lyrics_overlay;
 mod mini_player_lyrics;
 #[allow(dead_code)]
-#[path = "player.rs"]
 mod player_legacy;
 mod player_facade;
 #[rustfmt::skip]
