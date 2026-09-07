@@ -1,4 +1,4 @@
-# AVS3 normative frequency-domain tables
+# AVS3 normative interoperability tables
 
 `avs3_fd_tables_0.bin` through `avs3_fd_tables_8.bin` are contiguous chunks of one
 43,968-byte little-endian asset containing 10,992 binary32 values used by AVS3
@@ -37,10 +37,23 @@ Canonical concatenated fingerprints:
 - SHA-256: `6b8e25a332edf722c81c494c85ab57d90f145d1524fd808e01333e1c9a6d39d5`
 - FNV-1a 64: `9ce264f019b75cc4`
 
-The Rust tests verify byte geometry, FNV-1a, finite values, all split-VQ table
-lengths, and bit-for-bit equality between the embedded mean vector and the
-existing Annex-B.46 `LSF_MEAN` constants.
+`avs3a_mcr_rotations.bin` is the normative MCR angle-VQ interoperability table
+preconverted to little-endian `(cos(theta), sin(theta))` `f32` pairs. The 512-entry
+long/transition-window codebook comes first, followed by the 256-entry short-window
+codebook; each entry has three angle dimensions. Keeping rotations rather than raw
+angles removes per-frame trigonometry from the <=32-kb/s stereo hot path.
 
-These files contain interoperability data rather than imported reference-decoder
-control flow. For terms and notices applying to the public reference material,
-consult its accompanying UWA Code Sharing Policy documentation.
+MCR rotation fingerprints:
+
+- size: `18,432` bytes
+- SHA-256: `9fe0ece1f78509f66847b9b31c60efed6a2185b5ee533e0b17e66cf3b5df61bc`
+- FNV-1a 64: `5b62aa9a6b23145a`
+
+The Rust tests verify byte geometry, fingerprints and representative rotation
+values. MCR indexing and inverse-rotation control flow are implemented independently
+in `mcr_synthesis.rs`; the asset is static interoperability data rather than imported
+reference-decoder control flow.
+
+These files contain interoperability data. For terms and notices applying to the
+public AVS3 reference material used for cross-checking, consult its accompanying
+UWA Code Sharing Policy documentation.

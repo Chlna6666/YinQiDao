@@ -2,21 +2,19 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{
     BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace, BweConfig,
-    BweSynthesisWorkspace, FdShapingWorkspace, GaStereoFrameSideInfo, NeuralNetworkType,
-    SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
-    apply_inverse_fd_spectrum_shaping, apply_inverse_tns, apply_stereo_ms_upmix,
-    decode_basic_channel_neural_mdct, inverse_group_spectrum, normative_lsf_codebooks,
-    parse_stereo_frame_side_info, synthesize_mdct_frame,
+    BweSideInfo, BweSynthesisWorkspace, CoreSidePrefix, FdShapingWorkspace,
+    GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, LsfCodebooks, NeuralNetworkType,
+    SpectrumDegroupWorkspace, StereoSideInfo, TnsSynthesisWorkspace, apply_bwe_synthesis,
+    apply_inverse_fd_spectrum_shaping, apply_inverse_tns, apply_mcr_stereo_upmix,
+    apply_stereo_ms_upmix, decode_basic_channel_neural_mdct, inverse_group_spectrum,
+    normative_lsf_codebooks, parse_stereo_frame_side_info, parse_stereo_mcr_frame_side_info,
+    synthesize_mdct_frame,
 };
 
 const STEREO_CHANNELS: usize = 2;
 const STEREO_PCM_SAMPLES: usize = BASE_OUTPUT_POSITIONS * STEREO_CHANNELS;
 
-/// Decoder-owned reusable state for the complete Basic-profile conventional-stereo path.
-///
-/// Each coded/downmixed channel owns independent neural, degrouping, BWE/TNS, FD-shaping and
-/// IMDCT/OLA state. The two 1024-line spectra are upmixed in place before post processing, matching
-/// the normative Table-9 ordering. Planar PCM scratch is interleaved only at the final API boundary.
+/// Decoder-owned reusable state for both conventional and MCR Basic-profile stereo paths.
 #[derive(Debug)]
 pub struct BasicStereoSynthesisWorkspace {
     neural: [BasicMonoNeuralWorkspace; STEREO_CHANNELS],
@@ -60,38 +58,80 @@ impl Default for BasicStereoSynthesisWorkspace {
     }
 }
 
-/// Decode one >32-kb/s conventional Basic-profile stereo payload to 1024 interleaved PCM frames.
+/// Common production diagnostics for both conventional and MCR stereo.
 ///
-/// Normative order:
-/// `two-channel neural inverse-QC -> inverse grouping -> inverse M/S + ILD -> per-channel BWE ->
-/// inverse TNS -> inverse FD shaping -> independent IMDCT/window/OLA -> interleave`.
-///
-/// MCR stereo remains an explicit unsupported path in `parse_stereo_frame_side_info()` until the
-/// referenced GB/T 33475.3 B.154/B.155 reconstruction codebooks are installed.
-pub fn parse_decode_basic_stereo_pcm(
-    payload: &[u8],
-    core_bit_offset: usize,
-    low_bitrate_precision: bool,
+/// MCR has no right-channel grouping/QC payload, so this deliberately exposes only data that exists
+/// for both modes instead of manufacturing a fake `GaChannelSideInfo` for the reconstructed channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GaStereoPcmChannelInfo {
+    pub core: CoreSidePrefix,
+    pub bwe: Option<BweSideInfo>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GaStereoPcmSideInfo {
+    pub channels: [GaStereoPcmChannelInfo; STEREO_CHANNELS],
+    pub stereo: StereoSideInfo,
+    pub is_mcr: bool,
+    pub next_bit_offset: usize,
+    pub trailing_bits: usize,
+}
+
+enum ParsedStereoSide {
+    Conventional(GaStereoFrameSideInfo),
+    Mcr(GaStereoMcrFrameSideInfo),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn post_synthesize_channel(
+    core: CoreSidePrefix,
+    bwe_side: Option<BweSideInfo>,
     bwe_config: Option<BweConfig>,
-    total_bitrate_kbps: u32,
-    workspace: &mut BasicStereoSynthesisWorkspace,
-    pcm_interleaved: &mut [f32],
-) -> Result<GaStereoFrameSideInfo, CodecError> {
-    if pcm_interleaved.len() != STEREO_PCM_SAMPLES {
-        return Err(CodecError::InvalidData(
-            "basic stereo synthesis output must contain 2048 interleaved PCM samples",
-        ));
+    codebooks: LsfCodebooks<'_>,
+    spectrum: &mut [f32],
+    bwe_workspace: &mut BweSynthesisWorkspace,
+    tns_workspace: &mut TnsSynthesisWorkspace,
+    fd_workspace: &mut FdShapingWorkspace,
+    pcm: &mut [f32],
+    synthesis_workspace: &mut Avs3SynthesisWorkspace,
+) -> Result<(), CodecError> {
+    match (bwe_config, bwe_side) {
+        (Some(config), Some(side)) => {
+            apply_bwe_synthesis(config, side, spectrum, bwe_workspace)?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CodecError::InvalidData(
+                "stereo BWE configuration and decoded side information disagree",
+            ));
+        }
     }
 
-    let side = parse_stereo_frame_side_info(
-        payload,
-        core_bit_offset,
-        NeuralNetworkType::Basic,
-        low_bitrate_precision,
-        bwe_config,
-        total_bitrate_kbps,
+    apply_inverse_tns(
+        &core.tns,
+        core.transform_type,
+        spectrum,
+        tns_workspace,
     )?;
+    apply_inverse_fd_spectrum_shaping(
+        &core.fd_shaping,
+        codebooks,
+        spectrum,
+        fd_workspace,
+    )?;
+    synthesize_mdct_frame(
+        core.transform_type,
+        spectrum,
+        pcm,
+        synthesis_workspace,
+    )
+}
 
+fn decode_conventional_stereo(
+    payload: &[u8],
+    side: &GaStereoFrameSideInfo,
+    workspace: &mut BasicStereoSynthesisWorkspace,
+) -> Result<(), CodecError> {
     for channel_index in 0..STEREO_CHANNELS {
         let channel = &side.channels[channel_index];
         decode_basic_channel_neural_mdct(
@@ -109,58 +149,156 @@ pub fn parse_decode_basic_stereo_pcm(
         )?;
     }
 
-    {
-        let (left, right) = workspace.spectra.split_at_mut(1);
-        apply_stereo_ms_upmix(side.stereo, &mut left[0], &mut right[0])?;
+    let (left, right) = workspace.spectra.split_at_mut(1);
+    apply_stereo_ms_upmix(side.stereo, &mut left[0], &mut right[0])
+}
+
+fn decode_mcr_stereo(
+    payload: &[u8],
+    side: &GaStereoMcrFrameSideInfo,
+    workspace: &mut BasicStereoSynthesisWorkspace,
+) -> Result<(), CodecError> {
+    decode_basic_channel_neural_mdct(
+        payload,
+        &side.left,
+        side.bwe_config,
+        &mut workspace.neural[0],
+        &mut workspace.spectra[0],
+    )?;
+    inverse_group_spectrum(
+        side.left.core.transform_type,
+        side.left.group,
+        &mut workspace.spectra[0],
+        &mut workspace.degroup[0],
+    )?;
+
+    let (left, right) = workspace.spectra.split_at_mut(1);
+    apply_mcr_stereo_upmix(side.stereo, &mut left[0], &mut right[0])
+}
+
+/// Decode one Basic-profile stereo payload to 1024 interleaved PCM frames.
+///
+/// >32 kb/s follows the conventional two-channel neural inverse-QC + M/S/ILD path. <=32 kb/s
+/// follows the normative MCR path: two core side blocks, one left grouping/QC payload, one neural
+/// inverse-QC, inverse grouping, 18-band MCR reconstruction, then independent channel-local
+/// BWE/TNS/FD shaping and IMDCT/OLA.
+pub fn parse_decode_basic_stereo_pcm(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    total_bitrate_kbps: u32,
+    workspace: &mut BasicStereoSynthesisWorkspace,
+    pcm_interleaved: &mut [f32],
+) -> Result<GaStereoPcmSideInfo, CodecError> {
+    if pcm_interleaved.len() != STEREO_PCM_SAMPLES {
+        return Err(CodecError::InvalidData(
+            "basic stereo synthesis output must contain 2048 interleaved PCM samples",
+        ));
     }
+
+    let parsed = if total_bitrate_kbps <= 32 {
+        let side = parse_stereo_mcr_frame_side_info(
+            payload,
+            core_bit_offset,
+            NeuralNetworkType::Basic,
+            low_bitrate_precision,
+            bwe_config,
+            total_bitrate_kbps,
+        )?;
+        decode_mcr_stereo(payload, &side, workspace)?;
+        ParsedStereoSide::Mcr(side)
+    } else {
+        let side = parse_stereo_frame_side_info(
+            payload,
+            core_bit_offset,
+            NeuralNetworkType::Basic,
+            low_bitrate_precision,
+            bwe_config,
+            total_bitrate_kbps,
+        )?;
+        decode_conventional_stereo(payload, &side, workspace)?;
+        ParsedStereoSide::Conventional(side)
+    };
 
     let codebooks = normative_lsf_codebooks();
-    for channel_index in 0..STEREO_CHANNELS {
-        let channel = &side.channels[channel_index];
-        let spectrum = &mut workspace.spectra[channel_index];
-
-        match (side.bwe_config, channel.bwe) {
-            (Some(config), Some(bwe_side)) => {
-                apply_bwe_synthesis(
-                    config,
-                    bwe_side,
-                    spectrum,
+    let diagnostics = match &parsed {
+        ParsedStereoSide::Conventional(frame) => {
+            for channel_index in 0..STEREO_CHANNELS {
+                let channel = &frame.channels[channel_index];
+                post_synthesize_channel(
+                    channel.core,
+                    channel.bwe,
+                    frame.bwe_config,
+                    codebooks,
+                    &mut workspace.spectra[channel_index],
                     &mut workspace.bwe[channel_index],
+                    &mut workspace.tns[channel_index],
+                    &mut workspace.fd[channel_index],
+                    &mut workspace.planar_pcm[channel_index],
+                    &mut workspace.synthesis[channel_index],
                 )?;
             }
-            (None, None) => {}
-            _ => {
-                return Err(CodecError::InvalidData(
-                    "stereo BWE configuration and decoded side information disagree",
-                ));
+            GaStereoPcmSideInfo {
+                channels: frame.channels.each_ref().map(|channel| GaStereoPcmChannelInfo {
+                    core: channel.core,
+                    bwe: channel.bwe,
+                }),
+                stereo: frame.stereo,
+                is_mcr: false,
+                next_bit_offset: frame.next_bit_offset,
+                trailing_bits: frame.trailing_bits,
             }
         }
-
-        apply_inverse_tns(
-            &channel.core.tns,
-            channel.core.transform_type,
-            spectrum,
-            &mut workspace.tns[channel_index],
-        )?;
-        apply_inverse_fd_spectrum_shaping(
-            &channel.core.fd_shaping,
-            codebooks,
-            spectrum,
-            &mut workspace.fd[channel_index],
-        )?;
-        synthesize_mdct_frame(
-            channel.core.transform_type,
-            spectrum,
-            &mut workspace.planar_pcm[channel_index],
-            &mut workspace.synthesis[channel_index],
-        )?;
-    }
+        ParsedStereoSide::Mcr(frame) => {
+            post_synthesize_channel(
+                frame.left.core,
+                frame.left.bwe,
+                frame.bwe_config,
+                codebooks,
+                &mut workspace.spectra[0],
+                &mut workspace.bwe[0],
+                &mut workspace.tns[0],
+                &mut workspace.fd[0],
+                &mut workspace.planar_pcm[0],
+                &mut workspace.synthesis[0],
+            )?;
+            post_synthesize_channel(
+                frame.right_core,
+                frame.right_bwe,
+                frame.bwe_config,
+                codebooks,
+                &mut workspace.spectra[1],
+                &mut workspace.bwe[1],
+                &mut workspace.tns[1],
+                &mut workspace.fd[1],
+                &mut workspace.planar_pcm[1],
+                &mut workspace.synthesis[1],
+            )?;
+            GaStereoPcmSideInfo {
+                channels: [
+                    GaStereoPcmChannelInfo {
+                        core: frame.left.core,
+                        bwe: frame.left.bwe,
+                    },
+                    GaStereoPcmChannelInfo {
+                        core: frame.right_core,
+                        bwe: frame.right_bwe,
+                    },
+                ],
+                stereo: frame.stereo,
+                is_mcr: true,
+                next_bit_offset: frame.next_bit_offset,
+                trailing_bits: frame.trailing_bits,
+            }
+        }
+    };
 
     for frame in 0..BASE_OUTPUT_POSITIONS {
         pcm_interleaved[2 * frame] = workspace.planar_pcm[0][frame];
         pcm_interleaved[2 * frame + 1] = workspace.planar_pcm[1][frame];
     }
-    Ok(side)
+    Ok(diagnostics)
 }
 
 #[cfg(test)]
@@ -184,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_payload_fails_before_neural_or_post_processing() {
+    fn truncated_conventional_payload_fails_before_neural_or_post_processing() {
         let mut workspace = BasicStereoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; STEREO_PCM_SAMPLES];
         assert!(parse_decode_basic_stereo_pcm(
@@ -193,6 +331,22 @@ mod tests {
             false,
             None,
             64,
+            &mut workspace,
+            &mut pcm,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn truncated_mcr_payload_selects_mcr_parser_without_falling_into_ms_layout() {
+        let mut workspace = BasicStereoSynthesisWorkspace::new();
+        let mut pcm = [0.0_f32; STEREO_PCM_SAMPLES];
+        assert!(parse_decode_basic_stereo_pcm(
+            &[],
+            0,
+            false,
+            None,
+            32,
             &mut workspace,
             &mut pcm,
         )

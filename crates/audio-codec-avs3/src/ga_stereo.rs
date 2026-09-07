@@ -1,7 +1,7 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BweConfig, BweSideInfo, GaChannelSideInfo, GroupSideInfo, NeuralNetworkType, QcSideInfo,
+    BweConfig, BweSideInfo, CoreSidePrefix, GaChannelSideInfo, GroupSideInfo, NeuralNetworkType,
     TransformType, bitreader::BitReader, parse_core_side_prefix_at, parse_group_bits_at,
     parse_qc_side_info_at, qc_fixed_header_bits,
 };
@@ -18,9 +18,9 @@ pub enum StereoCouplingSideInfo {
         ild_q_idx: Option<u8>,
         bits_ratio: u8,
     },
-    /// MCR side information. The current decoder parses these indices exactly but deliberately does
-    /// not consume them for upmix until the referenced GB/T 33475.3-2018 B.154/B.155 codebooks are
-    /// installed.
+    /// Low-bitrate MCR side information. Six three-dimensional VQ vectors are transmitted for each
+    /// of the even/odd subspectra. Long/transition windows use the 9-bit codebook and short windows
+    /// use the 8-bit codebook.
     Mcr {
         is_short_window: bool,
         vq_bits: u8,
@@ -43,6 +43,24 @@ pub struct GaStereoFrameSideInfo {
     pub channel_bytes: [usize; STEREO_CHANNELS],
     pub next_bit_offset: usize,
     /// Unused storage bits after the byte-counted QC payloads.
+    pub trailing_bits: usize,
+}
+
+/// Complete low-bitrate MCR frame side information.
+///
+/// MCR still transmits two complete core/BWE side blocks, but only the left coded channel carries
+/// grouping and QC entropy data. The right spectrum is reconstructed later from the left spectrum
+/// and the MCR VQ rotations, so inventing a synthetic right `GaChannelSideInfo` would incorrectly
+/// imply a second neural payload exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GaStereoMcrFrameSideInfo {
+    pub left: GaChannelSideInfo,
+    pub right_core: CoreSidePrefix,
+    pub right_bwe: Option<BweSideInfo>,
+    pub bwe_config: Option<BweConfig>,
+    pub stereo: StereoSideInfo,
+    pub channel_bytes: [usize; STEREO_CHANNELS],
+    pub next_bit_offset: usize,
     pub trailing_bits: usize,
 }
 
@@ -131,12 +149,25 @@ pub fn allocate_stereo_ms_bytes(
     Ok(([channel_zero, channel_one], available_bits & 7))
 }
 
+/// Normative MCR byte budget: one coded neural channel owns all byte-counted entropy payload.
+pub fn allocate_stereo_mcr_bytes(
+    remaining_payload_bits: usize,
+    nn_type: NeuralNetworkType,
+    group: GroupSideInfo,
+) -> Result<(usize, usize), CodecError> {
+    let fixed_qc_bits = qc_fixed_header_bits(nn_type, group.num_groups)?;
+    let available_bits = remaining_payload_bits
+        .checked_sub(fixed_qc_bits)
+        .ok_or(CodecError::Truncated)?;
+    Ok((available_bits / 8, available_bits & 7))
+}
+
 fn parse_channel_core_and_bwe(
     payload: &[u8],
     bit_offset: usize,
     low_bitrate_precision: bool,
     bwe_config: Option<BweConfig>,
-) -> Result<(crate::CoreSidePrefix, Option<BweSideInfo>, usize), CodecError> {
+) -> Result<(CoreSidePrefix, Option<BweSideInfo>, usize), CodecError> {
     let core = parse_core_side_prefix_at(payload, bit_offset, low_bitrate_precision)?;
     let mut next = core.next_bit_offset;
     let bwe = if let Some(config) = bwe_config {
@@ -149,13 +180,7 @@ fn parse_channel_core_and_bwe(
     Ok((core, bwe, next))
 }
 
-/// Parse a complete general-full-rate stereo frame through both byte-counted QC payloads.
-///
-/// The normative frame-major order is preserved: both core/BWE blocks, both grouping blocks,
-/// one stereo side block, stereo byte allocation, then two `DecodeQcBits()` blocks. The current
-/// executable path supports the >32-kb/s M/S mode; <=32-kb/s MCR syntax is parsed by
-/// `parse_stereo_side_info_at` but its single-channel QC allocation/upmix remains a separate
-/// milestone because it depends on GB/T 33475.3-2018 B.154/B.155.
+/// Parse a complete conventional (>32-kb/s) general-full-rate stereo frame through both QC blocks.
 pub fn parse_stereo_frame_side_info(
     payload: &[u8],
     core_bit_offset: usize,
@@ -164,6 +189,12 @@ pub fn parse_stereo_frame_side_info(
     bwe_config: Option<BweConfig>,
     total_bitrate_kbps: u32,
 ) -> Result<GaStereoFrameSideInfo, CodecError> {
+    if total_bitrate_kbps <= 32 {
+        return Err(CodecError::Unsupported(
+            "low-bitrate AVS3 stereo uses the dedicated MCR frame parser",
+        ));
+    }
+
     let (core0, bwe0, after_core0) = parse_channel_core_and_bwe(
         payload,
         core_bit_offset,
@@ -187,8 +218,8 @@ pub fn parse_stereo_frame_side_info(
     )?;
 
     let StereoCouplingSideInfo::Ms { bits_ratio, .. } = stereo.coupling else {
-        return Err(CodecError::Unsupported(
-            "AVS3 MCR stereo QC allocation/upmix requires GB/T 33475.3 B.154/B.155",
+        return Err(CodecError::Internal(
+            "conventional stereo parser unexpectedly selected MCR".into(),
         ));
     };
 
@@ -246,6 +277,88 @@ pub fn parse_stereo_frame_side_info(
     })
 }
 
+/// Parse a complete <=32-kb/s MCR stereo frame.
+///
+/// Ordering follows `Avs3StereoMcrDec`: two core/BWE side blocks, grouping for the left coded
+/// channel only, MCR VQ side data, a one-channel QC allocation, then one left-channel QC block.
+pub fn parse_stereo_mcr_frame_side_info(
+    payload: &[u8],
+    core_bit_offset: usize,
+    nn_type: NeuralNetworkType,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    total_bitrate_kbps: u32,
+) -> Result<GaStereoMcrFrameSideInfo, CodecError> {
+    if total_bitrate_kbps > 32 {
+        return Err(CodecError::InvalidData(
+            "MCR stereo parser requires a total bitrate at or below 32 kb/s",
+        ));
+    }
+
+    let (left_core, left_bwe, after_left) = parse_channel_core_and_bwe(
+        payload,
+        core_bit_offset,
+        low_bitrate_precision,
+        bwe_config,
+    )?;
+    let (right_core, right_bwe, after_right) = parse_channel_core_and_bwe(
+        payload,
+        after_left,
+        low_bitrate_precision,
+        bwe_config,
+    )?;
+    let left_group = parse_group_bits_at(payload, after_right, left_core.transform_type)?;
+    let stereo = parse_stereo_side_info_at(
+        payload,
+        left_group.next_bit_offset,
+        total_bitrate_kbps,
+        left_core.transform_type,
+    )?;
+    if !matches!(stereo.coupling, StereoCouplingSideInfo::Mcr { .. }) {
+        return Err(CodecError::Internal(
+            "MCR frame parser unexpectedly selected conventional stereo".into(),
+        ));
+    }
+
+    let payload_bits = payload.len().saturating_mul(8);
+    let remaining_payload_bits = payload_bits
+        .checked_sub(stereo.next_bit_offset)
+        .ok_or(CodecError::Truncated)?;
+    let (left_bytes, trailing_bits) =
+        allocate_stereo_mcr_bytes(remaining_payload_bits, nn_type, left_group)?;
+    let left_qc = parse_qc_side_info_at(
+        payload,
+        stereo.next_bit_offset,
+        nn_type,
+        left_group.num_groups,
+        left_bytes,
+    )?;
+    let actual_tail = payload_bits
+        .checked_sub(left_qc.next_bit_offset)
+        .ok_or(CodecError::Truncated)?;
+    if actual_tail != trailing_bits {
+        return Err(CodecError::Internal(
+            "MCR QC parsing does not match one-channel payload accounting".into(),
+        ));
+    }
+
+    Ok(GaStereoMcrFrameSideInfo {
+        left: GaChannelSideInfo {
+            core: left_core,
+            bwe: left_bwe,
+            group: left_group,
+            qc: left_qc,
+        },
+        right_core,
+        right_bwe,
+        bwe_config,
+        stereo,
+        channel_bytes: [left_bytes, 0],
+        next_bit_offset: left_qc.next_bit_offset,
+        trailing_bits,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,7 +370,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {
@@ -340,22 +456,33 @@ mod tests {
     }
 
     #[test]
+    fn mcr_allocation_reserves_only_one_qc_header() {
+        let group = GroupSideInfo {
+            num_groups: 1,
+            group_indicator: [false; 8],
+            next_bit_offset: 0,
+        };
+        let (bytes, tail) =
+            allocate_stereo_mcr_bytes(19 + 13 * 8 + 5, NeuralNetworkType::Basic, group).unwrap();
+        assert_eq!(bytes, 13);
+        assert_eq!(tail, 5);
+    }
+
+    #[test]
     fn parses_complete_basic_ms_frame_and_qc_ranges() {
         let mut writer = BitWriter::new();
-        writer.zeros(50); // ch0 long core, high-precision FD, two disabled TNS filters
-        writer.zeros(50); // ch1
-        writer.push(1, 1); // isMs
-        writer.push(8, 4); // IldQIdx
-        writer.push(3, 3); // bitsRatio -> 3/8 of byte groups to ch0
+        writer.zeros(50);
+        writer.zeros(50);
+        writer.push(1, 1);
+        writer.push(8, 4);
+        writer.push(3, 3);
 
-        // channel 0: 19 fixed Basic bits + six range-coded bytes
         writer.push(0, 1);
         writer.push(127, 7);
         writer.push(0, 3);
         writer.push(0, 8);
         writer.zeros(6 * 8);
 
-        // channel 1: 19 fixed Basic bits + ten range-coded bytes
         writer.push(0, 1);
         writer.push(127, 7);
         writer.push(0, 3);
@@ -380,23 +507,33 @@ mod tests {
     }
 
     #[test]
-    fn complete_mcr_frame_stops_before_guessing_qc_layout() {
+    fn parses_complete_mcr_frame_with_one_coded_qc_channel() {
         let mut writer = BitWriter::new();
         writer.zeros(50);
         writer.zeros(50);
-        for _ in 0..MCR_VQ_VECTORS * 2 {
-            writer.push(0, 9);
+        for index in 0..MCR_VQ_VECTORS {
+            writer.push(index as u32, 9);
+            writer.push((index + 16) as u32, 9);
         }
-        assert!(matches!(
-            parse_stereo_frame_side_info(
-                &writer.bytes,
-                0,
-                NeuralNetworkType::Basic,
-                false,
-                None,
-                32,
-            ),
-            Err(CodecError::Unsupported(_))
-        ));
+        writer.push(0, 1);
+        writer.push(127, 7);
+        writer.push(0, 3);
+        writer.push(0, 8);
+        writer.zeros(4 * 8);
+
+        let frame = parse_stereo_mcr_frame_side_info(
+            &writer.bytes,
+            0,
+            NeuralNetworkType::Basic,
+            false,
+            None,
+            32,
+        )
+        .unwrap();
+        assert_eq!(frame.channel_bytes, [4, 0]);
+        assert_eq!(frame.left.qc.channel_bytes, 4);
+        assert_eq!(frame.next_bit_offset, writer.bit_pos);
+        assert_eq!(frame.trailing_bits, writer.bytes.len() * 8 - writer.bit_pos);
+        assert!(matches!(frame.stereo.coupling, StereoCouplingSideInfo::Mcr { .. }));
     }
 }

@@ -40,6 +40,7 @@ mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
 mod mcac_synthesis;
+mod mcr_synthesis;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
@@ -135,10 +136,14 @@ pub use ga_mono_post::{
     BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pre_fd,
 };
 pub use ga_stereo::{
-    GaStereoFrameSideInfo, StereoCouplingSideInfo, StereoSideInfo,
-    allocate_stereo_ms_bytes, parse_stereo_frame_side_info, parse_stereo_side_info_at,
+    GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, StereoCouplingSideInfo,
+    StereoSideInfo, allocate_stereo_mcr_bytes, allocate_stereo_ms_bytes,
+    parse_stereo_frame_side_info, parse_stereo_mcr_frame_side_info, parse_stereo_side_info_at,
 };
-pub use ga_stereo_pcm::{BasicStereoSynthesisWorkspace, parse_decode_basic_stereo_pcm};
+pub use ga_stereo_pcm::{
+    BasicStereoSynthesisWorkspace, GaStereoPcmChannelInfo, GaStereoPcmSideInfo,
+    parse_decode_basic_stereo_pcm,
+};
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
 };
@@ -151,6 +156,12 @@ pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
 pub use mcac_synthesis::{
     MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor,
     resolve_multichannel_pair_index,
+};
+pub use mcr_synthesis::{
+    MCR_LONG_CODEBOOK_ENTRIES, MCR_ROTATION_BYTES_LEN, MCR_ROTATION_FNV1A,
+    MCR_ROTATION_VALUES, MCR_SCALE_FACTOR_BANDS, MCR_SHORT_CODEBOOK_ENTRIES,
+    MCR_SUBSPECTRA, MCR_SUBVECTOR_DIMENSIONS, MCR_SUBVECTORS, apply_mcr_stereo_upmix,
+    mcr_rotation_bytes,
 };
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
