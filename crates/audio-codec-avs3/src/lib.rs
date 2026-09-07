@@ -33,6 +33,7 @@ mod ga_mono_neural;
 mod ga_mono_pcm;
 mod ga_mono_post;
 mod ga_stereo;
+mod ga_stereo_pcm;
 mod group;
 mod imdct_synthesis;
 mod inverse_qc;
@@ -68,12 +69,8 @@ pub use base_pipeline::{
     BasePipelineWorkspace, NoiseFillingRng, apply_base_noise_filling_in_place,
     decode_basic_base_to_mdct, dequantize_base_latents_into,
 };
-pub use bwe::{
-    BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at,
-};
-pub use bwe_synthesis::{
-    BweSynthesisWorkspace, BweWhiteningRng, apply_bwe_synthesis,
-};
+pub use bwe::{BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at};
+pub use bwe_synthesis::{BweSynthesisWorkspace, BweWhiteningRng, apply_bwe_synthesis};
 pub use config::{
     AudioCodingMethod, Avs3SpecificConfig, ChannelConfiguration, CodingProfile, ContentType,
     GeneralFullRateConfig, LosslessConfig, NeuralNetworkType, QuantizationResolution,
@@ -124,8 +121,8 @@ pub use ga_frame::{
 };
 pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use ga_mono_neural::{
-    BasicMonoNeuralWorkspace, decode_basic_mono_neural_mdct,
-    parse_and_decode_basic_mono_neural_mdct,
+    BasicMonoNeuralWorkspace, decode_basic_channel_neural_mdct,
+    decode_basic_mono_neural_mdct, parse_and_decode_basic_mono_neural_mdct,
 };
 pub use ga_mono_pcm::parse_decode_basic_mono_pcm;
 pub use ga_mono_post::{
@@ -135,6 +132,7 @@ pub use ga_stereo::{
     GaStereoFrameSideInfo, StereoCouplingSideInfo, StereoSideInfo,
     allocate_stereo_ms_bytes, parse_stereo_frame_side_info, parse_stereo_side_info_at,
 };
+pub use ga_stereo_pcm::{BasicStereoSynthesisWorkspace, parse_decode_basic_stereo_pcm};
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
 };
@@ -171,9 +169,7 @@ pub use range_tables::{
     select_base_range_model_index,
 };
 pub use stereo_synthesis::apply_stereo_ms_upmix;
-pub use synthesis::{
-    apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
-};
+pub use synthesis::{apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot};
 pub use tns::{
     TNS_REFLECTION_COEFFICIENTS, TnsFilterSideInfo, TnsSideInfo,
     parse_tns_side_info_at, reflection_coefficient,
