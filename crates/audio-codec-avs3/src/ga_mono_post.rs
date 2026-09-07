@@ -3,12 +3,12 @@ use yinqidao_codec_core::CodecError;
 use crate::{
     BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace, BweConfig,
     BweSynthesisWorkspace, FdShapingWorkspace, GaMonoFrameSideInfo, LsfCodebooks,
-    SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
+    NeuralNetworkType, SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
     apply_inverse_fd_spectrum_shaping, apply_inverse_tns, inverse_group_spectrum,
-    parse_and_decode_basic_mono_neural_mdct, synthesize_mdct_frame,
+    parse_and_decode_mono_neural_mdct, synthesize_mdct_frame,
 };
 
-/// Decoder-owned reusable state for the Basic mono path through inverse TNS.
+/// Decoder-owned reusable state for the mono path through inverse TNS.
 #[derive(Debug, Default)]
 pub struct BasicMonoPreFdWorkspace {
     neural: BasicMonoNeuralWorkspace,
@@ -27,11 +27,11 @@ impl BasicMonoPreFdWorkspace {
     }
 }
 
-/// Persistent state for the complete Basic-profile mono spectral and PCM path.
+/// Persistent state for the complete mono spectral and PCM path.
 ///
-/// Neural scratch, BWE/TNS state, FD-shaping buffers, FFT plans/scratch, overlap history and the
-/// intermediate 1024-line spectrum all live here and are reused across frames. Once constructed,
-/// decoding one frame does not allocate in the post-neural path.
+/// The same post-neural state is reused by Basic and Low-Complexity inverse-QC profiles. Neural
+/// scratch, BWE/TNS state, FD-shaping buffers, FFT plans/scratch, overlap history and the
+/// intermediate 1024-line spectrum all live here and are reused across frames.
 #[derive(Debug, Default)]
 pub struct BasicMonoSynthesisWorkspace {
     pre_fd: BasicMonoPreFdWorkspace,
@@ -49,7 +49,6 @@ impl BasicMonoSynthesisWorkspace {
         &self.pre_fd
     }
 
-    /// Most recently reconstructed spectrum after inverse FD shaping.
     pub fn spectrum(&self) -> &[f32; BASE_OUTPUT_POSITIONS] {
         &self.spectrum
     }
@@ -59,14 +58,9 @@ impl BasicMonoSynthesisWorkspace {
     }
 }
 
-/// Parse and decode a Basic-profile mono frame through the complete pre-FD-shaping spectrum path.
-///
-/// Order:
-/// `QC/neural inverse -> spectrum inverse grouping -> BWE -> inverse TNS`.
-///
-/// The returned 1024-line spectrum is intentionally left before frequency-domain inverse spectrum
-/// shaping so callers that need a spectral-domain stage can reuse this boundary directly.
-pub fn parse_decode_basic_mono_pre_fd(
+/// Parse and decode a mono frame through the complete pre-FD-shaping spectrum path.
+pub fn parse_decode_mono_pre_fd(
+    nn_type: NeuralNetworkType,
     payload: &[u8],
     core_bit_offset: usize,
     low_bitrate_precision: bool,
@@ -76,11 +70,12 @@ pub fn parse_decode_basic_mono_pre_fd(
 ) -> Result<GaMonoFrameSideInfo, CodecError> {
     if output.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
-            "basic mono pre-FD output must contain 1024 MDCT coefficients",
+            "mono pre-FD output must contain 1024 MDCT coefficients",
         ));
     }
 
-    let side = parse_and_decode_basic_mono_neural_mdct(
+    let side = parse_and_decode_mono_neural_mdct(
+        nn_type,
         payload,
         core_bit_offset,
         low_bitrate_precision,
@@ -115,21 +110,32 @@ pub fn parse_decode_basic_mono_pre_fd(
         output,
         &mut workspace.tns,
     )?;
-
     Ok(side)
 }
 
-/// Decode one Basic-profile mono payload all the way to 1024 floating-point PCM samples.
-///
-/// Normative order:
-/// `neural inverse-QC -> inverse grouping -> BWE -> inverse TNS -> inverse FD shaping -> IMDCT ->
-/// window -> overlap/add`.
-///
-/// `codebooks` is currently explicit because Annex-B B.34..B.45 are the final large normative
-/// asset not yet bundled in this crate. The execution path itself is complete; once the static
-/// asset is installed this parameter can be replaced by `normative_lsf_codebooks()` without
-/// changing the hot path.
-pub fn parse_decode_basic_mono_pcm(
+/// Compatibility Basic-profile pre-FD entry point.
+pub fn parse_decode_basic_mono_pre_fd(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    workspace: &mut BasicMonoPreFdWorkspace,
+    output: &mut [f32],
+) -> Result<GaMonoFrameSideInfo, CodecError> {
+    parse_decode_mono_pre_fd(
+        NeuralNetworkType::Basic,
+        payload,
+        core_bit_offset,
+        low_bitrate_precision,
+        bwe_config,
+        workspace,
+        output,
+    )
+}
+
+/// Decode one mono payload all the way to 1024 floating-point PCM samples.
+pub fn parse_decode_mono_pcm_with_codebooks(
+    nn_type: NeuralNetworkType,
     payload: &[u8],
     core_bit_offset: usize,
     low_bitrate_precision: bool,
@@ -140,11 +146,12 @@ pub fn parse_decode_basic_mono_pcm(
 ) -> Result<GaMonoFrameSideInfo, CodecError> {
     if pcm.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
-            "basic mono synthesis output must contain 1024 PCM samples",
+            "mono synthesis output must contain 1024 PCM samples",
         ));
     }
 
-    let side = parse_decode_basic_mono_pre_fd(
+    let side = parse_decode_mono_pre_fd(
+        nn_type,
         payload,
         core_bit_offset,
         low_bitrate_precision,
@@ -168,6 +175,28 @@ pub fn parse_decode_basic_mono_pcm(
     Ok(side)
 }
 
+/// Compatibility Basic-profile mono PCM entry point with explicit LSF codebooks.
+pub fn parse_decode_basic_mono_pcm(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    codebooks: LsfCodebooks<'_>,
+    workspace: &mut BasicMonoSynthesisWorkspace,
+    pcm: &mut [f32],
+) -> Result<GaMonoFrameSideInfo, CodecError> {
+    parse_decode_mono_pcm_with_codebooks(
+        NeuralNetworkType::Basic,
+        payload,
+        core_bit_offset,
+        low_bitrate_precision,
+        bwe_config,
+        codebooks,
+        workspace,
+        pcm,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,22 +216,8 @@ mod tests {
     fn rejects_wrong_output_geometry_before_parsing() {
         let mut workspace = BasicMonoPreFdWorkspace::new();
         let mut output = [0.0_f32; 8];
-        assert!(parse_decode_basic_mono_pre_fd(
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn truncated_payload_fails_before_post_processing() {
-        let mut workspace = BasicMonoPreFdWorkspace::new();
-        let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_basic_mono_pre_fd(
+        assert!(parse_decode_mono_pre_fd(
+            NeuralNetworkType::LowComplexity,
             &[],
             0,
             false,
@@ -230,10 +245,11 @@ mod tests {
     }
 
     #[test]
-    fn complete_pcm_frontend_rejects_truncated_payload_before_table_lookup() {
+    fn low_complexity_pcm_frontend_rejects_truncated_payload_before_table_lookup() {
         let mut workspace = BasicMonoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_basic_mono_pcm(
+        assert!(parse_decode_mono_pcm_with_codebooks(
+            NeuralNetworkType::LowComplexity,
             &[],
             0,
             false,

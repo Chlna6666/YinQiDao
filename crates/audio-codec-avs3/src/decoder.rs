@@ -12,9 +12,9 @@ use crate::{
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::coded_payload,
-    ga_mono_pcm::parse_decode_basic_mono_pcm,
-    ga_multichannel_pcm::parse_decode_basic_multichannel_pcm,
-    ga_stereo_pcm::parse_decode_basic_stereo_pcm,
+    ga_mono_pcm::parse_decode_mono_pcm,
+    ga_multichannel_pcm::parse_decode_multichannel_pcm,
+    ga_stereo_pcm::parse_decode_stereo_pcm,
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
@@ -27,11 +27,11 @@ struct ResolvedBwe {
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Basic-profile mono, conventional >32-kb/s stereo and multichannel general-full-rate frames
-/// execute the complete built-in path through neural inverse-QC, inverse grouping/coupling,
-/// BWE/TNS, inverse FD shaping and IMDCT/OLA to PCM. Multichannel LFE output additionally follows
-/// the normative 32-line spectrum restriction. MCR stereo, HOA, low-complexity neural synthesis and
-/// lossless coding remain explicit later milestones.
+/// Basic and Low-Complexity mono/stereo/multichannel general-full-rate frames execute the complete
+/// built-in path through neural inverse-QC, inverse grouping/coupling, BWE/TNS, inverse FD shaping
+/// and IMDCT/OLA to PCM. Stereo includes conventional M/S/ILD and <=32-kb/s MCR reconstruction;
+/// multichannel LFE output additionally follows the normative 32-line spectrum restriction. HOA
+/// and lossless coding remain explicit later milestones.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -405,18 +405,10 @@ impl AudioDecoder for Avs3Decoder {
                 let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
                     "general-full-rate AATF frame is missing neural-network type",
                 ))?;
-                match nn_type {
-                    NeuralNetworkType::Basic => {}
-                    NeuralNetworkType::LowComplexity => {
-                        return Err(CodecError::Unsupported(
-                            "AVS3-P3 low-complexity multichannel neural synthesis is not implemented yet",
-                        ));
-                    }
-                    NeuralNetworkType::Reserved(_) => {
-                        return Err(CodecError::Unsupported(
-                            "reserved AVS3 neural-network type",
-                        ));
-                    }
+                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+                    return Err(CodecError::Unsupported(
+                        "reserved AVS3 neural-network type",
+                    ));
                 }
                 let low_bitrate = self
                     .lsf_low_bitrate_precision(plan)
@@ -444,7 +436,8 @@ impl AudioDecoder for Avs3Decoder {
                     channel_count,
                 );
                 output.samples.resize(sample_count, 0.0);
-                let frame = parse_decode_basic_multichannel_pcm(
+                let frame = parse_decode_multichannel_pcm(
+                    nn_type,
                     payload,
                     core_bit_offset,
                     low_bitrate,
@@ -476,18 +469,10 @@ impl AudioDecoder for Avs3Decoder {
                 let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
                     "general-full-rate AATF frame is missing neural-network type",
                 ))?;
-                match nn_type {
-                    NeuralNetworkType::Basic => {}
-                    NeuralNetworkType::LowComplexity => {
-                        return Err(CodecError::Unsupported(
-                            "AVS3-P3 low-complexity mono neural synthesis is not implemented yet",
-                        ));
-                    }
-                    NeuralNetworkType::Reserved(_) => {
-                        return Err(CodecError::Unsupported(
-                            "reserved AVS3 neural-network type",
-                        ));
-                    }
+                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+                    return Err(CodecError::Unsupported(
+                        "reserved AVS3 neural-network type",
+                    ));
                 }
                 let low_bitrate = self
                     .lsf_low_bitrate_precision(plan)
@@ -497,7 +482,8 @@ impl AudioDecoder for Avs3Decoder {
 
                 output.clear_for(header.sample_rate.unwrap_or(self.info.sample_rate), 1);
                 output.samples.resize(BASE_OUTPUT_POSITIONS, 0.0);
-                let side = parse_decode_basic_mono_pcm(
+                let side = parse_decode_mono_pcm(
+                    nn_type,
                     payload,
                     core_bit_offset,
                     low_bitrate,
@@ -523,18 +509,10 @@ impl AudioDecoder for Avs3Decoder {
                 let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
                     "general-full-rate AATF frame is missing neural-network type",
                 ))?;
-                match nn_type {
-                    NeuralNetworkType::Basic => {}
-                    NeuralNetworkType::LowComplexity => {
-                        return Err(CodecError::Unsupported(
-                            "AVS3-P3 low-complexity stereo neural synthesis is not implemented yet",
-                        ));
-                    }
-                    NeuralNetworkType::Reserved(_) => {
-                        return Err(CodecError::Unsupported(
-                            "reserved AVS3 neural-network type",
-                        ));
-                    }
+                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+                    return Err(CodecError::Unsupported(
+                        "reserved AVS3 neural-network type",
+                    ));
                 }
                 let low_bitrate = self
                     .lsf_low_bitrate_precision(plan)
@@ -545,7 +523,8 @@ impl AudioDecoder for Avs3Decoder {
 
                 output.clear_for(header.sample_rate.unwrap_or(self.info.sample_rate), 2);
                 output.samples.resize(BASE_OUTPUT_POSITIONS * 2, 0.0);
-                let side = parse_decode_basic_stereo_pcm(
+                let side = parse_decode_stereo_pcm(
+                    nn_type,
                     payload,
                     core_bit_offset,
                     low_bitrate,

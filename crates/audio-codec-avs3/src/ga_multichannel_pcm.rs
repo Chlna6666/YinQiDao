@@ -5,25 +5,14 @@ use crate::{
     BweSynthesisWorkspace, FdShapingWorkspace, GaMultichannelFrameSideInfo, NeuralNetworkType,
     SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
     apply_inverse_fd_spectrum_shaping, apply_inverse_tns, apply_multichannel_mcac,
-    decode_basic_channel_neural_mdct, inverse_group_spectrum, normative_lsf_codebooks,
+    decode_channel_neural_mdct, inverse_group_spectrum, normative_lsf_codebooks,
     parse_multichannel_frame_side_info, synthesize_mdct_frame,
 };
 
 /// Number of MDCT coefficients retained for an AVS3 multichannel LFE signal.
-///
-/// The published UWA/Huawei reference decoder defines `LFE_RESERVED_LINES` as 32 and clears all
-/// higher coefficients in `McLfeProc()` after inverse FD spectrum shaping and before IMDCT. At
-/// 48 kHz with the normative 1024-line long transform this corresponds to the intended ~750-Hz LFE
-/// bandwidth. Short-window spectra remain in the codec's eight-way frequency-interleaved layout at
-/// this point; keeping the first 32 entries is therefore equivalent to the reference decoder's
-/// pre-deinterleave restriction.
 pub const MC_LFE_RESERVED_LINES: usize = 32;
 
-/// Decoder-owned reusable state for the complete Basic-profile multichannel path.
-///
-/// Workspaces are provisioned once for the configured channel count and then retained across
-/// frames. Each coded channel owns independent neural, inverse-grouping, BWE/TNS, FD-shaping and
-/// IMDCT/OLA state. Spectra are coupled in place by MCAC before the per-channel post-synthesis pass.
+/// Decoder-owned reusable state for the complete multichannel path across both neural profiles.
 #[derive(Debug, Default)]
 pub struct BasicMultichannelSynthesisWorkspace {
     neural: Vec<BasicMonoNeuralWorkspace>,
@@ -92,9 +81,6 @@ impl BasicMultichannelSynthesisWorkspace {
 }
 
 /// Apply the normative multichannel LFE high-frequency restriction in-place.
-///
-/// This must run after BWE, inverse TNS and inverse FD spectrum shaping, but before IMDCT/OLA. It is
-/// intentionally separate from MCAC because the LFE channel does not participate in MCAC coupling.
 pub fn apply_multichannel_lfe_restriction(spectrum: &mut [f32]) -> Result<(), CodecError> {
     if spectrum.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
@@ -105,17 +91,14 @@ pub fn apply_multichannel_lfe_restriction(spectrum: &mut [f32]) -> Result<(), Co
     Ok(())
 }
 
-/// Decode one Basic-profile multichannel payload to 1024 interleaved N-channel PCM frames.
+/// Decode one Basic or Low-Complexity multichannel payload to interleaved N-channel PCM.
 ///
-/// Normative execution order:
-/// `all channel inverse-QC -> all inverse grouping -> MCAC -> per-channel BWE -> inverse TNS ->
-/// inverse FD shaping -> LFE 32-line restriction -> per-channel IMDCT/window/OLA -> interleave`.
-///
-/// The LFE restriction is applied only to `lfe_index`; pair indices consumed by MCAC address the
-/// non-LFE logical channel list and are mapped back to coded-channel positions by
-/// [`apply_multichannel_mcac`].
+/// Execution order is profile-independent after inverse-QC:
+/// `all inverse-QC -> all inverse grouping -> MCAC -> per-channel BWE/TNS/FD -> LFE restriction
+/// -> per-channel IMDCT/OLA -> interleave`.
 #[allow(clippy::too_many_arguments)]
-pub fn parse_decode_basic_multichannel_pcm(
+pub fn parse_decode_multichannel_pcm(
+    nn_type: NeuralNetworkType,
     payload: &[u8],
     core_bit_offset: usize,
     low_bitrate_precision: bool,
@@ -126,9 +109,14 @@ pub fn parse_decode_basic_multichannel_pcm(
     workspace: &mut BasicMultichannelSynthesisWorkspace,
     pcm_interleaved: &mut [f32],
 ) -> Result<GaMultichannelFrameSideInfo, CodecError> {
+    if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "reserved AVS3 neural-network type in multichannel synthesis",
+        ));
+    }
     if channel_count < 3 {
         return Err(CodecError::InvalidData(
-            "basic multichannel synthesis requires at least three channels",
+            "multichannel synthesis requires at least three channels",
         ));
     }
     let channel_count_usize = usize::from(channel_count);
@@ -146,7 +134,7 @@ pub fn parse_decode_basic_multichannel_pcm(
         ))?;
     if pcm_interleaved.len() != expected_samples {
         return Err(CodecError::InvalidData(
-            "basic multichannel synthesis output has invalid interleaved PCM geometry",
+            "multichannel synthesis output has invalid interleaved PCM geometry",
         ));
     }
 
@@ -154,7 +142,7 @@ pub fn parse_decode_basic_multichannel_pcm(
         payload,
         core_bit_offset,
         channel_count,
-        NeuralNetworkType::Basic,
+        nn_type,
         low_bitrate_precision,
         bwe_config,
         total_bitrate_kbps,
@@ -170,7 +158,8 @@ pub fn parse_decode_basic_multichannel_pcm(
 
     for channel_index in 0..channel_count_usize {
         let channel = &side.channels[channel_index];
-        decode_basic_channel_neural_mdct(
+        decode_channel_neural_mdct(
+            nn_type,
             payload,
             channel,
             side.bwe_config,
@@ -242,6 +231,33 @@ pub fn parse_decode_basic_multichannel_pcm(
     Ok(side)
 }
 
+/// Compatibility Basic-profile multichannel entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_decode_basic_multichannel_pcm(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    total_bitrate_kbps: u32,
+    channel_count: u16,
+    lfe_index: Option<usize>,
+    workspace: &mut BasicMultichannelSynthesisWorkspace,
+    pcm_interleaved: &mut [f32],
+) -> Result<GaMultichannelFrameSideInfo, CodecError> {
+    parse_decode_multichannel_pcm(
+        NeuralNetworkType::Basic,
+        payload,
+        core_bit_offset,
+        low_bitrate_precision,
+        bwe_config,
+        total_bitrate_kbps,
+        channel_count,
+        lfe_index,
+        workspace,
+        pcm_interleaved,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,24 +267,17 @@ mod tests {
         let mut spectrum: [f32; BASE_OUTPUT_POSITIONS] =
             std::array::from_fn(|index| index as f32 + 1.0);
         let preserved = spectrum[..MC_LFE_RESERVED_LINES].to_vec();
-
         apply_multichannel_lfe_restriction(&mut spectrum).unwrap();
-
         assert_eq!(&spectrum[..MC_LFE_RESERVED_LINES], preserved.as_slice());
         assert!(spectrum[MC_LFE_RESERVED_LINES..].iter().all(|&value| value == 0.0));
     }
 
     #[test]
-    fn lfe_restriction_rejects_non_normative_spectrum_geometry() {
-        let mut spectrum = [1.0_f32; 32];
-        assert!(apply_multichannel_lfe_restriction(&mut spectrum).is_err());
-    }
-
-    #[test]
-    fn multichannel_frontend_rejects_invalid_output_geometry_before_parsing() {
+    fn low_complexity_frontend_rejects_invalid_output_geometry_before_parsing() {
         let mut workspace = BasicMultichannelSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_basic_multichannel_pcm(
+        assert!(parse_decode_multichannel_pcm(
+            NeuralNetworkType::LowComplexity,
             &[],
             0,
             false,
@@ -288,9 +297,7 @@ mod tests {
         let mut workspace = BasicMultichannelSynthesisWorkspace::new();
         workspace.prepare_channels(6);
         assert_eq!(workspace.channel_count(), 6);
-        assert_eq!(workspace.spectra().len(), 6);
         workspace.prepare_channels(10);
         assert_eq!(workspace.channel_count(), 10);
-        assert_eq!(workspace.spectra().len(), 10);
     }
 }

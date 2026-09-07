@@ -39,6 +39,7 @@ mod group;
 mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
+mod lc_pipeline;
 mod mcac_synthesis;
 mod mcr_synthesis;
 mod metadata;
@@ -125,15 +126,19 @@ pub use ga_frame::{
 pub use ga_multichannel_pcm::{
     BasicMultichannelSynthesisWorkspace, MC_LFE_RESERVED_LINES,
     apply_multichannel_lfe_restriction, parse_decode_basic_multichannel_pcm,
+    parse_decode_multichannel_pcm,
 };
 pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use ga_mono_neural::{
     BasicMonoNeuralWorkspace, decode_basic_channel_neural_mdct,
-    decode_basic_mono_neural_mdct, parse_and_decode_basic_mono_neural_mdct,
+    decode_basic_mono_neural_mdct, decode_channel_neural_mdct,
+    decode_low_complexity_mono_neural_mdct, parse_and_decode_basic_mono_neural_mdct,
+    parse_and_decode_mono_neural_mdct,
 };
-pub use ga_mono_pcm::parse_decode_basic_mono_pcm;
+pub use ga_mono_pcm::{parse_decode_basic_mono_pcm, parse_decode_mono_pcm};
 pub use ga_mono_post::{
     BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pre_fd,
+    parse_decode_mono_pcm_with_codebooks, parse_decode_mono_pre_fd,
 };
 pub use ga_stereo::{
     GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, StereoCouplingSideInfo,
@@ -142,7 +147,7 @@ pub use ga_stereo::{
 };
 pub use ga_stereo_pcm::{
     BasicStereoSynthesisWorkspace, GaStereoPcmChannelInfo, GaStereoPcmSideInfo,
-    parse_decode_basic_stereo_pcm,
+    parse_decode_basic_stereo_pcm, parse_decode_stereo_pcm,
 };
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
@@ -153,6 +158,9 @@ pub use inverse_qc::{
     noise_filling_parameter,
 };
 pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
+pub use lc_pipeline::{
+    LowComplexityPipelineWorkspace, decode_low_complexity_base_to_mdct_normative,
+};
 pub use mcac_synthesis::{
     MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor,
     resolve_multichannel_pair_index,

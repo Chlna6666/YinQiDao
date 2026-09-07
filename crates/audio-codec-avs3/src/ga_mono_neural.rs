@@ -2,21 +2,24 @@ use yinqidao_codec_core::CodecError;
 
 use crate::{
     BASE_OUTPUT_POSITIONS, BasePipelineWorkspace, BweConfig, ContextPipelineWorkspace,
-    GaChannelSideInfo, GaMonoFrameSideInfo, NeuralNetworkType, NoiseFillingRng,
-    decode_basic_base_to_mdct_normative, decode_context_and_select_base_models_default,
+    GaChannelSideInfo, GaMonoFrameSideInfo, LowComplexityPipelineWorkspace, NeuralNetworkType,
+    NoiseFillingRng, decode_basic_base_to_mdct_normative,
+    decode_context_and_select_base_models_default, decode_low_complexity_base_to_mdct_normative,
     parse_mono_frame_side_info,
 };
 
 const BASE_MODEL_VALUES: usize = 64 * 16;
 
-/// Reusable scratch/state for one Basic-profile coded channel's hyper-prior path.
+/// Reusable scratch/state for one AVS3 neural-coded channel's hyper-prior path.
 ///
-/// The historical type name is retained because mono was the first caller; the workspace itself is
-/// channel-generic and is also reused independently for both downmixed stereo channels.
+/// The historical type name is retained for API compatibility. The workspace is channel-generic:
+/// Basic uses the base decoder CNN workspace, while Low Complexity owns a smaller direct-latent
+/// workspace. Both profiles share context decoding, model selection and deterministic noise state.
 #[derive(Debug)]
 pub struct BasicMonoNeuralWorkspace {
     context: ContextPipelineWorkspace,
     base: BasePipelineWorkspace,
+    low_complexity: LowComplexityPipelineWorkspace,
     rng: NoiseFillingRng,
     context_stddev: [f32; BASE_MODEL_VALUES],
     model_indices: [u8; BASE_MODEL_VALUES],
@@ -41,6 +44,7 @@ impl Default for BasicMonoNeuralWorkspace {
         Self {
             context: ContextPipelineWorkspace::new(),
             base: BasePipelineWorkspace::new(),
+            low_complexity: LowComplexityPipelineWorkspace::new(),
             rng: NoiseFillingRng::default(),
             context_stddev: [0.0; BASE_MODEL_VALUES],
             model_indices: [0; BASE_MODEL_VALUES],
@@ -60,11 +64,13 @@ fn noise_fill_line_count(bwe_config: Option<BweConfig>) -> Result<usize, CodecEr
     }
 }
 
-/// Decode one already-parsed Basic-profile coded channel to the 1024-point neural MDCT spectrum.
+/// Decode one already-parsed Basic or Low-Complexity coded channel to a 1024-line MDCT spectrum.
 ///
-/// This is the common zero-copy neural execution boundary shared by mono and the two downmixed
-/// channels in conventional stereo. All mutable scratch remains decoder-owned and reusable.
-pub fn decode_basic_channel_neural_mdct(
+/// Context entropy decoding/model selection is common. Basic then runs the normative base decoder
+/// CNN; LC directly emits the inverse-scaled 64x16 latent tensor, as specified by
+/// `MdctDequantDecodeHyperLc` in the public reference implementation.
+pub fn decode_channel_neural_mdct(
+    nn_type: NeuralNetworkType,
     payload: &[u8],
     channel: &GaChannelSideInfo,
     bwe_config: Option<BweConfig>,
@@ -73,18 +79,11 @@ pub fn decode_basic_channel_neural_mdct(
 ) -> Result<(), CodecError> {
     if output.len() != BASE_OUTPUT_POSITIONS {
         return Err(CodecError::InvalidData(
-            "basic channel neural output must contain 1024 MDCT coefficients",
+            "AVS3 channel neural output must contain 1024 MDCT coefficients",
         ));
     }
 
     let qc = &channel.qc;
-    let is_feat_amplified = qc.is_feat_amplified.ok_or(CodecError::InvalidData(
-        "basic channel QC is missing isFeatAmplified",
-    ))?;
-    let scale_q_idx = qc.scale_q_idx.ok_or(CodecError::InvalidData(
-        "basic channel QC is missing scaleQIdx",
-    ))?;
-
     decode_context_and_select_base_models_default(
         payload,
         qc.context_bitstream,
@@ -93,29 +92,91 @@ pub fn decode_basic_channel_neural_mdct(
         &mut workspace.model_indices,
     )?;
 
-    decode_basic_base_to_mdct_normative(
+    let num_lines_noise_fill = noise_fill_line_count(bwe_config)?;
+    match nn_type {
+        NeuralNetworkType::Basic => {
+            let is_feat_amplified = qc.is_feat_amplified.ok_or(CodecError::InvalidData(
+                "basic channel QC is missing isFeatAmplified",
+            ))?;
+            let scale_q_idx = qc.scale_q_idx.ok_or(CodecError::InvalidData(
+                "basic channel QC is missing scaleQIdx",
+            ))?;
+            if qc.scale_q_idx_lc.is_some() {
+                return Err(CodecError::InvalidData(
+                    "basic channel QC unexpectedly contains low-complexity scale data",
+                ));
+            }
+
+            decode_basic_base_to_mdct_normative(
+                payload,
+                qc.base_bitstream,
+                &workspace.model_indices,
+                num_lines_noise_fill,
+                channel.group,
+                qc.nf_param_q_idx,
+                is_feat_amplified,
+                scale_q_idx,
+                &mut workspace.rng,
+                &mut workspace.base,
+                output,
+            )
+        }
+        NeuralNetworkType::LowComplexity => {
+            let scale_q_idx_lc = qc.scale_q_idx_lc.ok_or(CodecError::InvalidData(
+                "low-complexity channel QC is missing scaleQIdxLc",
+            ))?;
+            if qc.is_feat_amplified.is_some() || qc.scale_q_idx.is_some() {
+                return Err(CodecError::InvalidData(
+                    "low-complexity channel QC unexpectedly contains Basic scale data",
+                ));
+            }
+
+            decode_low_complexity_base_to_mdct_normative(
+                payload,
+                qc.base_bitstream,
+                &workspace.model_indices,
+                num_lines_noise_fill,
+                channel.group,
+                qc.nf_param_q_idx,
+                scale_q_idx_lc,
+                &mut workspace.rng,
+                &mut workspace.low_complexity,
+                output,
+            )
+        }
+        NeuralNetworkType::Reserved(_) => Err(CodecError::Unsupported(
+            "reserved AVS3 neural-network type in inverse-QC",
+        )),
+    }
+}
+
+/// Compatibility wrapper for callers that are known to carry Basic QC syntax.
+pub fn decode_basic_channel_neural_mdct(
+    payload: &[u8],
+    channel: &GaChannelSideInfo,
+    bwe_config: Option<BweConfig>,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    decode_channel_neural_mdct(
+        NeuralNetworkType::Basic,
         payload,
-        qc.base_bitstream,
-        &workspace.model_indices,
-        noise_fill_line_count(bwe_config)?,
-        channel.group,
-        qc.nf_param_q_idx,
-        is_feat_amplified,
-        scale_q_idx,
-        &mut workspace.rng,
-        &mut workspace.base,
+        channel,
+        bwe_config,
+        workspace,
         output,
     )
 }
 
-/// Decode one already-parsed basic-profile mono QC payload to the 1024-point neural MDCT spectrum.
+/// Decode one already-parsed Basic-profile mono QC payload.
 pub fn decode_basic_mono_neural_mdct(
     payload: &[u8],
     side: &GaMonoFrameSideInfo,
     workspace: &mut BasicMonoNeuralWorkspace,
     output: &mut [f32],
 ) -> Result<(), CodecError> {
-    decode_basic_channel_neural_mdct(
+    decode_channel_neural_mdct(
+        NeuralNetworkType::Basic,
         payload,
         &side.channel,
         side.bwe_config,
@@ -124,9 +185,26 @@ pub fn decode_basic_mono_neural_mdct(
     )
 }
 
-/// Parse the complete mono syntax through QC and immediately execute the built-in Basic neural
-/// inverse-QC model. This is the thin production front-end intended for `Avs3Decoder`.
-pub fn parse_and_decode_basic_mono_neural_mdct(
+/// Decode one already-parsed Low-Complexity mono QC payload.
+pub fn decode_low_complexity_mono_neural_mdct(
+    payload: &[u8],
+    side: &GaMonoFrameSideInfo,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    decode_channel_neural_mdct(
+        NeuralNetworkType::LowComplexity,
+        payload,
+        &side.channel,
+        side.bwe_config,
+        workspace,
+        output,
+    )
+}
+
+/// Parse mono syntax through QC and execute the selected built-in neural inverse-QC profile.
+pub fn parse_and_decode_mono_neural_mdct(
+    nn_type: NeuralNetworkType,
     payload: &[u8],
     core_bit_offset: usize,
     low_bitrate_precision: bool,
@@ -137,12 +215,39 @@ pub fn parse_and_decode_basic_mono_neural_mdct(
     let side = parse_mono_frame_side_info(
         payload,
         core_bit_offset,
-        NeuralNetworkType::Basic,
+        nn_type,
         low_bitrate_precision,
         bwe_config,
     )?;
-    decode_basic_mono_neural_mdct(payload, &side, workspace, output)?;
+    decode_channel_neural_mdct(
+        nn_type,
+        payload,
+        &side.channel,
+        side.bwe_config,
+        workspace,
+        output,
+    )?;
     Ok(side)
+}
+
+/// Compatibility Basic-profile mono front-end.
+pub fn parse_and_decode_basic_mono_neural_mdct(
+    payload: &[u8],
+    core_bit_offset: usize,
+    low_bitrate_precision: bool,
+    bwe_config: Option<BweConfig>,
+    workspace: &mut BasicMonoNeuralWorkspace,
+    output: &mut [f32],
+) -> Result<GaMonoFrameSideInfo, CodecError> {
+    parse_and_decode_mono_neural_mdct(
+        NeuralNetworkType::Basic,
+        payload,
+        core_bit_offset,
+        low_bitrate_precision,
+        bwe_config,
+        workspace,
+        output,
+    )
 }
 
 #[cfg(test)]
@@ -165,10 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_decode_frontend_rejects_truncated_core_before_neural_work() {
+    fn basic_frontend_rejects_truncated_core_before_neural_work() {
         let mut workspace = BasicMonoNeuralWorkspace::new();
         let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
         assert!(parse_and_decode_basic_mono_neural_mdct(
+            &[],
+            0,
+            false,
+            None,
+            &mut workspace,
+            &mut output,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn low_complexity_frontend_rejects_truncated_core_before_neural_work() {
+        let mut workspace = BasicMonoNeuralWorkspace::new();
+        let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
+        assert!(parse_and_decode_mono_neural_mdct(
+            NeuralNetworkType::LowComplexity,
             &[],
             0,
             false,
