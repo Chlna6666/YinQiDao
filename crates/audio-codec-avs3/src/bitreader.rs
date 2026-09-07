@@ -15,6 +15,10 @@ impl<'a> BitReader<'a> {
         self.bytes.len().saturating_mul(8).saturating_sub(self.bit_pos)
     }
 
+    pub(crate) fn position_bits(&self) -> usize {
+        self.bit_pos
+    }
+
     pub(crate) fn read_bit(&mut self) -> Result<bool, CodecError> {
         Ok(self.read_bits(1)? != 0)
     }
@@ -61,7 +65,9 @@ mod tests {
         assert_eq!(reader.read_bits(4).unwrap(), 0b1011);
         assert!(!reader.read_bit().unwrap());
         assert_eq!(reader.read_bits(3).unwrap(), 0b010);
+        assert_eq!(reader.position_bits(), 8);
         assert_eq!(reader.read_bits(8).unwrap(), 0b0110_0001);
         assert_eq!(reader.bits_remaining(), 0);
+        assert_eq!(reader.position_bits(), 16);
     }
 }

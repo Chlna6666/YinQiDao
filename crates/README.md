@@ -7,7 +7,7 @@ Current layout:
 - `audio-codec-core`: decoder/frame/stream contracts shared by non-Symphonia codecs.
 - `audio-codec-registry`: canonical routing/capability metadata. A codec appearing here does **not** mean its decoder is complete; maturity is explicit.
 - `audio-simd`: runtime-dispatched kernels shared by codecs and DSP.
-- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work, including ISO-BMFF `av3a`/`dca3` probing, bit reading, decoder state and SIMD synthesis primitives.
+- `audio-codec-avs3`: pure-Rust AV3A/AVS3-P3 work. It now parses ISO-BMFF `av3a`/`dca3`, CA3 specific configuration, normative AATF synchronization/frame headers, and exposes SIMD synthesis primitives.
 
 ## CPU dispatch policy
 
@@ -48,4 +48,25 @@ The registry currently tracks:
 
 New decoder crates should be created only when an actual parser/decoder milestone is implemented and tested. Do not add empty crates merely to make the format list look complete.
 
-AVS3 status: the crate currently implements the container/config boundary and low-level infrastructure. The normative AVS3-P3 entropy, transform and immersive reconstruction tools must be implemented from the specification and verified against conformance vectors before the player switches away from the transitional external AV3A backend. Do not report the crate as a complete AVS3 decoder until those tests pass.
+## AVS3 milestone status
+
+Implemented in pure Rust:
+
+1. ISO-BMFF `av3a` AudioSampleEntry probing and raw `dca3` extraction.
+2. `CA3SpecificBox` parsing for `audio_codec_id=1` (lossless) and `audio_codec_id=2` (general full-rate).
+3. General full-rate configuration parsing for channel, object, mixed and HOA content.
+4. AATF `0xFFF` syncword, codec id, ancillary flag, NN type, coding profile, sampling-frequency signalling, CRC fields, channel/object/HOA layout fields, resolution and bitrate indices.
+5. 7.1.4 / 5.1.4 / 7.1.2 / FOA / HOA channel-index mapping from the normative Annex A table.
+6. Validation that the AATF coding method and known sample rate agree with `dca3` before entering the codec payload.
+
+Still intentionally unsupported:
+
+- `ga_co_raw_data_block()` metadata/core side-bit demultiplexing;
+- range/entropy decoding and inverse quantization;
+- inverse transform, TNS/BWE and post synthesis;
+- stereo/multichannel reconstruction;
+- object metadata rendering and HOA spatial decoding;
+- `ll_raw_data_block()` lossless reconstruction;
+- normative CRC verification.
+
+The player must not report AVS3 as a complete decoder until the raw-data-block paths pass official/reference conformance and regression vectors. The temporary external AV3A backend can only be removed after that point.
