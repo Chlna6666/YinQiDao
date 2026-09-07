@@ -8,6 +8,7 @@ description = "Pure-Rust AVS3-P3 / AV3A codec foundation for YinQiDao"
 publish = false
 
 [dependencies]
+rustfft = "6.4.1"
 yinqidao-audio-simd = { path = "../audio-simd" }
 yinqidao-codec-core = { path = "../audio-codec-core" }
 

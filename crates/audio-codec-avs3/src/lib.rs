@@ -31,6 +31,7 @@ mod ga_mono;
 mod ga_mono_neural;
 mod ga_mono_post;
 mod group;
+mod imdct_synthesis;
 mod inverse_qc;
 mod metadata;
 mod metadata_prefix;
@@ -121,6 +122,7 @@ pub use ga_mono_post::{BasicMonoPreFdWorkspace, parse_decode_basic_mono_pre_fd};
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
 };
+pub use imdct_synthesis::{Avs3SynthesisWorkspace, synthesize_mdct_frame};
 pub use inverse_qc::{
     basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,
     noise_filling_parameter,
