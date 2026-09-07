@@ -55,6 +55,14 @@ pub enum TnsSideBoundary {
     },
 }
 
+/// Parsed portion of one `DecodeCoreSideBits()` block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoreSidePrefix {
+    pub transform_type: TransformType,
+    pub fd_shaping: FdShapingSideInfo,
+    pub tns: TnsSideBoundary,
+}
+
 /// Parse only the fixed transform prefix at bit offset zero.
 pub fn parse_core_transform_type(core_side_bits: &[u8]) -> Result<TransformType, CodecError> {
     parse_core_transform_type_at(core_side_bits, 0)
@@ -123,6 +131,28 @@ pub fn parse_tns_boundary_at(
     })
 }
 
+/// Parse the portion of `DecodeCoreSideBits()` whose widths are fully determined before the TNS
+/// coefficient Huffman tables are consulted.
+pub fn parse_core_side_prefix_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    low_bitrate_precision: bool,
+) -> Result<CoreSidePrefix, CodecError> {
+    let transform_type = parse_core_transform_type_at(bytes, bit_offset)?;
+    let fd_shaping = parse_fd_shaping_at(
+        bytes,
+        bit_offset.saturating_add(2),
+        low_bitrate_precision,
+    )?;
+    let tns = parse_tns_boundary_at(bytes, fd_shaping.next_bit_offset)?;
+
+    Ok(CoreSidePrefix {
+        transform_type,
+        fd_shaping,
+        tns,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +214,19 @@ mod tests {
                 order: 4,
                 code_bit_offset: 4,
             }
+        );
+    }
+
+    #[test]
+    fn core_prefix_chains_transform_fd_and_disabled_tns() {
+        // transform=00, high-precision FD shaping consumes 46 zero bits, then tnsEnable[0..2]=00.
+        let bytes = [0_u8; 7];
+        let prefix = parse_core_side_prefix_at(&bytes, 0, false).unwrap();
+        assert_eq!(prefix.transform_type, TransformType::Long);
+        assert_eq!(prefix.fd_shaping.next_bit_offset, 48);
+        assert_eq!(
+            prefix.tns,
+            TnsSideBoundary::Complete { next_bit_offset: 50 }
         );
     }
 
