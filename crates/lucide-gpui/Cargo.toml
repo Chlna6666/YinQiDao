@@ -15,7 +15,6 @@ pedantic = "warn"
 [dependencies]
 gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "37c8276655aee1337c9c0d0cfe97b464dc492198", default-features = false }
 anyhow = "1.0.100"
-lucide-gpui-macros = { path = "../lucide-gpui-macros" }
 
 [build-dependencies]
 anyhow = "1.0.100"

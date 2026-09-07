@@ -12,7 +12,6 @@ resolver = "2"
 members = [
     ".",
     "crates/lucide-gpui",
-    "crates/lucide-gpui-macros",
     "crates/audio-simd",
     "crates/audio-codec-core",
     "crates/audio-codec-registry",
