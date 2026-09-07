@@ -11,36 +11,36 @@ const MDCT_LINES: usize = 1024;
 /// table immediately following the neural-network parameters. Five-bit indices 30 and 31 are
 /// therefore reserved/invalid.
 pub const MC_ILD_CODEBOOK: [f32; 30] = [
-    f32::from_bits(0x3FE3_8E39), // 16/9
-    f32::from_bits(0x3F40_0000), // 3/4
-    f32::from_bits(0x3F10_0000), // 9/16
-    f32::from_bits(0x404C_CCCD), // 16/5
-    f32::from_bits(0x40AA_AAAB), // 16/3
-    f32::from_bits(0x3F50_0000), // 13/16
-    f32::from_bits(0x3F88_8889), // 16/15
-    f32::from_bits(0x4080_0000), // 4
-    f32::from_bits(0x3E40_0000), // 3/16
-    f32::from_bits(0x3F92_4925), // 8/7
-    f32::from_bits(0x3EE0_0000), // 7/16
-    f32::from_bits(0x3FBA_2E8C), // 16/11
-    f32::from_bits(0x3E00_0000), // 1/8
-    f32::from_bits(0x3F20_0000), // 5/8
-    f32::from_bits(0x4012_4925), // 16/7
-    f32::from_bits(0x3F00_0000), // 1/2
-    f32::from_bits(0x4180_0000), // 16
-    f32::from_bits(0x4000_0000), // 2
-    f32::from_bits(0x3F60_0000), // 7/8
-    f32::from_bits(0x3E80_0000), // 1/4
-    f32::from_bits(0x3FAA_AAAB), // 4/3
-    f32::from_bits(0x3EC0_0000), // 3/8
-    f32::from_bits(0x3FCC_CCCD), // 8/5
-    f32::from_bits(0x4100_0000), // 8
-    f32::from_bits(0x3F30_0000), // 11/16
-    f32::from_bits(0x3D80_0000), // 1/16
-    f32::from_bits(0x3F9D_89D9), // 16/13
-    f32::from_bits(0x3EA0_0000), // 5/16
-    f32::from_bits(0x3F70_0000), // 15/16
-    f32::from_bits(0x402A_AAAB), // 8/3
+    f32::from_bits(0x3FE3_8E39),
+    f32::from_bits(0x3F40_0000),
+    f32::from_bits(0x3F10_0000),
+    f32::from_bits(0x404C_CCCD),
+    f32::from_bits(0x40AA_AAAB),
+    f32::from_bits(0x3F50_0000),
+    f32::from_bits(0x3F88_8889),
+    f32::from_bits(0x4080_0000),
+    f32::from_bits(0x3E40_0000),
+    f32::from_bits(0x3F92_4925),
+    f32::from_bits(0x3EE0_0000),
+    f32::from_bits(0x3FBA_2E8C),
+    f32::from_bits(0x3E00_0000),
+    f32::from_bits(0x3F20_0000),
+    f32::from_bits(0x4012_4925),
+    f32::from_bits(0x3F00_0000),
+    f32::from_bits(0x4180_0000),
+    f32::from_bits(0x4000_0000),
+    f32::from_bits(0x3F60_0000),
+    f32::from_bits(0x3E80_0000),
+    f32::from_bits(0x3FAA_AAAB),
+    f32::from_bits(0x3EC0_0000),
+    f32::from_bits(0x3FCC_CCCD),
+    f32::from_bits(0x4100_0000),
+    f32::from_bits(0x3F30_0000),
+    f32::from_bits(0x3D80_0000),
+    f32::from_bits(0x3F9D_89D9),
+    f32::from_bits(0x3EA0_0000),
+    f32::from_bits(0x3F70_0000),
+    f32::from_bits(0x402A_AAAB),
 ];
 
 #[inline]
@@ -48,7 +48,9 @@ pub fn mc_ild_factor(index: u8) -> Result<f32, CodecError> {
     MC_ILD_CODEBOOK
         .get(usize::from(index))
         .copied()
-        .ok_or(CodecError::InvalidData("mcILD index exceeds the Annex-B codebook"))
+        .ok_or(CodecError::InvalidData(
+            "mcILD index exceeds the Annex-B codebook",
+        ))
 }
 
 /// Resolve `channelPairIndex` as the row-major sequence number of the upper-triangular channel-pair
@@ -134,12 +136,27 @@ fn two_spectra_mut(
     }
 }
 
+fn resolve_coded_pair(
+    couple_ch_num: usize,
+    channel_count: usize,
+    lfe_index: Option<usize>,
+    pair_index: u16,
+) -> Result<(usize, usize), CodecError> {
+    let (logical_first, logical_second) =
+        resolve_multichannel_pair_index(couple_ch_num as u16, pair_index)?;
+    Ok((
+        coupled_to_coded_channel(logical_first, channel_count, lfe_index)?,
+        coupled_to_coded_channel(logical_second, channel_count, lfe_index)?,
+    ))
+}
+
 /// Apply AVS3 multi-channel M/S upmixing and per-channel inverse mcILD adjustment in place.
 ///
 /// `spectra` contains one already inverse-QC and inverse-grouped 1024-line spectrum per coded
 /// channel, including LFE when present. Pair indices address the logical non-LFE channel list; this
-/// function maps them back to coded-channel positions before upmixing. Pairing is required to be
-/// disjoint so reconstruction is independent of pair iteration order.
+/// function maps them back to coded-channel positions. The published reference decoder performs
+/// all M/S reconstruction in reverse pair order and only then applies mcILD energy balance, so the
+/// same two-phase ordering is preserved here. Valid pair groups are required to be disjoint.
 pub fn apply_multichannel_mcac(
     side: &MultichannelSideInfo,
     lfe_index: Option<usize>,
@@ -153,7 +170,9 @@ pub fn apply_multichannel_mcac(
     }
     let couple_ch_num = channel_count
         .checked_sub(usize::from(lfe_index.is_some()))
-        .ok_or(CodecError::InvalidData("invalid MCAC coupled-channel count"))?;
+        .ok_or(CodecError::InvalidData(
+            "invalid MCAC coupled-channel count",
+        ))?;
     if side.silence_flags.len() != couple_ch_num {
         return Err(CodecError::InvalidData(
             "MCAC silence-flag count does not match non-LFE channels",
@@ -165,6 +184,9 @@ pub fn apply_multichannel_mcac(
         ));
     }
 
+    // Validate semantic pair membership once before mutating spectra. This also prevents malformed
+    // overlapping pairs from making reconstruction order-dependent.
+    let mut coded_pairs = Vec::with_capacity(side.pairs.len());
     for (pair_pos, pair) in side.pairs.iter().enumerate() {
         let (logical_first, logical_second) =
             resolve_multichannel_pair_index(couple_ch_num as u16, pair.pair_index)?;
@@ -173,7 +195,6 @@ pub fn apply_multichannel_mcac(
                 "MCAC channel pair references a silent channel",
             ));
         }
-
         for previous in &side.pairs[..pair_pos] {
             let (previous_first, previous_second) =
                 resolve_multichannel_pair_index(couple_ch_num as u16, previous.pair_index)?;
@@ -187,15 +208,28 @@ pub fn apply_multichannel_mcac(
                 ));
             }
         }
+        coded_pairs.push(resolve_coded_pair(
+            couple_ch_num,
+            channel_count,
+            lfe_index,
+            pair.pair_index,
+        )?);
+        // Validate ILD indices before any spectrum mutation.
+        mc_ild_factor(pair.ild_first)?;
+        mc_ild_factor(pair.ild_second)?;
+    }
 
-        let coded_first =
-            coupled_to_coded_channel(logical_first, channel_count, lfe_index)?;
-        let coded_second =
-            coupled_to_coded_channel(logical_second, channel_count, lfe_index)?;
+    // Reference Avs3McacDec() reverses the transmitted pair list for inverse M/S.
+    for &(coded_first, coded_second) in coded_pairs.iter().rev() {
+        let (first, second) = two_spectra_mut(spectra, coded_first, coded_second)?;
+        inverse_ms_pair(first, second)?;
+    }
+
+    // Energy balance is a separate pass after all pair reconstruction.
+    for (pair, &(coded_first, coded_second)) in side.pairs.iter().zip(&coded_pairs) {
         let first_factor = mc_ild_factor(pair.ild_first)?;
         let second_factor = mc_ild_factor(pair.ild_second)?;
         let (first, second) = two_spectra_mut(spectra, coded_first, coded_second)?;
-        inverse_ms_pair(first, second)?;
         for value in first {
             *value *= first_factor;
         }
@@ -232,17 +266,17 @@ mod tests {
     #[test]
     fn mcac_maps_non_lfe_pair_and_applies_independent_ild() {
         let mut spectra = [[0.0_f32; MDCT_LINES]; 4];
-        spectra[0][0] = 1.0; // M
-        spectra[3][0] = 1.0; // S; logical non-LFE channel 2 because channel 2 is LFE
+        spectra[0][0] = 1.0;
+        spectra[3][0] = 1.0;
         let side = MultichannelSideInfo {
             has_silence: false,
             silence_flags: vec![false; 3],
             pair_count: 1,
             pair_index_bits: 2,
             pairs: vec![MultichannelPairSideInfo {
-                pair_index: 1, // logical pair (0,2) -> coded pair (0,3)
-                ild_first: 15, // 0.5
-                ild_second: 17, // 2.0
+                pair_index: 1,
+                ild_first: 15,
+                ild_second: 17,
             }],
             channel_bit_ratios: vec![Some(21), Some(21), Some(22)],
             next_bit_offset: 0,
@@ -250,7 +284,7 @@ mod tests {
         apply_multichannel_mcac(&side, Some(2), &mut spectra).unwrap();
         assert!((spectra[0][0] - 0.5 * 2.0_f32.sqrt()).abs() < 1.0e-6);
         assert!(spectra[3][0].abs() < 1.0e-6);
-        assert_eq!(spectra[2][0], 0.0); // LFE untouched
+        assert_eq!(spectra[2][0], 0.0);
     }
 
     #[test]
@@ -263,12 +297,12 @@ mod tests {
             pair_index_bits: 3,
             pairs: vec![
                 MultichannelPairSideInfo {
-                    pair_index: 0, // (0,1)
+                    pair_index: 0,
                     ild_first: 15,
                     ild_second: 15,
                 },
                 MultichannelPairSideInfo {
-                    pair_index: 1, // (0,2)
+                    pair_index: 1,
                     ild_first: 15,
                     ild_second: 15,
                 },
