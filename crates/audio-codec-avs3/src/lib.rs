@@ -23,12 +23,14 @@ mod decoder;
 mod dynamic_metadata;
 mod entropy;
 mod fd_lsf;
+mod fd_lsf_tables;
 mod fd_shaping;
 mod frame;
 mod ga;
 mod ga_frame;
 mod ga_mono;
 mod ga_mono_neural;
+mod ga_mono_pcm;
 mod ga_mono_post;
 mod group;
 mod imdct_synthesis;
@@ -105,6 +107,10 @@ pub use fd_lsf::{
     FD_SHAPING_SFB_BOUNDARIES, FD_SHAPING_SUBBANDS, LSF_MEAN, LSF_ORDER,
     LsfCodebook, LsfCodebooks, dequantize_lsf,
 };
+pub use fd_lsf_tables::{
+    FD_LSF_TABLE_BYTES, FD_LSF_TABLE_FNV1A, FD_LSF_TABLE_VALUES,
+    normative_lsf_codebooks,
+};
 pub use fd_shaping::{
     FdShapingWorkspace, apply_inverse_fd_spectrum_shaping, lsf_to_lsp, lsp_to_lpc,
 };
@@ -118,9 +124,9 @@ pub use ga_mono_neural::{
     BasicMonoNeuralWorkspace, decode_basic_mono_neural_mdct,
     parse_and_decode_basic_mono_neural_mdct,
 };
+pub use ga_mono_pcm::parse_decode_basic_mono_pcm;
 pub use ga_mono_post::{
-    BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pcm,
-    parse_decode_basic_mono_pre_fd,
+    BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pre_fd,
 };
 pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
