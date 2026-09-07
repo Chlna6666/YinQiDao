@@ -1,14 +1,20 @@
+use crate::neural::{
+    CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_SPEC, CONTEXT_LAYER_3_SPEC, ContextDecoderParams,
+    ConvTranspose1dParams,
+};
+
 mod b2;
 mod b4;
+mod b6;
 
 pub use b2::CONTEXT_LAYER_1_KERNEL;
 pub use b4::CONTEXT_LAYER_2_KERNEL;
+pub use b6::CONTEXT_LAYER_3_KERNEL;
 
 // GY/T 363-2023 / T/UWA 009.1-2023 Annex B context-decoder parameters.
 //
-// B.2 and B.4 are kept in dedicated data modules because each kernel contains 3 * 16 * 16 exact
-// binary32 coefficients. Tables B.3, B.5 and B.7 are stored here as exact IEEE-754 bit patterns.
-// B.6 remains intentionally absent until its complete 768-value table passes the same validation.
+// B.2/B.4/B.6 are kept in dedicated data modules because each kernel contains 3 * 16 * 16 exact
+// binary32 coefficients. Tables B.3/B.5/B.7 are stored here as exact IEEE-754 bit patterns.
 
 pub const CONTEXT_LAYER_1_BIAS: [f32; 16] = [
     f32::from_bits(0x3E5B_9B84), f32::from_bits(0xC031_AE93),
@@ -43,6 +49,30 @@ pub const CONTEXT_LAYER_3_BIAS: [f32; 16] = [
     f32::from_bits(0x3DE1_4608), f32::from_bits(0x3DE1_4CCD),
 ];
 
+/// Return the complete normative context decoder parameters from Annex B tables B.2..B.7.
+///
+/// All slices point directly at static binary32 tables. There is no model parsing, allocation,
+/// transpose, or copy on the decode path.
+pub fn context_decoder_params() -> ContextDecoderParams<'static> {
+    ContextDecoderParams {
+        layer_1: ConvTranspose1dParams {
+            spec: CONTEXT_LAYER_1_SPEC,
+            kernel: &CONTEXT_LAYER_1_KERNEL,
+            bias: &CONTEXT_LAYER_1_BIAS,
+        },
+        layer_2: ConvTranspose1dParams {
+            spec: CONTEXT_LAYER_2_SPEC,
+            kernel: &CONTEXT_LAYER_2_KERNEL,
+            bias: &CONTEXT_LAYER_2_BIAS,
+        },
+        layer_3: ConvTranspose1dParams {
+            spec: CONTEXT_LAYER_3_SPEC,
+            kernel: &CONTEXT_LAYER_3_KERNEL,
+            bias: &CONTEXT_LAYER_3_BIAS,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +81,7 @@ mod tests {
     fn annex_b_context_parameter_shapes_are_exact() {
         assert_eq!(CONTEXT_LAYER_1_KERNEL.len(), 3 * 16 * 16);
         assert_eq!(CONTEXT_LAYER_2_KERNEL.len(), 3 * 16 * 16);
+        assert_eq!(CONTEXT_LAYER_3_KERNEL.len(), 3 * 16 * 16);
         assert_eq!(CONTEXT_LAYER_1_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_2_BIAS.len(), 16);
         assert_eq!(CONTEXT_LAYER_3_BIAS.len(), 16);
@@ -64,5 +95,16 @@ mod tests {
         assert_eq!(CONTEXT_LAYER_2_BIAS[15].to_bits(), 0xBEAC_23B2);
         assert_eq!(CONTEXT_LAYER_3_BIAS[0].to_bits(), 0x3DE1_4B18);
         assert_eq!(CONTEXT_LAYER_3_BIAS[15].to_bits(), 0x3DE1_4CCD);
+    }
+
+    #[test]
+    fn complete_annex_b_constructor_uses_only_static_tables() {
+        let params = context_decoder_params();
+        assert_eq!(params.layer_1.kernel.as_ptr(), CONTEXT_LAYER_1_KERNEL.as_ptr());
+        assert_eq!(params.layer_2.kernel.as_ptr(), CONTEXT_LAYER_2_KERNEL.as_ptr());
+        assert_eq!(params.layer_3.kernel.as_ptr(), CONTEXT_LAYER_3_KERNEL.as_ptr());
+        assert_eq!(params.layer_1.bias.as_ptr(), CONTEXT_LAYER_1_BIAS.as_ptr());
+        assert_eq!(params.layer_2.bias.as_ptr(), CONTEXT_LAYER_2_BIAS.as_ptr());
+        assert_eq!(params.layer_3.bias.as_ptr(), CONTEXT_LAYER_3_BIAS.as_ptr());
     }
 }
