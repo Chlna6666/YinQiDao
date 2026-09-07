@@ -47,13 +47,15 @@ Implemented in pure Rust:
 11. A 32-bit AVS3 range-decoder engine with 16-bit renormalization, 16-bit CDF precision, 4-bit signed overflow extension and zero-extension of omitted trailing bytes.
 12. Zero-copy range-byte windows that consume byte-counted QC payloads starting at arbitrary packet bit offsets.
 13. Normative Basic/Low-Complexity feature-scale and noise-filling parameter dequantization helpers.
-14. Cross-platform SIMD synthesis primitives in `audio-simd` for overlap-add, transform windows and filter/prediction dot products.
+14. Normative B.1 context range models, exact binary32 B.8 standard-deviation thresholds and lower-bound/clamped B.9 row selection.
+15. Context/hyper-prior entropy decoding into signed integer latent tensors in `position × context-channel` order, with a reusable allocation-free workspace API.
+16. Cross-platform SIMD synthesis primitives in `audio-simd` for overlap-add, transform windows and filter/prediction dot products.
 
 Still intentionally unsupported for production playback:
 
 - full Basic static metadata (`BasicL1()` / VR extension) bodies;
-- normative B.1/B.8/B.9 probability/standard-deviation tables wired into context/base latent range decoding;
-- context/base decoding neural-network weights and inverse transforms;
+- the complete 64-row normative B.9 base CDF data and base-latent range decoding;
+- context/base neural-network weights, latent quantizer parameters and inverse transforms;
 - complete inverse quantization/noise-filling reconstruction into MDCT spectra;
 - stereo inverse M/S and multichannel MCAC reconstruction;
 - post synthesis: inverse TNS/BWE/FD shaping, degrouping and IMDCT;
@@ -61,6 +63,6 @@ Still intentionally unsupported for production playback:
 - `ll_raw_data_block()` lossless reconstruction;
 - normative CRC verification.
 
-The range engine is deliberately model-agnostic. CDF/model data must come from the normative AVS3 tables or properly licensed project-owned data; code from public mirrors without an explicit compatible license is not copied into this repository.
+The range engine is deliberately model-agnostic. CDF/model data must come from the normative AVS3 tables or properly licensed project-owned data; code or model blobs from public mirrors without an explicit compatible license are not copied into this repository.
 
 AVS3 remains `InDevelopment` in the codec registry until real AV3A samples and official/reference conformance vectors pass end-to-end PCM regression tests. The transitional external AV3A backend must not be removed before that point.

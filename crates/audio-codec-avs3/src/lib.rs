@@ -12,6 +12,7 @@ mod container;
 mod core;
 mod decoder;
 mod dynamic_metadata;
+mod entropy;
 mod frame;
 mod ga;
 mod ga_frame;
@@ -22,6 +23,7 @@ mod metadata_prefix;
 mod multichannel;
 mod qc;
 mod range;
+mod range_tables;
 mod synthesis;
 mod tns;
 
@@ -46,6 +48,7 @@ pub use dynamic_metadata::{
     DynamicObjectMetadata, ObjectDivergence, ObjectPosition, PolarExtent,
     parse_dynamic_metadata_at,
 };
+pub use entropy::{decode_context_latents, decode_context_latents_into};
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
 pub use ga_frame::{
@@ -69,6 +72,10 @@ pub use multichannel::{
 pub use qc::{BitRange, QcSideInfo, parse_qc_side_info_at, qc_fixed_header_bits};
 pub use range::{
     RANGE_DEFAULT_PRECISION, RANGE_OVERFLOW_WIDTH, RangeByteWindow, RangeDecoder, RangeModel,
+};
+pub use range_tables::{
+    BASE_RANGE_MODEL_COUNT, BASE_STDDEV_THRESHOLD_BITS, CONTEXT_RANGE_MODEL_COUNT,
+    base_stddev_threshold, context_range_model, select_base_range_model_index,
 };
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
