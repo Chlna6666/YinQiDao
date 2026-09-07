@@ -6,6 +6,7 @@
 //! codec DLL is required.
 
 mod allocation;
+mod base_neural;
 mod bitreader;
 mod bwe;
 mod config;
@@ -31,6 +32,11 @@ mod synthesis;
 mod tns;
 
 pub use allocation::{McBitAllocation, allocate_multichannel_bytes, lfe_allocation_bytes};
+pub use base_neural::{
+    BASE_INPUT_CHANNELS, BASE_INPUT_POSITIONS, BASE_LAYER_1_SPEC, BASE_LAYER_2_SPEC,
+    BASE_LAYER_3_SPEC, BASE_LAYER_4_SPEC, BASE_OUTPUT_POSITIONS, BaseDecoderParams,
+    BaseDecoderWorkspace, IgdnParams, apply_igdn_in_place, decode_base_network,
+};
 pub use bwe::{
     BweConfig, BweMode, BweSideInfo, WhiteningLevel, parse_bwe_side_info_at,
 };
