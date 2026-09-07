@@ -59,4 +59,11 @@ impl AssetSource for Assets {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/icons_gen.rs"));
+// `icons_gen.rs` is emitted by this crate's build.rs into OUT_DIR, so ordinary Rust module file
+// resolution cannot name it. Keep the generated boundary isolated here; hand-written code must use
+// normal `mod name;` declarations and must not depend back on this module.
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/icons_gen.rs"));
+}
+
+pub use generated::icons;
