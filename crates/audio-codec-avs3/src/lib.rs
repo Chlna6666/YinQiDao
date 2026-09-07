@@ -32,6 +32,7 @@ mod metadata_prefix;
 mod multichannel;
 mod neural;
 mod qc;
+mod quantizer_params;
 mod range;
 mod range_tables;
 mod synthesis;
@@ -113,6 +114,7 @@ pub use neural::{
     decode_context_network,
 };
 pub use qc::{BitRange, QcSideInfo, parse_qc_side_info_at, qc_fixed_header_bits};
+pub use quantizer_params::{BASE_QUANTILE_MEDIANS, CONTEXT_QUANTILE_MEDIANS};
 pub use range::{
     RANGE_DEFAULT_PRECISION, RANGE_OVERFLOW_WIDTH, RangeByteWindow, RangeDecoder, RangeModel,
 };

@@ -1,21 +1,20 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BasePipelineWorkspace, BitRange, GroupSideInfo, NoiseFillingRng, base_decoder_params,
-    decode_basic_base_to_mdct,
+    BASE_QUANTILE_MEDIANS, BasePipelineWorkspace, BitRange, GroupSideInfo, NoiseFillingRng,
+    base_decoder_params, decode_basic_base_to_mdct,
 };
 
-/// Decode the basic-profile base bitstream with the complete normative Annex-B neural model.
+/// Decode the basic-profile base bitstream with the complete built-in AVS3 model parameters.
 ///
-/// This is the production/default entry point for the basic-profile inverse-QC path. Unlike
-/// [`decode_basic_base_to_mdct`], callers do not provide neural-network weights: B.10..B.23 are
-/// selected directly from the crate's exact static binary32 tables. The lower-level injectable
-/// entry point remains available for tests, differential validation and model experiments.
+/// B.10..B.23 are selected directly from exact static binary32 tables. The interoperable base
+/// scalar quantizer has sixteen exact-zero medians, so callers no longer need to provide a model
+/// offset vector. The lower-level [`decode_basic_base_to_mdct`] entry point remains available for
+/// tests, differential validation and model experiments.
 pub fn decode_basic_base_to_mdct_normative(
     packet: &[u8],
     base_range: BitRange,
     model_indices: &[u8],
-    quantile_medians: &[f32],
     num_lines_noise_fill: usize,
     group: GroupSideInfo,
     nf_param_q_idx: [Option<u8>; 2],
@@ -29,7 +28,7 @@ pub fn decode_basic_base_to_mdct_normative(
         packet,
         base_range,
         model_indices,
-        quantile_medians,
+        &BASE_QUANTILE_MEDIANS,
         num_lines_noise_fill,
         group,
         nf_param_q_idx,
@@ -50,7 +49,6 @@ mod tests {
     #[test]
     fn normative_entrypoint_keeps_geometry_validation() {
         let model_indices = [0_u8; BASE_INPUT_POSITIONS * BASE_INPUT_CHANNELS];
-        let medians = [0.0_f32; BASE_INPUT_CHANNELS];
         let group = GroupSideInfo {
             num_groups: 1,
             group_indicator: [false; 8],
@@ -67,7 +65,6 @@ mod tests {
                 bit_len: 0,
             },
             &model_indices,
-            &medians,
             0,
             group,
             [Some(0), None],
