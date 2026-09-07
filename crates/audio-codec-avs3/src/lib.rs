@@ -13,8 +13,10 @@ mod decoder;
 mod dynamic_metadata;
 mod frame;
 mod ga;
+mod group;
 mod metadata;
 mod metadata_prefix;
+mod multichannel;
 mod synthesis;
 mod tns;
 
@@ -40,11 +42,16 @@ pub use dynamic_metadata::{
 };
 pub use frame::{AATF_SYNCWORD, AatfFrameHeader, SoundBedType, parse_aatf_frame_header};
 pub use ga::{GaCodecFormat, GaDecodePlan, coded_payload};
+pub use group::{GroupSideInfo, parse_group_bits_at};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
     DynamicChannelPrefix, DynamicMetadataPrefix, StaticMetadataPrefix,
     parse_dynamic_channel_prefix_at, parse_dynamic_metadata_prefix_at,
     parse_static_metadata_prefix_at,
+};
+pub use multichannel::{
+    MultichannelPairSideInfo, MultichannelSideInfo, channel_pair_index_bits,
+    parse_multichannel_side_info_at,
 };
 pub use synthesis::{
     apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot,
