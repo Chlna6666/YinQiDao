@@ -35,6 +35,7 @@ mod ga_mono_post;
 mod group;
 mod imdct_synthesis;
 mod inverse_qc;
+mod isobmff;
 mod metadata;
 mod metadata_prefix;
 mod multichannel;
@@ -136,6 +137,7 @@ pub use inverse_qc::{
     basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,
     noise_filling_parameter,
 };
+pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
     DynamicChannelPrefix, DynamicMetadataPrefix, StaticMetadataPrefix,
