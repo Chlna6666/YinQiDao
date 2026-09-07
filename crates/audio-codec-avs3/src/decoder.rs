@@ -6,8 +6,9 @@ use crate::{
     BASE_OUTPUT_POSITIONS, Av3aSampleEntry, BasicMonoSynthesisWorkspace,
     BasicMultichannelSynthesisWorkspace, BasicStereoSynthesisWorkspace, BweConfig, BweMode,
     BweSideInfo, ChannelConfiguration, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
-    DynamicMetadataPrefix, GaCodecFormat, GaDecodePlan, GaMultichannelFrameSideInfo,
-    NeuralNetworkType, StaticMetadataPrefix, TransformType,
+    DynamicMetadataPrefix, GaCodecFormat, GaDecodePlan, GaHoaFrameSideInfo,
+    GaMultichannelFrameSideInfo, HoaConfig, HoaSynthesisWorkspace, NeuralNetworkType,
+    StaticMetadataPrefix, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, GeneralFullRateConfig, parse_dca3},
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
@@ -15,6 +16,7 @@ use crate::{
     ga_mono_pcm::parse_decode_mono_pcm,
     ga_multichannel_pcm::parse_decode_multichannel_pcm,
     ga_stereo_pcm::parse_decode_stereo_pcm,
+    hoa_synthesis::parse_decode_hoa_pcm,
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
@@ -27,11 +29,11 @@ struct ResolvedBwe {
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Basic and Low-Complexity mono/stereo/multichannel general-full-rate frames execute the complete
-/// built-in path through neural inverse-QC, inverse grouping/coupling, BWE/TNS, inverse FD shaping
-/// and IMDCT/OLA to PCM. Stereo includes conventional M/S/ILD and <=32-kb/s MCR reconstruction;
-/// multichannel LFE output additionally follows the normative 32-line spectrum restriction. HOA
-/// and lossless coding remain explicit later milestones.
+/// Basic and Low-Complexity mono/stereo/multichannel/HOA general-full-rate frames execute the
+/// complete built-in path through neural inverse-QC and profile-specific reconstruction to PCM.
+/// Stereo includes conventional M/S/ILD and <=32-kb/s MCR; multichannel applies MCAC/LFE handling;
+/// HOA includes transport inverse-DMX, 512-hop analysis/synthesis and delayed spatial basis
+/// recovery. Lossless coding and static metadata bodies remain explicit later milestones.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -39,6 +41,7 @@ pub struct Avs3Decoder {
     mono_synthesis: BasicMonoSynthesisWorkspace,
     stereo_synthesis: BasicStereoSynthesisWorkspace,
     multichannel_synthesis: BasicMultichannelSynthesisWorkspace,
+    hoa_synthesis: HoaSynthesisWorkspace,
     last_frame_header: Option<AatfFrameHeader>,
     last_decode_plan: Option<GaDecodePlan>,
     last_metadata_boundary: Option<MetadataBoundary>,
@@ -55,6 +58,8 @@ pub struct Avs3Decoder {
     last_after_bwe_bit_offset: Option<usize>,
     /// Full frame-major state for multichannel/object/mixed decoding.
     last_multichannel_frame_side_info: Option<GaMultichannelFrameSideInfo>,
+    /// Full HOA transport/spatial side information for the most recently decoded HOA frame.
+    last_hoa_frame_side_info: Option<GaHoaFrameSideInfo>,
     packets_seen: u64,
 }
 
@@ -87,6 +92,7 @@ impl Avs3Decoder {
             mono_synthesis: BasicMonoSynthesisWorkspace::new(),
             stereo_synthesis: BasicStereoSynthesisWorkspace::new(),
             multichannel_synthesis: BasicMultichannelSynthesisWorkspace::new(),
+            hoa_synthesis: HoaSynthesisWorkspace::new(),
             last_frame_header: None,
             last_decode_plan: None,
             last_metadata_boundary: None,
@@ -100,6 +106,7 @@ impl Avs3Decoder {
             last_bwe_side_info: None,
             last_after_bwe_bit_offset: None,
             last_multichannel_frame_side_info: None,
+            last_hoa_frame_side_info: None,
             packets_seen: 0,
         })
     }
@@ -164,6 +171,10 @@ impl Avs3Decoder {
         self.last_multichannel_frame_side_info.as_ref()
     }
 
+    pub fn last_hoa_frame_side_info(&self) -> Option<&GaHoaFrameSideInfo> {
+        self.last_hoa_frame_side_info.as_ref()
+    }
+
     pub fn packets_seen(&self) -> u64 {
         self.packets_seen
     }
@@ -208,6 +219,7 @@ impl Avs3Decoder {
                 };
                 BweMode::Multichannel { non_lfe_channels }
             }
+            // HOA BWE is resolved independently per transport group/channel from its bitrate table.
             GaCodecFormat::Hoa => return Ok(ResolvedBwe::default()),
         };
 
@@ -278,7 +290,13 @@ impl Avs3Decoder {
                         ));
                     }
                 }
-                ContentType::Hoa => {}
+                ContentType::Hoa => {
+                    if config.hoa_order != header.hoa_order {
+                        return Err(CodecError::InvalidData(
+                            "AATF HOA order does not match dca3 configuration",
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -297,6 +315,7 @@ impl Avs3Decoder {
         self.last_bwe_side_info = None;
         self.last_after_bwe_bit_offset = None;
         self.last_multichannel_frame_side_info = None;
+        self.last_hoa_frame_side_info = None;
     }
 }
 
@@ -548,11 +567,71 @@ impl AudioDecoder for Avs3Decoder {
                 Ok(DecodeStatus::FrameReady)
             }
             GaCodecFormat::Hoa => {
+                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
+                    "general-full-rate HOA frame is missing neural-network type",
+                ))?;
+                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+                    return Err(CodecError::Unsupported(
+                        "reserved AVS3 neural-network type",
+                    ));
+                }
+                let order = header.hoa_order.ok_or(CodecError::InvalidData(
+                    "HOA frame is missing semantic ambisonic order",
+                ))?;
+                let total_bitrate_kbps = u32::from(self.general_config()?.total_bitrate_kbps);
+                let hoa_config = HoaConfig::for_order_bitrate(order, total_bitrate_kbps)?;
+                let channel_count = u16::from(hoa_config.output_channels);
+                if plan.output_channels != Some(channel_count) {
+                    return Err(CodecError::InvalidData(
+                        "HOA decode-plan channel count disagrees with bitrate configuration",
+                    ));
+                }
+                let sample_count = usize::from(channel_count)
+                    .checked_mul(BASE_OUTPUT_POSITIONS)
+                    .ok_or(CodecError::InvalidData("HOA PCM output geometry overflow"))?;
+
+                output.clear_for(
+                    header.sample_rate.unwrap_or(self.info.sample_rate),
+                    channel_count,
+                );
+                output.samples.resize(sample_count, 0.0);
+                let frame = parse_decode_hoa_pcm(
+                    nn_type,
+                    payload,
+                    core_bit_offset,
+                    order,
+                    total_bitrate_kbps,
+                    &mut self.hoa_synthesis,
+                    &mut output.samples,
+                )?;
+
+                if let Some(first) = frame.channels.first() {
+                    self.last_core_side_prefix = Some(first.core);
+                    self.last_first_transform_type = Some(first.core.transform_type);
+                    self.last_bwe_side_info = first.bwe;
+                    self.last_after_bwe_bit_offset = Some(
+                        first
+                            .bwe
+                            .map(|bwe| bwe.next_bit_offset)
+                            .unwrap_or(first.core.next_bit_offset),
+                    );
+                }
+                self.last_bwe_present = Some(
+                    frame
+                        .channel_bwe_configs
+                        .iter()
+                        .any(Option::is_some),
+                );
+                self.last_bwe_config = frame
+                    .channel_bwe_configs
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .next();
+                self.last_hoa_frame_side_info = Some(frame);
                 self.last_frame_header = Some(header);
                 self.packets_seen = self.packets_seen.saturating_add(1);
-                Err(CodecError::Unsupported(
-                    "AVS3-P3 HOA side information and byte splitting are not implemented yet",
-                ))
+                Ok(DecodeStatus::FrameReady)
             }
         }
     }
@@ -567,6 +646,7 @@ impl AudioDecoder for Avs3Decoder {
         self.mono_synthesis.reset_synthesis_history();
         self.stereo_synthesis.reset_synthesis_history();
         self.multichannel_synthesis.reset_synthesis_history();
+        self.hoa_synthesis.reset();
         self.packets_seen = 0;
     }
 }
@@ -606,5 +686,6 @@ mod tests {
         assert_eq!(decoder.packets_seen(), 0);
         assert_eq!(decoder.last_decode_plan(), None);
         assert!(decoder.last_multichannel_frame_side_info().is_none());
+        assert!(decoder.last_hoa_frame_side_info().is_none());
     }
 }

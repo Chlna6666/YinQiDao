@@ -38,6 +38,8 @@ mod ga_stereo;
 mod ga_stereo_pcm;
 mod group;
 mod hoa_side;
+mod hoa_synthesis;
+mod hoa_transform;
 mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
@@ -164,6 +166,12 @@ pub use hoa_side::{
     MAX_HOA_GROUPS, allocate_hoa_bytes, hoa_pair_index_bits, parse_hoa_frame_side_info,
     parse_hoa_side_info_at, resolve_hoa_pair_index,
 };
+pub use hoa_synthesis::{
+    HOA_FRAME_SAMPLES, HOA_OVERLAP_SIZE, HOA_SPATIAL_TABLE_BYTES_LEN,
+    HOA_SPATIAL_TABLE_FNV1A, HoaPostSynthesisWorkspace, HoaSynthesisWorkspace,
+    hoa_basis_coefficients, hoa_spatial_table_bytes, parse_decode_hoa_pcm,
+};
+pub use hoa_transform::{HOA_TRANSFORM_BINS, HOA_TRANSFORM_LEN, HoaTransformWorkspace};
 pub use imdct_synthesis::{Avs3SynthesisWorkspace, synthesize_mdct_frame};
 pub use inverse_qc::{
     basic_feature_scale, inverse_scale_in_place, low_complexity_feature_scale,

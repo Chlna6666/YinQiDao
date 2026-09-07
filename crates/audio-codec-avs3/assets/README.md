@@ -54,6 +54,23 @@ values. MCR indexing and inverse-rotation control flow are implemented independe
 in `mcr_synthesis.rs`; the asset is static interoperability data rather than imported
 reference-decoder control flow.
 
+`avs3a_hoa_spatial_tables.bin` contains the 1,343 fixed-angle HOA basis index pairs
+followed by the 257-entry binary32 sine table used by spatial basis recovery. Angle
+indices are serialized as little-endian signed 16-bit integers; sine values are
+little-endian `f32`. The final three fixed-angle rows are explicit zero rows, matching
+the implicit zero initialization in the declared 1,343-row reference table.
+
+HOA spatial-table fingerprints:
+
+- size: `6,400` bytes
+- SHA-256: `641e93f65c86376815560119d6704064d33528ecddd331bab133f189164aec50`
+- FNV-1a 64: `91a0296fd4def1af`
+
+`hoa_synthesis.rs` uses the table read-only through `include_bytes!`. Sine/cosine
+values are resolved by table lookup and quadrant mapping; the nine spherical-harmonic
+normalization constants are fixed binary32 constants. No table decoding, allocation,
+trigonometry or square-root operation occurs in the per-frame basis-recovery hot path.
+
 These files contain interoperability data. For terms and notices applying to the
 public AVS3 reference material used for cross-checking, consult its accompanying
 UWA Code Sharing Policy documentation.

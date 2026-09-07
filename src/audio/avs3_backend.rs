@@ -19,7 +19,7 @@ impl fmt::Display for Av3aRustError {
             Self::Io(error) => write!(formatter, "AV3A ISO-BMFF 读取失败: {error}"),
             Self::Codec(error) => write!(formatter, "AVS3-P3 解码失败: {error}"),
             Self::UnexpectedStatus => formatter.write_str("AVS3-P3 完整 sample 未产生 PCM frame"),
-            Self::InvalidFrame => formatter.write_str("AVS3-P3 Basic transport PCM 输出几何不合法"),
+            Self::InvalidFrame => formatter.write_str("AVS3-P3 Pure Rust PCM 输出几何不合法"),
         }
     }
 }
@@ -46,14 +46,15 @@ impl From<CodecError> for Av3aRustError {
     }
 }
 
-/// Player-side pure-Rust AV3A backend for complete Basic-profile transport PCM paths.
+/// Player-side pure-Rust AV3A backend for complete general-full-rate PCM paths.
 ///
-/// The first compressed sample is decoded once during capability probing and retained as the
-/// first output frame. Unsupported AVS3 modes (including MCR stereo, low-complexity neural coding,
-/// HOA and lossless) therefore fall back to the transitional process backend before playback
-/// starts without decoding frame zero twice for supported streams. Multichannel Basic frames stay
-/// N-channel through the codec boundary; the existing player DSP performs the configured
-/// multichannel-to-binaural/stereo reduction before device output.
+/// The first compressed sample is decoded once during capability probing and retained as the first
+/// output frame. Basic/Low-Complexity mono, conventional/MCR stereo, multichannel/object/mixed and
+/// HOA 4/9/16-channel frames stay on the Pure-Rust path. Remaining unsupported syntax such as
+/// lossless coding or unimplemented static-metadata bodies falls back to the transitional process
+/// backend before playback starts, without decoding frame zero twice. Multichannel and HOA frames
+/// remain N-channel through the codec boundary; the player DSP performs the configured output
+/// reduction/rendering before device output.
 pub(crate) struct Av3aRustBackend {
     demuxer: Av3aIsoBmffDemuxer,
     decoder: Avs3Decoder,
@@ -198,8 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_basic_multichannel_frame_geometry() {
+    fn accepts_multichannel_and_hoa_frame_geometry() {
         assert!(validate_frame_geometry(&frame(12, 12 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok());
+        assert!(validate_frame_geometry(&frame(16, 16 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok());
     }
 
     #[test]
