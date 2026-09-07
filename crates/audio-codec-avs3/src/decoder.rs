@@ -3,15 +3,17 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    Av3aSampleEntry, BweConfig, BweMode, BweSideInfo, ChannelConfiguration, CoreSidePrefix,
-    DynamicChannelPrefix, DynamicMetadata, DynamicMetadataPrefix, GaCodecFormat, GaDecodePlan,
-    GaMultichannelFrameSideInfo, NeuralNetworkType, StaticMetadataPrefix, TransformType,
+    BASE_OUTPUT_POSITIONS, Av3aSampleEntry, BasicMonoSynthesisWorkspace, BweConfig, BweMode,
+    BweSideInfo, ChannelConfiguration, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
+    DynamicMetadataPrefix, GaCodecFormat, GaDecodePlan, GaMultichannelFrameSideInfo,
+    NeuralNetworkType, StaticMetadataPrefix, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, GeneralFullRateConfig, parse_dca3},
     core::{parse_core_side_prefix_at, parse_core_transform_type_at},
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::coded_payload,
     ga_frame::parse_multichannel_frame_side_info,
+    ga_mono_pcm::parse_decode_basic_mono_pcm,
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
@@ -32,14 +34,14 @@ struct ParsedSingleBwe {
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Container/AATF framing, dynamic metadata, FD shaping, full TNS, BWE, grouping, multichannel
-/// side information, McBitsAllocation and complete QC payload ranges are now parsed for
-/// mono/stereo/multichannel general-full-rate frames. Range decoding, inverse quantization,
-/// MCAC/inverse-M/S and post synthesis remain separate normative milestones before PCM output.
+/// Basic-profile mono general-full-rate frames now execute the complete built-in path through
+/// neural inverse-QC, BWE/TNS, inverse FD shaping and IMDCT/OLA to PCM. Stereo, multichannel, HOA,
+/// low-complexity neural synthesis and lossless coding remain explicit later milestones.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
     specific_config: Option<Avs3SpecificConfig>,
+    mono_synthesis: BasicMonoSynthesisWorkspace,
     last_frame_header: Option<AatfFrameHeader>,
     last_decode_plan: Option<GaDecodePlan>,
     last_metadata_boundary: Option<MetadataBoundary>,
@@ -85,6 +87,7 @@ impl Avs3Decoder {
             },
             decoder_config: entry.decoder_config.clone(),
             specific_config,
+            mono_synthesis: BasicMonoSynthesisWorkspace::new(),
             last_frame_header: None,
             last_decode_plan: None,
             last_metadata_boundary: None,
@@ -477,8 +480,67 @@ impl AudioDecoder for Avs3Decoder {
                     );
                 }
                 self.last_multichannel_frame_side_info = Some(frame);
+
+                output.clear_for(
+                    header.sample_rate.unwrap_or(self.info.sample_rate),
+                    plan.output_channels
+                        .or_else(|| header.resolved_channels())
+                        .unwrap_or(self.info.channels),
+                );
+                self.last_frame_header = Some(header);
+                self.packets_seen = self.packets_seen.saturating_add(1);
+                Err(CodecError::Unsupported(
+                    "AVS3-P3 multichannel side/QC layout parsed; range decoding and inverse quantization are not implemented yet",
+                ))
             }
-            GaCodecFormat::Mono | GaCodecFormat::Stereo => {
+            GaCodecFormat::Mono => {
+                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
+                    "general-full-rate AATF frame is missing neural-network type",
+                ))?;
+                match nn_type {
+                    NeuralNetworkType::Basic => {}
+                    NeuralNetworkType::LowComplexity => {
+                        return Err(CodecError::Unsupported(
+                            "AVS3-P3 low-complexity mono neural synthesis is not implemented yet",
+                        ));
+                    }
+                    NeuralNetworkType::Reserved(_) => {
+                        return Err(CodecError::Unsupported(
+                            "reserved AVS3 neural-network type",
+                        ));
+                    }
+                }
+                let low_bitrate = self
+                    .lsf_low_bitrate_precision(plan)
+                    .ok_or(CodecError::InvalidData(
+                        "mono synthesis requires bitrate/channel configuration",
+                    ))?;
+
+                output.clear_for(header.sample_rate.unwrap_or(self.info.sample_rate), 1);
+                output.samples.resize(BASE_OUTPUT_POSITIONS, 0.0);
+                let side = parse_decode_basic_mono_pcm(
+                    payload,
+                    core_bit_offset,
+                    low_bitrate,
+                    resolved_bwe.config,
+                    &mut self.mono_synthesis,
+                    &mut output.samples,
+                )?;
+                let core = side.channel.core;
+                self.last_core_side_prefix = Some(core);
+                self.last_first_transform_type = Some(core.transform_type);
+                self.last_bwe_side_info = side.channel.bwe;
+                self.last_after_bwe_bit_offset = Some(
+                    side.channel
+                        .bwe
+                        .map(|bwe| bwe.next_bit_offset)
+                        .unwrap_or(core.next_bit_offset),
+                );
+                self.last_frame_header = Some(header);
+                self.packets_seen = self.packets_seen.saturating_add(1);
+                Ok(DecodeStatus::FrameReady)
+            }
+            GaCodecFormat::Stereo => {
                 let (transform, core, bwe) =
                     self.parse_single_core_and_bwe(payload, &header, plan, core_bit_offset)?;
                 self.last_core_side_prefix = Some(core);
@@ -487,33 +549,26 @@ impl AudioDecoder for Avs3Decoder {
                 self.last_bwe_config = bwe.config;
                 self.last_bwe_side_info = bwe.side_info;
                 self.last_after_bwe_bit_offset = bwe.next_bit_offset;
+
+                output.clear_for(
+                    header.sample_rate.unwrap_or(self.info.sample_rate),
+                    plan.output_channels
+                        .or_else(|| header.resolved_channels())
+                        .unwrap_or(self.info.channels),
+                );
+                self.last_frame_header = Some(header);
+                self.packets_seen = self.packets_seen.saturating_add(1);
+                Err(CodecError::Unsupported(
+                    "AVS3-P3 stereo MCAC/inverse-M/S and synthesis are not implemented yet",
+                ))
             }
             GaCodecFormat::Hoa => {
                 self.last_frame_header = Some(header);
                 self.packets_seen = self.packets_seen.saturating_add(1);
-                return Err(CodecError::Unsupported(
+                Err(CodecError::Unsupported(
                     "AVS3-P3 HOA side information and byte splitting are not implemented yet",
-                ));
+                ))
             }
-        }
-
-        output.clear_for(
-            header.sample_rate.unwrap_or(self.info.sample_rate),
-            plan.output_channels
-                .or_else(|| header.resolved_channels())
-                .unwrap_or(self.info.channels),
-        );
-        self.last_frame_header = Some(header);
-        self.packets_seen = self.packets_seen.saturating_add(1);
-
-        match plan.format {
-            GaCodecFormat::Multichannel => Err(CodecError::Unsupported(
-                "AVS3-P3 multichannel side/QC layout parsed; range decoding and inverse quantization are not implemented yet",
-            )),
-            GaCodecFormat::Mono | GaCodecFormat::Stereo => Err(CodecError::Unsupported(
-                "AVS3-P3 mono/stereo grouping/allocation/QC and entropy synthesis are not implemented yet",
-            )),
-            GaCodecFormat::Hoa => unreachable!("HOA returns before output setup"),
         }
     }
 
@@ -524,6 +579,7 @@ impl AudioDecoder for Avs3Decoder {
     fn reset(&mut self) {
         self.last_frame_header = None;
         self.clear_frame_diagnostics();
+        self.mono_synthesis.reset_synthesis_history();
         self.packets_seen = 0;
     }
 }
