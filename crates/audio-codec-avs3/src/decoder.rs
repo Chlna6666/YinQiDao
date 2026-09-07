@@ -3,10 +3,10 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    Av3aSampleEntry, DynamicChannelPrefix, DynamicMetadata, DynamicMetadataPrefix,
-    StaticMetadataPrefix, TransformType,
+    Av3aSampleEntry, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
+    DynamicMetadataPrefix, StaticMetadataPrefix, TnsSideBoundary, TransformType,
     config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
-    core::parse_core_transform_type_at,
+    core::{parse_core_side_prefix_at, parse_core_transform_type_at},
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::{GaDecodePlan, coded_payload},
@@ -16,10 +16,10 @@ use crate::{
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
-/// Container/config, AATF framing, full-rate routing and dynamic Audio Vivid L1/L2 object metadata
-/// are parsed without native decoders. Dynamic-metadata frames now reach the exact core-side bit
-/// boundary. Static `BasicL1()` and the FdShaping/TNS/BWE + entropy/inverse-quantization stages are
-/// the next remaining boundaries before PCM synthesis.
+/// Container/config, AATF framing, full-rate routing, dynamic Audio Vivid L1/L2 metadata and the
+/// deterministic prefix of `DecodeCoreSideBits()` are parsed without native decoders. TNS Huffman
+/// coefficient tables, BWE/group/QC side information and inverse quantization remain the next
+/// normative milestones before PCM synthesis.
 pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
@@ -30,6 +30,7 @@ pub struct Avs3Decoder {
     last_static_metadata_prefix: Option<StaticMetadataPrefix>,
     last_dynamic_metadata_prefix: Option<DynamicMetadataPrefix>,
     last_dynamic_metadata: Option<DynamicMetadata>,
+    last_core_side_prefix: Option<CoreSidePrefix>,
     last_first_transform_type: Option<TransformType>,
     packets_seen: u64,
 }
@@ -66,6 +67,7 @@ impl Avs3Decoder {
             last_static_metadata_prefix: None,
             last_dynamic_metadata_prefix: None,
             last_dynamic_metadata: None,
+            last_core_side_prefix: None,
             last_first_transform_type: None,
             packets_seen: 0,
         })
@@ -103,12 +105,41 @@ impl Avs3Decoder {
         self.last_dynamic_metadata.as_ref()
     }
 
+    pub fn last_core_side_prefix(&self) -> Option<CoreSidePrefix> {
+        self.last_core_side_prefix
+    }
+
     pub fn last_first_transform_type(&self) -> Option<TransformType> {
         self.last_first_transform_type
     }
 
     pub fn packets_seen(&self) -> u64 {
         self.packets_seen
+    }
+
+    fn lsf_low_bitrate_precision(&self, plan: GaDecodePlan) -> Option<bool> {
+        let Avs3SpecificConfig::GeneralFullRate(config) = self.specific_config.as_ref()? else {
+            return None;
+        };
+        let channels = u32::from(plan.output_channels?);
+        if channels == 0 {
+            return None;
+        }
+        Some(u32::from(config.total_bitrate_kbps) <= channels.saturating_mul(32))
+    }
+
+    fn parse_core_prefix(
+        &self,
+        payload: &[u8],
+        core_bit_offset: usize,
+        plan: GaDecodePlan,
+    ) -> Result<(TransformType, Option<CoreSidePrefix>), CodecError> {
+        let transform = parse_core_transform_type_at(payload, core_bit_offset)?;
+        let prefix = self
+            .lsf_low_bitrate_precision(plan)
+            .map(|low_bitrate| parse_core_side_prefix_at(payload, core_bit_offset, low_bitrate))
+            .transpose()?;
+        Ok((transform, prefix))
     }
 
     fn validate_frame_against_config(&self, header: &AatfFrameHeader) -> Result<(), CodecError> {
@@ -207,6 +238,7 @@ impl AudioDecoder for Avs3Decoder {
             static_metadata_prefix,
             dynamic_metadata_prefix,
             dynamic_metadata,
+            core_side_prefix,
             first_transform_type,
         ) = if method == AudioCodingMethod::GeneralFullRate {
             let plan = GaDecodePlan::from_header(&header)?;
@@ -217,14 +249,18 @@ impl AudioDecoder for Avs3Decoder {
             let metadata = parse_metadata_boundary(payload)?;
 
             match metadata {
-                MetadataBoundary::None { core_bit_offset } => (
-                    Some(plan),
-                    Some(metadata),
-                    None,
-                    None,
-                    None,
-                    Some(parse_core_transform_type_at(payload, core_bit_offset)?),
-                ),
+                MetadataBoundary::None { core_bit_offset } => {
+                    let (transform, core) = self.parse_core_prefix(payload, core_bit_offset, plan)?;
+                    (
+                        Some(plan),
+                        Some(metadata),
+                        None,
+                        None,
+                        None,
+                        core,
+                        Some(transform),
+                    )
+                }
                 MetadataBoundary::StaticPresent { static_bit_offset } => {
                     let prefix = parse_static_metadata_prefix_at(payload, static_bit_offset)?;
                     if !prefix.basic_level_supported() {
@@ -232,7 +268,7 @@ impl AudioDecoder for Avs3Decoder {
                             "reserved AVS3 basic static metadata level",
                         ));
                     }
-                    (Some(plan), Some(metadata), Some(prefix), None, None, None)
+                    (Some(plan), Some(metadata), Some(prefix), None, None, None, None)
                 }
                 MetadataBoundary::DynamicPresent { dynamic_bit_offset } => {
                     let object_channels = header.object_channels().ok_or(CodecError::InvalidData(
@@ -255,22 +291,21 @@ impl AudioDecoder for Avs3Decoder {
                         first_channel_bit_offset,
                         first_channel,
                     };
-                    let transform = Some(parse_core_transform_type_at(
-                        payload,
-                        decoded.core_bit_offset,
-                    )?);
+                    let (transform, core) =
+                        self.parse_core_prefix(payload, decoded.core_bit_offset, plan)?;
                     (
                         Some(plan),
                         Some(metadata),
                         None,
                         Some(prefix),
                         Some(decoded),
-                        transform,
+                        core,
+                        Some(transform),
                     )
                 }
             }
         } else {
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, None)
         };
 
         self.packets_seen = self.packets_seen.saturating_add(1);
@@ -286,26 +321,32 @@ impl AudioDecoder for Avs3Decoder {
         self.last_static_metadata_prefix = static_metadata_prefix;
         self.last_dynamic_metadata_prefix = dynamic_metadata_prefix;
         self.last_dynamic_metadata = dynamic_metadata;
+        self.last_core_side_prefix = core_side_prefix;
         self.last_first_transform_type = first_transform_type;
         self.last_frame_header = Some(header);
 
-        match (method, metadata_boundary) {
+        match (method, metadata_boundary, core_side_prefix) {
             (
                 AudioCodingMethod::GeneralFullRate,
                 Some(MetadataBoundary::StaticPresent { .. }),
+                _,
             ) => Err(CodecError::Unsupported(
                 "AVS3-P3 BasicL1/VrExt static metadata body decoding is not implemented yet",
             )),
             (
                 AudioCodingMethod::GeneralFullRate,
-                Some(MetadataBoundary::DynamicPresent { .. } | MetadataBoundary::None { .. }),
+                _,
+                Some(CoreSidePrefix {
+                    tns: TnsSideBoundary::HuffmanCodes { .. },
+                    ..
+                }),
             ) => Err(CodecError::Unsupported(
-                "AVS3-P3 FdShaping/TNS/BWE and entropy synthesis is not implemented yet",
+                "AVS3-P3 TNS Huffman coefficient tables B.25-B.32 are not implemented yet",
             )),
-            (AudioCodingMethod::GeneralFullRate, None) => Err(CodecError::Internal(
-                "general full-rate frame lost metadata parser state".into(),
+            (AudioCodingMethod::GeneralFullRate, _, _) => Err(CodecError::Unsupported(
+                "AVS3-P3 BWE/group/QC and entropy synthesis is not implemented yet",
             )),
-            (AudioCodingMethod::Lossless, _) => Err(CodecError::Unsupported(
+            (AudioCodingMethod::Lossless, _, _) => Err(CodecError::Unsupported(
                 "AVS3-P3 ll_raw_data_block lossless synthesis is not implemented yet",
             )),
         }
@@ -322,6 +363,7 @@ impl AudioDecoder for Avs3Decoder {
         self.last_static_metadata_prefix = None;
         self.last_dynamic_metadata_prefix = None;
         self.last_dynamic_metadata = None;
+        self.last_core_side_prefix = None;
         self.last_first_transform_type = None;
         self.packets_seen = 0;
     }
@@ -351,5 +393,6 @@ mod tests {
         assert_eq!(decoder.last_static_metadata_prefix(), None);
         assert_eq!(decoder.last_dynamic_metadata_prefix(), None);
         assert!(decoder.last_dynamic_metadata().is_none());
+        assert_eq!(decoder.last_core_side_prefix(), None);
     }
 }
