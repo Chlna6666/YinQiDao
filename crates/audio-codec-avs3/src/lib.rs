@@ -65,10 +65,15 @@ pub use config::{
     full_rate_sample_rate, parse_dca3,
 };
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
-pub use context_params::{CONTEXT_LAYER_1_BIAS, CONTEXT_LAYER_2_BIAS, CONTEXT_LAYER_3_BIAS};
+pub use context_params::{
+    CONTEXT_LAYER_1_BIAS, CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_2_BIAS,
+    CONTEXT_LAYER_2_KERNEL, CONTEXT_LAYER_3_BIAS, CONTEXT_LAYER_3_KERNEL,
+    context_decoder_params,
+};
 pub use context_pipeline::{
     ContextModelParams, ContextPipelineWorkspace, decode_context_and_select_base_models,
-    decode_context_stddev_into, dequantize_context_latents_into,
+    decode_context_and_select_base_models_default, decode_context_stddev_into,
+    default_context_model_params, dequantize_context_latents_into,
     select_base_range_models_into,
 };
 pub use core::{

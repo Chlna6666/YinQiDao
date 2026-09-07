@@ -5,16 +5,30 @@ use crate::{
     ContextDecoderParams, ContextDecoderWorkspace, decode_context_latents_into,
     decode_context_network, select_base_range_model_index,
 };
+use crate::context_params::context_decoder_params;
+use crate::quantizer_params::CONTEXT_QUANTILE_MEDIANS;
 
 const CONTEXT_INPUT_VALUES: usize = CONTEXT_INPUT_POSITIONS * CONTEXT_CHANNELS;
 const CONTEXT_OUTPUT_VALUES: usize = CONTEXT_OUTPUT_POSITIONS * CONTEXT_CHANNELS;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContextModelParams<'a> {
-    /// Per-context-channel scalar-quantizer median. Model data is supplied independently from the
-    /// runtime so the decoder never depends on an opaque native/model blob.
+    /// Per-context-channel scalar-quantizer median. Kept separate from the Annex-B neural tables
+    /// because GY/T 363-2023 does not publish this interoperable hyper-prior model parameter.
     pub quantile_medians: &'a [f32],
     pub decoder: ContextDecoderParams<'a>,
+}
+
+/// Return the production/default context model without parsing an opaque model blob.
+///
+/// B.2..B.7 come from the normative Annex-B static tables while the sixteen quantizer medians are
+/// the explicitly stored interoperable hyper-prior parameters. Every returned slice is `'static`;
+/// constructing this value performs no allocation, copy or model parsing.
+pub fn default_context_model_params() -> ContextModelParams<'static> {
+    ContextModelParams {
+        quantile_medians: &CONTEXT_QUANTILE_MEDIANS,
+        decoder: context_decoder_params(),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -45,10 +59,10 @@ impl ContextPipelineWorkspace {
 
 /// Inverse scalar quantization for a position-major latent tensor.
 ///
-/// The normative quantizer is channel-wise, so adding each channel's median directly to the
-/// position-major tensor is equivalent to transposing to channel-major layout, dequantizing, then
-/// transposing back. Avoiding those transposes keeps the context path allocation- and copy-free
-/// once the workspace has been initialized.
+/// The quantizer is channel-wise, so adding each channel's median directly to the position-major
+/// tensor is equivalent to transposing to channel-major layout, dequantizing, then transposing
+/// back. Avoiding those transposes keeps the context path allocation- and copy-free once the
+/// workspace has been initialized.
 pub fn dequantize_context_latents_into(
     quantized: &[i32],
     quantile_medians: &[f32],
@@ -82,7 +96,8 @@ pub fn dequantize_context_latents_into(
 }
 
 /// Decode one context range-coded block all the way to the 64x16 standard-deviation field used by
-/// table B.8. The caller supplies the normative quantizer medians and B.2..B.7 CNN parameters.
+/// table B.8. The low-level entry point keeps the model injectable for differential tests and model
+/// experiments; normal decoding should use [`default_context_model_params`].
 pub fn decode_context_stddev_into(
     packet: &[u8],
     context_range: BitRange,
@@ -145,8 +160,8 @@ pub fn select_base_range_models_into(
     Ok(())
 }
 
-/// Convenience path used by the future base entropy decoder. It keeps all context temporary
-/// storage in `workspace` and emits only the B.9 row indices required for `baseBitstream`.
+/// Low-level injectable context path. It keeps all temporary storage in `workspace` and emits only
+/// the B.9 row indices required for `baseBitstream`.
 pub fn decode_context_and_select_base_models(
     packet: &[u8],
     context_range: BitRange,
@@ -159,11 +174,32 @@ pub fn decode_context_and_select_base_models(
     select_base_range_models_into(context_stddev, model_indices)
 }
 
+/// Production/default hyper-prior path: range-decode context latents, apply the explicit
+/// interoperable quantizer medians, execute Annex-B B.2..B.7, and select the exact B.9 model row for
+/// every base latent. No model parameter is supplied by the caller.
+pub fn decode_context_and_select_base_models_default(
+    packet: &[u8],
+    context_range: BitRange,
+    workspace: &mut ContextPipelineWorkspace,
+    context_stddev: &mut [f32],
+    model_indices: &mut [u8],
+) -> Result<(), CodecError> {
+    decode_context_and_select_base_models(
+        packet,
+        context_range,
+        default_context_model_params(),
+        workspace,
+        context_stddev,
+        model_indices,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_SPEC, CONTEXT_LAYER_3_SPEC,
+        CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_KERNEL,
+        CONTEXT_LAYER_2_SPEC, CONTEXT_LAYER_3_KERNEL, CONTEXT_LAYER_3_SPEC,
         ConvTranspose1dParams,
     };
 
@@ -233,6 +269,15 @@ mod tests {
         assert!(indices.iter().all(|&index| index == expected));
         assert_eq!(workspace.quantized_latents().len(), CONTEXT_INPUT_VALUES);
         assert_eq!(workspace.dequantized_latents().len(), CONTEXT_INPUT_VALUES);
+    }
+
+    #[test]
+    fn default_context_model_is_fully_static() {
+        let params = default_context_model_params();
+        assert_eq!(params.quantile_medians.as_ptr(), CONTEXT_QUANTILE_MEDIANS.as_ptr());
+        assert_eq!(params.decoder.layer_1.kernel.as_ptr(), CONTEXT_LAYER_1_KERNEL.as_ptr());
+        assert_eq!(params.decoder.layer_2.kernel.as_ptr(), CONTEXT_LAYER_2_KERNEL.as_ptr());
+        assert_eq!(params.decoder.layer_3.kernel.as_ptr(), CONTEXT_LAYER_3_KERNEL.as_ptr());
     }
 
     #[test]
