@@ -59,9 +59,35 @@ impl AssetSource for Assets {
     }
 }
 
-// `icons_gen.rs` is emitted by this crate's build.rs into OUT_DIR, so ordinary Rust module file
-// resolution cannot name it. Keep the generated boundary isolated here; hand-written code must use
-// normal `mod name;` declarations and must not depend back on this module.
+// The proc-macro only resolves one requested identifier to one SVG at each `icon!(...)` call site.
+// It does not scan the icon directory or emit a full icon API, so unused Lucide assets never become
+// rustc inputs. Keep the public macro in this crate; callers do not depend on the implementation
+// crate directly.
+#[doc(hidden)]
+pub use lucide_gpui_macros::__icon_asset;
+
+#[doc(hidden)]
+pub fn __register_icon(path: &'static str, bytes: &'static [u8]) {
+    registry::register(path, bytes);
+}
+
+/// Embed and register exactly one Lucide SVG at the call site.
+///
+/// Underscores in the Rust identifier map to Lucide's hyphenated file names, for example
+/// `icon!(folder_plus)` resolves `icons/folder-plus.svg`.
+#[macro_export]
+macro_rules! icon {
+    ($name:ident) => {{
+        const ASSET: (&'static str, &'static [u8]) = $crate::__icon_asset!($name);
+        static ONCE: ::std::sync::Once = ::std::sync::Once::new();
+        ONCE.call_once(|| $crate::__register_icon(ASSET.0, ASSET.1));
+        ASSET.0
+    }};
+}
+
+// Transitional compatibility boundary while application call sites migrate to `icon!(name)`.
+// `icons_gen.rs` is still emitted by build.rs for now and is removed once no `icon_xxx()` calls
+// remain. Generated code stays isolated; hand-written modules must use normal module declarations.
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/icons_gen.rs"));
 }
