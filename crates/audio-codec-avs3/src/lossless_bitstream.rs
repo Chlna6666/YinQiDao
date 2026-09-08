@@ -1,6 +1,13 @@
+mod prepost;
+
 use yinqidao_codec_core::CodecError;
 
 use crate::{LOSSLESS_RICE_MAX_PREFIX, bitreader::BitReader};
+
+pub use prepost::{
+    LOSSLESS_PREPROCESS_MAX_SAMPLES, lossless_ra_shift, lossless_ra_shift12,
+    lossless_residual_shift_plan,
+};
 
 /// Decode one ordinary MSB-first Golomb-Rice codeword at an arbitrary bit position.
 ///
