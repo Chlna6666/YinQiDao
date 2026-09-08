@@ -4,6 +4,8 @@ mod spatial;
 pub use eq::{EqPreset, clamp_eq};
 pub use spatial::{SpatialPreset, clamp_spatial};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::model::{EqSettings, SpatialSettings};
 use yinqidao_audio_spatial::{ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine};
 
@@ -12,6 +14,20 @@ use super::debug::{
 };
 use eq::EqProcessor;
 use spatial::Spatializer;
+
+// Decoder seek and AudioProcessor live on different layers. A generation counter keeps the signal
+// lock-free and allocation-free: successful seek increments it, and the next PCM block resets state
+// exactly once before consuming the new timeline. Preloading never seeks the active decoder.
+static TRANSPORT_RESET_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn request_transport_reset() {
+    TRANSPORT_RESET_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+#[inline]
+fn transport_reset_generation() -> u64 {
+    TRANSPORT_RESET_GENERATION.load(Ordering::Acquire)
+}
 
 #[derive(Clone, Debug)]
 struct StreamingLinearResampler {
@@ -140,6 +156,7 @@ pub struct AudioProcessor {
     source_debug_scratch: Vec<f32>,
     eq_debug_scratch: Vec<f32>,
     resampler: StreamingLinearResampler,
+    transport_reset_generation: u64,
 }
 
 impl AudioProcessor {
@@ -156,18 +173,30 @@ impl AudioProcessor {
             source_debug_scratch: Vec::new(),
             eq_debug_scratch: Vec::new(),
             resampler: StreamingLinearResampler::new(sample_rate),
+            transport_reset_generation: transport_reset_generation(),
         }
     }
 
     /// Clear state tied to the previous playback timeline while retaining all allocated workspaces.
-    /// This is intentionally separate from parameter changes: seek/track reopen are discontinuities,
-    /// whereas normal consecutive decode chunks must preserve delay/filter/resampler history.
+    /// This is intentionally separate from normal consecutive decode chunks, which must preserve
+    /// delay/filter/resampler history.
     pub(crate) fn reset_transport(&mut self) {
+        self.eq.reset_state();
         self.spatial.reset_transport();
         if let Some(engine) = self.native_spatial.as_mut() {
             engine.reset();
         }
         self.resampler.reset();
+    }
+
+    #[inline]
+    fn consume_transport_reset(&mut self) {
+        let generation = transport_reset_generation();
+        let parameters_changed = self.eq.take_transport_reset_request();
+        if parameters_changed || generation != self.transport_reset_generation {
+            self.reset_transport();
+            self.transport_reset_generation = generation;
+        }
     }
 
     #[cfg(test)]
@@ -184,6 +213,10 @@ impl AudioProcessor {
         input_channels: u16,
         output: &mut Vec<f32>,
     ) {
+        // Reset before touching the first PCM sample of a discontinuous timeline. This keeps the
+        // operation outside SpatialEngine's inner 64-frame source loop and makes it happen once.
+        self.consume_transport_reset();
+
         let output_rate = self.eq.sample_rate();
         let native_multichannel = input_channels > 2;
 
@@ -416,8 +449,6 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
 
 fn speaker_for_channel(channels: usize, index: usize) -> Speaker {
     match channels {
-        // These tables remain only as emergency compatibility fallback when native engine creation
-        // or validation fails. Normal 10/12-channel playback is routed through SpatialEngine.
         12 => LAYOUT_7_1_4[index.min(LAYOUT_7_1_4.len() - 1)],
         10 => LAYOUT_5_1_4[index.min(LAYOUT_5_1_4.len() - 1)],
         _ => {
@@ -556,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_reset_matches_fresh_native_renderer_and_resampler() {
+    fn transport_reset_matches_fresh_native_renderer_resampler_and_eq() {
         let mut input = vec![0.0_f32; 12 * 97];
         for (frame_index, frame) in input.chunks_exact_mut(12).enumerate() {
             let phase = frame_index as f32 * 0.031;
@@ -570,7 +601,7 @@ mod tests {
         let make_processor = || {
             AudioProcessor::new(
                 48_000,
-                EqPreset::Flat.settings(),
+                EqPreset::Rock.settings(),
                 SpatialSettings::default(),
                 1.0,
             )
@@ -619,6 +650,23 @@ mod tests {
                 .zip(expected.iter())
                 .all(|(left, right)| (left - right).abs() < 1.0e-6)
         );
+    }
+
+    #[test]
+    fn global_transport_generation_is_consumed_once() {
+        let input = vec![0.1_f32; 128];
+        let mut processor = AudioProcessor::new(
+            48_000,
+            EqPreset::Rock.settings(),
+            SpatialPreset::Orbit360.settings(),
+            1.0,
+        );
+        let _ = processor.process(&input, 48_000, 2);
+        let before = processor.transport_reset_generation;
+        request_transport_reset();
+        assert_ne!(transport_reset_generation(), before);
+        let _ = processor.process(&input, 48_000, 2);
+        assert_eq!(processor.transport_reset_generation, transport_reset_generation());
     }
 
     #[test]
