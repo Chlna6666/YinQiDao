@@ -5,7 +5,10 @@ use crate::environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SO
 use crate::image_source::source_reflection_descriptors;
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
-pub const MAX_DEBUG_REFLECTIONS: usize = EARLY_REFLECTION_TAP_COUNT;
+pub const MAX_DEBUG_REFLECTION_SOURCES: usize = 12;
+pub const REFLECTIONS_PER_DEBUG_SOURCE: usize = EARLY_REFLECTION_TAP_COUNT;
+pub const MAX_DEBUG_REFLECTIONS: usize =
+    MAX_DEBUG_REFLECTION_SOURCES * REFLECTIONS_PER_DEBUG_SOURCE;
 
 const HEAD_RADIUS_M: f32 = 0.0875;
 const COMMON_CAUSAL_DELAY_SAMPLES: f32 = 2.0;
@@ -68,20 +71,31 @@ impl Default for SpatialDebugReflectionWall {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SpatialDebugReflection {
     pub active: bool,
+    pub source_index: u16,
     pub tap_index: u8,
     pub wall: SpatialDebugReflectionWall,
-    /// Compatibility field name: source-aware image-source mode stores the actual first-order wall
-    /// bounce position here, not the old delay-derived virtual wall point.
-    pub virtual_position: Vec3,
-    /// Excess source->wall->listener path delay relative to the direct path.
-    pub delay_samples: u32,
-    pub delay_milliseconds: f32,
-    /// Full first-order image-source path length.
+    pub image_position: Vec3,
+    pub bounce_position: Vec3,
+    /// Full first-order source -> wall -> listener image-source path length.
     pub path_length_meters: f32,
-    pub gain: f32,
+    /// Extra distance relative to the direct source/listener path.
+    pub excess_path_meters: f32,
+    /// Extra delay used by the realtime renderer; direct programme latency is not added.
+    pub excess_delay_samples: f32,
+    pub delay_milliseconds: f32,
+    pub wall_reflectance: f32,
+    /// Approximate rendered reflection contribution after direction/distance binaural gains.
     pub wet_contribution: f32,
-    /// Legacy display field. Image-source reflections are binauralized by arrival direction rather
-    /// than a fixed same-ear/cross-ear routing rule, so this remains false in the new path.
+    pub arrival_azimuth_degrees: f32,
+    pub arrival_elevation_degrees: f32,
+    pub left_delay_samples: f32,
+    pub right_delay_samples: f32,
+    pub left_gain: f32,
+    pub right_gain: f32,
+    /// Compatibility aliases for the existing GPUI while it migrates to the full matrix fields.
+    pub virtual_position: Vec3,
+    pub delay_samples: u32,
+    pub gain: f32,
     pub cross_ear: bool,
 }
 
@@ -138,14 +152,26 @@ impl SpatialDebugSnapshot {
             reflection_count: 0,
             reflections: [SpatialDebugReflection {
                 active: false,
+                source_index: 0,
                 tap_index: 0,
                 wall: SpatialDebugReflectionWall::Front,
+                image_position: Vec3::ZERO,
+                bounce_position: Vec3::ZERO,
+                path_length_meters: 0.0,
+                excess_path_meters: 0.0,
+                excess_delay_samples: 0.0,
+                delay_milliseconds: 0.0,
+                wall_reflectance: 0.0,
+                wet_contribution: 0.0,
+                arrival_azimuth_degrees: 0.0,
+                arrival_elevation_degrees: 0.0,
+                left_delay_samples: 0.0,
+                right_delay_samples: 0.0,
+                left_gain: 0.0,
+                right_gain: 0.0,
                 virtual_position: Vec3::ZERO,
                 delay_samples: 0,
-                delay_milliseconds: 0.0,
-                path_length_meters: 0.0,
                 gain: 0.0,
-                wet_contribution: 0.0,
                 cross_ear: false,
             }; MAX_DEBUG_REFLECTIONS],
         }
@@ -181,11 +207,16 @@ impl SpatialDebugSnapshot {
         );
         self.source_count = self.source_count.max(source_index + 1);
 
-        // Until the fixed snapshot is widened to source×tap storage, publish the first FullRange
-        // source's four real image-source paths. This is truthful and bounded, unlike retaining the
-        // old global post-mix tap visualization after the DSP path has moved per-source.
-        if self.reflection_count == 0 && matches!(kind, SourceKind::FullRange) {
-            self.capture_reflections_for_source(pose);
+        if source_index < MAX_DEBUG_REFLECTION_SOURCES {
+            let base = source_index * REFLECTIONS_PER_DEBUG_SOURCE;
+            self.reflections[base..base + REFLECTIONS_PER_DEBUG_SOURCE]
+                .fill(SpatialDebugReflection::default());
+            self.reflection_count = self
+                .reflection_count
+                .max(base + REFLECTIONS_PER_DEBUG_SOURCE);
+            if matches!(kind, SourceKind::FullRange) {
+                self.capture_reflections_for_source(source_index, pose);
+            }
         }
     }
 
@@ -207,32 +238,60 @@ impl SpatialDebugSnapshot {
         self.reflection_count = 0;
     }
 
-    fn capture_reflections_for_source(&mut self, pose: SourcePose) {
+    fn capture_reflections_for_source(&mut self, source_index: usize, pose: SourcePose) {
         let sample_rate = self.sample_rate.max(1) as f32;
         let descriptors =
             source_reflection_descriptors(sample_rate, pose, self.listener, self.environment);
-        for (index, descriptor) in descriptors.into_iter().enumerate() {
+        let base = source_index * REFLECTIONS_PER_DEBUG_SOURCE;
+        for (tap_index, descriptor) in descriptors.into_iter().enumerate() {
+            let reflected_pose = SourcePose {
+                position: descriptor.image_position,
+                velocity: pose.velocity,
+                gain: finite_or_zero(pose.gain).clamp(0.0, 4.0)
+                    * self.environment.mix.clamp(0.0, 0.45)
+                    * descriptor.wall_reflectance,
+                spread: finite_or_zero(pose.spread).clamp(0.0, 1.0),
+            };
+            let arrival = analyze_source(
+                sample_rate,
+                source_index,
+                SourceKind::FullRange,
+                reflected_pose,
+                self.listener,
+            );
             let excess_delay_samples = descriptor.excess_delay_samples.max(0.0);
-            self.reflections[index] = SpatialDebugReflection {
+            let rounded_delay = excess_delay_samples.round().min(u32::MAX as f32) as u32;
+            let slot = base + tap_index;
+            self.reflections[slot] = SpatialDebugReflection {
                 active: self.environment.mix > 1.0e-5 && descriptor.wall_reflectance > 0.0,
-                tap_index: index.min(u8::MAX as usize) as u8,
+                source_index: source_index.min(u16::MAX as usize) as u16,
+                tap_index: tap_index.min(u8::MAX as usize) as u8,
                 wall: match descriptor.wall {
                     ReflectionWall::Left => SpatialDebugReflectionWall::Left,
                     ReflectionWall::Right => SpatialDebugReflectionWall::Right,
                     ReflectionWall::Front => SpatialDebugReflectionWall::Front,
                     ReflectionWall::Rear => SpatialDebugReflectionWall::Rear,
                 },
-                virtual_position: descriptor.bounce_position,
-                delay_samples: excess_delay_samples.round().min(u32::MAX as f32) as u32,
-                delay_milliseconds: excess_delay_samples / sample_rate * 1_000.0,
+                image_position: descriptor.image_position,
+                bounce_position: descriptor.bounce_position,
                 path_length_meters: descriptor.path_length_meters,
+                excess_path_meters: descriptor.excess_path_meters,
+                excess_delay_samples,
+                delay_milliseconds: excess_delay_samples / sample_rate * 1_000.0,
+                wall_reflectance: descriptor.wall_reflectance,
+                wet_contribution: ((arrival.left_gain + arrival.right_gain) * 0.5).max(0.0),
+                arrival_azimuth_degrees: arrival.azimuth_degrees,
+                arrival_elevation_degrees: arrival.elevation_degrees,
+                left_delay_samples: arrival.left_delay_samples + excess_delay_samples,
+                right_delay_samples: arrival.right_delay_samples + excess_delay_samples,
+                left_gain: arrival.left_gain,
+                right_gain: arrival.right_gain,
+                virtual_position: descriptor.bounce_position,
+                delay_samples: rounded_delay,
                 gain: descriptor.wall_reflectance,
-                wet_contribution: descriptor.wall_reflectance
-                    * self.environment.mix.clamp(0.0, 1.0),
                 cross_ear: false,
             };
         }
-        self.reflection_count = MAX_DEBUG_REFLECTIONS;
     }
 }
 
@@ -416,7 +475,7 @@ mod tests {
     fn fixed_snapshot_has_no_dynamic_storage() {
         let snapshot = SpatialDebugSnapshot::new(48_000);
         assert_eq!(snapshot.sources.len(), MAX_DEBUG_SOURCES);
-        assert_eq!(snapshot.reflections.len(), MAX_DEBUG_REFLECTIONS);
+        assert_eq!(snapshot.reflections.len(), 48);
         assert_eq!(snapshot.source_count, 0);
     }
 
@@ -431,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn reflection_snapshot_uses_first_source_image_path() {
+    fn reflection_matrix_tracks_source_and_real_bounce_geometry() {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
         snapshot.record_source(
@@ -439,15 +498,31 @@ mod tests {
             SourceKind::FullRange,
             SourcePose::new(Vec3::new(0.25, 0.0, 1.0)),
         );
-        assert_eq!(snapshot.reflection_count, MAX_DEBUG_REFLECTIONS);
-        let left = snapshot.reflections[0];
-        assert!(left.active);
-        assert_eq!(left.wall, SpatialDebugReflectionWall::Left);
-        assert!(left.virtual_position.x < 0.0);
-        assert!(left.delay_samples > 0);
-        assert!(left.delay_milliseconds > 0.0);
-        assert!(left.path_length_meters > 0.0);
-        assert!(!left.cross_ear);
+        snapshot.record_source(
+            1,
+            SourceKind::FullRange,
+            SourcePose::new(Vec3::new(-0.25, 0.0, 1.0)),
+        );
+        assert_eq!(snapshot.reflection_count, 8);
+        assert_eq!(snapshot.reflections[0].source_index, 0);
+        assert_eq!(snapshot.reflections[4].source_index, 1);
+        assert!(snapshot.reflections[0].active);
+        assert!(snapshot.reflections[0].path_length_meters > 0.0);
+        assert!(snapshot.reflections[0].excess_delay_samples > 0.0);
+        assert!(snapshot.reflections[0].left_delay_samples > 0.0);
+        assert!(snapshot.reflections[0].right_delay_samples > 0.0);
+        assert_eq!(snapshot.reflections[0].virtual_position, snapshot.reflections[0].bounce_position);
+    }
+
+    #[test]
+    fn lfe_reflection_group_is_explicitly_inactive() {
+        let mut snapshot = SpatialDebugSnapshot::new(48_000);
+        snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
+        snapshot.record_source(3, SourceKind::Lfe, SourcePose::default());
+        assert_eq!(snapshot.reflection_count, 16);
+        assert!(snapshot.reflections[12..16]
+            .iter()
+            .all(|reflection| !reflection.active));
     }
 
     #[test]

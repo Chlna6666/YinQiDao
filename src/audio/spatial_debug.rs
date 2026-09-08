@@ -7,7 +7,7 @@ use yinqidao_audio_spatial::{
 };
 
 const SOURCE_WORDS: usize = 24;
-const REFLECTION_WORDS: usize = 12;
+const REFLECTION_WORDS: usize = 22;
 const LISTENER_WORDS: usize = 9;
 const ENVIRONMENT_WORDS: usize = 4;
 const READ_RETRIES: usize = 4;
@@ -226,8 +226,9 @@ fn load_source(index: usize) -> SpatialDebugSource {
 fn store_reflection(index: usize, reflection: SpatialDebugReflection) {
     let base = index * REFLECTION_WORDS;
     REFLECTIONS[base].store(if reflection.active { 1 } else { 0 }, Ordering::Relaxed);
-    REFLECTIONS[base + 1].store(u32::from(reflection.tap_index), Ordering::Relaxed);
-    REFLECTIONS[base + 2].store(
+    REFLECTIONS[base + 1].store(u32::from(reflection.source_index), Ordering::Relaxed);
+    REFLECTIONS[base + 2].store(u32::from(reflection.tap_index), Ordering::Relaxed);
+    REFLECTIONS[base + 3].store(
         match reflection.wall {
             SpatialDebugReflectionWall::Left => 0,
             SpatialDebugReflectionWall::Right => 1,
@@ -236,41 +237,71 @@ fn store_reflection(index: usize, reflection: SpatialDebugReflection) {
         },
         Ordering::Relaxed,
     );
-    store_f32(&REFLECTIONS[base + 3], reflection.virtual_position.x);
-    store_f32(&REFLECTIONS[base + 4], reflection.virtual_position.y);
-    store_f32(&REFLECTIONS[base + 5], reflection.virtual_position.z);
-    REFLECTIONS[base + 6].store(reflection.delay_samples, Ordering::Relaxed);
-    store_f32(&REFLECTIONS[base + 7], reflection.delay_milliseconds);
-    store_f32(&REFLECTIONS[base + 8], reflection.path_length_meters);
-    store_f32(&REFLECTIONS[base + 9], reflection.gain);
-    store_f32(&REFLECTIONS[base + 10], reflection.wet_contribution);
-    REFLECTIONS[base + 11].store(if reflection.cross_ear { 1 } else { 0 }, Ordering::Relaxed);
+    for (slot, value) in [
+        reflection.image_position.x,
+        reflection.image_position.y,
+        reflection.image_position.z,
+        reflection.bounce_position.x,
+        reflection.bounce_position.y,
+        reflection.bounce_position.z,
+        reflection.path_length_meters,
+        reflection.excess_path_meters,
+        reflection.excess_delay_samples,
+        reflection.delay_milliseconds,
+        reflection.wall_reflectance,
+        reflection.wet_contribution,
+        reflection.arrival_azimuth_degrees,
+        reflection.arrival_elevation_degrees,
+        reflection.left_delay_samples,
+        reflection.right_delay_samples,
+        reflection.left_gain,
+        reflection.right_gain,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store_f32(&REFLECTIONS[base + 4 + slot], value);
+    }
 }
 
 fn load_reflection(index: usize) -> SpatialDebugReflection {
     let base = index * REFLECTION_WORDS;
+    let value = |offset: usize| load_f32(&REFLECTIONS[base + offset]);
+    let bounce_position = Vec3::new(value(7), value(8), value(9));
+    let excess_delay_samples = value(12);
+    let wall_reflectance = value(14);
     SpatialDebugReflection {
         active: REFLECTIONS[base].load(Ordering::Relaxed) != 0,
-        tap_index: REFLECTIONS[base + 1]
+        source_index: REFLECTIONS[base + 1]
+            .load(Ordering::Relaxed)
+            .min(u32::from(u16::MAX)) as u16,
+        tap_index: REFLECTIONS[base + 2]
             .load(Ordering::Relaxed)
             .min(u32::from(u8::MAX)) as u8,
-        wall: match REFLECTIONS[base + 2].load(Ordering::Relaxed) {
+        wall: match REFLECTIONS[base + 3].load(Ordering::Relaxed) {
             0 => SpatialDebugReflectionWall::Left,
             1 => SpatialDebugReflectionWall::Right,
             3 => SpatialDebugReflectionWall::Rear,
             _ => SpatialDebugReflectionWall::Front,
         },
-        virtual_position: Vec3::new(
-            load_f32(&REFLECTIONS[base + 3]),
-            load_f32(&REFLECTIONS[base + 4]),
-            load_f32(&REFLECTIONS[base + 5]),
-        ),
-        delay_samples: REFLECTIONS[base + 6].load(Ordering::Relaxed),
-        delay_milliseconds: load_f32(&REFLECTIONS[base + 7]),
-        path_length_meters: load_f32(&REFLECTIONS[base + 8]),
-        gain: load_f32(&REFLECTIONS[base + 9]),
-        wet_contribution: load_f32(&REFLECTIONS[base + 10]),
-        cross_ear: REFLECTIONS[base + 11].load(Ordering::Relaxed) != 0,
+        image_position: Vec3::new(value(4), value(5), value(6)),
+        bounce_position,
+        path_length_meters: value(10),
+        excess_path_meters: value(11),
+        excess_delay_samples,
+        delay_milliseconds: value(13),
+        wall_reflectance,
+        wet_contribution: value(15),
+        arrival_azimuth_degrees: value(16),
+        arrival_elevation_degrees: value(17),
+        left_delay_samples: value(18),
+        right_delay_samples: value(19),
+        left_gain: value(20),
+        right_gain: value(21),
+        virtual_position: bounce_position,
+        delay_samples: excess_delay_samples.round().clamp(0.0, u32::MAX as f32) as u32,
+        gain: wall_reflectance,
+        cross_ear: false,
     }
 }
 
@@ -289,43 +320,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atomic_publication_round_trips_fixed_scene() {
+    fn atomic_publication_round_trips_reflection_matrix_entry() {
         let mut source = SpatialDebugSource::default();
         source.active = true;
-        source.source_index = 0;
+        source.source_index = 1;
         source.kind = SpatialDebugSourceKind::FullRange;
         source.position = Vec3::RIGHT;
         source.azimuth_degrees = 90.0;
         source.ild_db = 3.0;
+
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.sequence = 7;
         snapshot.rendered_frames = 1_600;
-        snapshot.source_count = 1;
-        snapshot.sources[0] = source;
-        snapshot.reflection_count = 1;
-        snapshot.reflections[0] = SpatialDebugReflection {
+        snapshot.source_count = 2;
+        snapshot.sources[1] = source;
+        snapshot.reflection_count = 8;
+        snapshot.reflections[4] = SpatialDebugReflection {
             active: true,
+            source_index: 1,
             tap_index: 0,
             wall: SpatialDebugReflectionWall::Left,
-            virtual_position: Vec3::new(-1.5, 0.0, 0.0),
-            delay_samples: 240,
-            delay_milliseconds: 5.0,
-            path_length_meters: 1.715,
-            gain: 0.30,
-            wet_contribution: 0.03,
-            cross_ear: true,
+            image_position: Vec3::new(-3.0, 0.0, 1.0),
+            bounce_position: Vec3::new(-1.5, 0.0, 0.5),
+            path_length_meters: 3.2,
+            excess_path_meters: 2.1,
+            excess_delay_samples: 294.0,
+            delay_milliseconds: 6.125,
+            wall_reflectance: 0.58,
+            wet_contribution: 0.037,
+            arrival_azimuth_degrees: -71.0,
+            arrival_elevation_degrees: 0.0,
+            left_delay_samples: 298.0,
+            right_delay_samples: 296.0,
+            left_gain: 0.031,
+            right_gain: 0.039,
+            virtual_position: Vec3::new(-1.5, 0.0, 0.5),
+            delay_samples: 294,
+            gain: 0.58,
+            cross_ear: false,
         };
         publish_spatial_debug_snapshot(snapshot);
 
         let read = spatial_debug_latest_snapshot().expect("published snapshot");
         assert_eq!(read.sequence, 7);
         assert_eq!(read.rendered_frames, 1_600);
-        assert_eq!(read.source_count, 1);
-        assert_eq!(read.sources[0].position, Vec3::RIGHT);
-        assert!((read.sources[0].ild_db - 3.0).abs() < f32::EPSILON);
-        assert_eq!(read.reflection_count, 1);
-        assert_eq!(read.reflections[0].wall, SpatialDebugReflectionWall::Left);
-        assert_eq!(read.reflections[0].delay_samples, 240);
+        assert_eq!(read.source_count, 2);
+        assert_eq!(read.sources[1].position, Vec3::RIGHT);
+        assert_eq!(read.reflection_count, 8);
+        assert_eq!(read.reflections[4].source_index, 1);
+        assert_eq!(read.reflections[4].wall, SpatialDebugReflectionWall::Left);
+        assert_eq!(read.reflections[4].bounce_position, Vec3::new(-1.5, 0.0, 0.5));
+        assert!((read.reflections[4].left_gain - 0.031).abs() < f32::EPSILON);
+        assert_eq!(read.reflections[4].virtual_position, read.reflections[4].bounce_position);
 
         clear_spatial_debug_snapshot();
         assert!(spatial_debug_latest_snapshot().is_none());
