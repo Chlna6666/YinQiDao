@@ -47,9 +47,6 @@ pub fn lossless_rice_split(value: u64, parameter: u8) -> Result<(u64, u64), Code
             "lossless Rice parameter exceeds 64-bit symbol geometry",
         ));
     }
-    if parameter == 64 {
-        unreachable!("parameter > 63 rejected above");
-    }
     let quotient = value >> parameter;
     let remainder = if parameter == 0 {
         0
@@ -99,12 +96,9 @@ pub fn validate_lossless_rice_block_size(block_size: usize) -> Result<(), CodecE
 
 /// Decoder-side rolling statistic for backward block-adaptive Golomb-Rice coding.
 ///
-/// `sum` is initialized as `2^m * 32`. For an already unsigned-mapped residual sub-block the
-/// patent's update equation subtracts `sum/32` once per symbol and adds that symbol's mapped
-/// magnitude. Parameter recentering chooses the largest permitted correction, i.e. the parameter
-/// whose `[2^m*32, 2^(m+1)*32]` interval contains the updated statistic. The syntax layer may choose
-/// a smaller permitted correction; keeping this arithmetic isolated prevents that syntax decision
-/// from leaking into signed mapping or channel reconstruction.
+/// `sum` is initialized as `2^m * 32`. Predictor seed samples and signed prediction residuals use
+/// different statistical domains in the normative algorithm, so this single state exposes
+/// explicit update entry points for both while retaining the mapped-residual compatibility API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LosslessRiceState {
     parameter: u8,
@@ -128,32 +122,61 @@ impl LosslessRiceState {
         })
     }
 
-    pub fn parameter(self) -> u8 {
+    pub const fn parameter(self) -> u8 {
         self.parameter
     }
 
-    pub fn sum(self) -> u64 {
+    pub const fn sum(self) -> u64 {
         self.sum
     }
 
-    pub fn block_size(self) -> usize {
+    pub const fn block_size(self) -> usize {
         self.block_size
     }
 
-    /// Update the 32-value rolling statistic from one unsigned-mapped sub-block.
+    /// Update the moving statistic for predictor seed samples.
+    ///
+    /// The caller supplies the exact non-negative seed statistic decoded from the wire. It must
+    /// not be passed through the signed residual mapping again.
+    pub fn update_seed_block(&mut self, values: &[u64]) -> Result<(), CodecError> {
+        self.update_terms(values.len(), values.iter().copied())
+    }
+
+    /// Update the moving statistic for signed prediction residuals without an intermediate buffer.
+    pub fn update_residual_block(&mut self, residuals: &[i32]) -> Result<(), CodecError> {
+        self.update_terms(
+            residuals.len(),
+            residuals.iter().copied().map(lossless_rice_map_signed),
+        )
+    }
+
+    /// Update from prediction residuals already mapped onto the non-negative Rice alphabet.
+    pub fn update_mapped_residual_block(&mut self, values: &[u64]) -> Result<(), CodecError> {
+        self.update_terms(values.len(), values.iter().copied())
+    }
+
+    /// Compatibility alias for callers that already provide unsigned-mapped prediction residuals.
     pub fn update_mapped_block(&mut self, values: &[u64]) -> Result<(), CodecError> {
-        if values.len() != self.block_size {
+        self.update_mapped_residual_block(values)
+    }
+
+    fn update_terms(
+        &mut self,
+        count: usize,
+        mut terms: impl Iterator<Item = u64>,
+    ) -> Result<(), CodecError> {
+        if count != self.block_size {
             return Err(CodecError::InvalidData(
                 "lossless Rice sub-block length does not match configured block size",
             ));
         }
         let decay_per_symbol = self.sum / LOSSLESS_RICE_WINDOW as u64;
         let decay = decay_per_symbol
-            .checked_mul(values.len() as u64)
+            .checked_mul(count as u64)
             .ok_or(CodecError::InvalidData(
                 "lossless Rice rolling-statistic decay overflow",
             ))?;
-        let block_sum = values.iter().try_fold(0_u64, |sum, &value| {
+        let block_sum = terms.try_fold(0_u64, |sum, value| {
             sum.checked_add(value).ok_or(CodecError::InvalidData(
                 "lossless Rice mapped sub-block sum overflow",
             ))
@@ -294,11 +317,31 @@ mod tests {
         let mut state = LosslessRiceState::new(3, 4).unwrap();
         assert_eq!(state.sum(), 256);
         state.update_mapped_block(&[8, 8, 8, 8]).unwrap();
-        // sum + block_sum - block_size * (sum/32) = 256 + 32 - 4*8 = 256.
         assert_eq!(state.sum(), 256);
         state.recenter_parameter();
         assert_eq!(state.parameter(), 3);
         assert!(LosslessRiceState::new(3, 3).is_err());
+    }
+
+    #[test]
+    fn rice_state_distinguishes_seed_and_signed_residual_domains() {
+        let mut seed = LosslessRiceState::new(3, 4).unwrap();
+        seed.update_seed_block(&[8, 8, 8, 8]).unwrap();
+        assert_eq!(seed.sum(), 256);
+
+        let mut residual = LosslessRiceState::new(3, 4).unwrap();
+        residual.update_residual_block(&[4, -4, 4, -4]).unwrap();
+        assert_eq!(residual.sum(), 254);
+    }
+
+    #[test]
+    fn mapped_and_signed_residual_updates_are_equivalent() {
+        let mut signed = LosslessRiceState::new(2, 2).unwrap();
+        signed.update_residual_block(&[-3, 5]).unwrap();
+
+        let mut mapped = LosslessRiceState::new(2, 2).unwrap();
+        mapped.update_mapped_residual_block(&[5, 10]).unwrap();
+        assert_eq!(signed, mapped);
     }
 
     #[test]
