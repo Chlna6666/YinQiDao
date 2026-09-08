@@ -259,9 +259,14 @@ impl Spatializer {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn settings(&self) -> &SpatialSettings {
         &self.settings
+    }
+
+    pub(crate) fn motion_enabled(&self) -> bool {
+        self.settings.enabled
+            && self.settings.motion_mode != SpatialMotionMode::Static
+            && self.settings.motion_intensity > 0.001
     }
 
     /// Reset all state that is coupled to the previous transport position while retaining buffers.
@@ -271,13 +276,24 @@ impl Spatializer {
     }
 
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
+        self.process_internal(samples, true);
+    }
+
+    /// Apply only the authored-stereo width/crossfeed/distance/reflection stage. Dynamic movement is
+    /// owned by `yinqidao-audio-spatial::Trajectory` in the player integration path.
+    pub(crate) fn process_static(&mut self, samples: &mut [f32]) {
+        self.process_internal(samples, false);
+    }
+
+    fn process_internal(&mut self, samples: &mut [f32], allow_motion: bool) {
         if !self.settings.enabled {
             return;
         }
 
         let settings = self.settings.clone();
-        let motion_enabled =
-            settings.motion_mode != SpatialMotionMode::Static && settings.motion_intensity > 0.001;
+        let motion_enabled = allow_motion
+            && settings.motion_mode != SpatialMotionMode::Static
+            && settings.motion_intensity > 0.001;
 
         // Preserve the original stereo image. The old range (0.72..2.10) could more than double
         // side energy, exaggerating phase differences and hollowing the centre. 0.92..1.42 keeps
@@ -393,8 +409,6 @@ impl Spatializer {
                 };
 
                 let rear_amount = (-front).max(0.0) * radius;
-                // The previous 0.10..0.34 one-pole coefficient darkened rear positions into a
-                // muffled low-pass. Keep enough HF content for localisation while retaining a cue.
                 let rear_alpha = 0.42 + (1.0 - rear_amount) * 0.28;
                 self.rear_lowpass_left += rear_alpha * (moving_left - self.rear_lowpass_left);
                 self.rear_lowpass_right += rear_alpha * (moving_right - self.rear_lowpass_right);
@@ -411,9 +425,6 @@ impl Spatializer {
                 self.oscillator_sin = sin * step_cos + cos * step_sin;
                 self.oscillator_cos = cos * step_cos - sin * step_sin;
 
-                // Never fully replace the authored stereo field with the synthetic moving source.
-                // Motion intensity controls the positional cue while at least 45% static image is
-                // retained even at the extreme end of the UI range.
                 let motion_blend = (settings.motion_intensity * 0.55).clamp(0.0, 0.55);
                 (
                     static_left * (1.0 - motion_blend) + moving_left * motion_blend,
@@ -476,12 +487,6 @@ fn motion_position(mode: SpatialMotionMode, sin: f32, cos: f32) -> (f32, f32, f3
     }
 }
 
-/// First-order Lagrange fractional delay over the already-written motion ring.
-///
-/// Dynamic binaural ITD is normally a fractional sample. Quantising it with `round()` makes a
-/// moving source jump between integer delays, producing zipper/stair-step localisation. Two ring
-/// reads and one lerp keep the trajectory continuous without allocating or changing audio-clock
-/// ownership of the motion state.
 #[inline]
 fn read_fractional_delay(buffer: &[f32], write_cursor: usize, delay_samples: f32) -> f32 {
     debug_assert!(buffer.len() >= 2);
@@ -491,8 +496,6 @@ fn read_fractional_delay(buffer: &[f32], write_cursor: usize, delay_samples: f32
         return buffer.first().copied().unwrap_or(0.0);
     }
 
-    // The current slot has just been written. Leave one older sample available for interpolation so
-    // the lerp never wraps onto that newly-written slot at the maximum representable delay.
     let delay = delay_samples.clamp(0.0, buffer.len().saturating_sub(2) as f32);
     let whole = delay as usize;
     let fraction = delay - whole as f32;
@@ -542,7 +545,6 @@ mod tests {
 
     #[test]
     fn fractional_delay_interpolates_across_ring_wrap() {
-        // Cursor 0 is the sample just written; the chronological history behind it is 30, 20, 10.
         let buffer = [40.0_f32, 10.0, 20.0, 30.0];
         let sample = |delay| read_fractional_delay(&buffer, 0, delay);
         assert!((sample(0.0) - 40.0).abs() < 1e-6);
@@ -565,6 +567,16 @@ mod tests {
                 .iter()
                 .any(|frame| { (frame[0] - frame[1]).abs() > 0.01 })
         );
+    }
+
+    #[test]
+    fn static_stage_does_not_advance_legacy_motion_oscillator() {
+        let settings = SpatialPreset::Orbit360.settings();
+        let mut spatializer = Spatializer::new(48_000, settings);
+        let mut samples = vec![0.3; 512];
+        spatializer.process_static(&mut samples);
+        assert_eq!(spatializer.oscillator_sin, 0.0);
+        assert_eq!(spatializer.oscillator_cos, 1.0);
     }
 
     #[test]
