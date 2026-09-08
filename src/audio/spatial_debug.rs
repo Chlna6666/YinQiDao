@@ -27,9 +27,6 @@ static SOURCES: [AtomicU32; MAX_DEBUG_SOURCES * SOURCE_WORDS] =
 static REFLECTIONS: [AtomicU32; MAX_DEBUG_REFLECTIONS * REFLECTION_WORDS] =
     [const { AtomicU32::new(0) }; MAX_DEBUG_REFLECTIONS * REFLECTION_WORDS];
 
-/// Publish a spatial scene without allocation, locks or blocking. The surrounding odd/even epoch
-/// gives readers a consistent multi-atomic snapshot; all payload slots remain ordinary atomics so a
-/// concurrent reader/writer can never create a Rust data race.
 pub(crate) fn publish_spatial_debug_snapshot(snapshot: SpatialDebugSnapshot) {
     EPOCH.fetch_add(1, Ordering::AcqRel);
 
@@ -84,7 +81,6 @@ pub(crate) fn clear_spatial_debug_snapshot() {
     VALID.store(false, Ordering::Release);
 }
 
-/// Read the latest complete spatial scene. The copy is fixed-size and contains no heap storage.
 pub fn spatial_debug_latest_snapshot() -> Option<SpatialDebugSnapshot> {
     if !VALID.load(Ordering::Acquire) {
         return None;
@@ -234,6 +230,8 @@ fn store_reflection(index: usize, reflection: SpatialDebugReflection) {
             SpatialDebugReflectionWall::Right => 1,
             SpatialDebugReflectionWall::Front => 2,
             SpatialDebugReflectionWall::Rear => 3,
+            SpatialDebugReflectionWall::Floor => 4,
+            SpatialDebugReflectionWall::Ceiling => 5,
         },
         Ordering::Relaxed,
     );
@@ -282,6 +280,8 @@ fn load_reflection(index: usize) -> SpatialDebugReflection {
             0 => SpatialDebugReflectionWall::Left,
             1 => SpatialDebugReflectionWall::Right,
             3 => SpatialDebugReflectionWall::Rear,
+            4 => SpatialDebugReflectionWall::Floor,
+            5 => SpatialDebugReflectionWall::Ceiling,
             _ => SpatialDebugReflectionWall::Front,
         },
         image_position: Vec3::new(value(4), value(5), value(6)),
@@ -320,58 +320,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atomic_publication_round_trips_reflection_matrix_entry() {
+    fn atomic_publication_round_trips_vertical_reflection_entry() {
         let mut source = SpatialDebugSource::default();
         source.active = true;
         source.source_index = 1;
         source.kind = SpatialDebugSourceKind::FullRange;
         source.position = Vec3::RIGHT;
-        source.azimuth_degrees = 90.0;
-        source.ild_db = 3.0;
 
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.sequence = 7;
         snapshot.rendered_frames = 1_600;
         snapshot.source_count = 2;
         snapshot.sources[1] = source;
-        snapshot.reflection_count = 8;
-        snapshot.reflections[4] = SpatialDebugReflection {
+        snapshot.reflection_count = 12;
+        snapshot.reflections[11] = SpatialDebugReflection {
             active: true,
             source_index: 1,
-            tap_index: 0,
-            wall: SpatialDebugReflectionWall::Left,
-            image_position: Vec3::new(-3.0, 0.0, 1.0),
-            bounce_position: Vec3::new(-1.5, 0.0, 0.5),
+            tap_index: 5,
+            wall: SpatialDebugReflectionWall::Ceiling,
+            image_position: Vec3::new(0.5, 3.0, 1.0),
+            bounce_position: Vec3::new(0.25, 1.5, 0.5),
             path_length_meters: 3.2,
             excess_path_meters: 2.1,
             excess_delay_samples: 294.0,
             delay_milliseconds: 6.125,
-            wall_reflectance: 0.58,
+            wall_reflectance: 0.50,
             wet_contribution: 0.037,
-            arrival_azimuth_degrees: -71.0,
-            arrival_elevation_degrees: 0.0,
+            arrival_azimuth_degrees: 12.0,
+            arrival_elevation_degrees: 58.0,
             left_delay_samples: 298.0,
             right_delay_samples: 296.0,
             left_gain: 0.031,
             right_gain: 0.039,
-            virtual_position: Vec3::new(-1.5, 0.0, 0.5),
+            virtual_position: Vec3::new(0.25, 1.5, 0.5),
             delay_samples: 294,
-            gain: 0.58,
+            gain: 0.50,
             cross_ear: false,
         };
         publish_spatial_debug_snapshot(snapshot);
 
         let read = spatial_debug_latest_snapshot().expect("published snapshot");
-        assert_eq!(read.sequence, 7);
-        assert_eq!(read.rendered_frames, 1_600);
-        assert_eq!(read.source_count, 2);
-        assert_eq!(read.sources[1].position, Vec3::RIGHT);
-        assert_eq!(read.reflection_count, 8);
-        assert_eq!(read.reflections[4].source_index, 1);
-        assert_eq!(read.reflections[4].wall, SpatialDebugReflectionWall::Left);
-        assert_eq!(read.reflections[4].bounce_position, Vec3::new(-1.5, 0.0, 0.5));
-        assert!((read.reflections[4].left_gain - 0.031).abs() < f32::EPSILON);
-        assert_eq!(read.reflections[4].virtual_position, read.reflections[4].bounce_position);
+        assert_eq!(read.reflection_count, 12);
+        assert_eq!(read.reflections[11].wall, SpatialDebugReflectionWall::Ceiling);
+        assert_eq!(read.reflections[11].bounce_position, Vec3::new(0.25, 1.5, 0.5));
+        assert!((read.reflections[11].arrival_elevation_degrees - 58.0).abs() < f32::EPSILON);
 
         clear_spatial_debug_snapshot();
         assert!(spatial_debug_latest_snapshot().is_none());

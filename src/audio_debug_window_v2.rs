@@ -2,9 +2,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext, BorrowAppContext, Bounds, Context, Global, Hsla, IntoElement, PathBuilder,
-    Render, Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    App, AppContext, BorrowAppContext, Bounds, Context, Global, Hsla, IntoElement, Render, Timer,
+    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
     SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind,
@@ -18,7 +17,7 @@ use crate::audio_spatial_debug_3d::{SpatialDebug3dCamera, SpatialDebug3dScene};
 
 const DEBUG_UI_TICK: Duration = Duration::from_millis(33);
 const SOURCE_ROWS: usize = 12;
-const REFLECTION_ROWS: usize = 16;
+const REFLECTION_ROWS: usize = 24;
 
 #[derive(Default)]
 struct AudioDebugWindowState {
@@ -45,7 +44,7 @@ pub(crate) fn open(cx: &mut App) -> Result<()> {
 
     remove_untracked_windows(cx);
     set_audio_debug_enabled(true);
-    let bounds = Bounds::centered(None, size(px(1_420.0), px(940.0)), cx);
+    let bounds = Bounds::centered(None, size(px(1_440.0), px(960.0)), cx);
     let window = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -105,23 +104,21 @@ fn start_debug_ui_service(window: WindowHandle<AudioDebugView>, cx: &mut App) {
                     let audio_changed = audio.sequence != view.snapshot.sequence;
                     let spatial_changed = spatial.as_ref().map(|snapshot| snapshot.sequence)
                         != view.spatial_snapshot.as_ref().map(|snapshot| snapshot.sequence);
+                    if spatial_changed {
+                        view.gpu_scene.update(spatial);
+                        view.spatial_snapshot = spatial;
+                    }
+                    if audio_changed {
+                        view.snapshot = audio;
+                    }
                     if audio_changed || spatial_changed {
-                        if spatial_changed {
-                            view.gpu_scene.update(spatial);
-                            view.spatial_snapshot = spatial;
-                        }
-                        if audio_changed {
-                            view.snapshot = audio;
-                        }
                         view_cx.notify();
                         window.refresh();
                     }
                 });
                 if result.is_err() {
                     if cx.has_global::<AudioDebugWindowState>() {
-                        cx.update_global(|state: &mut AudioDebugWindowState, _cx| {
-                            state.window = None;
-                        });
+                        cx.update_global(|state: &mut AudioDebugWindowState, _cx| state.window = None);
                     }
                     set_audio_debug_enabled(false);
                     return false;
@@ -163,8 +160,7 @@ impl Render for AudioDebugView {
         let spatial = self.spatial_snapshot;
         let mesh = self.gpu_scene.mesh();
         let mesh_error = self.gpu_scene.error();
-        let camera = self.camera;
-        let draw_parameters = self.gpu_scene.draw_parameters(1.56, camera);
+        let draw_parameters = self.gpu_scene.draw_parameters(1.58, self.camera);
         let frozen = self.frozen;
 
         div()
@@ -198,7 +194,7 @@ impl Render for AudioDebugView {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(0x85909d))
-                                    .child("A/B/C 信号参考 + GPUI Custom Mesh 3D + image-source reflection geometry"),
+                                    .child("实时信号参考 + GPUI Custom Mesh 3D + 六面 image-source room"),
                             ),
                     )
                     .child(
@@ -206,35 +202,18 @@ impl Render for AudioDebugView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(monitor_button(
-                                "A SOURCE",
-                                snapshot.monitor_mode == AudioDebugMonitorMode::Source,
-                            )
-                            .on_click(cx.listener(|_, _, _, _| {
-                                set_audio_debug_monitor_mode(AudioDebugMonitorMode::Source);
-                            })))
-                            .child(monitor_button(
-                                "B POST-EQ",
-                                snapshot.monitor_mode == AudioDebugMonitorMode::PostEq,
-                            )
-                            .on_click(cx.listener(|_, _, _, _| {
-                                set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostEq);
-                            })))
-                            .child(monitor_button(
-                                "C SPATIAL",
-                                snapshot.monitor_mode == AudioDebugMonitorMode::PostSpatial,
-                            )
-                            .on_click(cx.listener(|_, _, _, _| {
-                                set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostSpatial);
-                            })))
-                            .child(
-                                action_button(if frozen { "继续" } else { "冻结" }).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.frozen = !this.frozen;
-                                        cx.notify();
-                                    }),
-                                ),
-                            ),
+                            .child(monitor_button("A SOURCE", snapshot.monitor_mode == AudioDebugMonitorMode::Source)
+                                .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::Source))))
+                            .child(monitor_button("B POST-EQ", snapshot.monitor_mode == AudioDebugMonitorMode::PostEq)
+                                .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostEq))))
+                            .child(monitor_button("C SPATIAL", snapshot.monitor_mode == AudioDebugMonitorMode::PostSpatial)
+                                .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostSpatial))))
+                            .child(action_button(if frozen { "继续" } else { "冻结" }).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.frozen = !this.frozen;
+                                    cx.notify();
+                                }),
+                            )),
                     ),
             )
             .child(
@@ -243,7 +222,7 @@ impl Render for AudioDebugView {
                     .gap_3()
                     .child(stage_card("A · ORIGINAL", "decoder/source reference", &snapshot.source, rgb(0x8fa3ba)))
                     .child(stage_card("B · POST-EQ", "PEQ + preamp", &snapshot.eq, rgb(0xffa63d)))
-                    .child(stage_card("C · POST-SPATIAL", "virtual source + room", &snapshot.spatial, rgb(0x56d38f))),
+                    .child(stage_card("C · POST-SPATIAL", "virtual source + six-wall room", &snapshot.spatial, rgb(0x56d38f))),
             )
             .child(
                 div()
@@ -256,7 +235,7 @@ impl Render for AudioDebugView {
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} source · {} reflection · {} Hz · sequence {}",
+                                    "{} source · {} reflection · {} Hz · seq {}",
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -266,7 +245,7 @@ impl Render for AudioDebugView {
                             div()
                                 .relative()
                                 .w_full()
-                                .h(px(510.0))
+                                .h(px(540.0))
                                 .overflow_hidden()
                                 .rounded_lg()
                                 .bg(rgb(0x070a0e))
@@ -337,39 +316,24 @@ impl Render for AudioDebugView {
                     .child(
                         panel(
                             "Spatial Telemetry",
-                            Some("authored channel / ITD / ILD / distance / external cues".into()),
+                            Some("authored channel / ITD / ILD / height / distance".into()),
                             spatial_telemetry(spatial),
                         )
-                        .w(px(450.0)),
+                        .w(px(455.0)),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        panel(
-                            "Original ↔ Spatial Waveform",
-                            Some("灰：原版 · 绿：空间处理后".into()),
-                            chart(190.0, waveform_compare_canvas(snapshot.clone())),
-                        )
-                        .flex_1()
-                        .min_w(px(0.0)),
-                    )
-                    .child(
-                        panel(
-                            "Image-source Reflection Matrix",
-                            Some("source → wall bounce → listener · 实际 excess delay / binaural arrival".into()),
-                            reflection_telemetry(spatial),
-                        )
-                        .w(px(560.0)),
-                    ),
+                panel(
+                    "Image-source Reflection Matrix",
+                    Some("source → floor/ceiling/wall bounce → listener · excess delay / binaural arrival".into()),
+                    reflection_telemetry(spatial),
+                ),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(0x727d89))
-                    .child("3D 场景使用 BMCBL GPUI GpuMesh3d/WGSL/depth 正式管线；空间定位仍为 YinQiDao 自研参数化双耳模型，不宣称 measured HRTF。"),
+                    .child("3D 场景使用 BMCBL GPUI GpuMesh3d/WGSL/depth 正式管线；音频仍是 YinQiDao 自研参数化双耳/空间外化路径，不宣称 measured HRTF。"),
             )
     }
 }
@@ -421,17 +385,6 @@ fn panel(title: &'static str, subtitle: Option<String>, content: impl IntoElemen
         .border_color(rgb(0x252b33))
         .bg(rgb(0x101319))
         .child(header)
-        .child(content)
-}
-
-fn chart(height: f32, content: impl IntoElement) -> gpui::Div {
-    div()
-        .relative()
-        .w_full()
-        .h(px(height))
-        .overflow_hidden()
-        .rounded_lg()
-        .bg(rgb(0x090c10))
         .child(content)
 }
 
@@ -565,54 +518,6 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
     body.into_any_element()
 }
 
-fn waveform_compare_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
-    canvas(
-        move |bounds, _window, _cx| bounds,
-        move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x090c10)));
-            let left = bounds.left();
-            let top = bounds.top();
-            let width = bounds.size.width;
-            let height = bounds.size.height;
-            let center = top + height * 0.5;
-            let source = &snapshot.source.waveform_left;
-            let spatial = &snapshot.spatial.waveform_left;
-            draw_waveform(window, source, left, center, width, height, rgb(0x718092));
-            draw_waveform(window, spatial, left, center, width, height, rgb(0x56d38f));
-        },
-    )
-    .absolute()
-    .inset_0()
-}
-
-fn draw_waveform(
-    window: &mut Window,
-    samples: &[f32],
-    left: gpui::Pixels,
-    center: gpui::Pixels,
-    width: gpui::Pixels,
-    height: gpui::Pixels,
-    color: Hsla,
-) {
-    if samples.len() < 2 {
-        return;
-    }
-    let mut path = PathBuilder::stroke(px(1.1));
-    let denominator = (samples.len() - 1) as f32;
-    for (index, sample) in samples.iter().copied().enumerate() {
-        let x = left + width * (index as f32 / denominator);
-        let y = center - height * 0.43 * sample.clamp(-1.0, 1.0);
-        if index == 0 {
-            path.move_to(point(x, y));
-        } else {
-            path.line_to(point(x, y));
-        }
-    }
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
-    }
-}
-
 fn channel_name(source_count: usize, index: usize) -> &'static str {
     const STEREO: [&str; 2] = ["L", "R"];
     const SURROUND_5_1_4: [&str; 10] = ["FL", "FR", "C", "LFE", "SL", "SR", "TFL", "TFR", "TRL", "TRR"];
@@ -631,5 +536,7 @@ fn wall_label(wall: SpatialDebugReflectionWall) -> &'static str {
         SpatialDebugReflectionWall::Right => "RIGHT",
         SpatialDebugReflectionWall::Front => "FRONT",
         SpatialDebugReflectionWall::Rear => "REAR",
+        SpatialDebugReflectionWall::Floor => "FLOOR",
+        SpatialDebugReflectionWall::Ceiling => "CEILING",
     }
 }

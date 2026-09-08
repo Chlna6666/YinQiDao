@@ -160,35 +160,21 @@ fn build_scene_mesh(
         [relative.dot(right), relative.dot(up), relative.dot(forward)]
     };
 
-    let source_count = snapshot.source_count.min(snapshot.sources.len());
-    let mut max_abs_x = 0.0_f32;
-    let mut max_abs_y = 0.0_f32;
-    let mut max_abs_z = 0.0_f32;
-    for source in snapshot.sources[..source_count].iter().copied() {
-        if !source.active {
-            continue;
-        }
-        let p = to_local(source.position);
-        max_abs_x = max_abs_x.max(p[0].abs());
-        max_abs_y = max_abs_y.max(p[1].abs());
-        max_abs_z = max_abs_z.max(p[2].abs());
-    }
-
+    // Must match the audio-spatial image-source room geometry. The room is intentionally independent
+    // of individual source positions so every authored channel shares one acoustic enclosure.
     let room = snapshot.environment.room_size.clamp(0.0, 1.0);
-    let half_width = (1.45 + room * 2.55).max(max_abs_x + 0.65);
-    let half_depth = (1.80 + room * 3.20).max(max_abs_z + 0.75);
-    let half_height = (1.35 + room * 1.15).max(max_abs_y + 0.70);
+    let half_width = 1.65 + room * 3.00;
+    let half_height = 1.25 + room * 1.50;
+    let half_depth = 2.10 + room * 4.10;
     let fit_radius = half_width.max(half_depth).max(half_height).max(MIN_SCENE_RADIUS);
 
-    // Listener is the stable scene origin. The forward arrow makes head orientation immediately
-    // visible even when the authored speaker layout itself is symmetric.
     builder.push_octahedron(
         [0.0, 0.0, 0.0],
         LISTENER_RADIUS,
         [0.25, 0.88, 1.0, 1.0],
-        false,
     );
 
+    let source_count = snapshot.source_count.min(snapshot.sources.len());
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active {
             continue;
@@ -200,7 +186,7 @@ fn build_scene_mesh(
         } else {
             SOURCE_RADIUS * (0.88 + source.near_field_amount.clamp(0.0, 1.0) * 0.34)
         };
-        builder.push_octahedron(position, radius, color, false);
+        builder.push_octahedron(position, radius, color);
     }
     let opaque_count = builder.indices.len() as u32;
 
@@ -209,10 +195,10 @@ fn build_scene_mesh(
         [0.0, 0.0, 0.55],
         0.018,
         [0.30, 0.92, 1.0, 0.76],
-        true,
     );
     builder.push_room_box(half_width, half_height, half_depth);
     builder.push_floor_grid(half_width, -half_height, half_depth);
+    builder.push_ceiling_grid(half_width, half_height, half_depth);
 
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active || matches!(source.kind, SpatialDebugSourceKind::Lfe) {
@@ -227,13 +213,11 @@ fn build_scene_mesh(
         let speed = length3(velocity_local);
         if speed > 0.005 {
             let scale = (0.20 / speed.max(0.001)).min(0.85);
-            let end = add3(start, mul3(velocity_local, scale));
             builder.push_segment(
                 start,
-                end,
+                add3(start, mul3(velocity_local, scale)),
                 VELOCITY_WIDTH,
                 [0.96, 0.84, 0.32, 0.72],
-                true,
             );
         }
     }
@@ -244,7 +228,11 @@ fn build_scene_mesh(
             continue;
         }
         let source_index = usize::from(reflection.source_index);
-        let Some(source) = snapshot.sources.get(source_index).copied().filter(|source| source.active)
+        let Some(source) = snapshot
+            .sources
+            .get(source_index)
+            .copied()
+            .filter(|source| source.active)
         else {
             continue;
         };
@@ -253,18 +241,16 @@ fn build_scene_mesh(
         let energy = reflection.wet_contribution.clamp(0.0, 1.0);
         let alpha = (0.10 + energy.sqrt() * 0.74).clamp(0.10, 0.82);
         let path_color = wall_color(reflection.wall, alpha);
-        builder.push_segment(source_position, bounce, PATH_WIDTH, path_color, true);
-        builder.push_segment(bounce, [0.0, 0.0, 0.0], PATH_WIDTH, path_color, true);
+        builder.push_segment(source_position, bounce, PATH_WIDTH, path_color);
+        builder.push_segment(bounce, [0.0, 0.0, 0.0], PATH_WIDTH, path_color);
         builder.push_octahedron(
             bounce,
             BOUNCE_RADIUS,
             wall_color(reflection.wall, (alpha + 0.12).min(0.92)),
-            true,
         );
     }
 
     let total_count = builder.indices.len() as u32;
-    let transparent_count = total_count.saturating_sub(opaque_count);
     let ranges = GpuMesh3dDrawRanges {
         opaque: GpuMesh3dRange {
             start: 0,
@@ -272,7 +258,7 @@ fn build_scene_mesh(
         },
         glass: GpuMesh3dRange {
             start: opaque_count,
-            count: transparent_count,
+            count: total_count.saturating_sub(opaque_count),
         },
         water: GpuMesh3dRange::default(),
     };
@@ -324,13 +310,18 @@ fn source_color(kind: SpatialDebugSourceKind, elevation_degrees: f32, index: u16
     [rgb[0], rgb[1], rgb[2], 1.0]
 }
 
-fn wall_color(wall: yinqidao_audio_spatial::SpatialDebugReflectionWall, alpha: f32) -> [f32; 4] {
+fn wall_color(
+    wall: yinqidao_audio_spatial::SpatialDebugReflectionWall,
+    alpha: f32,
+) -> [f32; 4] {
     use yinqidao_audio_spatial::SpatialDebugReflectionWall;
     match wall {
         SpatialDebugReflectionWall::Left => [0.38, 0.72, 1.0, alpha],
         SpatialDebugReflectionWall::Right => [1.0, 0.52, 0.42, alpha],
         SpatialDebugReflectionWall::Front => [0.46, 0.92, 0.62, alpha],
         SpatialDebugReflectionWall::Rear => [0.86, 0.58, 1.0, alpha],
+        SpatialDebugReflectionWall::Floor => [0.96, 0.74, 0.30, alpha],
+        SpatialDebugReflectionWall::Ceiling => [0.44, 0.86, 0.96, alpha],
     }
 }
 
@@ -347,13 +338,7 @@ impl MeshBuilder {
         index
     }
 
-    fn push_octahedron(
-        &mut self,
-        center: [f32; 3],
-        radius: f32,
-        color: [f32; 4],
-        _transparent: bool,
-    ) {
+    fn push_octahedron(&mut self, center: [f32; 3], radius: f32, color: [f32; 4]) {
         let points = [
             add3(center, [radius, 0.0, 0.0]),
             add3(center, [-radius, 0.0, 0.0]),
@@ -367,14 +352,8 @@ impl MeshBuilder {
             self.push_vertex(point, color);
         }
         const FACES: [[u32; 3]; 8] = [
-            [2, 0, 4],
-            [2, 4, 1],
-            [2, 1, 5],
-            [2, 5, 0],
-            [3, 4, 0],
-            [3, 1, 4],
-            [3, 5, 1],
-            [3, 0, 5],
+            [2, 0, 4], [2, 4, 1], [2, 1, 5], [2, 5, 0],
+            [3, 4, 0], [3, 1, 4], [3, 5, 1], [3, 0, 5],
         ];
         for face in FACES {
             self.indices.extend(face.map(|index| base + index));
@@ -387,7 +366,6 @@ impl MeshBuilder {
         end: [f32; 3],
         half_width: f32,
         color: [f32; 4],
-        _transparent: bool,
     ) {
         let direction = sub3(end, start);
         let length = length3(direction);
@@ -421,12 +399,9 @@ impl MeshBuilder {
             self.push_vertex(position, color);
         }
         const TRIANGLES: [[u32; 3]; 12] = [
-            [0, 1, 2], [0, 2, 3],
-            [4, 6, 5], [4, 7, 6],
-            [0, 4, 5], [0, 5, 1],
-            [1, 5, 6], [1, 6, 2],
-            [2, 6, 7], [2, 7, 3],
-            [3, 7, 4], [3, 4, 0],
+            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+            [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
+            [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
         ];
         for triangle in TRIANGLES {
             self.indices.extend(triangle.map(|index| base + index));
@@ -450,12 +425,25 @@ impl MeshBuilder {
             (4, 5), (5, 6), (6, 7), (7, 4),
             (0, 4), (1, 5), (2, 6), (3, 7),
         ] {
-            self.push_segment(p[a], p[b], ROOM_EDGE_WIDTH, c, true);
+            self.push_segment(p[a], p[b], ROOM_EDGE_WIDTH, c);
         }
     }
 
     fn push_floor_grid(&mut self, half_width: f32, y: f32, half_depth: f32) {
-        let color = [0.24, 0.32, 0.42, 0.12];
+        self.push_horizontal_grid(half_width, y, half_depth, [0.24, 0.32, 0.42, 0.14]);
+    }
+
+    fn push_ceiling_grid(&mut self, half_width: f32, y: f32, half_depth: f32) {
+        self.push_horizontal_grid(half_width, y, half_depth, [0.22, 0.42, 0.50, 0.08]);
+    }
+
+    fn push_horizontal_grid(
+        &mut self,
+        half_width: f32,
+        y: f32,
+        half_depth: f32,
+        color: [f32; 4],
+    ) {
         let lines = 8usize;
         for index in 1..lines {
             let t = index as f32 / lines as f32;
@@ -464,16 +452,14 @@ impl MeshBuilder {
             self.push_segment(
                 [x, y, -half_depth],
                 [x, y, half_depth],
-                ROOM_EDGE_WIDTH * 0.45,
+                ROOM_EDGE_WIDTH * 0.40,
                 color,
-                true,
             );
             self.push_segment(
                 [-half_width, y, z],
                 [half_width, y, z],
-                ROOM_EDGE_WIDTH * 0.45,
+                ROOM_EDGE_WIDTH * 0.40,
                 color,
-                true,
             );
         }
     }

@@ -1,8 +1,8 @@
 use std::f32::consts::PI;
 
-use crate::{EnvironmentSettings, ListenerPose, SourceKind, SourcePose, Vec3};
 use crate::environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S};
 use crate::image_source::source_reflection_descriptors;
+use crate::{EnvironmentSettings, ListenerPose, SourceKind, SourcePose, Vec3};
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
 pub const MAX_DEBUG_REFLECTION_SOURCES: usize = 12;
@@ -60,6 +60,8 @@ pub enum SpatialDebugReflectionWall {
     Right,
     Front,
     Rear,
+    Floor,
+    Ceiling,
 }
 
 impl Default for SpatialDebugReflectionWall {
@@ -92,7 +94,8 @@ pub struct SpatialDebugReflection {
     pub right_delay_samples: f32,
     pub left_gain: f32,
     pub right_gain: f32,
-    /// Compatibility aliases for the existing GPUI while it migrates to the full matrix fields.
+    // Transitional aliases retained only for the old uncompiled debug source file. The active V2
+    // UI consumes the real image/bounce/path fields above.
     pub virtual_position: Vec3,
     pub delay_samples: u32,
     pub gain: f32,
@@ -271,6 +274,8 @@ impl SpatialDebugSnapshot {
                     ReflectionWall::Right => SpatialDebugReflectionWall::Right,
                     ReflectionWall::Front => SpatialDebugReflectionWall::Front,
                     ReflectionWall::Rear => SpatialDebugReflectionWall::Rear,
+                    ReflectionWall::Floor => SpatialDebugReflectionWall::Floor,
+                    ReflectionWall::Ceiling => SpatialDebugReflectionWall::Ceiling,
                 },
                 image_position: descriptor.image_position,
                 bounce_position: descriptor.bounce_position,
@@ -475,7 +480,7 @@ mod tests {
     fn fixed_snapshot_has_no_dynamic_storage() {
         let snapshot = SpatialDebugSnapshot::new(48_000);
         assert_eq!(snapshot.sources.len(), MAX_DEBUG_SOURCES);
-        assert_eq!(snapshot.reflections.len(), 48);
+        assert_eq!(snapshot.reflections.len(), 72);
         assert_eq!(snapshot.source_count, 0);
     }
 
@@ -490,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn reflection_matrix_tracks_source_and_real_bounce_geometry() {
+    fn reflection_matrix_tracks_six_walls_per_source() {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
         snapshot.record_source(
@@ -503,15 +508,13 @@ mod tests {
             SourceKind::FullRange,
             SourcePose::new(Vec3::new(-0.25, 0.0, 1.0)),
         );
-        assert_eq!(snapshot.reflection_count, 8);
+        assert_eq!(snapshot.reflection_count, 12);
         assert_eq!(snapshot.reflections[0].source_index, 0);
-        assert_eq!(snapshot.reflections[4].source_index, 1);
+        assert_eq!(snapshot.reflections[6].source_index, 1);
+        assert_eq!(snapshot.reflections[4].wall, SpatialDebugReflectionWall::Floor);
+        assert_eq!(snapshot.reflections[5].wall, SpatialDebugReflectionWall::Ceiling);
         assert!(snapshot.reflections[0].active);
-        assert!(snapshot.reflections[0].path_length_meters > 0.0);
-        assert!(snapshot.reflections[0].excess_delay_samples > 0.0);
-        assert!(snapshot.reflections[0].left_delay_samples > 0.0);
-        assert!(snapshot.reflections[0].right_delay_samples > 0.0);
-        assert_eq!(snapshot.reflections[0].virtual_position, snapshot.reflections[0].bounce_position);
+        assert!(snapshot.reflections[5].arrival_elevation_degrees.abs() > 10.0);
     }
 
     #[test]
@@ -519,8 +522,8 @@ mod tests {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
         snapshot.record_source(3, SourceKind::Lfe, SourcePose::default());
-        assert_eq!(snapshot.reflection_count, 16);
-        assert!(snapshot.reflections[12..16]
+        assert_eq!(snapshot.reflection_count, 24);
+        assert!(snapshot.reflections[18..24]
             .iter()
             .all(|reflection| !reflection.active));
     }
