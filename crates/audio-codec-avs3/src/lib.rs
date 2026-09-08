@@ -184,7 +184,17 @@ pub use lc_pipeline::{
     LowComplexityPipelineWorkspace, decode_low_complexity_base_to_mdct_normative,
 };
 pub use lossless_bitstream::{
-    decode_lossless_rice_base_codeword_at, restore_lossless_flattened_residual,
+    LOSSLESS_ENTROPY_MODE_BITS, LOSSLESS_FRAME_ERROR_CHECK_BITS, LOSSLESS_LPC_ORDER_MAX,
+    LOSSLESS_LPC_ORDER_MIN, LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE,
+    LOSSLESS_PREPROCESS_MAX_SAMPLES, LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP,
+    LOSSLESS_UNIFORM_PARCOR_Q20_STEP, LosslessAatfEnvelope, LosslessEntropyMode,
+    LosslessStereoDecorrelationMode, decode_lossless_entropy_mode_at,
+    decode_lossless_frame_error_check_at, decode_lossless_rice_base_codeword_at,
+    dequantize_lossless_uniform_parcor_q20, dequantize_lossless_uniform_parcor_tail_q20,
+    lossless_ra_shift, lossless_ra_shift12, lossless_residual_shift_plan,
+    parse_lossless_aatf_envelope, restore_lossless_anti_phase,
+    restore_lossless_flattened_residual, restore_lossless_stereo_in_place,
+    restore_lossless_stereo_pair, validate_lossless_lpc_order,
 };
 pub use lossless_primitives::{
     LOSSLESS_RICE_BLOCK_SIZES, LOSSLESS_RICE_MAX_PREFIX, LOSSLESS_RICE_WINDOW,
