@@ -1,3 +1,4 @@
+pub(crate) mod adaptive;
 mod prepost;
 
 use yinqidao_codec_core::CodecError;
