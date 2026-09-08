@@ -206,7 +206,7 @@ pub struct GeneralFullRateConfig {
 pub struct LosslessConfig {
     pub sampling_frequency_index: u8,
     pub explicit_sample_rate: Option<u32>,
-    /// `Avs3AudioLLSpecificConfig` reserves ancillary data in `dca3`; valid files carry zero.
+    /// GY/T 363-2023 defines this one-bit value as the presence flag for ancillary data.
     pub anc_data_index: bool,
     pub coding_profile: CodingProfile,
     pub channel_number: u8,
@@ -334,14 +334,19 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
         None
     };
     let anc_data_index = reader.read_bit()?;
-    if anc_data_index {
-        return Err(CodecError::InvalidData(
-            "lossless dca3 anc_data_index must be zero",
+    let coding_profile = CodingProfile::from(reader.read_bits(3)? as u8);
+    if matches!(coding_profile, CodingProfile::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "reserved lossless coding_profile in dca3",
         ));
     }
-    let coding_profile = CodingProfile::from(reader.read_bits(3)? as u8);
     let channel_number = reader.read_bits(8)? as u8;
     let resolution = QuantizationResolution::from(reader.read_bits(2)? as u8);
+    if matches!(resolution, QuantizationResolution::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "reserved lossless resolution in dca3",
+        ));
+    }
     let additional_info_length = reader.read_bits(16)? as usize;
     if reader.bits_remaining() < additional_info_length.saturating_mul(8).saturating_add(2) {
         return Err(CodecError::Truncated);
@@ -350,6 +355,7 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
     for _ in 0..additional_info_length {
         additional_info.push(reader.read_bits(8)? as u8);
     }
+    // GY/T 420-2025 requires reserved bits to be set to one, but decoders shall ignore them.
     reader.skip_bits(2)?;
 
     Ok(LosslessConfig {
@@ -452,7 +458,7 @@ mod tests {
         writer.push(2, 16);
         writer.push(0xAB, 8);
         writer.push(0xCD, 8);
-        writer.push(0, 2);
+        writer.push(3, 2);
 
         let config = parse_dca3(&writer.bytes).unwrap();
         let Avs3SpecificConfig::Lossless(lossless) = &config else {
@@ -475,7 +481,7 @@ mod tests {
         writer.push(2, 8);
         writer.push(1, 2);
         writer.push(0, 16);
-        writer.push(0, 2);
+        writer.push(3, 2);
 
         let config = parse_dca3(&writer.bytes).unwrap();
         let Avs3SpecificConfig::Lossless(lossless) = &config else {
@@ -486,16 +492,53 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lossless_dca3_ancillary_flag() {
+    fn accepts_lossless_dca3_ancillary_flag() {
         let mut writer = BitWriter::new();
         writer.push(1, 4);
         writer.push(0x2, 4);
         writer.push(1, 1);
+        writer.push(0, 3);
+        writer.push(2, 8);
+        writer.push(1, 2);
+        writer.push(0, 16);
+        writer.push(3, 2);
+
+        let Avs3SpecificConfig::Lossless(config) = parse_dca3(&writer.bytes).unwrap() else {
+            panic!("lossless config");
+        };
+        assert!(config.anc_data_index);
+    }
+
+    #[test]
+    fn rejects_reserved_lossless_coding_profile() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 4);
+        writer.push(0x2, 4);
+        writer.push(0, 1);
+        writer.push(3, 3);
 
         assert_eq!(
             parse_dca3(&writer.bytes),
-            Err(CodecError::InvalidData(
-                "lossless dca3 anc_data_index must be zero"
+            Err(CodecError::Unsupported(
+                "reserved lossless coding_profile in dca3"
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_lossless_resolution() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 4);
+        writer.push(0x2, 4);
+        writer.push(0, 1);
+        writer.push(0, 3);
+        writer.push(2, 8);
+        writer.push(0, 2);
+
+        assert_eq!(
+            parse_dca3(&writer.bytes),
+            Err(CodecError::Unsupported(
+                "reserved lossless resolution in dca3"
             ))
         );
     }
