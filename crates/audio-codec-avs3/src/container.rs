@@ -7,6 +7,7 @@ use std::{
 const PROBE_PREFIX_BYTES: u64 = 1024 * 1024;
 const PROBE_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE: usize = 32;
+const AUDIO_SAMPLE_ENTRY_MIN_BOX_BYTES: usize = 8 + AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Av3aSampleEntry {
@@ -44,21 +45,21 @@ pub fn probe_av3a_path(path: &Path) -> io::Result<Option<Av3aSampleEntry>> {
     Ok(None)
 }
 
-/// Probe an in-memory ISO-BMFF region for an `av3a` AudioSampleEntry.
+/// Probe an in-memory ISO-BMFF region for a structurally valid `av3a` AudioSampleEntry.
 ///
-/// This parser deliberately limits itself to the standardized AudioSampleEntry fixed header and
-/// child-box framing. Elementary AVS3-P3 syntax belongs to the decoder module, not the container
-/// scanner.
+/// The four bytes `av3a` are not sufficient evidence by themselves: cover artwork and arbitrary
+/// metadata can contain the same byte sequence. A candidate is accepted only when the enclosing
+/// box size, AudioSampleEntry reserved/data-reference fields, fixed header and complete box extent
+/// are available in this probe region. This prevents embedded JPEG/PNG data from selecting the AVS
+/// decoder accidentally.
 pub fn probe_av3a_bytes(bytes: &[u8]) -> Option<Av3aSampleEntry> {
-    let mut saw_av3a = false;
-
     for (type_pos, fourcc) in bytes.windows(4).enumerate() {
         if fourcc != b"av3a" {
             continue;
         }
-        saw_av3a = true;
 
-        if type_pos + AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE > bytes.len() {
+        let box_end = valid_audio_sample_entry_end(bytes, type_pos)?;
+        if type_pos + AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE > box_end {
             continue;
         }
 
@@ -76,7 +77,7 @@ pub fn probe_av3a_bytes(bytes: &[u8]) -> Option<Av3aSampleEntry> {
             continue;
         }
 
-        let decoder_config = child_box_payload(bytes, type_pos, b"dca3").unwrap_or_default();
+        let decoder_config = child_box_payload(bytes, type_pos, box_end, b"dca3").unwrap_or_default();
         return Some(Av3aSampleEntry {
             sample_rate,
             channels,
@@ -85,26 +86,36 @@ pub fn probe_av3a_bytes(bytes: &[u8]) -> Option<Av3aSampleEntry> {
         });
     }
 
-    // Preserve the previous player's conservative fallback when the region clearly contains an
-    // AV3A sample entry but the fixed header is split across the selected probe window. This is
-    // only metadata for backend selection; the decoder will still validate the actual bitstream.
-    saw_av3a.then(|| Av3aSampleEntry {
-        sample_rate: 48_000,
-        channels: 2,
-        sample_size_bits: None,
-        decoder_config: Vec::new(),
-    })
+    None
 }
 
-fn child_box_payload(bytes: &[u8], type_pos: usize, wanted: &[u8; 4]) -> Option<Vec<u8>> {
+fn valid_audio_sample_entry_end(bytes: &[u8], type_pos: usize) -> Option<usize> {
     let box_start = type_pos.checked_sub(4)?;
-    let declared_size = u32::from_be_bytes(bytes.get(box_start..type_pos)?.try_into().ok()?) as usize;
-    let box_end = if declared_size >= 8 {
-        box_start.checked_add(declared_size)?.min(bytes.len())
-    } else {
-        bytes.len()
-    };
+    let declared_size =
+        u32::from_be_bytes(bytes.get(box_start..type_pos)?.try_into().ok()?) as usize;
+    if declared_size < AUDIO_SAMPLE_ENTRY_MIN_BOX_BYTES {
+        return None;
+    }
+    let box_end = box_start.checked_add(declared_size)?;
+    if box_end > bytes.len() {
+        return None;
+    }
 
+    // ISO-BMFF SampleEntry: six reserved zero bytes followed by a non-zero data-reference index.
+    if bytes.get(type_pos + 4..type_pos + 10)? != [0_u8; 6] {
+        return None;
+    }
+    let data_reference_index =
+        u16::from_be_bytes(bytes.get(type_pos + 10..type_pos + 12)?.try_into().ok()?);
+    (data_reference_index != 0).then_some(box_end)
+}
+
+fn child_box_payload(
+    bytes: &[u8],
+    type_pos: usize,
+    box_end: usize,
+    wanted: &[u8; 4],
+) -> Option<Vec<u8>> {
     let mut cursor = type_pos.checked_add(AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE)?;
     while cursor.checked_add(8)? <= box_end {
         let size = u32::from_be_bytes(bytes.get(cursor..cursor + 4)?.try_into().ok()?) as usize;
@@ -131,7 +142,10 @@ mod tests {
     #[test]
     fn parses_7_1_4_sample_entry_metadata() {
         let mut bytes = vec![0_u8; 64];
+        // Sample entry occupies bytes 4..64; type begins at byte 8.
+        bytes[4..8].copy_from_slice(&(60_u32).to_be_bytes());
         bytes[8..12].copy_from_slice(b"av3a");
+        bytes[18..20].copy_from_slice(&1_u16.to_be_bytes());
         bytes[28..30].copy_from_slice(&12_u16.to_be_bytes());
         bytes[30..32].copy_from_slice(&24_u16.to_be_bytes());
         bytes[36..40].copy_from_slice(&(44_100_u32 << 16).to_be_bytes());
@@ -148,6 +162,7 @@ mod tests {
         // Full box starts at 0, therefore the type is at byte 4.
         bytes[0..4].copy_from_slice(&(56_u32).to_be_bytes());
         bytes[4..8].copy_from_slice(b"av3a");
+        bytes[14..16].copy_from_slice(&1_u16.to_be_bytes());
         bytes[24..26].copy_from_slice(&2_u16.to_be_bytes());
         bytes[26..28].copy_from_slice(&24_u16.to_be_bytes());
         bytes[32..36].copy_from_slice(&(48_000_u32 << 16).to_be_bytes());
@@ -157,5 +172,23 @@ mod tests {
 
         let entry = probe_av3a_bytes(&bytes).expect("av3a");
         assert_eq!(entry.decoder_config, vec![0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn ignores_av3a_signature_inside_unrelated_payload() {
+        let mut bytes = vec![0xAA_u8; 96];
+        bytes[40..44].copy_from_slice(b"av3a");
+        assert_eq!(probe_av3a_bytes(&bytes), None);
+    }
+
+    #[test]
+    fn rejects_sample_entry_split_at_probe_boundary() {
+        let mut bytes = vec![0_u8; 48];
+        bytes[0..4].copy_from_slice(&(64_u32).to_be_bytes());
+        bytes[4..8].copy_from_slice(b"av3a");
+        bytes[14..16].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[24..26].copy_from_slice(&2_u16.to_be_bytes());
+        bytes[32..36].copy_from_slice(&(48_000_u32 << 16).to_be_bytes());
+        assert_eq!(probe_av3a_bytes(&bytes), None);
     }
 }
