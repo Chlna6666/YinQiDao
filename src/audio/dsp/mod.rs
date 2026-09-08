@@ -168,10 +168,12 @@ impl AudioProcessor {
         output: &mut Vec<f32>,
     ) {
         let output_rate = self.eq.sample_rate();
+        let native_multichannel = input_channels > 2;
 
-        // Decode-domain multichannel audio is reduced to a binaural stereo reference before the
-        // player EQ. In particular this keeps AV3A 7.1.4 / 12ch content from silently dropping
-        // channels 3..12 as the old frame[0]/frame[1] fallback did.
+        // Decode-domain multichannel audio is reduced exactly once to a binaural stereo reference.
+        // Do not run the generic stereo spatializer on top of authored 5.1.4/7.1.4/AV3A content:
+        // that second pass used to widen, cross-delay and reverberate an already spatial mix and is
+        // the main reason native 3D material sounded less coherent than ordinary stereo tracks.
         to_stereo_into(input, input_channels, &mut self.stereo_scratch);
         self.resampler.process_into(
             &self.stereo_scratch,
@@ -190,7 +192,9 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        self.spatial.process(output);
+        if !native_multichannel {
+            self.spatial.process(output);
+        }
 
         if debug_enabled {
             capture_audio_debug_frame(
@@ -200,9 +204,6 @@ impl AudioProcessor {
                 output_rate,
             );
 
-            // A/B/C is a real listening comparison, not just a graph selector. Selection happens
-            // before the common volume stage so loudness differences are not introduced by three
-            // independent output gains.
             match audio_debug_monitor_mode() {
                 AudioDebugMonitorMode::Source => {
                     output.clear();
@@ -217,9 +218,6 @@ impl AudioProcessor {
         }
 
         let gain = perceptual_volume_gain(self.volume);
-        // Gain + final PCM guard is a hot per-sample operation. Route it through the shared SIMD
-        // crate so the same AVX2/SSE2/NEON dispatch used by future pure-Rust codecs also benefits
-        // ordinary Symphonia playback without requiring target-cpu=native binaries.
         yinqidao_audio_simd::gain_clamp_in_place(output, gain);
     }
 }
@@ -300,24 +298,41 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
             let speaker = speaker_for_channel(channels, index);
             let (mut left_gain, mut right_gain) = equal_power_pan(speaker.azimuth_deg);
 
-            let elevation = (1.0 - speaker.elevation_deg.abs() / 180.0 * 0.18).clamp(0.78, 1.0);
+            // Height channels should remain audible as ambience, not merely become quieter copies
+            // of their floor counterparts. Keep a mild level offset and slightly pull them toward
+            // the centre to avoid an exaggerated hard-left/right ceiling image.
+            let elevation_amount = (speaker.elevation_deg.abs() / 90.0).clamp(0.0, 1.0);
+            let elevation_gain = 1.0 - elevation_amount * 0.08;
+            if elevation_amount > 0.0 {
+                let centre = (left_gain + right_gain) * 0.5;
+                left_gain = left_gain * (1.0 - elevation_amount * 0.12)
+                    + centre * elevation_amount * 0.12;
+                right_gain = right_gain * (1.0 - elevation_amount * 0.12)
+                    + centre * elevation_amount * 0.12;
+            }
+
             if speaker.rear {
-                let crossfeed = 0.12;
+                // Rear channels need a more diffuse binaural image than front speakers. This
+                // stateless crossfeed preserves rear energy without pretending the source is a
+                // second front speaker after azimuth folding.
+                let crossfeed = 0.18;
                 let l = left_gain;
                 let r = right_gain;
                 left_gain = l * (1.0 - crossfeed) + r * crossfeed;
                 right_gain = r * (1.0 - crossfeed) + l * crossfeed;
             }
 
-            let gain = speaker.gain * elevation;
+            let gain = speaker.gain * elevation_gain;
             left += sample * left_gain * gain;
             right += sample * right_gain * gain;
             energy += gain * gain;
         }
 
-        let normalization = (2.0 / energy.max(2.0)).sqrt() * 0.94;
-        output.push((left * normalization).clamp(-1.5, 1.5));
-        output.push((right * normalization).clamp(-1.5, 1.5));
+        // Energy normalisation keeps 10/12-channel material from driving the final limiter on
+        // every frame while preserving enough headroom for correlated centre/LFE content.
+        let normalization = (2.0 / energy.max(2.0)).sqrt() * 0.90;
+        output.push((left * normalization).clamp(-1.35, 1.35));
+        output.push((right * normalization).clamp(-1.35, 1.35));
     }
 }
 
@@ -394,6 +409,33 @@ mod tests {
         to_stereo_into(&input, 12, &mut output);
         assert_eq!(output.len(), 16);
         assert!(output.iter().any(|sample| sample.abs() > 0.01));
+    }
+
+    #[test]
+    fn native_multichannel_is_not_spatialized_twice() {
+        let mut input = vec![0.0_f32; 12 * 64];
+        for frame in input.chunks_exact_mut(12) {
+            frame[0] = 0.30;
+            frame[1] = -0.15;
+            frame[4] = 0.22;
+            frame[8] = 0.18;
+            frame[11] = -0.12;
+        }
+
+        let immersive = SpatialPreset::Immersive3d.settings();
+        let mut disabled = immersive.clone();
+        disabled.enabled = false;
+        let mut with_spatial = AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
+        let mut without_spatial =
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), disabled, 1.0);
+
+        let rendered = with_spatial.process(&input, 48_000, 12);
+        let reference = without_spatial.process(&input, 48_000, 12);
+        assert_eq!(rendered.len(), reference.len());
+        assert!(rendered
+            .iter()
+            .zip(reference.iter())
+            .all(|(left, right)| (left - right).abs() < 1.0e-6));
     }
 
     #[test]
