@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, io, time::Duration};
+use std::{error::Error, fmt, io, thread, time::Duration};
 
 use yinqidao_codec_avs3::{
     Av3aIsoBmffDemuxer, Avs3Decoder, Avs3SpecificConfig, parse_dca3,
@@ -6,11 +6,16 @@ use yinqidao_codec_avs3::{
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
 
 const AVS3_FRAME_SAMPLES_PER_CHANNEL: usize = 1024;
+/// `Avs3Decoder::new()` currently materializes several large fixed-size synthesis workspaces before
+/// the decoder is moved behind a `Box`. Keep that one-time construction away from the small generic
+/// audio-worker stack, especially in Windows debug builds where stack-slot reuse is less aggressive.
+const AVS3_DECODER_INIT_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum Av3aRustError {
     Io(io::Error),
     Codec(CodecError),
+    DecoderInitPanicked,
     UnexpectedStatus,
     InvalidFrame,
 }
@@ -20,6 +25,7 @@ impl fmt::Display for Av3aRustError {
         match self {
             Self::Io(error) => write!(formatter, "AV3A ISO-BMFF 读取失败: {error}"),
             Self::Codec(error) => write!(formatter, "AVS3-P3 解码失败: {error}"),
+            Self::DecoderInitPanicked => formatter.write_str("AVS3-P3 解码器初始化线程异常退出"),
             Self::UnexpectedStatus => formatter.write_str("AVS3-P3 完整 sample 未产生 PCM frame"),
             Self::InvalidFrame => formatter.write_str("AVS3-P3 Pure Rust PCM 输出几何不合法"),
         }
@@ -31,7 +37,7 @@ impl Error for Av3aRustError {
         match self {
             Self::Io(error) => Some(error),
             Self::Codec(error) => Some(error),
-            Self::UnexpectedStatus | Self::InvalidFrame => None,
+            Self::DecoderInitPanicked | Self::UnexpectedStatus | Self::InvalidFrame => None,
         }
     }
 }
@@ -59,7 +65,9 @@ impl From<CodecError> for Av3aRustError {
 /// reduction/rendering before device output.
 pub(crate) struct Av3aRustBackend {
     demuxer: Av3aIsoBmffDemuxer,
-    decoder: Avs3Decoder,
+    /// Keep the very large synthesis state on the heap. Construction itself is performed on a
+    /// dedicated large-stack thread below so debug builds never materialize it on audio-worker.
+    decoder: Box<Avs3Decoder>,
     packet: Vec<u8>,
     frame: AudioFrame,
     first_frame_ready: bool,
@@ -78,11 +86,9 @@ impl Av3aRustBackend {
             return Ok(None);
         }
 
-        // `Avs3Decoder` currently owns several large GA synthesis workspaces. Lossless frames are
-        // deliberately gated inside that decoder until Chapter 8 is bit-exact, so constructing all
-        // GA workspaces just to discover the Lossless `Unsupported` result wastes substantial stack
-        // and can overflow the relatively small audio-worker stack in debug builds. Parse the tiny
-        // dca3 config first and bypass the heavy decoder entirely for Lossless streams.
+        // Lossless is deliberately gated until Chapter 8 is bit-exact. Detect it with the tiny dca3
+        // parser before allocating any GA synthesis state, so unsupported M4A/AV3A content falls
+        // through cleanly rather than risking a large decoder construction on audio-worker.
         if matches!(
             parse_dca3(&entry.decoder_config)?,
             Avs3SpecificConfig::Lossless(_)
@@ -99,7 +105,17 @@ impl Av3aRustBackend {
         }
 
         let duration = demuxer.duration();
-        let mut decoder = Avs3Decoder::new(&entry)?;
+        // `Avs3Decoder` still contains four large inline synthesis workspaces. In debug builds the
+        // constructor can exceed the default Windows child-thread stack before `Box::new` has a
+        // chance to move the completed value to the heap. Construct and box it on a temporary
+        // large-stack thread, then only move the pointer back to audio-worker.
+        let mut decoder = thread::Builder::new()
+            .name("yinqidao-avs3-init".into())
+            .stack_size(AVS3_DECODER_INIT_STACK_BYTES)
+            .spawn(move || Avs3Decoder::new(&entry).map(Box::new))?
+            .join()
+            .map_err(|_| Av3aRustError::DecoderInitPanicked)??;
+
         let mut packet = Vec::new();
         let Some(_) = demuxer.next_sample_into(&mut packet)? else {
             return Ok(None);
