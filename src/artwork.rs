@@ -12,6 +12,8 @@ use lofty::prelude::TaggedFileExt;
 
 use crate::model::Track;
 
+const ARTWORK_CACHE_REVISION: &str = "embedded-v3";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArtworkPalette {
     pub dominant_rgb: [u8; 3],
@@ -102,7 +104,7 @@ impl ArtworkCache {
             .artwork_key
             .clone()
             .unwrap_or_else(|| track.path.to_string_lossy().into_owned());
-        let hash = stable_hash(&key);
+        let hash = artwork_cache_hash(&key);
         let cache_path = self.directory.join(format!("{:016x}.png", hash));
         let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
         let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
@@ -111,30 +113,35 @@ impl ArtworkCache {
             let png = fs::read(&cache_path)
                 .with_context(|| format!("读取封面缓存失败: {}", cache_path.display()))?;
 
-            let blurred_png = if blur_cache_path.exists() {
-                fs::read(&blur_cache_path).ok()
-            } else {
-                None
-            };
-
-            let palette = if palette_cache_path.exists() {
-                fs::read_to_string(&palette_cache_path)
-                    .ok()
-                    .and_then(|s| ArtworkPalette::parse_serialized(&s))
-            } else {
-                None
-            };
-
-            if let (Some(b_png), Some(pal)) = (blurred_png, palette) {
-                return Ok(Some(Artwork {
-                    png,
-                    blurred_png: b_png,
-                    palette: pal,
-                }));
-            }
-
-            // 补全缺失的模糊图与调色板
+            // Never return stale/corrupted bytes merely because the cache files exist. Previous
+            // M4A metadata parsing could accept arbitrary non-empty Picture payloads, so old cache
+            // entries need a real decode check before they can be trusted.
             if let Ok(img) = image::load_from_memory(&png) {
+                let blurred_png = if blur_cache_path.exists() {
+                    fs::read(&blur_cache_path)
+                        .ok()
+                        .filter(|bytes| image::load_from_memory(bytes).is_ok())
+                } else {
+                    None
+                };
+
+                let palette = if palette_cache_path.exists() {
+                    fs::read_to_string(&palette_cache_path)
+                        .ok()
+                        .and_then(|s| ArtworkPalette::parse_serialized(&s))
+                } else {
+                    None
+                };
+
+                if let (Some(b_png), Some(pal)) = (blurred_png, palette) {
+                    return Ok(Some(Artwork {
+                        png,
+                        blurred_png: b_png,
+                        palette: pal,
+                    }));
+                }
+
+                // 补全缺失或损坏的模糊图与调色板。
                 let blurred = generate_blurred_artwork(&img).unwrap_or_else(|_| png.clone());
                 let pal = extract_palette(&img);
                 let _ = fs::write(&blur_cache_path, &blurred);
@@ -146,13 +153,11 @@ impl ArtworkCache {
                 }));
             }
 
-            let fallback_blur = png.clone();
-            let fallback_pal = ArtworkPalette::default();
-            return Ok(Some(Artwork {
-                png,
-                blurred_png: fallback_blur,
-                palette: fallback_pal,
-            }));
+            // Invalid cache bytes must not reach GPUI's image path. Remove all siblings and fall
+            // through to a fresh embedded/sidecar extraction.
+            let _ = fs::remove_file(&cache_path);
+            let _ = fs::remove_file(&blur_cache_path);
+            let _ = fs::remove_file(&palette_cache_path);
         }
 
         let Some(image) = decoded_local_artwork(&track.path) else {
@@ -181,7 +186,7 @@ impl ArtworkCache {
         let blurred_png = generate_blurred_artwork(&image).unwrap_or_else(|_| png.clone());
         let palette = extract_palette(&image);
 
-        let hash = stable_hash(key);
+        let hash = artwork_cache_hash(key);
         let cache_path = self.directory.join(format!("{:016x}.png", hash));
         let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
         let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
@@ -402,7 +407,7 @@ fn embedded_artwork(path: &Path) -> Option<Vec<u8>> {
     tagged.tags().iter().find_map(|tag| {
         tag.pictures()
             .iter()
-            .find(|picture| !picture.data().is_empty())
+            .find(|picture| is_recognized_artwork(picture.data()))
             .map(|picture| picture.data().to_vec())
     })
 }
@@ -416,7 +421,16 @@ fn sidecar_artwork(path: &Path) -> Option<Vec<u8>> {
                 .into_iter()
                 .map(move |extension| parent.join(format!("{name}.{extension}")))
         })
-        .find_map(|candidate| fs::read(candidate).ok())
+        .find_map(|candidate| {
+            fs::read(candidate)
+                .ok()
+                .filter(|bytes| is_recognized_artwork(bytes))
+        })
+}
+
+#[inline]
+fn is_recognized_artwork(data: &[u8]) -> bool {
+    !data.is_empty() && image::guess_format(data).is_ok()
 }
 
 fn encode_png(image: &DynamicImage) -> Result<Vec<u8>> {
@@ -425,6 +439,10 @@ fn encode_png(image: &DynamicImage) -> Result<Vec<u8>> {
         .write_to(&mut output, ImageFormat::Png)
         .context("编码封面缩略图失败")?;
     Ok(output.into_inner())
+}
+
+fn artwork_cache_hash(key: &str) -> u64 {
+    stable_hash(&format!("{ARTWORK_CACHE_REVISION}:{key}"))
 }
 
 fn stable_hash(value: &str) -> u64 {
@@ -479,6 +497,14 @@ mod tests {
         assert!(artwork.palette.mask_alpha >= 0.40 && artwork.palette.mask_alpha <= 0.85);
         assert!(cache.load(&track).expect("cached").is_some());
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn artwork_probe_rejects_non_image_metadata_payloads() {
+        assert!(!is_recognized_artwork(&[]));
+        assert!(!is_recognized_artwork(b"av3a-not-cover-art"));
+        assert!(is_recognized_artwork(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(is_recognized_artwork(b"\xff\xd8\xff\xe0rest"));
     }
 
     #[test]
