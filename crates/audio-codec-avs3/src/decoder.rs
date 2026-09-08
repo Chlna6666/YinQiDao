@@ -17,6 +17,7 @@ use crate::{
     ga_multichannel_pcm::parse_decode_multichannel_pcm,
     ga_stereo_pcm::parse_decode_stereo_pcm,
     hoa_synthesis::parse_decode_hoa_pcm,
+    lossless_bitstream::parse_lossless_aatf_envelope,
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
@@ -48,6 +49,10 @@ pub struct Avs3Decoder {
     last_static_metadata_prefix: Option<StaticMetadataPrefix>,
     last_dynamic_metadata_prefix: Option<DynamicMetadataPrefix>,
     last_dynamic_metadata: Option<DynamicMetadata>,
+    /// Raw trailing `frame_error_check().crc_check` from the most recently accepted lossless frame.
+    last_lossless_frame_crc: Option<u8>,
+    /// Byte length of `ll_raw_data_block()` plus optional ancillary data for the last lossless frame.
+    last_lossless_payload_bytes: Option<usize>,
     /// Compatibility/diagnostic view of the first coded channel.
     last_core_side_prefix: Option<CoreSidePrefix>,
     last_first_transform_type: Option<TransformType>,
@@ -99,6 +104,8 @@ impl Avs3Decoder {
             last_static_metadata_prefix: None,
             last_dynamic_metadata_prefix: None,
             last_dynamic_metadata: None,
+            last_lossless_frame_crc: None,
+            last_lossless_payload_bytes: None,
             last_core_side_prefix: None,
             last_first_transform_type: None,
             last_bwe_present: None,
@@ -141,6 +148,14 @@ impl Avs3Decoder {
 
     pub fn last_dynamic_metadata(&self) -> Option<&DynamicMetadata> {
         self.last_dynamic_metadata.as_ref()
+    }
+
+    pub fn last_lossless_frame_crc(&self) -> Option<u8> {
+        self.last_lossless_frame_crc
+    }
+
+    pub fn last_lossless_payload_bytes(&self) -> Option<usize> {
+        self.last_lossless_payload_bytes
     }
 
     pub fn last_core_side_prefix(&self) -> Option<CoreSidePrefix> {
@@ -308,6 +323,8 @@ impl Avs3Decoder {
         self.last_static_metadata_prefix = None;
         self.last_dynamic_metadata_prefix = None;
         self.last_dynamic_metadata = None;
+        self.last_lossless_frame_crc = None;
+        self.last_lossless_payload_bytes = None;
         self.last_core_side_prefix = None;
         self.last_first_transform_type = None;
         self.last_bwe_present = None;
@@ -360,6 +377,9 @@ impl AudioDecoder for Avs3Decoder {
         let method = header.coding_method;
 
         if method == AudioCodingMethod::Lossless {
+            let envelope = parse_lossless_aatf_envelope(packet, &header)?;
+            self.last_lossless_frame_crc = Some(envelope.frame_crc);
+            self.last_lossless_payload_bytes = Some(envelope.raw_block_and_ancillary.len());
             self.last_frame_header = Some(header);
             self.packets_seen = self.packets_seen.saturating_add(1);
             return Err(CodecError::Unsupported(
