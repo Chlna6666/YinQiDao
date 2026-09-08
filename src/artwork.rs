@@ -12,7 +12,7 @@ use lofty::{picture::PictureType, prelude::TaggedFileExt};
 
 use crate::model::Track;
 
-const ARTWORK_CACHE_REVISION: &str = "embedded-front-v4";
+const ARTWORK_CACHE_REVISION: &str = "embedded-front-v5";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArtworkPalette {
@@ -425,18 +425,61 @@ fn embedded_artwork(path: &Path) -> Option<Vec<u8>> {
 
 fn sidecar_artwork(path: &Path) -> Option<Vec<u8>> {
     let parent = path.parent()?;
+    let stem = path.file_stem()?.to_str()?;
+
+    const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "ico"];
+
+    // 优先匹配同名伴随封面：如 "歌名.jpg"、"歌名.png"
+    for extension in EXTENSIONS {
+        let candidate = parent.join(format!("{stem}.{extension}"));
+        if let Ok(bytes) = fs::read(&candidate) {
+            if is_recognized_artwork(&bytes) {
+                return Some(bytes);
+            }
+        }
+    }
+
+    // 通用目录级封面（"cover"、"folder"、"front"）仅适用于专有子目录（如独立专辑目录），
+    // 严禁在系统级目录（如系统音乐文件夹、下载、桌面或磁盘根目录）中误匹配其他软件留下的通用封面。
+    if is_user_system_or_root_dir(parent) {
+        return None;
+    }
+
     ["cover", "folder", "front"]
         .into_iter()
         .flat_map(|name| {
-            ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "ico"]
-                .into_iter()
+            EXTENSIONS
+                .iter()
                 .map(move |extension| parent.join(format!("{name}.{extension}")))
         })
         .find_map(|candidate| {
             fs::read(candidate)
                 .ok()
-                .filter(|bytes| is_recognized_artwork(bytes))
+                .filter(|bytes| is_recognized_artwork(&bytes))
         })
+}
+
+fn is_user_system_or_root_dir(path: &Path) -> bool {
+    if path.parent().is_none() {
+        return true;
+    }
+
+    if let Some(user_dirs) = directories::UserDirs::new() {
+        let system_dirs = [
+            user_dirs.audio_dir(),
+            user_dirs.download_dir(),
+            user_dirs.desktop_dir(),
+            user_dirs.document_dir(),
+            user_dirs.video_dir(),
+            user_dirs.picture_dir(),
+            Some(user_dirs.home_dir()),
+        ];
+        if system_dirs.into_iter().flatten().any(|d| path == d) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[inline]
@@ -543,5 +586,45 @@ mod tests {
         let parsed =
             ArtworkPalette::parse_serialized(&serialized).expect("parse serialized palette");
         assert_eq!(parsed.dominant_rgb, color_pal.dominant_rgb);
+    }
+
+    #[test]
+    fn sidecar_artwork_ignores_generic_cover_in_user_system_dir() {
+        if let Some(audio_dir) =
+            directories::UserDirs::new().and_then(|u| u.audio_dir().map(Path::to_path_buf))
+        {
+            // In user's system Music directory, generic "Folder.jpg" must NOT match for an unrelated track
+            let track_path = audio_dir.join("test_unrelated_song_xyz.m4a");
+            // Unless there is a file named "test_unrelated_song_xyz.jpg", sidecar_artwork should return None
+            assert!(sidecar_artwork(&track_path).is_none());
+        }
+    }
+
+    #[test]
+    fn sidecar_artwork_prefers_track_stem_over_generic_folder() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("yinqidao-sidecar-{suffix}"));
+        fs::create_dir_all(&root).expect("root");
+
+        let stem_img =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255])));
+        stem_img.save(root.join("my_song.jpg")).expect("stem img");
+
+        let generic_img =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(20, 20, Rgba([0, 255, 0, 255])));
+        generic_img
+            .save(root.join("folder.jpg"))
+            .expect("generic img");
+
+        let song_path = root.join("my_song.m4a");
+        let sidecar = sidecar_artwork(&song_path).expect("find sidecar");
+        let decoded = image::load_from_memory(&sidecar).expect("decode");
+        // Must match the 10x10 stem image, not the 20x20 generic image
+        assert_eq!(decoded.dimensions(), (10, 10));
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }
