@@ -98,11 +98,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .hover(|s| s.bg(theme::accent_red_active()))
                         .transition(press_transition())
                         .active(|s| s.scale(0.96))
-                        .child(themed_icon(
-                            icon!(folder_plus),
-                            16.0,
-                            ACCENT_RED.into(),
-                        ))
+                        .child(themed_icon(icon!(folder_plus), 16.0, ACCENT_RED.into()))
                         .child(
                             div()
                                 .text_sm()
@@ -290,11 +286,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
             .flex()
             .items_center()
             .justify_center()
-            .child(themed_icon(
-                icon!(disc_3),
-                42.0,
-                hsla(0.0, 0.0, 1.0, 0.80),
-            ))
+            .child(themed_icon(icon!(disc_3), 42.0, hsla(0.0, 0.0, 1.0, 0.80)))
             .into_any_element()
     };
 
@@ -337,11 +329,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(themed_icon(
-                                    icon!(play),
-                                    20.0,
-                                    hsla(0.0, 0.0, 1.0, 1.0),
-                                )),
+                                .child(themed_icon(icon!(play), 20.0, hsla(0.0, 0.0, 1.0, 1.0))),
                         ),
                 ),
         )
@@ -448,11 +436,7 @@ pub(super) fn track_row(
             .flex()
             .items_center()
             .justify_center()
-            .child(themed_icon(
-                icon!(music),
-                18.0,
-                hsla(0.0, 0.0, 1.0, 0.85),
-            ))
+            .child(themed_icon(icon!(music), 18.0, hsla(0.0, 0.0, 1.0, 0.85)))
             .into_any_element()
     };
 
@@ -531,11 +515,7 @@ pub(super) fn track_row(
                         .justify_center()
                         .rounded_full()
                         .hover(|s| s.bg(theme::bg_active()))
-                        .child(themed_icon(
-                            icon!(plus),
-                            14.0,
-                            hsla(220.0, 0.08, 0.50, 1.0),
-                        ))
+                        .child(themed_icon(icon!(plus), 14.0, hsla(220.0, 0.08, 0.50, 1.0)))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             app_listener(view, move |this, _, _, cx| {
@@ -577,11 +557,7 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(themed_icon(
-                    icon!(folder_open),
-                    28.0,
-                    ACCENT_RED.into(),
-                )),
+                .child(themed_icon(icon!(folder_open), 28.0, ACCENT_RED.into())),
         )
         .child(
             div()

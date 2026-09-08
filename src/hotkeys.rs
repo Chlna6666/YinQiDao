@@ -253,9 +253,9 @@ mod platform {
 
             loop {
                 let mut message = MaybeUninit::<Msg>::zeroed();
-                let has_message = unsafe {
-                    PeekMessageW(message.as_mut_ptr(), ptr::null_mut(), 0, 0, PM_REMOVE)
-                } != 0;
+                let has_message =
+                    unsafe { PeekMessageW(message.as_mut_ptr(), ptr::null_mut(), 0, 0, PM_REMOVE) }
+                        != 0;
                 if !has_message {
                     break;
                 }
@@ -386,7 +386,8 @@ mod platform {
                     }
                 }
                 Ok(ServiceCommand::SetEnabled(false)) => {}
-                Ok(ServiceCommand::Shutdown) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Ok(ServiceCommand::Shutdown)
+                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     break;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

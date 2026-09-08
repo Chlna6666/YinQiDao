@@ -368,8 +368,21 @@ fn artist_similarity(expected: &str, actual: &str) -> i32 {
 fn split_artist_names(value: &str) -> Vec<String> {
     let mut value = value.to_lowercase();
     for separator in [
-        " featuring ", " feat. ", " feat ", " ft. ", " ft ", "、", "/", "&", "，", ",", ";",
-        "；", " + ", " x ", " × ",
+        " featuring ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        "、",
+        "/",
+        "&",
+        "，",
+        ",",
+        ";",
+        "；",
+        " + ",
+        " x ",
+        " × ",
     ] {
         value = value.replace(separator, "|");
     }
@@ -537,13 +550,7 @@ mod tests {
     #[test]
     fn exact_metadata_beats_wrong_version() {
         let track = track("晴天", "周杰伦", "叶惠美", 269_000);
-        let exact = candidate(
-            ProviderKind::QqMusic,
-            "晴天",
-            "周杰伦",
-            "叶惠美",
-            269_300,
-        );
+        let exact = candidate(ProviderKind::QqMusic, "晴天", "周杰伦", "叶惠美", 269_300);
         let live = candidate(
             ProviderKind::Netease,
             "晴天 (Live)",

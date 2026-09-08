@@ -122,28 +122,58 @@ pub(crate) struct CpuRenderer {
 }
 
 impl CpuRenderer {
-    pub(crate) fn new(sample_rate: u32, block_frames: usize, max_sources: usize) -> Result<Self, SpatialError> {
-        if sample_rate == 0 { return Err(SpatialError::InvalidSampleRate); }
-        if block_frames == 0 { return Err(SpatialError::InvalidBlockFrames); }
-        if max_sources == 0 { return Err(SpatialError::InvalidSourceCapacity); }
+    pub(crate) fn new(
+        sample_rate: u32,
+        block_frames: usize,
+        max_sources: usize,
+    ) -> Result<Self, SpatialError> {
+        if sample_rate == 0 {
+            return Err(SpatialError::InvalidSampleRate);
+        }
+        if block_frames == 0 {
+            return Err(SpatialError::InvalidBlockFrames);
+        }
+        if max_sources == 0 {
+            return Err(SpatialError::InvalidSourceCapacity);
+        }
         let sample_rate_f32 = sample_rate as f32;
         let maximum_itd_seconds = HEAD_RADIUS_M / SPEED_OF_SOUND_M_S * (PI * 0.5 + 1.0);
         let delay_capacity = (sample_rate_f32 * (maximum_itd_seconds + 0.0015)).ceil() as usize + 8;
         let lfe_alpha = 1.0 - (-2.0 * PI * 120.0 / sample_rate_f32).exp();
         let mut sources = Vec::with_capacity(max_sources);
-        for _ in 0..max_sources { sources.push(SourceState::new(delay_capacity, block_frames)); }
-        Ok(Self { sample_rate: sample_rate_f32, block_frames, sources, lfe_alpha })
+        for _ in 0..max_sources {
+            sources.push(SourceState::new(delay_capacity, block_frames));
+        }
+        Ok(Self {
+            sample_rate: sample_rate_f32,
+            block_frames,
+            sources,
+            lfe_alpha,
+        })
     }
 
-    pub(crate) fn source_capacity(&self) -> usize { self.sources.len() }
+    pub(crate) fn source_capacity(&self) -> usize {
+        self.sources.len()
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_strided_source(
-        &mut self, source_index: usize, input: &[f32], input_stride: usize, input_channel: usize,
-        frames: usize, start_pose: SourcePose, end_pose: SourcePose, listener: ListenerPose,
-        kind: SourceKind, mix_left: &mut [f32], mix_right: &mut [f32],
+        &mut self,
+        source_index: usize,
+        input: &[f32],
+        input_stride: usize,
+        input_channel: usize,
+        frames: usize,
+        start_pose: SourcePose,
+        end_pose: SourcePose,
+        listener: ListenerPose,
+        kind: SourceKind,
+        mix_left: &mut [f32],
+        mix_right: &mut [f32],
     ) -> Result<(), SpatialError> {
-        if source_index >= self.sources.len() { return Err(SpatialError::SourceCapacityExceeded); }
+        if source_index >= self.sources.len() {
+            return Err(SpatialError::SourceCapacityExceeded);
+        }
         debug_assert!(frames <= self.block_frames);
         debug_assert!(frames <= mix_left.len());
         debug_assert!(frames <= mix_right.len());
@@ -175,8 +205,10 @@ impl CpuRenderer {
                     let (delayed_left, delayed_right) = state
                         .delay
                         .read_pair(parameters.left_delay, parameters.right_delay);
-                    state.filter_left += parameters.left_filter_alpha * (delayed_left - state.filter_left);
-                    state.filter_right += parameters.right_filter_alpha * (delayed_right - state.filter_right);
+                    state.filter_left +=
+                        parameters.left_filter_alpha * (delayed_left - state.filter_left);
+                    state.filter_right +=
+                        parameters.right_filter_alpha * (delayed_right - state.filter_right);
                     state.scratch_left[frame] = state.filter_left * parameters.left_gain;
                     state.scratch_right[frame] = state.filter_right * parameters.right_gain;
                     parameters.advance(parameter_step);
@@ -206,16 +238,32 @@ impl CpuRenderer {
             }
         }
 
-        yinqidao_audio_simd::mix_accumulate(&mut mix_left[..frames], &state.scratch_left[..frames], 1.0);
-        yinqidao_audio_simd::mix_accumulate(&mut mix_right[..frames], &state.scratch_right[..frames], 1.0);
+        yinqidao_audio_simd::mix_accumulate(
+            &mut mix_left[..frames],
+            &state.scratch_left[..frames],
+            1.0,
+        );
+        yinqidao_audio_simd::mix_accumulate(
+            &mut mix_right[..frames],
+            &state.scratch_right[..frames],
+            1.0,
+        );
         Ok(())
     }
 
-    pub(crate) fn reset(&mut self) { for state in &mut self.sources { state.reset(); } }
+    pub(crate) fn reset(&mut self) {
+        for state in &mut self.sources {
+            state.reset();
+        }
+    }
 }
 
 #[inline]
-fn parameters_for_pose(sample_rate: f32, pose: SourcePose, listener: ListenerPose) -> RenderParameters {
+fn parameters_for_pose(
+    sample_rate: f32,
+    pose: SourcePose,
+    listener: ListenerPose,
+) -> RenderParameters {
     let relative = pose.position - listener.position;
     let distance = relative.length().clamp(0.05, MAX_DISTANCE_METERS);
     let direction = relative.normalized_or(crate::Vec3::FORWARD);
@@ -234,16 +282,30 @@ fn parameters_for_pose(sample_rate: f32, pose: SourcePose, listener: ListenerPos
 
     // Woodworth spherical-head ITD approximation: parameterized binaural localization, not measured HRTF.
     let theta = azimuth.abs().clamp(0.0, PI);
-    let path_term = if theta <= PI * 0.5 { theta + theta.sin() } else { PI - theta + theta.sin() };
+    let path_term = if theta <= PI * 0.5 {
+        theta + theta.sin()
+    } else {
+        PI - theta + theta.sin()
+    };
     let itd_samples = HEAD_RADIUS_M / SPEED_OF_SOUND_M_S * path_term * sample_rate;
     let (left_delay, right_delay) = if azimuth >= 0.0 {
-        (COMMON_CAUSAL_DELAY_SAMPLES + itd_samples, COMMON_CAUSAL_DELAY_SAMPLES)
+        (
+            COMMON_CAUSAL_DELAY_SAMPLES + itd_samples,
+            COMMON_CAUSAL_DELAY_SAMPLES,
+        )
     } else {
-        (COMMON_CAUSAL_DELAY_SAMPLES, COMMON_CAUSAL_DELAY_SAMPLES + itd_samples)
+        (
+            COMMON_CAUSAL_DELAY_SAMPLES,
+            COMMON_CAUSAL_DELAY_SAMPLES + itd_samples,
+        )
     };
 
     let far_ear_attenuation = (1.0 - lateral * (0.18 + 0.10 / distance.max(0.35))).clamp(0.62, 1.0);
-    let distance_gain = if distance <= 1.0 { 1.0 } else { 1.0 / (1.0 + (distance - 1.0) * 0.34) };
+    let distance_gain = if distance <= 1.0 {
+        1.0
+    } else {
+        1.0 / (1.0 + (distance - 1.0) * 0.34)
+    };
     let rear_gain = 1.0 - rear * 0.08;
     let height_gain = 1.0 - height * 0.035;
     let common_gain = pose.gain.max(0.0) * distance_gain * rear_gain * height_gain;
@@ -253,9 +315,23 @@ fn parameters_for_pose(sample_rate: f32, pose: SourcePose, listener: ListenerPos
     let far_alpha = one_pole_alpha(sample_rate, far_cutoff);
 
     if azimuth >= 0.0 {
-        RenderParameters { left_delay, right_delay, left_gain: common_gain * far_ear_attenuation, right_gain: common_gain, left_filter_alpha: far_alpha, right_filter_alpha: near_alpha }
+        RenderParameters {
+            left_delay,
+            right_delay,
+            left_gain: common_gain * far_ear_attenuation,
+            right_gain: common_gain,
+            left_filter_alpha: far_alpha,
+            right_filter_alpha: near_alpha,
+        }
     } else {
-        RenderParameters { left_delay, right_delay, left_gain: common_gain, right_gain: common_gain * far_ear_attenuation, left_filter_alpha: near_alpha, right_filter_alpha: far_alpha }
+        RenderParameters {
+            left_delay,
+            right_delay,
+            left_gain: common_gain,
+            right_gain: common_gain * far_ear_attenuation,
+            left_filter_alpha: near_alpha,
+            right_filter_alpha: far_alpha,
+        }
     }
 }
 
@@ -271,7 +347,11 @@ mod tests {
 
     #[test]
     fn right_source_delays_and_attenuates_far_left_ear() {
-        let parameters = parameters_for_pose(48_000.0, SourcePose::new(Vec3::RIGHT), ListenerPose::identity());
+        let parameters = parameters_for_pose(
+            48_000.0,
+            SourcePose::new(Vec3::RIGHT),
+            ListenerPose::identity(),
+        );
         assert!(parameters.left_delay > parameters.right_delay);
         assert!(parameters.left_gain < parameters.right_gain);
         assert!(parameters.left_filter_alpha < parameters.right_filter_alpha);
@@ -279,7 +359,11 @@ mod tests {
 
     #[test]
     fn front_source_is_symmetric() {
-        let parameters = parameters_for_pose(48_000.0, SourcePose::new(Vec3::FORWARD), ListenerPose::identity());
+        let parameters = parameters_for_pose(
+            48_000.0,
+            SourcePose::new(Vec3::FORWARD),
+            ListenerPose::identity(),
+        );
         assert!((parameters.left_delay - parameters.right_delay).abs() < 1.0e-6);
         assert!((parameters.left_gain - parameters.right_gain).abs() < 1.0e-6);
     }

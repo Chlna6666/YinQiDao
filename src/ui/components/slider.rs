@@ -339,7 +339,10 @@ pub fn interactive_slider(
                 return;
             };
             begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
-            (click_for_down)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
+            (click_for_down)(
+                horizontal_ratio(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -372,7 +375,10 @@ pub fn interactive_slider(
             let Some(bounds) = *bounds_for_up.borrow() else {
                 return;
             };
-            (drag_end_for_up)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
+            (drag_end_for_up)(
+                horizontal_ratio(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
@@ -383,7 +389,10 @@ pub fn interactive_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up_out.borrow() {
-                (drag_end_for_up_out)(horizontal_ratio(event.position.x, bounds, style.thumb_size), cx);
+                (drag_end_for_up_out)(
+                    horizontal_ratio(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
             }
         })
 }
@@ -432,7 +441,10 @@ pub fn interactive_vertical_slider(
                 return;
             };
             begin_pointer_press(&id_for_down, f32::from(event.position.y), cx);
-            (change_for_down)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+            (change_for_down)(
+                vertical_ratio(event.position.y, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -449,7 +461,10 @@ pub fn interactive_vertical_slider(
                 mark_pointer_dragging(&id_for_move, cx);
             }
             if let Some(bounds) = *bounds_for_move.borrow() {
-                (change_for_move)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+                (change_for_move)(
+                    vertical_ratio(event.position.y, bounds, style.thumb_size),
+                    cx,
+                );
             }
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
@@ -461,7 +476,10 @@ pub fn interactive_vertical_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up.borrow() {
-                (change_for_up)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+                (change_for_up)(
+                    vertical_ratio(event.position.y, bounds, style.thumb_size),
+                    cx,
+                );
             }
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
@@ -473,7 +491,10 @@ pub fn interactive_vertical_slider(
                 return;
             }
             if let Some(bounds) = *bounds_for_up_out.borrow() {
-                (change_for_up_out)(vertical_ratio(event.position.y, bounds, style.thumb_size), cx);
+                (change_for_up_out)(
+                    vertical_ratio(event.position.y, bounds, style.thumb_size),
+                    cx,
+                );
             }
         })
 }

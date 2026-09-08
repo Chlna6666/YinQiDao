@@ -232,7 +232,9 @@ pub(super) fn mini_player(
     let track = snapshot.current_track.as_ref();
     let track_id = track.map(|track| track.id);
     let title = track.map_or("等待播放", |track| track.title.as_str());
-    let artist = track.map_or("点击曲库开启音乐旅程", |track| track.artist.as_str());
+    let artist = track.map_or("点击曲库开启音乐旅程", |track| {
+        track.artist.as_str()
+    });
     let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
     let app_entity = cx.entity().downgrade();
 
@@ -619,10 +621,19 @@ pub(super) fn mini_player(
                                             let view = app_entity.clone();
                                             move |ratio, cx| {
                                                 let _ = view.update(cx, |this, cx| {
-                                                    if this.drag_target == Some(DragTarget::Volume) {
-                                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                                                    if this.drag_target == Some(DragTarget::Volume)
+                                                    {
+                                                        this.update_drag_ratio(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
                                                     } else {
-                                                        this.begin_drag(DragTarget::Volume, ratio, cx);
+                                                        this.begin_drag(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
                                                     }
                                                     this.send(PlayerCommand::SetVolume(ratio));
                                                 });
@@ -632,10 +643,19 @@ pub(super) fn mini_player(
                                             let view = app_entity.clone();
                                             move |ratio, cx| {
                                                 let _ = view.update(cx, |this, cx| {
-                                                    if this.drag_target == Some(DragTarget::Volume) {
-                                                        this.update_drag_ratio(DragTarget::Volume, ratio, cx);
+                                                    if this.drag_target == Some(DragTarget::Volume)
+                                                    {
+                                                        this.update_drag_ratio(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
                                                     } else {
-                                                        this.begin_drag(DragTarget::Volume, ratio, cx);
+                                                        this.begin_drag(
+                                                            DragTarget::Volume,
+                                                            ratio,
+                                                            cx,
+                                                        );
                                                     }
                                                     this.commit_drag(cx);
                                                     this.pending_volume_ratio = None;
@@ -686,11 +706,7 @@ fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl
         .flex()
         .items_center()
         .justify_center()
-        .child(themed_icon(
-            icon!(disc_3),
-            22.0,
-            hsla(0.0, 0.0, 1.0, 0.85),
-        ))
+        .child(themed_icon(icon!(disc_3), 22.0, hsla(0.0, 0.0, 1.0, 0.85)))
         .into_any_element()
 }
 
@@ -748,12 +764,20 @@ impl Render for NowPlaying {
         let snapshot = self
             .engine
             .as_ref()
-            .map_or_else(crate::model::PlayerSnapshot::default, |engine| engine.snapshot());
+            .map_or_else(crate::model::PlayerSnapshot::default, |engine| {
+                engine.snapshot()
+            });
         let track = snapshot.current_track.as_ref();
         let title = track.map_or("等待播放", |track| track.title.as_str());
-        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| track.artist.as_str());
+        let artist = track.map_or("从音栖岛歌库选择歌曲", |track| {
+            track.artist.as_str()
+        });
         let artwork = self.artwork.clone();
-        let bg = if self.dynamic_blur { rgb(0x11131c) } else { rgb(0x0e0f16) };
+        let bg = if self.dynamic_blur {
+            rgb(0x11131c)
+        } else {
+            rgb(0x0e0f16)
+        };
 
         div()
             .size_full()
@@ -787,11 +811,7 @@ impl Render for NowPlaying {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(themed_icon(
-                                icon!(disc_3),
-                                96.0,
-                                hsla(0.0, 0.0, 1.0, 0.75),
-                            ))
+                            .child(themed_icon(icon!(disc_3), 96.0, hsla(0.0, 0.0, 1.0, 0.75)))
                             .into_any_element()
                     })
                     .child(

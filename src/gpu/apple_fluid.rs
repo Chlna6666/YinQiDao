@@ -125,10 +125,8 @@ impl AppleFluidView {
                         let now = Instant::now();
                         let mounted = now.saturating_duration_since(this.last_render_at)
                             <= FLUID_MOUNT_LIVENESS;
-                        let should_animate = this.stage_visible
-                            && this.playing
-                            && mounted
-                            && this.shader_available;
+                        let should_animate =
+                            this.stage_visible && this.playing && mounted && this.shader_available;
 
                         if should_animate {
                             let delta = now

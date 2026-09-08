@@ -35,22 +35,13 @@ impl EqPreset {
         // cutting the top octave, which strongly emphasised chest/box resonance and sounded dull.
         let (preamp_db, bands_db) = match self {
             Self::Flat => (0.0, [0.0; 10]),
-            Self::Pop => (
-                -1.5,
-                [0.5, 1.0, 1.2, 0.4, -0.4, 0.2, 1.0, 1.4, 1.0, 0.4],
-            ),
-            Self::Rock => (
-                -2.0,
-                [1.8, 1.4, 0.6, -0.4, -0.8, 0.4, 1.4, 1.9, 1.4, 0.5],
-            ),
+            Self::Pop => (-1.5, [0.5, 1.0, 1.2, 0.4, -0.4, 0.2, 1.0, 1.4, 1.0, 0.4]),
+            Self::Rock => (-2.0, [1.8, 1.4, 0.6, -0.4, -0.8, 0.4, 1.4, 1.9, 1.4, 0.5]),
             Self::Vocal => (
                 -2.0,
                 [-2.0, -1.5, -1.0, -1.8, -1.0, 0.8, 2.4, 2.0, 1.2, 0.5],
             ),
-            Self::Classical => (
-                -1.0,
-                [0.4, 0.5, 0.2, -0.4, -0.5, 0.0, 0.5, 1.0, 0.9, 0.4],
-            ),
+            Self::Classical => (-1.0, [0.4, 0.5, 0.2, -0.4, -0.5, 0.0, 0.5, 1.0, 0.9, 0.4]),
         };
         EqSettings {
             enabled: true,
@@ -226,7 +217,12 @@ mod tests {
 
     #[test]
     fn boosted_presets_reserve_headroom() {
-        for preset in [EqPreset::Pop, EqPreset::Rock, EqPreset::Vocal, EqPreset::Classical] {
+        for preset in [
+            EqPreset::Pop,
+            EqPreset::Rock,
+            EqPreset::Vocal,
+            EqPreset::Classical,
+        ] {
             let settings = preset.settings();
             assert!(settings.preamp_db <= 0.0);
             assert!(settings.bands_db.iter().any(|gain| *gain > 0.0));

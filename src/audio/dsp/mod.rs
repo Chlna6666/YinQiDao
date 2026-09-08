@@ -5,13 +5,10 @@ pub use eq::{EqPreset, clamp_eq};
 pub use spatial::{SpatialPreset, clamp_spatial};
 
 use crate::model::{EqSettings, SpatialSettings};
-use yinqidao_audio_spatial::{
-    ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine,
-};
+use yinqidao_audio_spatial::{ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine};
 
 use super::debug::{
-    AudioDebugMonitorMode, audio_debug_enabled, audio_debug_monitor_mode,
-    capture_audio_debug_frame,
+    AudioDebugMonitorMode, audio_debug_enabled, audio_debug_monitor_mode, capture_audio_debug_frame,
 };
 use eq::EqProcessor;
 use spatial::Spatializer;
@@ -83,7 +80,7 @@ impl StreamingLinearResampler {
             .saturating_mul(u64::from(output_rate))
             .saturating_add(u64::from(input_rate) - 1)
             / u64::from(input_rate))
-            .saturating_add(2) as usize;
+        .saturating_add(2) as usize;
         output.reserve(estimated_frames.saturating_mul(2));
 
         let base_frame = self.input_frames;
@@ -194,21 +191,13 @@ impl AudioProcessor {
                 // Construction/render failure is not expected for a validated fixed layout, but
                 // playback must remain recoverable instead of panicking in the audio worker.
                 to_stereo_into(input, input_channels, &mut self.stereo_scratch);
-                self.resampler.process_into(
-                    &self.stereo_scratch,
-                    input_rate,
-                    output_rate,
-                    output,
-                );
+                self.resampler
+                    .process_into(&self.stereo_scratch, input_rate, output_rate, output);
             }
         } else {
             to_stereo_into(input, input_channels, &mut self.stereo_scratch);
-            self.resampler.process_into(
-                &self.stereo_scratch,
-                input_rate,
-                output_rate,
-                output,
-            );
+            self.resampler
+                .process_into(&self.stereo_scratch, input_rate, output_rate, output);
         }
 
         let debug_enabled = audio_debug_enabled();
@@ -346,31 +335,141 @@ struct Speaker {
 }
 
 const LAYOUT_7_1_4: [Speaker; 12] = [
-    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg:  30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
-    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
-    Speaker { azimuth_deg:  145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
-    Speaker { azimuth_deg:  -90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
-    Speaker { azimuth_deg:   90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
-    Speaker { azimuth_deg:  -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg:   35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-    Speaker { azimuth_deg:  145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker {
+        azimuth_deg: -30.0,
+        elevation_deg: 0.0,
+        gain: 1.00,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 30.0,
+        elevation_deg: 0.0,
+        gain: 1.00,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        gain: 0.82,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        gain: 0.34,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: -145.0,
+        elevation_deg: 0.0,
+        gain: 0.70,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: 145.0,
+        elevation_deg: 0.0,
+        gain: 0.70,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: -90.0,
+        elevation_deg: 0.0,
+        gain: 0.76,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 90.0,
+        elevation_deg: 0.0,
+        gain: 0.76,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: -35.0,
+        elevation_deg: 45.0,
+        gain: 0.58,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 35.0,
+        elevation_deg: 45.0,
+        gain: 0.58,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: -145.0,
+        elevation_deg: 45.0,
+        gain: 0.52,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: 145.0,
+        elevation_deg: 45.0,
+        gain: 0.52,
+        rear: true,
+    },
 ];
 
 const LAYOUT_5_1_4: [Speaker; 10] = [
-    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg:  30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
-    Speaker { azimuth_deg:   0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
-    Speaker { azimuth_deg: -125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
-    Speaker { azimuth_deg:  125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
-    Speaker { azimuth_deg:  -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg:   35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-    Speaker { azimuth_deg:  145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker {
+        azimuth_deg: -30.0,
+        elevation_deg: 0.0,
+        gain: 1.00,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 30.0,
+        elevation_deg: 0.0,
+        gain: 1.00,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        gain: 0.82,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        gain: 0.34,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: -125.0,
+        elevation_deg: 0.0,
+        gain: 0.72,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: 125.0,
+        elevation_deg: 0.0,
+        gain: 0.72,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: -35.0,
+        elevation_deg: 45.0,
+        gain: 0.58,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: 35.0,
+        elevation_deg: 45.0,
+        gain: 0.58,
+        rear: false,
+    },
+    Speaker {
+        azimuth_deg: -145.0,
+        elevation_deg: 45.0,
+        gain: 0.52,
+        rear: true,
+    },
+    Speaker {
+        azimuth_deg: 145.0,
+        elevation_deg: 45.0,
+        gain: 0.52,
+        rear: true,
+    },
 ];
 
 fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
@@ -388,10 +487,10 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
             let elevation_gain = 1.0 - elevation_amount * 0.08;
             if elevation_amount > 0.0 {
                 let centre = (left_gain + right_gain) * 0.5;
-                left_gain = left_gain * (1.0 - elevation_amount * 0.12)
-                    + centre * elevation_amount * 0.12;
-                right_gain = right_gain * (1.0 - elevation_amount * 0.12)
-                    + centre * elevation_amount * 0.12;
+                left_gain =
+                    left_gain * (1.0 - elevation_amount * 0.12) + centre * elevation_amount * 0.12;
+                right_gain =
+                    right_gain * (1.0 - elevation_amount * 0.12) + centre * elevation_amount * 0.12;
             }
 
             if speaker.rear {
@@ -539,17 +638,20 @@ mod tests {
         let immersive = SpatialPreset::Immersive3d.settings();
         let mut disabled = immersive.clone();
         disabled.enabled = false;
-        let mut with_spatial = AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
+        let mut with_spatial =
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
         let mut without_spatial =
             AudioProcessor::new(48_000, EqPreset::Flat.settings(), disabled, 1.0);
 
         let rendered = with_spatial.process(&input, 48_000, 12);
         let reference = without_spatial.process(&input, 48_000, 12);
         assert_eq!(rendered.len(), reference.len());
-        assert!(rendered
-            .iter()
-            .zip(reference.iter())
-            .all(|(left, right)| (left - right).abs() < 1.0e-6));
+        assert!(
+            rendered
+                .iter()
+                .zip(reference.iter())
+                .all(|(left, right)| (left - right).abs() < 1.0e-6)
+        );
     }
 
     #[test]
@@ -578,10 +680,12 @@ mod tests {
         }
 
         assert_eq!(actual.len(), expected.len());
-        assert!(actual
-            .iter()
-            .zip(expected.iter())
-            .all(|(left, right)| (left - right).abs() < 1.0e-5));
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(left, right)| (left - right).abs() < 1.0e-5)
+        );
     }
 
     #[test]

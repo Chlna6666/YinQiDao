@@ -1,8 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use yinqidao_audio_spatial::{
-    ChannelLayout, EngineConfig, SpatialEngine, SpeakerLayout,
-};
+use yinqidao_audio_spatial::{ChannelLayout, EngineConfig, SpatialEngine, SpeakerLayout};
 
 const SAMPLE_RATE: u32 = 48_000;
 const WARMUP_BLOCKS: usize = 512;
@@ -16,12 +14,36 @@ struct BenchCase {
 }
 
 const CASES: &[BenchCase] = &[
-    BenchCase { name: "5.1.4/32", layout: ChannelLayout::Surround5_1_4, block_frames: 32 },
-    BenchCase { name: "5.1.4/64", layout: ChannelLayout::Surround5_1_4, block_frames: 64 },
-    BenchCase { name: "5.1.4/128", layout: ChannelLayout::Surround5_1_4, block_frames: 128 },
-    BenchCase { name: "7.1.4/32", layout: ChannelLayout::Surround7_1_4, block_frames: 32 },
-    BenchCase { name: "7.1.4/64", layout: ChannelLayout::Surround7_1_4, block_frames: 64 },
-    BenchCase { name: "7.1.4/128", layout: ChannelLayout::Surround7_1_4, block_frames: 128 },
+    BenchCase {
+        name: "5.1.4/32",
+        layout: ChannelLayout::Surround5_1_4,
+        block_frames: 32,
+    },
+    BenchCase {
+        name: "5.1.4/64",
+        layout: ChannelLayout::Surround5_1_4,
+        block_frames: 64,
+    },
+    BenchCase {
+        name: "5.1.4/128",
+        layout: ChannelLayout::Surround5_1_4,
+        block_frames: 128,
+    },
+    BenchCase {
+        name: "7.1.4/32",
+        layout: ChannelLayout::Surround7_1_4,
+        block_frames: 32,
+    },
+    BenchCase {
+        name: "7.1.4/64",
+        layout: ChannelLayout::Surround7_1_4,
+        block_frames: 64,
+    },
+    BenchCase {
+        name: "7.1.4/128",
+        layout: ChannelLayout::Surround7_1_4,
+        block_frames: 128,
+    },
 ];
 
 fn main() {

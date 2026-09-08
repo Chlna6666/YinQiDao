@@ -16,9 +16,7 @@ use symphonia::core::{
     meta::MetadataOptions,
 };
 use thiserror::Error;
-use yinqidao_codec_avs3::{
-    Av3aIsoBmffDemuxer, Avs3SpecificConfig, parse_dca3, probe_av3a_path,
-};
+use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, Avs3SpecificConfig, parse_dca3, probe_av3a_path};
 
 use super::avs3_backend::Av3aRustBackend;
 
@@ -38,7 +36,9 @@ pub enum DecodeError {
     Decode { path: PathBuf, reason: String },
     #[error("音频定位失败 {path}: {reason}")]
     Seek { path: PathBuf, reason: String },
-    #[error("检测到 AV3A / Audio Vivid 音频，但当前 pure-Rust 路径尚不支持该 profile/layout，且没有可用的 FFmpeg fallback: {0}")]
+    #[error(
+        "检测到 AV3A / Audio Vivid 音频，但当前 pure-Rust 路径尚不支持该 profile/layout，且没有可用的 FFmpeg fallback: {0}"
+    )]
     Av3aBackend(PathBuf),
 }
 
@@ -85,9 +85,11 @@ impl Av3aProcessBackend {
         position: Duration,
     ) -> Result<Self, DecodeError> {
         let (child, stdout) =
-            spawn_av3a_process(&executable, path, position).map_err(|source| DecodeError::Open {
-                path: path.to_path_buf(),
-                source,
+            spawn_av3a_process(&executable, path, position).map_err(|source| {
+                DecodeError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                }
             })?;
         Ok(Self {
             executable,
@@ -108,10 +110,12 @@ impl Av3aProcessBackend {
     fn restart(&mut self, position: Duration) -> Result<(), DecodeError> {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let (child, stdout) = spawn_av3a_process(&self.executable, &self.path, position)
-            .map_err(|error| DecodeError::Seek {
-                path: self.path.clone(),
-                reason: format!("无法重启 AV3A 解码后端: {error}"),
+        let (child, stdout) =
+            spawn_av3a_process(&self.executable, &self.path, position).map_err(|error| {
+                DecodeError::Seek {
+                    path: self.path.clone(),
+                    reason: format!("无法重启 AV3A 解码后端: {error}"),
+                }
             })?;
         self.child = child;
         self.stdout = stdout;
@@ -153,7 +157,9 @@ impl Av3aProcessBackend {
                     return Err(DecodeError::Decode {
                         path: self.path.clone(),
                         reason: if detail.is_empty() {
-                            format!("AV3A 后端退出码 {status}。当前 ffmpeg 很可能没有编译 libarcdav3a/AVS3AudioDec")
+                            format!(
+                                "AV3A 后端退出码 {status}。当前 ffmpeg 很可能没有编译 libarcdav3a/AVS3AudioDec"
+                            )
                         } else {
                             format!("AV3A 后端失败: {detail}")
                         },
@@ -279,17 +285,12 @@ impl DecoderStream {
             let channels = entry.channels;
             let executable = resolve_av3a_decoder()
                 .ok_or_else(|| DecodeError::Av3aBackend(path.to_path_buf()))?;
-            let backend = Av3aProcessBackend::open(
-                executable,
-                path,
-                sample_rate,
-                channels,
-                Duration::ZERO,
-            )
-            .map_err(|error| match error {
-                DecodeError::Open { .. } => DecodeError::Av3aBackend(path.to_path_buf()),
-                other => other,
-            })?;
+            let backend =
+                Av3aProcessBackend::open(executable, path, sample_rate, channels, Duration::ZERO)
+                    .map_err(|error| match error {
+                    DecodeError::Open { .. } => DecodeError::Av3aBackend(path.to_path_buf()),
+                    other => other,
+                })?;
             tracing::info!(
                 path = %path.display(),
                 sample_rate,
@@ -346,11 +347,13 @@ impl DecoderStream {
                 .cloned()
                 .ok_or_else(|| DecodeError::MissingTrack(path.to_path_buf()))?;
             let container_duration = match (track.time_base, track.duration) {
-                (Some(time_base), Some(duration)) => time_base.calc_duration(duration).and_then(|time| {
-                    let seconds = time.as_secs_f64();
-                    (seconds.is_finite() && seconds > 0.0)
-                        .then(|| Duration::from_secs_f64(seconds))
-                }),
+                (Some(time_base), Some(duration)) => {
+                    time_base.calc_duration(duration).and_then(|time| {
+                        let seconds = time.as_secs_f64();
+                        (seconds.is_finite() && seconds > 0.0)
+                            .then(|| Duration::from_secs_f64(seconds))
+                    })
+                }
                 _ => None,
             };
             (track.id, codec_params, track.num_frames, container_duration)
@@ -393,9 +396,7 @@ impl DecoderStream {
         self.info
             .total_frames
             .map(|frames| {
-                Duration::from_secs_f64(
-                    frames as f64 / f64::from(self.info.sample_rate.max(1)),
-                )
+                Duration::from_secs_f64(frames as f64 / f64::from(self.info.sample_rate.max(1)))
             })
             .or(self.info.container_duration)
     }
@@ -459,10 +460,13 @@ impl DecoderStream {
                 break decoded_to_f32_into(decoded, samples);
             },
             DecoderBackend::Av3aRust(backend) => {
-                if !backend.next_chunk_into(samples).map_err(|error| DecodeError::Decode {
-                    path: self.path.clone(),
-                    reason: error.to_string(),
-                })? {
+                if !backend
+                    .next_chunk_into(samples)
+                    .map_err(|error| DecodeError::Decode {
+                        path: self.path.clone(),
+                        reason: error.to_string(),
+                    })?
+                {
                     return Ok(None);
                 }
                 (backend.sample_rate(), backend.channels())
@@ -523,9 +527,7 @@ impl DecoderStream {
     }
 
     pub fn position(&self) -> Duration {
-        Duration::from_secs_f64(
-            self.decoded_frames as f64 / self.info.sample_rate.max(1) as f64,
-        )
+        Duration::from_secs_f64(self.decoded_frames as f64 / self.info.sample_rate.max(1) as f64)
     }
 }
 
@@ -564,7 +566,9 @@ fn spawn_av3a_process(
         .arg("-loglevel")
         .arg("error");
     if !position.is_zero() {
-        command.arg("-ss").arg(format!("{:.6}", position.as_secs_f64()));
+        command
+            .arg("-ss")
+            .arg(format!("{:.6}", position.as_secs_f64()));
     }
     command
         .arg("-i")

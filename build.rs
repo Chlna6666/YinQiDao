@@ -32,10 +32,7 @@ fn main() {
     }
     .unwrap_or_else(|error| panic!("failed to compile Windows application resources: {error}"));
 
-    println!(
-        "cargo:rustc-link-arg-bin=yin_qi_dao={}",
-        resource.display()
-    );
+    println!("cargo:rustc-link-arg-bin=yin_qi_dao={}", resource.display());
 }
 
 fn generate_lucide_assets(manifest_dir: &Path, out_dir: &Path) -> Result<(), String> {
@@ -72,9 +69,8 @@ fn generate_lucide_assets(manifest_dir: &Path, out_dir: &Path) -> Result<(), Str
             "    lucide_gpui::StaticAsset::new(\n        \"lucide/{icon}.svg\",\n        include_bytes!(concat!(\n            env!(\"CARGO_MANIFEST_DIR\"),\n            \"/crates/lucide-gpui/icons/{file_name}\"\n        )),\n    ),\n"
         ));
     }
-    generated.push_str(
-        "];\n\npub(crate) fn install() {\n    lucide_gpui::install_assets(ASSETS);\n}\n",
-    );
+    generated
+        .push_str("];\n\npub(crate) fn install() {\n    lucide_gpui::install_assets(ASSETS);\n}\n");
 
     let output_path = out_dir.join("lucide_assets.rs");
     fs::write(&output_path, generated)
@@ -86,8 +82,8 @@ fn collect_rust_sources(dir: &Path, sources: &mut Vec<PathBuf>) -> Result<(), St
         .map_err(|error| format!("failed to read source directory {}: {error}", dir.display()))?;
 
     for entry in entries {
-        let entry = entry
-            .map_err(|error| format!("failed to read entry in {}: {error}", dir.display()))?;
+        let entry =
+            entry.map_err(|error| format!("failed to read entry in {}: {error}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
             collect_rust_sources(&path, sources)?;
@@ -338,10 +334,7 @@ fn compile_msvc_resource(
             .status()
         {
             Ok(status) if status.success() => return Ok(output),
-            Ok(status) => errors.push(format!(
-                "{} exited with {status}",
-                compiler.display()
-            )),
+            Ok(status) => errors.push(format!("{} exited with {status}", compiler.display())),
             Err(error) => errors.push(format!("{}: {error}", compiler.display())),
         }
     }
@@ -408,7 +401,10 @@ fn compile_gnu_resource(
         }
     }
 
-    Err(format!("no working windres compiler found: {}", errors.join("; ")))
+    Err(format!(
+        "no working windres compiler found: {}",
+        errors.join("; ")
+    ))
 }
 
 fn find_windows_sdk_rc(target_arch: &str) -> Vec<PathBuf> {

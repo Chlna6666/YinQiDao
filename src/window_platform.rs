@@ -52,11 +52,7 @@ fn remove_overlay_non_client_chrome(hwnd: *mut c_void) {
     // A desktop lyric surface is fully client-drawn and alpha-composited. Native non-client
     // rendering only adds a border/rounded frame/drop shadow around otherwise transparent pixels.
     apply(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_DISABLED);
-    apply(
-        hwnd,
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-        &DWMWCP_DONOTROUND,
-    );
+    apply(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_DONOTROUND);
     apply(hwnd, DWMWA_BORDER_COLOR, &DWMWA_COLOR_NONE);
 }
 
@@ -111,8 +107,7 @@ fn apply_topmost(hwnd: *mut c_void, enabled: bool) -> bool {
     } else {
         (-2_isize) as *mut c_void // HWND_NOTOPMOST
     };
-    let flags =
-        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER;
+    let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER;
 
     // SAFETY: `hwnd` comes from the live GPUI window. SetWindowPos does not retain either handle;
     // NOMOVE/NOSIZE/NOACTIVATE keep this operation limited to z-order and frame recomputation.
@@ -120,10 +115,7 @@ fn apply_topmost(hwnd: *mut c_void, enabled: bool) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn configure_desktop_lyrics_window(
-    window: &gpui::Window,
-    always_on_top: bool,
-) -> bool {
+pub(crate) fn configure_desktop_lyrics_window(window: &gpui::Window, always_on_top: bool) -> bool {
     let Some(hwnd) = native_hwnd(window) else {
         return false;
     };
@@ -134,10 +126,7 @@ pub(crate) fn configure_desktop_lyrics_window(
 }
 
 #[cfg(not(windows))]
-pub(crate) fn configure_desktop_lyrics_window(
-    window: &gpui::Window,
-    always_on_top: bool,
-) -> bool {
+pub(crate) fn configure_desktop_lyrics_window(window: &gpui::Window, always_on_top: bool) -> bool {
     set_always_on_top(window, always_on_top)
 }
 

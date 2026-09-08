@@ -72,8 +72,18 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
     if has_any(
         &all,
         &[
-            "8d", "8 d", "360 audio", "360°", "360声", "binaural", "双耳", "spatial audio",
-            "空间音频", "dolby atmos", "atmos", "immersive audio",
+            "8d",
+            "8 d",
+            "360 audio",
+            "360°",
+            "360声",
+            "binaural",
+            "双耳",
+            "spatial audio",
+            "空间音频",
+            "dolby atmos",
+            "atmos",
+            "immersive audio",
         ],
     ) {
         return (SmartAudioProfileKind::AlreadySpatial, 1.0);
@@ -82,8 +92,16 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
     if has_any(
         &genre,
         &[
-            "classical", "orchestral", "symphony", "baroque", "chamber", "opera", "古典", "交响",
-            "室内乐", "歌剧",
+            "classical",
+            "orchestral",
+            "symphony",
+            "baroque",
+            "chamber",
+            "opera",
+            "古典",
+            "交响",
+            "室内乐",
+            "歌剧",
         ],
     ) {
         return (SmartAudioProfileKind::Classical, 0.98);
@@ -99,8 +117,19 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
     if has_any(
         &genre,
         &[
-            "electronic", "electronica", "edm", "dance", "house", "techno", "trance", "dubstep",
-            "dnb", "drum and bass", "电子", "电音", "舞曲",
+            "electronic",
+            "electronica",
+            "edm",
+            "dance",
+            "house",
+            "techno",
+            "trance",
+            "dubstep",
+            "dnb",
+            "drum and bass",
+            "电子",
+            "电音",
+            "舞曲",
         ],
     ) {
         return (SmartAudioProfileKind::Electronic, 0.97);
@@ -124,7 +153,14 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
     if has_any(
         &genre,
         &[
-            "acoustic", "folk", "singer songwriter", "vocal", "unplugged", "民谣", "原声", "人声",
+            "acoustic",
+            "folk",
+            "singer songwriter",
+            "vocal",
+            "unplugged",
+            "民谣",
+            "原声",
+            "人声",
             "不插电",
         ],
     ) {
@@ -133,8 +169,16 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
     if has_any(
         &genre,
         &[
-            "ambient", "new age", "soundtrack", "score", "ost", "cinematic", "氛围", "新世纪",
-            "原声带", "影视原声",
+            "ambient",
+            "new age",
+            "soundtrack",
+            "score",
+            "ost",
+            "cinematic",
+            "氛围",
+            "新世纪",
+            "原声带",
+            "影视原声",
         ],
     ) {
         return (SmartAudioProfileKind::AmbientSoundtrack, 0.95);
@@ -148,14 +192,28 @@ pub fn classify(track: &Track) -> (SmartAudioProfileKind, f32) {
 
     if has_any(
         &all,
-        &[" live ", "live at", "concert", "演唱会", "现场版", "现场录音"],
+        &[
+            " live ",
+            "live at",
+            "concert",
+            "演唱会",
+            "现场版",
+            "现场录音",
+        ],
     ) || title.ends_with("live")
     {
         return (SmartAudioProfileKind::Live, 0.88);
     }
     if has_any(
         &all,
-        &["acoustic", "unplugged", "piano version", "钢琴版", "清唱", "人声版"],
+        &[
+            "acoustic",
+            "unplugged",
+            "piano version",
+            "钢琴版",
+            "清唱",
+            "人声版",
+        ],
     ) {
         return (SmartAudioProfileKind::VocalAcoustic, 0.82);
     }
@@ -198,9 +256,10 @@ fn target_settings(profile: SmartAudioProfileKind) -> (EqSettings, SpatialSettin
             };
             (eq, SpatialPreset::Wide.settings())
         }
-        SmartAudioProfileKind::VocalAcoustic => {
-            (EqPreset::Vocal.settings(), SpatialPreset::Headphones.settings())
-        }
+        SmartAudioProfileKind::VocalAcoustic => (
+            EqPreset::Vocal.settings(),
+            SpatialPreset::Headphones.settings(),
+        ),
         SmartAudioProfileKind::JazzSoul => {
             let eq = EqSettings {
                 enabled: true,
@@ -278,10 +337,12 @@ fn lerp(from: f32, to: f32, amount: f32) -> f32 {
 }
 
 fn normalize(value: &str) -> String {
-    value
-        .trim()
-        .to_lowercase()
-        .replace(['(', ')', '[', ']', '{', '}', '_', '-', '/', '\\', '·', '，', '、'], " ")
+    value.trim().to_lowercase().replace(
+        [
+            '(', ')', '[', ']', '{', '}', '_', '-', '/', '\\', '·', '，', '、',
+        ],
+        " ",
+    )
 }
 
 fn has_any(haystack: &str, needles: &[&str]) -> bool {
@@ -313,9 +374,18 @@ mod tests {
 
     #[test]
     fn genre_selects_expected_profile() {
-        assert_eq!(classify(&track(Some("Classical"), "x")).0, SmartAudioProfileKind::Classical);
-        assert_eq!(classify(&track(Some("EDM"), "x")).0, SmartAudioProfileKind::Electronic);
-        assert_eq!(classify(&track(Some("Rock"), "x")).0, SmartAudioProfileKind::Rock);
+        assert_eq!(
+            classify(&track(Some("Classical"), "x")).0,
+            SmartAudioProfileKind::Classical
+        );
+        assert_eq!(
+            classify(&track(Some("EDM"), "x")).0,
+            SmartAudioProfileKind::Electronic
+        );
+        assert_eq!(
+            classify(&track(Some("Rock"), "x")).0,
+            SmartAudioProfileKind::Rock
+        );
     }
 
     #[test]

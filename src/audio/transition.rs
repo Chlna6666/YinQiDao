@@ -55,10 +55,9 @@ pub(crate) fn analyze_smart_cue(
         };
         current_rate = sample_rate.max(1);
         current_channels = channels.max(1);
-        let samples_per_window = ((u64::from(current_rate) * u64::from(current_channels)
-            * ANALYSIS_WINDOW_MS)
-            / 1_000)
-            .max(1);
+        let samples_per_window =
+            ((u64::from(current_rate) * u64::from(current_channels) * ANALYSIS_WINDOW_MS) / 1_000)
+                .max(1);
 
         for sample in &chunk_samples {
             let value = f64::from(*sample);
@@ -81,10 +80,7 @@ pub(crate) fn analyze_smart_cue(
     }
 
     if sample_count > 0 {
-        windows.push((
-            window_start_ms,
-            (sum_squares / sample_count as f64).sqrt(),
-        ));
+        windows.push((window_start_ms, (sum_squares / sample_count as f64).sqrt()));
     }
 
     let mut best = SmartCue::default();
@@ -94,14 +90,8 @@ pub(crate) fn analyze_smart_cue(
         }
         let stable = &windows[index..index + STABLE_WINDOWS];
         let active_count = stable.iter().filter(|(_, rms)| *rms >= FLOOR_RMS).count();
-        let max_rms = stable
-            .iter()
-            .map(|(_, rms)| *rms)
-            .fold(0.0_f64, f64::max);
-        if stable[0].1 < ACTIVE_RMS
-            || active_count < STABLE_WINDOWS - 1
-            || max_rms < PEAK_RMS
-        {
+        let max_rms = stable.iter().map(|(_, rms)| *rms).fold(0.0_f64, f64::max);
+        if stable[0].1 < ACTIVE_RMS || active_count < STABLE_WINDOWS - 1 || max_rms < PEAK_RMS {
             continue;
         }
 
@@ -120,8 +110,7 @@ pub(crate) fn analyze_smart_cue(
         }
         let energy_confidence = ((max_rms - FLOOR_RMS) / 0.05).clamp(0.0, 1.0) as f32;
         let stability_confidence = active_count as f32 / STABLE_WINDOWS as f32;
-        let confidence =
-            (0.55 * stability_confidence + 0.45 * energy_confidence).clamp(0.0, 1.0);
+        let confidence = (0.55 * stability_confidence + 0.45 * energy_confidence).clamp(0.0, 1.0);
         if confidence >= MIN_CUE_CONFIDENCE {
             best = SmartCue {
                 position: Duration::from_millis(cue_ms),

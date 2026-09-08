@@ -34,13 +34,17 @@ impl MusicApp {
     fn disable_smart_audio_for_manual_tuning(&mut self) {
         if self.config.smart_audio.enabled {
             self.config.smart_audio.enabled = false;
-            self.send(PlayerCommand::SetSmartAudio(self.config.smart_audio.clone()));
+            self.send(PlayerCommand::SetSmartAudio(
+                self.config.smart_audio.clone(),
+            ));
         }
     }
 
     pub(crate) fn toggle_smart_audio(&mut self, cx: &mut Context<Self>) {
         self.config.smart_audio.enabled = !self.config.smart_audio.enabled;
-        self.send(PlayerCommand::SetSmartAudio(self.config.smart_audio.clone()));
+        self.send(PlayerCommand::SetSmartAudio(
+            self.config.smart_audio.clone(),
+        ));
         self.persist_audio_preferences();
         cx.notify();
     }
@@ -48,7 +52,9 @@ impl MusicApp {
     pub(crate) fn adjust_smart_audio_intensity(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.config.smart_audio.intensity =
             (self.config.smart_audio.intensity + delta).clamp(0.0, 1.0);
-        self.send(PlayerCommand::SetSmartAudio(self.config.smart_audio.clone()));
+        self.send(PlayerCommand::SetSmartAudio(
+            self.config.smart_audio.clone(),
+        ));
         self.persist_audio_preferences();
         cx.notify();
     }
@@ -95,7 +101,13 @@ impl MusicApp {
     ) {
         let db = -12.0 + ratio.clamp(0.0, 1.0) * 24.0;
         let quantized = (db * 2.0).round() * 0.5;
-        let current = self.config.eq.bands_db.get(index).copied().unwrap_or_default();
+        let current = self
+            .config
+            .eq
+            .bands_db
+            .get(index)
+            .copied()
+            .unwrap_or_default();
         self.adjust_manual_eq_band(index, quantized - current, cx);
     }
 

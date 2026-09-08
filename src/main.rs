@@ -1,3 +1,18 @@
+#![allow(
+    dead_code,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::assertions_on_constants,
+    clippy::field_reassign_with_default,
+    clippy::unnecessary_sort_by,
+    clippy::needless_borrow,
+    clippy::manual_clamp,
+    clippy::manual_is_multiple_of,
+    clippy::manual_map,
+    clippy::too_many_arguments,
+    clippy::clone_on_copy,
+    clippy::collapsible_if
+)]
+
 mod artwork;
 mod audio;
 mod audio_debug_window;
@@ -92,8 +107,8 @@ fn main() -> Result<()> {
             }
         };
 
-        desktop_lyrics::start_ui_service(main_window.clone(), cx);
-        global_shortcuts::start_ui_service(main_window.clone(), cx);
+        desktop_lyrics::start_ui_service(main_window, cx);
+        global_shortcuts::start_ui_service(main_window, cx);
 
         // Audio Laboratory is explicitly opened from Settings. Keep the analyzer disabled
         // on normal startup so the playback hot path has no debug-analysis overhead.

@@ -387,18 +387,9 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
         .items_center()
         .justify_between()
         .gap_3()
-        .child(
-            div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(title),
-        );
+        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title));
     if let Some(subtitle) = subtitle {
-        header = header.child(
-            div()
-                .text_xs()
-                .text_color(rgb(0x82_8c_99))
-                .child(subtitle),
-        );
+        header = header.child(div().text_xs().text_color(rgb(0x82_8c_99)).child(subtitle));
     }
 
     div()
@@ -459,12 +450,7 @@ fn stage_card(
                         .text_color(accent)
                         .child(title),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x7f_88_94))
-                        .child(subtitle),
-                ),
+                .child(div().text_xs().text_color(rgb(0x7f_88_94)).child(subtitle)),
         )
         .child(metric_row([
             ("Peak", format_db(stage.peak_dbfs)),
@@ -506,12 +492,7 @@ fn metric(label: &'static str, value: String) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap_0p5()
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(0x78_82_8f))
-                .child(label),
-        )
+        .child(div().text_xs().text_color(rgb(0x78_82_8f)).child(label))
         .child(
             div()
                 .text_sm()
@@ -643,14 +624,8 @@ fn spectrogram_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
 
             for (row_index, row) in snapshot.spectrogram.iter().enumerate() {
                 for (bin_index, db) in row.iter().copied().enumerate() {
-                    let level = ((db.clamp(DB_FLOOR, 0.0) - DB_FLOOR) / -DB_FLOOR)
-                        .clamp(0.0, 1.0);
-                    let cell_color = hsla(
-                        0.66 - level * 0.58,
-                        0.72,
-                        0.10 + level * 0.52,
-                        0.90,
-                    );
+                    let level = ((db.clamp(DB_FLOOR, 0.0) - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0);
+                    let cell_color = hsla(0.66 - level * 0.58, 0.72, 0.10 + level * 0.52, 0.90);
                     window.paint_quad(fill(
                         Bounds {
                             origin: point(

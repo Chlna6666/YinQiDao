@@ -18,5 +18,5 @@ pub use debug::{
 pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::AudioEngine;
-pub use smart_profile::classify as classify_smart_audio;
 pub(crate) use fingerprint::fingerprint_file;
+pub use smart_profile::classify as classify_smart_audio;

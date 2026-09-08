@@ -6,21 +6,30 @@ pub(crate) struct CubicDelayLine {
 
 impl CubicDelayLine {
     pub(crate) fn new(capacity: usize) -> Self {
-        Self { samples: vec![0.0; capacity.max(8)], write_cursor: 0 }
+        Self {
+            samples: vec![0.0; capacity.max(8)],
+            write_cursor: 0,
+        }
     }
 
     #[inline]
     pub(crate) fn push(&mut self, sample: f32) {
         self.samples[self.write_cursor] = sample;
         self.write_cursor += 1;
-        if self.write_cursor == self.samples.len() { self.write_cursor = 0; }
+        if self.write_cursor == self.samples.len() {
+            self.write_cursor = 0;
+        }
     }
 
     /// Four-point Lagrange interpolation over past samples.
     #[inline]
     pub(crate) fn read(&self, delay_samples: f32) -> f32 {
         let length = self.samples.len();
-        let newest = if self.write_cursor == 0 { length - 1 } else { self.write_cursor - 1 };
+        let newest = if self.write_cursor == 0 {
+            length - 1
+        } else {
+            self.write_cursor - 1
+        };
         self.read_with_context(delay_samples, length, newest)
     }
 
@@ -28,7 +37,11 @@ impl CubicDelayLine {
     #[inline]
     pub(crate) fn read_pair(&self, left_delay: f32, right_delay: f32) -> (f32, f32) {
         let length = self.samples.len();
-        let newest = if self.write_cursor == 0 { length - 1 } else { self.write_cursor - 1 };
+        let newest = if self.write_cursor == 0 {
+            length - 1
+        } else {
+            self.write_cursor - 1
+        };
         if left_delay == right_delay {
             let sample = self.read_with_context(left_delay, length, newest);
             return (sample, sample);
@@ -71,7 +84,11 @@ impl CubicDelayLine {
         // `newest + length - age` is in [1, 2*length). One conditional subtraction replaces the
         // integer modulo that previously ran for every Lagrange tap in the realtime hot path.
         let index = newest + length - age;
-        let wrapped = if index >= length { index - length } else { index };
+        let wrapped = if index >= length {
+            index - length
+        } else {
+            index
+        };
         self.samples[wrapped]
     }
 
@@ -88,7 +105,9 @@ mod tests {
     #[test]
     fn integer_delay_selects_exact_history_sample() {
         let mut delay = CubicDelayLine::new(16);
-        for value in 0..8 { delay.push(value as f32); }
+        for value in 0..8 {
+            delay.push(value as f32);
+        }
         assert_eq!(delay.read(2.0), 5.0);
         assert_eq!(delay.read(3.0), 4.0);
     }
@@ -96,7 +115,9 @@ mod tests {
     #[test]
     fn fractional_delay_is_continuous_between_adjacent_samples() {
         let mut delay = CubicDelayLine::new(16);
-        for value in 0..8 { delay.push(value as f32); }
+        for value in 0..8 {
+            delay.push(value as f32);
+        }
         let value = delay.read(2.5);
         assert!(value > 4.0 && value < 6.0);
     }
@@ -104,7 +125,9 @@ mod tests {
     #[test]
     fn paired_reads_match_independent_reads() {
         let mut delay = CubicDelayLine::new(16);
-        for value in 0..24 { delay.push(value as f32 * 0.25); }
+        for value in 0..24 {
+            delay.push(value as f32 * 0.25);
+        }
         let (left, right) = delay.read_pair(2.0, 3.375);
         assert!((left - delay.read(2.0)).abs() < f32::EPSILON);
         assert!((right - delay.read(3.375)).abs() < f32::EPSILON);
@@ -113,7 +136,9 @@ mod tests {
     #[test]
     fn wrapped_ring_preserves_age_addressing() {
         let mut delay = CubicDelayLine::new(8);
-        for value in 0..20 { delay.push(value as f32); }
+        for value in 0..20 {
+            delay.push(value as f32);
+        }
         assert_eq!(delay.read(1.0), 18.0);
         assert_eq!(delay.read(2.0), 17.0);
         assert_eq!(delay.read(4.0), 15.0);

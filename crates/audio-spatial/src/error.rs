@@ -19,8 +19,12 @@ impl fmt::Display for SpatialError {
             Self::InvalidSourceCapacity => "spatial engine source capacity must be non-zero",
             Self::UnsupportedChannelLayout => "unsupported spatial channel layout",
             Self::ChannelCountMismatch => "input channel count does not match the selected layout",
-            Self::OutputTooSmall => "spatial output buffer is smaller than the required stereo output",
-            Self::SourceCapacityExceeded => "spatial source count exceeds the preallocated capacity",
+            Self::OutputTooSmall => {
+                "spatial output buffer is smaller than the required stereo output"
+            }
+            Self::SourceCapacityExceeded => {
+                "spatial source count exceeds the preallocated capacity"
+            }
         };
         formatter.write_str(message)
     }

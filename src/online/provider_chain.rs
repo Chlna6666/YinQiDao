@@ -261,10 +261,7 @@ impl OnlineServices {
                                 release_mbid,
                                 "音乐平台无可用封面，使用匹配的 Cover Art Archive 封面"
                             );
-                            return (
-                                Some(bytes),
-                                Some(format!("musicbrainz:{release_mbid}")),
-                            );
+                            return (Some(bytes), Some(format!("musicbrainz:{release_mbid}")));
                         }
                     }
                     Ok(None) => {}

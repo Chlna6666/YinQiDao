@@ -135,7 +135,13 @@ mod tests {
 
     #[test]
     fn extension_lookup_is_case_insensitive() {
-        assert_eq!(by_extension(".APE").map(|codec| codec.id), Some(CodecId::Ape));
-        assert_eq!(by_extension("WV").map(|codec| codec.id), Some(CodecId::WavPack));
+        assert_eq!(
+            by_extension(".APE").map(|codec| codec.id),
+            Some(CodecId::Ape)
+        );
+        assert_eq!(
+            by_extension("WV").map(|codec| codec.id),
+            Some(CodecId::WavPack)
+        );
     }
 }

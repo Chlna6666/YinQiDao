@@ -24,8 +24,8 @@ use thiserror::Error;
 use crate::{
     audio_policy::audio_runtime_policy,
     model::{
-        EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SmartAudioSettings,
-        SpatialSettings, Track, TrackId, TrackTransitionSettings, TransitionMode,
+        EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SmartAudioSettings, SpatialSettings,
+        Track, TrackId, TrackTransitionSettings, TransitionMode,
     },
 };
 
@@ -202,7 +202,10 @@ impl PreloadCoordinator {
 
     fn take(&self, track_id: TrackId) -> Option<PreloadedTrack> {
         let mut ready = self.ready.lock().ok()?;
-        if ready.as_ref().is_some_and(|ready| ready.track_id == track_id) {
+        if ready
+            .as_ref()
+            .is_some_and(|ready| ready.track_id == track_id)
+        {
             ready.take()
         } else {
             None
@@ -330,7 +333,9 @@ fn prepare_preloaded_chunk(
 
         if cue > chunk_start {
             let skip = cue - chunk_start;
-            let skip_frames = ((skip.as_nanos().saturating_mul(u128::from(sample_rate.max(1))))
+            let skip_frames = ((skip
+                .as_nanos()
+                .saturating_mul(u128::from(sample_rate.max(1))))
                 / 1_000_000_000_u128)
                 .min(usize::MAX as u128) as usize;
             let channels_usize = usize::from(channels.max(1));
@@ -419,7 +424,9 @@ impl CrossfadeState {
     }
 
     fn available_samples(&self) -> usize {
-        self.buffered_samples.len().saturating_sub(self.buffer_cursor)
+        self.buffered_samples
+            .len()
+            .saturating_sub(self.buffer_cursor)
     }
 
     fn compact_buffer(&mut self) {
@@ -459,7 +466,8 @@ impl CrossfadeState {
                 channels,
                 &mut self.chunk_processed,
             );
-            self.buffered_samples.extend_from_slice(&self.chunk_processed);
+            self.buffered_samples
+                .extend_from_slice(&self.chunk_processed);
         }
         Ok(())
     }
@@ -486,18 +494,10 @@ impl CrossfadeState {
                 )
             };
             let index = frame * 2;
-            current[index] = mix_crossfade_sample(
-                current[index],
-                next_left,
-                current_gain,
-                next_gain,
-            );
-            current[index + 1] = mix_crossfade_sample(
-                current[index + 1],
-                next_right,
-                current_gain,
-                next_gain,
-            );
+            current[index] =
+                mix_crossfade_sample(current[index], next_left, current_gain, next_gain);
+            current[index + 1] =
+                mix_crossfade_sample(current[index + 1], next_right, current_gain, next_gain);
             self.next_frames_consumed = self.next_frames_consumed.saturating_add(1);
 
             if self.transition_frames < self.total_frames {
@@ -506,10 +506,10 @@ impl CrossfadeState {
                     self.phase_cos = 0.0;
                     self.phase_sin = 1.0;
                 } else {
-                    let next_cos = self.phase_cos * self.rotation_cos
-                        - self.phase_sin * self.rotation_sin;
-                    let next_sin = self.phase_sin * self.rotation_cos
-                        + self.phase_cos * self.rotation_sin;
+                    let next_cos =
+                        self.phase_cos * self.rotation_cos - self.phase_sin * self.rotation_sin;
+                    let next_sin =
+                        self.phase_sin * self.rotation_cos + self.phase_cos * self.rotation_sin;
                     self.phase_cos = next_cos;
                     self.phase_sin = next_sin;
                 }
@@ -686,12 +686,10 @@ impl AudioEngine {
 
     fn set_audible_position_immediately(&self, position: Duration) {
         self.flush.store(true, Ordering::Release);
-        let frames = position.as_nanos().saturating_mul(self.output_rate as u128)
-            / 1_000_000_000_u128;
-        self.audible_frames.store(
-            frames.min(u64::MAX as u128) as u64,
-            Ordering::Release,
-        );
+        let frames =
+            position.as_nanos().saturating_mul(self.output_rate as u128) / 1_000_000_000_u128;
+        self.audible_frames
+            .store(frames.min(u64::MAX as u128) as u64, Ordering::Release);
     }
 
     fn reset_transport_for_switch(&self, loading: bool) {
@@ -1415,9 +1413,7 @@ impl AudioWorker {
                 return Ok(false);
             };
             match decoder.next_chunk_into(&mut self.decoded_samples)? {
-                Some((sample_rate, channels)) => {
-                    Some((sample_rate, channels, decoder.position()))
-                }
+                Some((sample_rate, channels)) => Some((sample_rate, channels, decoder.position())),
                 None => None,
             }
         };
@@ -1454,7 +1450,8 @@ impl AudioWorker {
                 CrossfadeMixOutcome::Complete => {
                     let transition_frames_in_chunk = total_transition_frames
                         .saturating_sub(transition_before)
-                        .min(chunk_frames as u64) as usize;
+                        .min(chunk_frames as u64)
+                        as usize;
                     let frames_after_boundary =
                         chunk_frames.saturating_sub(transition_frames_in_chunk);
                     self.crossfade = Some(crossfade);
@@ -1657,9 +1654,7 @@ impl AudioWorker {
         let carry = crossfade.take_remaining_buffer();
         let carry_frames = carry.len() as u64 / 2;
         let carry_end_position = next_position
-            + Duration::from_secs_f64(
-                carry_frames as f64 / f64::from(self.output_rate.max(1)),
-            );
+            + Duration::from_secs_f64(carry_frames as f64 / f64::from(self.output_rate.max(1)));
 
         self.emit(PlayerEvent::TrackEnded);
         self.decode_generation = self.decode_generation.wrapping_add(1);
@@ -1752,8 +1747,7 @@ impl AudioWorker {
                 self.fade_in_elapsed_frames as f32 / (self.fade_in_total_frames - 1) as f32
             };
             let curved = fade_in_gain(progress);
-            let gain = self.fade_in_start_gain
-                + (1.0 - self.fade_in_start_gain) * curved;
+            let gain = self.fade_in_start_gain + (1.0 - self.fade_in_start_gain) * curved;
             let index = frame * 2;
             self.processed_samples[index] *= gain;
             self.processed_samples[index + 1] *= gain;
@@ -1857,8 +1851,8 @@ impl AudioWorker {
     }
 
     fn duration_to_output_frames(&self, position: Duration) -> u64 {
-        let frames = position.as_nanos().saturating_mul(self.output_rate as u128)
-            / 1_000_000_000_u128;
+        let frames =
+            position.as_nanos().saturating_mul(self.output_rate as u128) / 1_000_000_000_u128;
         frames.min(u64::MAX as u128) as u64
     }
 
@@ -1918,7 +1912,9 @@ impl AudioWorker {
 }
 
 fn sanitize_transition(mut settings: TrackTransitionSettings) -> TrackTransitionSettings {
-    settings.duration_ms = settings.duration_ms.clamp(MIN_TRANSITION_MS, MAX_TRANSITION_MS);
+    settings.duration_ms = settings
+        .duration_ms
+        .clamp(MIN_TRANSITION_MS, MAX_TRANSITION_MS);
     settings.max_smart_cue_ms = settings.max_smart_cue_ms.min(8_000);
     settings
 }
@@ -1933,8 +1929,14 @@ fn can_coalesce_commands(queued: &PlayerCommand, incoming: &PlayerCommand) -> bo
             | (PlayerCommand::SetVolume(_), PlayerCommand::SetVolume(_))
             | (PlayerCommand::SetEq(_), PlayerCommand::SetEq(_))
             | (PlayerCommand::SetSpatial(_), PlayerCommand::SetSpatial(_))
-            | (PlayerCommand::SetSmartAudio(_), PlayerCommand::SetSmartAudio(_))
-            | (PlayerCommand::SetTransition(_), PlayerCommand::SetTransition(_))
+            | (
+                PlayerCommand::SetSmartAudio(_),
+                PlayerCommand::SetSmartAudio(_)
+            )
+            | (
+                PlayerCommand::SetTransition(_),
+                PlayerCommand::SetTransition(_)
+            )
             | (
                 PlayerCommand::SetOutputDevice(_),
                 PlayerCommand::SetOutputDevice(_)

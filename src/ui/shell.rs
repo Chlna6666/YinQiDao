@@ -2243,7 +2243,10 @@ impl MusicApp {
                                         gpui::MouseButton::Left,
                                         cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
-                                            this.hide_stage_controls_immediately(event.position, cx);
+                                            this.hide_stage_controls_immediately(
+                                                event.position,
+                                                cx,
+                                            );
                                         }),
                                     )
                                     .child(theme::themed_icon(

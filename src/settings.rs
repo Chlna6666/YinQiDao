@@ -70,17 +70,10 @@ impl Default for DesktopLyricsConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct LyricsShortcutSettings {
     /// System-wide lyric shortcuts are opt-in. They are intentionally disabled by default.
     pub enabled: bool,
-}
-
-impl Default for LyricsShortcutSettings {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

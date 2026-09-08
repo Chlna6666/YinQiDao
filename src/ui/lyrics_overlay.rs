@@ -37,12 +37,13 @@ impl DesktopLyricsView {
             return;
         }
         let parent = self.parent.clone();
-        self.bounds_subscription = Some(cx.observe_window_bounds(window, move |_view, window, cx| {
-            let bounds = window.bounds();
-            let _ = parent.update(cx, |app, _cx| {
-                app.persist_desktop_lyrics_bounds(bounds);
-            });
-        }));
+        self.bounds_subscription =
+            Some(cx.observe_window_bounds(window, move |_view, window, cx| {
+                let bounds = window.bounds();
+                let _ = parent.update(cx, |app, _cx| {
+                    app.persist_desktop_lyrics_bounds(bounds);
+                });
+            }));
     }
 }
 
@@ -56,9 +57,10 @@ impl gpui::Render for DesktopLyricsView {
         let app = parent.read(cx);
         let config = app.config.desktop_lyrics.clone();
         let display = app.desktop_lyrics_display();
-        let current = display
-            .as_ref()
-            .map_or_else(|| "暂无同步歌词".to_string(), |lyrics| lyrics.current.clone());
+        let current = display.as_ref().map_or_else(
+            || "暂无同步歌词".to_string(),
+            |lyrics| lyrics.current.clone(),
+        );
         let translation = display
             .as_ref()
             .and_then(|lyrics| lyrics.translation.clone())
@@ -381,7 +383,11 @@ fn settings_panel(
         .child(settings_row(
             "desktop-lyrics-menu-background",
             "显示透明背景",
-            if config.background_opacity > 0.01 { "✓" } else { "" },
+            if config.background_opacity > 0.01 {
+                "✓"
+            } else {
+                ""
+            },
             move |_, _window, cx| {
                 let _ = background_parent.update(cx, |app, app_cx| {
                     app.toggle_desktop_lyrics_background(app_cx);

@@ -3,7 +3,7 @@ use std::{
     f32::consts::PI,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -273,7 +273,9 @@ pub(crate) fn capture_audio_debug_frame(
         state.phase_history.pop_front();
     }
 
-    state.crest_history.push_back(spatial_stage.crest_db.clamp(0.0, 48.0));
+    state
+        .crest_history
+        .push_back(spatial_stage.crest_db.clamp(0.0, 48.0));
     while state.crest_history.len() > PHASE_HISTORY_POINTS {
         state.crest_history.pop_front();
     }
@@ -286,8 +288,7 @@ pub(crate) fn capture_audio_debug_frame(
     }
 
     let eq_transfer_db = transfer_curve(&source_stage.spectrum_dbfs, &eq_stage.spectrum_dbfs);
-    let spatial_transfer_db =
-        transfer_curve(&eq_stage.spectrum_dbfs, &spatial_stage.spectrum_dbfs);
+    let spatial_transfer_db = transfer_curve(&eq_stage.spectrum_dbfs, &spatial_stage.spectrum_dbfs);
 
     state.snapshot = AudioDebugSnapshot {
         sequence: SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1,
@@ -448,8 +449,7 @@ fn spectrum(samples: &[f32], sample_rate: u32, mode: SpectrumMode) -> Vec<f32> {
                 SpectrumMode::Mid => (left + right) * 0.5,
                 SpectrumMode::Side => (left - right) * 0.5,
             };
-            let window =
-                0.5 - 0.5 * (2.0 * PI * index as f32 / (frames - 1) as f32).cos();
+            let window = 0.5 - 0.5 * (2.0 * PI * index as f32 / (frames - 1) as f32).cos();
             let q0 = sample * window + coefficient * q1 - q2;
             q2 = q1;
             q1 = q0;
@@ -544,7 +544,11 @@ fn mean_slice(values: &[f64]) -> f64 {
 }
 
 fn percentile_range(values: &VecDeque<f32>, low: f32, high: f32) -> f32 {
-    let mut sorted = values.iter().copied().filter(|v| v.is_finite()).collect::<Vec<_>>();
+    let mut sorted = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect::<Vec<_>>();
     if sorted.len() < 2 {
         return 0.0;
     }

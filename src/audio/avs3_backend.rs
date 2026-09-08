@@ -7,9 +7,9 @@ use std::{
 };
 
 use yinqidao_codec_avs3::{
-    AatfFrameHeader, AudioCodingMethod, Av3aIsoBmffDemuxer, Av3aSampleEntry, Avs3Decoder,
-    Avs3SpecificConfig, ChannelConfiguration, CodingProfile, NeuralNetworkType,
-    QuantizationResolution, parse_aatf_frame_header, parse_dca3,
+    AudioCodingMethod, Av3aIsoBmffDemuxer, Av3aSampleEntry, Avs3Decoder, Avs3SpecificConfig,
+    ChannelConfiguration, CodingProfile, NeuralNetworkType, QuantizationResolution,
+    parse_aatf_frame_header, parse_dca3,
 };
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
 
@@ -124,8 +124,7 @@ impl Av3aRustBackend {
         // caller is synchronous today, so the channel adds no PCM copy and at most one in-flight
         // command/result pair exists.
         let (command_tx, command_rx) = mpsc::sync_channel::<CodecCommand>(1);
-        let (decode_tx, decode_rx) =
-            mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
+        let (decode_tx, decode_rx) = mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<Option<AudioFrame>, Av3aRustError>>(1);
 
         let worker = thread::Builder::new()
@@ -505,6 +504,7 @@ mod tests {
             samples: vec![0.0; samples],
             sample_rate: 48_000,
             channels,
+            pts: None,
         }
     }
 
@@ -512,8 +512,7 @@ mod tests {
         command_tx: SyncSender<CodecCommand>,
         worker: Option<JoinHandle<()>>,
     ) -> Av3aRustBackend {
-        let (_decode_tx, decode_rx) =
-            mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
+        let (_decode_tx, decode_rx) = mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
         Av3aRustBackend {
             command_tx,
             decode_rx,
@@ -528,12 +527,8 @@ mod tests {
 
     #[test]
     fn accepts_multichannel_and_hoa_frame_geometry() {
-        assert!(
-            validate_frame_geometry(&frame(12, 12 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok()
-        );
-        assert!(
-            validate_frame_geometry(&frame(16, 16 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok()
-        );
+        assert!(validate_frame_geometry(&frame(12, 12 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok());
+        assert!(validate_frame_geometry(&frame(16, 16 * AVS3_FRAME_SAMPLES_PER_CHANNEL)).is_ok());
     }
 
     #[test]

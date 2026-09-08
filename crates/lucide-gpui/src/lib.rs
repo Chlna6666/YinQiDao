@@ -52,7 +52,7 @@ impl AssetSource for Assets {
         }
 
         if path.starts_with("lucide/") || path == "lucide" {
-            return Err(anyhow!("could not find asset at path \"{path}\"").into());
+            return Err(anyhow!("could not find asset at path \"{path}\""));
         }
 
         Ok(Vec::new())

@@ -50,9 +50,8 @@ impl MusicApp {
         ensure_window_state(cx);
 
         if !self.config.desktop_lyrics.visible {
-            let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-                state.window.take()
-            });
+            let existing =
+                cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
             if let Some(window) = existing {
                 let _ = window.update(cx, |_view, window, _cx| window.remove_window());
             }
@@ -60,9 +59,8 @@ impl MusicApp {
             return;
         }
 
-        let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-            state.window.clone()
-        });
+        let existing =
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
         if let Some(window) = existing {
             let always_on_top = self.config.desktop_lyrics.always_on_top;
             if window
@@ -85,10 +83,12 @@ impl MusicApp {
         let width = config.width.clamp(MIN_OVERLAY_WIDTH, 1_600.0);
         let height = config.height.clamp(MIN_OVERLAY_HEIGHT, 520.0);
         let window_bounds = match (config.x, config.y) {
-            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => WindowBounds::Windowed(Bounds {
-                origin: point(px(x), px(y)),
-                size: size(px(width), px(height)),
-            }),
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
+                WindowBounds::Windowed(Bounds {
+                    origin: point(px(x), px(y)),
+                    size: size(px(width), px(height)),
+                })
+            }
             _ => WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx)),
         };
         let parent = cx.entity().downgrade();
@@ -140,9 +140,8 @@ impl MusicApp {
 
     fn recreate_desktop_lyrics_window(&mut self, cx: &mut Context<Self>) {
         ensure_window_state(cx);
-        let existing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-            state.window.take()
-        });
+        let existing =
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
         if let Some(window) = existing {
             let _ = window.update(cx, |_view, window, _cx| window.remove_window());
         }
@@ -183,9 +182,8 @@ impl MusicApp {
         #[cfg(windows)]
         {
             ensure_window_state(cx);
-            let overlay = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-                state.window.clone()
-            });
+            let overlay =
+                cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
             if let Some(overlay) = overlay {
                 let applied = overlay
                     .update(cx, |_view, window, _cx| {
@@ -235,11 +233,7 @@ impl MusicApp {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn adjust_desktop_lyrics_background(
-        &mut self,
-        delta: f32,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn adjust_desktop_lyrics_background(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.background_opacity =
             (self.config.desktop_lyrics.background_opacity + delta).clamp(0.0, 0.85);
         self.save_config();
@@ -493,9 +487,7 @@ pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App
 
 pub(crate) fn shutdown(cx: &mut App) {
     ensure_window_state(cx);
-    let tracked = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-        state.window.take()
-    });
+    let tracked = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
     if let Some(window) = tracked {
         let _ = window.update(cx, |_view, window, _cx| window.remove_window());
     }

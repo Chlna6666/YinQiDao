@@ -122,12 +122,10 @@ fn audio_device_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEl
                                     .text_color(TEXT_PRIMARY)
                                     .child(device.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(TEXT_TERTIARY)
-                                    .child(format!("{} Hz · {} 声道", device.sample_rate, device.channels)),
-                            ),
+                            .child(div().text_xs().text_color(TEXT_TERTIARY).child(format!(
+                                "{} Hz · {} 声道",
+                                device.sample_rate, device.channels
+                            ))),
                     )
                     .child(value_badge(if active { "使用中" } else { "切换" }))
                     .on_mouse_down(
@@ -189,10 +187,7 @@ fn smart_audio_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
         |_ratio, _cx| {},
         move |ratio, cx| {
             let _ = weak.update(cx, |app, app_cx| {
-                app.adjust_smart_audio_intensity(
-                    ratio - app.config.smart_audio.intensity,
-                    app_cx,
-                );
+                app.adjust_smart_audio_intensity(ratio - app.config.smart_audio.intensity, app_cx);
             });
         },
     )
@@ -328,7 +323,12 @@ fn eq_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
     )
 }
 
-fn eq_band(app: &MusicApp, cx: &mut Context<MusicApp>, index: usize, frequency: &str) -> impl IntoElement {
+fn eq_band(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    index: usize,
+    frequency: &str,
+) -> impl IntoElement {
     let db = app.config.eq.bands_db[index];
     let ratio = ((db + 12.0) / 24.0).clamp(0.0, 1.0);
     let mut style = SliderStyle::settings_control();
@@ -381,16 +381,12 @@ fn eq_band(app: &MusicApp, cx: &mut Context<MusicApp>, index: usize, frequency: 
                 .child(step_button(
                     SharedString::from(format!("eq-band-{index}-dec")),
                     "−",
-                    cx.listener(move |this, _, _, cx| {
-                        this.adjust_manual_eq_band(index, -0.5, cx)
-                    }),
+                    cx.listener(move |this, _, _, cx| this.adjust_manual_eq_band(index, -0.5, cx)),
                 ))
                 .child(step_button(
                     SharedString::from(format!("eq-band-{index}-inc")),
                     "+",
-                    cx.listener(move |this, _, _, cx| {
-                        this.adjust_manual_eq_band(index, 0.5, cx)
-                    }),
+                    cx.listener(move |this, _, _, cx| this.adjust_manual_eq_band(index, 0.5, cx)),
                 )),
         )
 }
@@ -414,13 +410,48 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
 
     let mut parameters = div().flex().flex_col().gap_3();
     for (title, subtitle, control, value) in [
-        ("声场宽度 Width", "M/S 侧声道扩展", SpatialControl::Width, app.config.spatial.width),
-        ("空间深度 Depth", "早期反射与纵深", SpatialControl::Depth, app.config.spatial.depth),
-        ("听感距离 Distance", "空气吸收和距离衰减", SpatialControl::Distance, app.config.spatial.distance),
-        ("空间混合 Mix", "原始信号与空间信号比例", SpatialControl::Mix, app.config.spatial.mix),
-        ("Crossfeed", "耳机左右声道交叉馈送", SpatialControl::Crossfeed, app.config.spatial.crossfeed),
-        ("Room Size", "早期反射空间尺度", SpatialControl::Room, app.config.spatial.room_size),
-        ("3D Decorrelation", "非相关空间尾部与包围感", SpatialControl::Immersive3d, app.config.spatial.immersive_3d),
+        (
+            "声场宽度 Width",
+            "M/S 侧声道扩展",
+            SpatialControl::Width,
+            app.config.spatial.width,
+        ),
+        (
+            "空间深度 Depth",
+            "早期反射与纵深",
+            SpatialControl::Depth,
+            app.config.spatial.depth,
+        ),
+        (
+            "听感距离 Distance",
+            "空气吸收和距离衰减",
+            SpatialControl::Distance,
+            app.config.spatial.distance,
+        ),
+        (
+            "空间混合 Mix",
+            "原始信号与空间信号比例",
+            SpatialControl::Mix,
+            app.config.spatial.mix,
+        ),
+        (
+            "Crossfeed",
+            "耳机左右声道交叉馈送",
+            SpatialControl::Crossfeed,
+            app.config.spatial.crossfeed,
+        ),
+        (
+            "Room Size",
+            "早期反射空间尺度",
+            SpatialControl::Room,
+            app.config.spatial.room_size,
+        ),
+        (
+            "3D Decorrelation",
+            "非相关空间尾部与包围感",
+            SpatialControl::Immersive3d,
+            app.config.spatial.immersive_3d,
+        ),
     ] {
         parameters = parameters.child(spatial_parameter_row(
             title,
@@ -447,7 +478,10 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                 "轨道半径 Radius",
                 "虚拟声源绕听者的距离尺度",
                 SpatialControl::MotionRadius,
-                format!("{}%", (app.config.spatial.motion_radius * 100.0).round() as u32),
+                format!(
+                    "{}%",
+                    (app.config.spatial.motion_radius * 100.0).round() as u32
+                ),
                 0.05,
                 cx,
             ))
@@ -455,7 +489,10 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                 "运动强度 Intensity",
                 "动态声源在空间处理中的占比",
                 SpatialControl::MotionIntensity,
-                format!("{}%", (app.config.spatial.motion_intensity * 100.0).round() as u32),
+                format!(
+                    "{}%",
+                    (app.config.spatial.motion_intensity * 100.0).round() as u32
+                ),
                 0.05,
                 cx,
             ))
@@ -531,12 +568,8 @@ fn spatial_parameter_row(
         display,
         SharedString::from(format!("spatial-{}-dec", spatial_control_key(control))),
         SharedString::from(format!("spatial-{}-inc", spatial_control_key(control))),
-        cx.listener(move |this, _, _, cx| {
-            this.adjust_manual_spatial(control, -delta, cx)
-        }),
-        cx.listener(move |this, _, _, cx| {
-            this.adjust_manual_spatial(control, delta, cx)
-        }),
+        cx.listener(move |this, _, _, cx| this.adjust_manual_spatial(control, -delta, cx)),
+        cx.listener(move |this, _, _, cx| this.adjust_manual_spatial(control, delta, cx)),
     )
 }
 
@@ -599,11 +632,7 @@ fn track_transition_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl In
                 .rounded_xl()
                 .cursor_pointer()
                 .border_1()
-                .border_color(if active {
-                    ACCENT_RED.into()
-                } else {
-                    BORDER_CARD
-                })
+                .border_color(if active { ACCENT_RED } else { BORDER_CARD })
                 .bg(if active {
                     theme::accent_red_muted()
                 } else {
@@ -627,9 +656,7 @@ fn track_transition_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl In
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.set_track_transition_mode(mode, cx)
-                    }),
+                    cx.listener(move |this, _, _, cx| this.set_track_transition_mode(mode, cx)),
                 ),
         );
     }
@@ -782,16 +809,11 @@ fn desktop_lyrics_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl Into
                 LyricsColorTarget::Translation,
                 cx,
             ))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(action_button(
-                        "desktop-lyrics-reset-bounds",
-                        "重置歌词窗口位置",
-                        cx.listener(|this, _, _, cx| this.reset_desktop_lyrics_bounds(cx)),
-                    )),
-            ),
+            .child(div().flex().justify_end().child(action_button(
+                "desktop-lyrics-reset-bounds",
+                "重置歌词窗口位置",
+                cx.listener(|this, _, _, cx| this.reset_desktop_lyrics_bounds(cx)),
+            ))),
     )
 }
 
@@ -805,7 +827,9 @@ fn desktop_lyrics_alignment_row(app: &MusicApp, cx: &mut Context<MusicApp>) -> i
         let active = app.config.desktop_lyrics.alignment == alignment;
         choices = choices.child(
             div()
-                .id(SharedString::from(format!("desktop-lyrics-align-{alignment:?}")))
+                .id(SharedString::from(format!(
+                    "desktop-lyrics-align-{alignment:?}"
+                )))
                 .px_3()
                 .py_1p5()
                 .rounded_full()
@@ -846,21 +870,21 @@ fn desktop_lyrics_color_row(
     cx: &mut Context<MusicApp>,
 ) -> impl IntoElement {
     let mut palette = div().flex().items_center().gap_2();
-    for color in [0xff_3b_5c, 0xff_95_00, 0x34_c7_59, 0x00_7a_ff, 0xaf_52_de, 0xf2_f2_f7] {
+    for color in [
+        0xff_3b_5c, 0xff_95_00, 0x34_c7_59, 0x00_7a_ff, 0xaf_52_de, 0xf2_f2_f7,
+    ] {
         let active = current == color;
         palette = palette.child(
             div()
-                .id(SharedString::from(format!("lyrics-color-{target:?}-{color:06x}")))
+                .id(SharedString::from(format!(
+                    "lyrics-color-{target:?}-{color:06x}"
+                )))
                 .size(px(24.0))
                 .rounded_full()
                 .cursor_pointer()
                 .bg(rgb(color))
                 .border_1()
-                .border_color(if active {
-                    ACCENT_RED.into()
-                } else {
-                    BORDER_CARD
-                })
+                .border_color(if active { ACCENT_RED } else { BORDER_CARD })
                 .transition(press_transition())
                 .active(|style| style.scale(0.90))
                 .on_mouse_down(
@@ -877,7 +901,10 @@ fn desktop_lyrics_color_row(
         .items_center()
         .justify_between()
         .gap_4()
-        .child(label_block(title, format!("#{:06X}", current & 0x00ff_ffff)))
+        .child(label_block(
+            title,
+            format!("#{:06X}", current & 0x00ff_ffff),
+        ))
         .child(palette)
 }
 
@@ -940,12 +967,7 @@ fn shortcut_row(label: &'static str, shortcut: &'static str) -> impl IntoElement
         .items_center()
         .justify_between()
         .gap_4()
-        .child(
-            div()
-                .text_sm()
-                .text_color(TEXT_SECONDARY)
-                .child(label),
-        )
+        .child(div().text_sm().text_color(TEXT_SECONDARY).child(label))
         .child(
             div()
                 .px_3()
@@ -985,32 +1007,27 @@ fn directories_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
     card(
         "本地音乐目录与监控",
         "目录变化自动增量同步；必要时可重建本地索引",
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(list)
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(action_button(
-                        "settings-add-folder",
-                        "添加文件夹",
-                        cx.listener(|this, _, _, cx| this.choose_folder(cx)),
-                    ))
-                    .child(action_button(
-                        "settings-rescan",
-                        "增量同步",
-                        cx.listener(|this, _, _, cx| this.rescan_library(cx)),
-                    ))
-                    .child(action_button(
-                        "settings-reset-index",
-                        "重建索引",
-                        cx.listener(|this, _, _, cx| this.reset_library_index(cx)),
-                    )),
-            ),
+        div().flex().flex_col().gap_4().child(list).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(action_button(
+                    "settings-add-folder",
+                    "添加文件夹",
+                    cx.listener(|this, _, _, cx| this.choose_folder(cx)),
+                ))
+                .child(action_button(
+                    "settings-rescan",
+                    "增量同步",
+                    cx.listener(|this, _, _, cx| this.rescan_library(cx)),
+                ))
+                .child(action_button(
+                    "settings-reset-index",
+                    "重建索引",
+                    cx.listener(|this, _, _, cx| this.reset_library_index(cx)),
+                )),
+        ),
     )
 }
 
@@ -1063,16 +1080,11 @@ fn online_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement 
                         cx.listener(|this, _, _, cx| this.edit_acoustid_key(cx)),
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(action_button(
-                        "settings-retry-enrichment",
-                        "重新识别当前曲目",
-                        cx.listener(|this, _, _, cx| this.retry_current_enrichment(cx)),
-                    )),
-            ),
+            .child(div().flex().justify_end().child(action_button(
+                "settings-retry-enrichment",
+                "重新识别当前曲目",
+                cx.listener(|this, _, _, cx| this.retry_current_enrichment(cx)),
+            ))),
     )
 }
 
@@ -1166,12 +1178,7 @@ fn label_block(title: &str, subtitle: impl Into<SharedString>) -> impl IntoEleme
                 .text_color(TEXT_PRIMARY)
                 .child(title.to_owned()),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(TEXT_TERTIARY)
-                .child(subtitle),
-        )
+        .child(div().text_xs().text_color(TEXT_TERTIARY).child(subtitle))
 }
 
 fn step_row(

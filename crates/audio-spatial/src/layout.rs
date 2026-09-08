@@ -61,11 +61,26 @@ impl SpeakerLayout {
 
     pub const fn for_layout(layout: ChannelLayout) -> Self {
         match layout {
-            ChannelLayout::Stereo => Self { speakers: &STEREO, normalization: 0.92 },
-            ChannelLayout::Surround5_1 => Self { speakers: &SURROUND_5_1, normalization: 0.62 },
-            ChannelLayout::Surround7_1 => Self { speakers: &SURROUND_7_1, normalization: 0.54 },
-            ChannelLayout::Surround5_1_4 => Self { speakers: &SURROUND_5_1_4, normalization: 0.46 },
-            ChannelLayout::Surround7_1_4 => Self { speakers: &SURROUND_7_1_4, normalization: 0.42 },
+            ChannelLayout::Stereo => Self {
+                speakers: &STEREO,
+                normalization: 0.92,
+            },
+            ChannelLayout::Surround5_1 => Self {
+                speakers: &SURROUND_5_1,
+                normalization: 0.62,
+            },
+            ChannelLayout::Surround7_1 => Self {
+                speakers: &SURROUND_7_1,
+                normalization: 0.54,
+            },
+            ChannelLayout::Surround5_1_4 => Self {
+                speakers: &SURROUND_5_1_4,
+                normalization: 0.46,
+            },
+            ChannelLayout::Surround7_1_4 => Self {
+                speakers: &SURROUND_7_1_4,
+                normalization: 0.42,
+            },
         }
     }
 }
@@ -89,30 +104,48 @@ const STEREO: [Speaker; 2] = [
     Speaker::full_range(FRONT_RIGHT, 1.0),
 ];
 const SURROUND_5_1: [Speaker; 6] = [
-    Speaker::full_range(FRONT_LEFT, 1.0), Speaker::full_range(FRONT_RIGHT, 1.0),
-    Speaker::full_range(CENTER, 0.90), Speaker::lfe(0.34),
-    Speaker::full_range(REAR_125_LEFT, 0.78), Speaker::full_range(REAR_125_RIGHT, 0.78),
+    Speaker::full_range(FRONT_LEFT, 1.0),
+    Speaker::full_range(FRONT_RIGHT, 1.0),
+    Speaker::full_range(CENTER, 0.90),
+    Speaker::lfe(0.34),
+    Speaker::full_range(REAR_125_LEFT, 0.78),
+    Speaker::full_range(REAR_125_RIGHT, 0.78),
 ];
 const SURROUND_7_1: [Speaker; 8] = [
-    Speaker::full_range(FRONT_LEFT, 1.0), Speaker::full_range(FRONT_RIGHT, 1.0),
-    Speaker::full_range(CENTER, 0.90), Speaker::lfe(0.34),
-    Speaker::full_range(REAR_145_LEFT, 0.72), Speaker::full_range(REAR_145_RIGHT, 0.72),
-    Speaker::full_range(SIDE_LEFT, 0.78), Speaker::full_range(SIDE_RIGHT, 0.78),
+    Speaker::full_range(FRONT_LEFT, 1.0),
+    Speaker::full_range(FRONT_RIGHT, 1.0),
+    Speaker::full_range(CENTER, 0.90),
+    Speaker::lfe(0.34),
+    Speaker::full_range(REAR_145_LEFT, 0.72),
+    Speaker::full_range(REAR_145_RIGHT, 0.72),
+    Speaker::full_range(SIDE_LEFT, 0.78),
+    Speaker::full_range(SIDE_RIGHT, 0.78),
 ];
 const SURROUND_5_1_4: [Speaker; 10] = [
-    Speaker::full_range(FRONT_LEFT, 1.0), Speaker::full_range(FRONT_RIGHT, 1.0),
-    Speaker::full_range(CENTER, 0.90), Speaker::lfe(0.34),
-    Speaker::full_range(REAR_125_LEFT, 0.76), Speaker::full_range(REAR_125_RIGHT, 0.76),
-    Speaker::full_range(TOP_FRONT_LEFT, 0.64), Speaker::full_range(TOP_FRONT_RIGHT, 0.64),
-    Speaker::full_range(TOP_REAR_LEFT, 0.58), Speaker::full_range(TOP_REAR_RIGHT, 0.58),
+    Speaker::full_range(FRONT_LEFT, 1.0),
+    Speaker::full_range(FRONT_RIGHT, 1.0),
+    Speaker::full_range(CENTER, 0.90),
+    Speaker::lfe(0.34),
+    Speaker::full_range(REAR_125_LEFT, 0.76),
+    Speaker::full_range(REAR_125_RIGHT, 0.76),
+    Speaker::full_range(TOP_FRONT_LEFT, 0.64),
+    Speaker::full_range(TOP_FRONT_RIGHT, 0.64),
+    Speaker::full_range(TOP_REAR_LEFT, 0.58),
+    Speaker::full_range(TOP_REAR_RIGHT, 0.58),
 ];
 const SURROUND_7_1_4: [Speaker; 12] = [
-    Speaker::full_range(FRONT_LEFT, 1.0), Speaker::full_range(FRONT_RIGHT, 1.0),
-    Speaker::full_range(CENTER, 0.90), Speaker::lfe(0.34),
-    Speaker::full_range(REAR_145_LEFT, 0.72), Speaker::full_range(REAR_145_RIGHT, 0.72),
-    Speaker::full_range(SIDE_LEFT, 0.78), Speaker::full_range(SIDE_RIGHT, 0.78),
-    Speaker::full_range(TOP_FRONT_LEFT, 0.64), Speaker::full_range(TOP_FRONT_RIGHT, 0.64),
-    Speaker::full_range(TOP_REAR_LEFT, 0.58), Speaker::full_range(TOP_REAR_RIGHT, 0.58),
+    Speaker::full_range(FRONT_LEFT, 1.0),
+    Speaker::full_range(FRONT_RIGHT, 1.0),
+    Speaker::full_range(CENTER, 0.90),
+    Speaker::lfe(0.34),
+    Speaker::full_range(REAR_145_LEFT, 0.72),
+    Speaker::full_range(REAR_145_RIGHT, 0.72),
+    Speaker::full_range(SIDE_LEFT, 0.78),
+    Speaker::full_range(SIDE_RIGHT, 0.78),
+    Speaker::full_range(TOP_FRONT_LEFT, 0.64),
+    Speaker::full_range(TOP_FRONT_RIGHT, 0.64),
+    Speaker::full_range(TOP_REAR_LEFT, 0.58),
+    Speaker::full_range(TOP_REAR_RIGHT, 0.58),
 ];
 
 #[cfg(test)]

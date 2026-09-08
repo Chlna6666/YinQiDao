@@ -28,8 +28,7 @@ pub fn best_backend() -> SimdBackend {
 fn detect_backend() -> SimdBackend {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if std::arch::is_x86_feature_detected!("avx2")
-            && std::arch::is_x86_feature_detected!("fma")
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
         {
             return SimdBackend::Avx2Fma;
         }
@@ -192,7 +191,10 @@ fn scalar_multiply(samples: &mut [f32], coefficients: &[f32]) {
 
 #[inline]
 fn scalar_dot(left: &[f32], right: &[f32]) -> f32 {
-    left.iter().zip(right).map(|(left, right)| left * right).sum()
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -440,7 +442,10 @@ mod neon {
             while index < vectors {
                 let sample_v = vld1q_f32(samples.as_ptr().add(index));
                 let coefficient_v = vld1q_f32(coefficients.as_ptr().add(index));
-                vst1q_f32(samples.as_mut_ptr().add(index), vmulq_f32(sample_v, coefficient_v));
+                vst1q_f32(
+                    samples.as_mut_ptr().add(index),
+                    vmulq_f32(sample_v, coefficient_v),
+                );
                 index += 4;
             }
         }
