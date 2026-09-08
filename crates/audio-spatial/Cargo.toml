@@ -1,0 +1,14 @@
+[package]
+name = "yinqidao-audio-spatial"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+description = "Low-latency CPU spatial audio engine for YinQiDao"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+yinqidao-audio-simd = { path = "../audio-simd" }
