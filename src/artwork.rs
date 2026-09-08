@@ -8,11 +8,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, ImageFormat};
-use lofty::prelude::TaggedFileExt;
+use lofty::{picture::PictureType, prelude::TaggedFileExt};
 
 use crate::model::Track;
 
-const ARTWORK_CACHE_REVISION: &str = "embedded-v3";
+const ARTWORK_CACHE_REVISION: &str = "embedded-front-v4";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArtworkPalette {
@@ -404,6 +404,17 @@ fn decoded_local_artwork(path: &Path) -> Option<DynamicImage> {
 
 fn embedded_artwork(path: &Path) -> Option<Vec<u8>> {
     let tagged = lofty::read_from_path(path).ok()?;
+
+    // MP4/M4A tags can contain several valid pictures (front/back/icon). Prefer the semantic front
+    // cover first; only fall back to another decodable picture when no usable front cover exists.
+    for tag in tagged.tags() {
+        if let Some(picture) = tag.get_picture_type(PictureType::CoverFront)
+            && is_recognized_artwork(picture.data())
+        {
+            return Some(picture.data().to_vec());
+        }
+    }
+
     tagged.tags().iter().find_map(|tag| {
         tag.pictures()
             .iter()
