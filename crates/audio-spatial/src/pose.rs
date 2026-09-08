@@ -60,12 +60,39 @@ impl Vec3 {
     }
 }
 
+impl std::ops::Add for Vec3 {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+}
+
 impl std::ops::Sub for Vec3 {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+    }
+}
+
+impl std::ops::Mul<f32> for Vec3 {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
+    }
+}
+
+impl std::ops::Mul<Vec3> for f32 {
+    type Output = Vec3;
+
+    #[inline]
+    fn mul(self, rhs: Vec3) -> Self::Output {
+        rhs * self
     }
 }
 
@@ -146,5 +173,12 @@ mod tests {
         assert!((right.x - 1.0).abs() < 1.0e-6);
         assert!((up.y - 1.0).abs() < 1.0e-6);
         assert!((forward.z - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn vector_add_and_scalar_multiply_support_geometry_without_temporaries() {
+        let value = Vec3::RIGHT + Vec3::FORWARD * 2.0;
+        assert_eq!(value, Vec3::new(1.0, 0.0, 2.0));
+        assert_eq!(0.5 * value, Vec3::new(0.5, 0.0, 1.0));
     }
 }
