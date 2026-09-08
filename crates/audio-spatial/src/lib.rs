@@ -11,6 +11,7 @@ mod delay;
 mod engine;
 mod environment;
 mod error;
+mod image_source;
 mod layout;
 mod pose;
 mod renderer;
