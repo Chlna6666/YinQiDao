@@ -650,7 +650,9 @@ mod tests {
     #[test]
     fn av3a_sample_entry_reports_7_1_4_metadata() {
         let mut bytes = vec![0_u8; 64];
+        bytes[4..8].copy_from_slice(&(60_u32).to_be_bytes());
         bytes[8..12].copy_from_slice(b"av3a");
+        bytes[18..20].copy_from_slice(&1_u16.to_be_bytes());
         bytes[28..30].copy_from_slice(&12_u16.to_be_bytes());
         bytes[36..40].copy_from_slice(&(44_100_u32 << 16).to_be_bytes());
         let entry = probe_av3a_bytes(&bytes).expect("av3a");
