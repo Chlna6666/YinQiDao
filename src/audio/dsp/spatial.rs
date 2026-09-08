@@ -366,12 +366,12 @@ impl Spatializer {
 
                 let motion_len = self.motion_delay.len();
                 self.motion_delay[self.motion_cursor] = moving_source;
-                let itd_samples = (self.sample_rate * MAX_ITD_SECONDS * pan.abs() * radius)
-                    .round() as usize;
-                let itd_samples = itd_samples.min(motion_len - 1);
-                let delayed_index =
-                    (self.motion_cursor + motion_len - itd_samples) % motion_len;
-                let delayed_source = self.motion_delay[delayed_index];
+                let itd_samples = self.sample_rate * MAX_ITD_SECONDS * pan.abs() * radius;
+                let delayed_source = read_fractional_delay(
+                    &self.motion_delay,
+                    self.motion_cursor,
+                    itd_samples,
+                );
                 self.motion_cursor = (self.motion_cursor + 1) % motion_len;
 
                 let lateral = pan.abs() * radius;
@@ -474,6 +474,32 @@ fn motion_position(mode: SpatialMotionMode, sin: f32, cos: f32) -> (f32, f32, f3
     }
 }
 
+/// First-order Lagrange fractional delay over the already-written motion ring.
+///
+/// Dynamic binaural ITD is normally a fractional sample. Quantising it with `round()` makes a
+/// moving source jump between integer delays, producing zipper/stair-step localisation. Two ring
+/// reads and one lerp keep the trajectory continuous without allocating or changing audio-clock
+/// ownership of the motion state.
+#[inline]
+fn read_fractional_delay(buffer: &[f32], write_cursor: usize, delay_samples: f32) -> f32 {
+    debug_assert!(buffer.len() >= 2);
+    debug_assert!(write_cursor < buffer.len());
+
+    if buffer.len() < 2 {
+        return buffer.first().copied().unwrap_or(0.0);
+    }
+
+    // The current slot has just been written. Leave one older sample available for interpolation so
+    // the lerp never wraps onto that newly-written slot at the maximum representable delay.
+    let delay = delay_samples.clamp(0.0, buffer.len().saturating_sub(2) as f32);
+    let whole = delay as usize;
+    let fraction = delay - whole as f32;
+    let newer_index = (write_cursor + buffer.len() - whole) % buffer.len();
+    let older_index = (newer_index + buffer.len() - 1) % buffer.len();
+    let newer = buffer[newer_index];
+    newer + (buffer[older_index] - newer) * fraction
+}
+
 pub fn clamp_spatial(mut settings: SpatialSettings) -> SpatialSettings {
     settings.width = settings.width.clamp(0.0, 1.0);
     settings.depth = settings.depth.clamp(0.0, 1.0);
@@ -510,6 +536,17 @@ mod tests {
                 assert!((0.0..=1.001).contains(&radius));
             }
         }
+    }
+
+    #[test]
+    fn fractional_delay_interpolates_across_ring_wrap() {
+        // Cursor 0 is the sample just written; the chronological history behind it is 30, 20, 10.
+        let buffer = [40.0_f32, 10.0, 20.0, 30.0];
+        let sample = |delay| read_fractional_delay(&buffer, 0, delay);
+        assert!((sample(0.0) - 40.0).abs() < 1e-6);
+        assert!((sample(0.5) - 35.0).abs() < 1e-6);
+        assert!((sample(1.0) - 30.0).abs() < 1e-6);
+        assert!((sample(1.25) - 27.5).abs() < 1e-6);
     }
 
     #[test]
