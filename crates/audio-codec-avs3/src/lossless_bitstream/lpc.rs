@@ -1,5 +1,9 @@
 use yinqidao_codec_core::CodecError;
 
+/// Minimum standardized lossless LPC order exercised by the AVS2 conformance suite.
+pub const LOSSLESS_LPC_ORDER_MIN: u8 = 1;
+/// Maximum standardized lossless LPC order; conformance traversal explicitly reaches order 127.
+pub const LOSSLESS_LPC_ORDER_MAX: u8 = 127;
 /// Fractional precision used by the lossless predictor's fixed-point PARCOR/LPC domain.
 pub const LOSSLESS_LPC_Q_BITS: u8 = 20;
 /// Fixed-point representation of unity in the lossless Q20 predictor domain.
@@ -8,6 +12,17 @@ pub const LOSSLESS_LPC_Q_ONE: i32 = 1_i32 << LOSSLESS_LPC_Q_BITS;
 pub const LOSSLESS_UNIFORM_PARCOR_Q20_STEP: i32 = 1_i32 << 14;
 /// Half-step bias used to reconstruct the center of a uniform PARCOR quantization bin.
 pub const LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP: i32 = 1_i32 << 13;
+
+/// Validate the semantic LPC order without making any assumption about its eventual wire width.
+#[inline]
+pub fn validate_lossless_lpc_order(order: u8) -> Result<usize, CodecError> {
+    if !(LOSSLESS_LPC_ORDER_MIN..=LOSSLESS_LPC_ORDER_MAX).contains(&order) {
+        return Err(CodecError::InvalidData(
+            "lossless LPC order is outside the standardized 1..=127 range",
+        ));
+    }
+    Ok(usize::from(order))
+}
 
 /// Reconstruct a third-or-later lossless PARCOR coefficient in the normative Q20 domain.
 ///
@@ -50,6 +65,15 @@ pub fn dequantize_lossless_uniform_parcor_tail_q20(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_full_standardized_lpc_order_range() {
+        assert_eq!(validate_lossless_lpc_order(1).unwrap(), 1);
+        assert_eq!(validate_lossless_lpc_order(127).unwrap(), 127);
+        assert!(validate_lossless_lpc_order(0).is_err());
+        assert!(validate_lossless_lpc_order(128).is_err());
+        assert!(validate_lossless_lpc_order(u8::MAX).is_err());
+    }
 
     #[test]
     fn q20_constants_match_uniform_parcor_geometry() {
