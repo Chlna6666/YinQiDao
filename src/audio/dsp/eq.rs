@@ -126,6 +126,7 @@ pub(crate) struct EqProcessor {
     sample_rate: f32,
     left: [Biquad; 10],
     right: [Biquad; 10],
+    transport_reset_requested: bool,
 }
 
 impl EqProcessor {
@@ -135,6 +136,7 @@ impl EqProcessor {
             sample_rate: sample_rate.max(1) as f32,
             left: [Biquad::default(); 10],
             right: [Biquad::default(); 10],
+            transport_reset_requested: false,
         };
         processor.rebuild();
         processor
@@ -146,7 +148,23 @@ impl EqProcessor {
 
     pub(crate) fn set_settings(&mut self, settings: EqSettings) {
         self.settings = clamp_eq(settings);
+        // `AudioWorker::apply_processing_for_track` passes through here on every track reopen.
+        // Treat the next PCM block as a fresh DSP timeline. The same behaviour on an interactive
+        // EQ/spatial profile change is intentional: old IIR/delay history must not colour new params.
+        self.transport_reset_requested = true;
         self.rebuild();
+    }
+
+    pub(crate) fn take_transport_reset_request(&mut self) -> bool {
+        let requested = self.transport_reset_requested;
+        self.transport_reset_requested = false;
+        requested
+    }
+
+    pub(crate) fn reset_state(&mut self) {
+        // Rebuilding coefficients also zeroes every biquad z1/z2 without changing settings.
+        self.rebuild();
+        self.transport_reset_requested = false;
     }
 
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
@@ -235,5 +253,14 @@ mod tests {
         assert!(EqPreset::Pop.matches(&pop));
         pop.bands_db[2] += 0.25;
         assert!(!EqPreset::Pop.matches(&pop));
+    }
+
+    #[test]
+    fn settings_change_requests_a_transport_state_reset() {
+        let mut processor = EqProcessor::new(48_000, EqPreset::Flat.settings());
+        assert!(!processor.take_transport_reset_request());
+        processor.set_settings(EqPreset::Rock.settings());
+        assert!(processor.take_transport_reset_request());
+        assert!(!processor.take_transport_reset_request());
     }
 }
