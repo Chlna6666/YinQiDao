@@ -1,6 +1,8 @@
 use std::{error::Error, fmt, io, time::Duration};
 
-use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, Avs3Decoder};
+use yinqidao_codec_avs3::{
+    Av3aIsoBmffDemuxer, Avs3Decoder, Avs3SpecificConfig, parse_dca3,
+};
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
 
 const AVS3_FRAME_SAMPLES_PER_CHANNEL: usize = 1024;
@@ -73,6 +75,21 @@ impl Av3aRustBackend {
     ) -> Result<Option<Self>, Av3aRustError> {
         let entry = demuxer.sample_entry().clone();
         if entry.decoder_config.is_empty() {
+            return Ok(None);
+        }
+
+        // `Avs3Decoder` currently owns several large GA synthesis workspaces. Lossless frames are
+        // deliberately gated inside that decoder until Chapter 8 is bit-exact, so constructing all
+        // GA workspaces just to discover the Lossless `Unsupported` result wastes substantial stack
+        // and can overflow the relatively small audio-worker stack in debug builds. Parse the tiny
+        // dca3 config first and bypass the heavy decoder entirely for Lossless streams.
+        if matches!(
+            parse_dca3(&entry.decoder_config)?,
+            Avs3SpecificConfig::Lossless(_)
+        ) {
+            tracing::debug!(
+                "AV3A Lossless 尚未打开 pure-Rust synthesis gate，跳过重型 GA workspace 探测"
+            );
             return Ok(None);
         }
 
