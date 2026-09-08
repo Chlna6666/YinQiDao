@@ -406,7 +406,7 @@ fn parse_stsc(payload: &[u8]) -> io::Result<Vec<StscEntry>> {
     if payload.len() < required || count == 0 {
         return Err(invalid("invalid stsc entry array"));
     }
-    let mut entries = Vec::with_capacity(count);
+    let mut entries: Vec<StscEntry> = Vec::with_capacity(count);
     for raw in payload[8..required].chunks_exact(12) {
         let entry = StscEntry {
             first_chunk: be_u32(&raw[0..4])?,
