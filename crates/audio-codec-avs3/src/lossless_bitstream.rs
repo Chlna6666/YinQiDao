@@ -30,6 +30,42 @@ pub use stereo::{
     restore_lossless_stereo_in_place, restore_lossless_stereo_pair,
 };
 
+/// Standardized arithmetic-coding block counts exercised by the AVS2 Lossless conformance suite.
+///
+/// This is a semantic value set only. It deliberately does not imply how `sbk_no` is represented
+/// on the wire inside `ll_raw_data_block()`.
+pub const LOSSLESS_ARITHMETIC_BLOCK_COUNTS: [u8; 4] = [1, 2, 4, 8];
+
+/// Standardized lifting-wavelet levels exercised by the AVS2 Lossless conformance suite.
+///
+/// This is a semantic value set only. The eventual syntax parser must obtain the field width and
+/// coding from the normative Chapter 8 syntax table rather than deriving it from this range.
+pub const LOSSLESS_WAVELET_LEVELS: [u8; 2] = [0, 1];
+
+/// Validate the semantic arithmetic-coder block count without assuming its wire representation.
+#[inline]
+pub fn validate_lossless_arithmetic_block_count(block_count: u8) -> Result<usize, CodecError> {
+    if LOSSLESS_ARITHMETIC_BLOCK_COUNTS.contains(&block_count) {
+        Ok(usize::from(block_count))
+    } else {
+        Err(CodecError::InvalidData(
+            "lossless arithmetic block count must be 1, 2, 4, or 8",
+        ))
+    }
+}
+
+/// Validate the semantic lifting-wavelet level without assuming its wire representation.
+#[inline]
+pub fn validate_lossless_wavelet_level(level: u8) -> Result<usize, CodecError> {
+    if LOSSLESS_WAVELET_LEVELS.contains(&level) {
+        Ok(usize::from(level))
+    } else {
+        Err(CodecError::InvalidData(
+            "lossless wavelet level must be zero or one",
+        ))
+    }
+}
+
 /// Decode one ordinary MSB-first Golomb-Rice codeword at an arbitrary bit position.
 ///
 /// This helper intentionally handles only the base `q <= 63` form. IEEE 1857.2 / GB/T 33475.3
@@ -116,6 +152,29 @@ pub fn restore_lossless_flattened_residual(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_conformance_arithmetic_block_counts_without_wire_assumptions() {
+        assert_eq!(LOSSLESS_ARITHMETIC_BLOCK_COUNTS, [1, 2, 4, 8]);
+        for count in LOSSLESS_ARITHMETIC_BLOCK_COUNTS {
+            assert_eq!(
+                validate_lossless_arithmetic_block_count(count).unwrap(),
+                usize::from(count)
+            );
+        }
+        for count in [0, 3, 5, 7, 9, u8::MAX] {
+            assert!(validate_lossless_arithmetic_block_count(count).is_err());
+        }
+    }
+
+    #[test]
+    fn validates_conformance_wavelet_levels_without_wire_assumptions() {
+        assert_eq!(LOSSLESS_WAVELET_LEVELS, [0, 1]);
+        assert_eq!(validate_lossless_wavelet_level(0).unwrap(), 0);
+        assert_eq!(validate_lossless_wavelet_level(1).unwrap(), 1);
+        assert!(validate_lossless_wavelet_level(2).is_err());
+        assert!(validate_lossless_wavelet_level(u8::MAX).is_err());
+    }
 
     #[test]
     fn decodes_base_rice_codeword_without_repacking() {
