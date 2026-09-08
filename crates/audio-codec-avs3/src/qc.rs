@@ -14,7 +14,7 @@ impl BitRange {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QcSideInfo {
     pub is_feat_amplified: Option<bool>,
     pub scale_q_idx: Option<u8>,
