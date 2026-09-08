@@ -20,6 +20,7 @@ pub struct Trajectory {
     speed_hz: f64,
     radius: f32,
     elevation: f32,
+    direction: f64,
     sample_clock: u64,
 }
 
@@ -37,12 +38,19 @@ impl Trajectory {
             speed_hz: f64::from(speed_hz.clamp(0.005, 2.0)),
             radius: radius.clamp(0.05, 8.0),
             elevation: elevation.clamp(-1.0, 1.0),
+            direction: 1.0,
             sample_clock: 0,
         }
     }
+
+    pub fn set_clockwise(&mut self, clockwise: bool) {
+        self.direction = if clockwise { 1.0 } else { -1.0 };
+    }
+
     pub fn sample_clock(&self) -> u64 {
         self.sample_clock
     }
+
     pub fn reset(&mut self) {
         self.sample_clock = 0;
     }
@@ -56,7 +64,7 @@ impl Trajectory {
     }
 
     fn pose_at(&self, sample_clock: u64) -> SourcePose {
-        let phase = sample_clock as f64 * self.speed_hz * TAU / self.sample_rate;
+        let phase = sample_clock as f64 * self.speed_hz * TAU / self.sample_rate * self.direction;
         let (sin, cos) = phase.sin_cos();
         let sin = sin as f32;
         let cos = cos as f32;
@@ -108,6 +116,7 @@ impl Trajectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn trajectory_is_audio_clock_driven() {
         let mut trajectory = Trajectory::new(TrajectoryKind::Orbit360, 48_000, 0.5, 1.0, 0.0);
@@ -115,5 +124,18 @@ mod tests {
         let (_, second_end) = trajectory.next_segment(480);
         assert_eq!(trajectory.sample_clock(), 960);
         assert_ne!(first_end.position, second_end.position);
+    }
+
+    #[test]
+    fn counter_clockwise_reverses_lateral_motion_without_changing_clock() {
+        let mut clockwise = Trajectory::new(TrajectoryKind::Orbit360, 48_000, 0.5, 1.0, 0.0);
+        let mut counter = clockwise.clone();
+        counter.set_clockwise(false);
+
+        let (_, clockwise_end) = clockwise.next_segment(1_200);
+        let (_, counter_end) = counter.next_segment(1_200);
+        assert_eq!(clockwise.sample_clock(), counter.sample_clock());
+        assert!((clockwise_end.position.x + counter_end.position.x).abs() < 1.0e-5);
+        assert!((clockwise_end.position.z - counter_end.position.z).abs() < 1.0e-5);
     }
 }
