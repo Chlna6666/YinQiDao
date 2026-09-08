@@ -15,7 +15,9 @@
 
 mod artwork;
 mod audio;
+#[path = "audio_debug_window_v2.rs"]
 mod audio_debug_window;
+mod audio_spatial_debug_3d;
 mod audio_policy;
 mod desktop_lyrics;
 mod global_shortcuts;
@@ -91,9 +93,6 @@ fn main() -> Result<()> {
                 appears_transparent: true,
                 ..Default::default()
             });
-            // Match the BMCBL fork's sharp-text path: an opaque client surface avoids compositor
-            // resampling, while the explicit corner preference lets Windows 11 use DWM corners and
-            // Windows 10 fall back to the fork's pixel-aligned window region.
             options.window_background = gpui::WindowBackgroundAppearance::Opaque;
             options.window_corner_preference = WindowCornerPreference::Rounded;
         }
@@ -109,14 +108,8 @@ fn main() -> Result<()> {
 
         desktop_lyrics::start_ui_service(main_window, cx);
         global_shortcuts::start_ui_service(main_window, cx);
-
-        // Audio Laboratory is explicitly opened from Settings. Keep the analyzer disabled
-        // on normal startup so the playback hot path has no debug-analysis overhead.
         audio::set_audio_debug_enabled(false);
 
-        // 主窗口是进程生命周期所有者。on_window_closed 会对任意辅助窗口触发，因此不能
-        // 用 main_window.update() 的成功与否判断主窗口是否死亡：主窗口事件回调期间的重入
-        // 借用同样会让 update() 失败，并会把“关闭桌面歌词”误判成“关闭主程序”。
         let main_window_id = main_window.window_id();
         cx.on_window_closed(move |cx| {
             let main_still_open = cx
