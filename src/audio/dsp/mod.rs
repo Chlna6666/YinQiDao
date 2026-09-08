@@ -8,18 +8,18 @@ pub use spatial::{SpatialPreset, clamp_spatial};
 use std::cell::Cell;
 
 use crate::model::{EqSettings, SpatialSettings};
-use yinqidao_audio_spatial::{ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine};
+use yinqidao_audio_spatial::{
+    ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialDebugSnapshot, SpatialEngine,
+};
 
 use super::debug::{
     AudioDebugMonitorMode, audio_debug_enabled, audio_debug_monitor_mode, capture_audio_debug_frame,
 };
+use super::spatial_debug::{clear_spatial_debug_snapshot, publish_spatial_debug_snapshot};
 use eq::EqProcessor;
 use spatial::Spatializer;
 use trajectory_spatial::StereoSpatializer;
 
-// Decoder seek and AudioProcessor live on different layers but on the same audio worker. Keep the
-// discontinuity generation thread-local so a seek/preload in another engine/thread cannot reset an
-// unrelated playback instance. The next PCM block consumes the generation exactly once.
 std::thread_local! {
     static TRANSPORT_RESET_GENERATION: Cell<u64> = const { Cell::new(1) };
 }
@@ -164,6 +164,7 @@ pub struct AudioProcessor {
     eq_debug_scratch: Vec<f32>,
     resampler: StreamingLinearResampler,
     transport_reset_generation: u64,
+    spatial_debug_published_frames: Option<u64>,
 }
 
 impl AudioProcessor {
@@ -182,12 +183,10 @@ impl AudioProcessor {
             eq_debug_scratch: Vec::new(),
             resampler: StreamingLinearResampler::new(sample_rate),
             transport_reset_generation: transport_reset_generation(),
+            spatial_debug_published_frames: None,
         }
     }
 
-    /// Clear state tied to the previous playback timeline while retaining all allocated workspaces.
-    /// This is intentionally separate from normal consecutive decode chunks, which must preserve
-    /// delay/filter/resampler history.
     pub(crate) fn reset_transport(&mut self) {
         self.eq.reset_state();
         self.spatial.reset_transport();
@@ -198,6 +197,7 @@ impl AudioProcessor {
             engine.reset();
         }
         self.resampler.reset();
+        self.spatial_debug_published_frames = None;
     }
 
     #[inline]
@@ -228,10 +228,20 @@ impl AudioProcessor {
 
         let output_rate = self.eq.sample_rate();
         let native_multichannel = input_channels > 2;
+        let debug_enabled = audio_debug_enabled();
+        if let Some(renderer) = self.stereo_spatial.as_mut() {
+            renderer.set_debug_enabled(debug_enabled);
+        }
+        if let Some(engine) = self.native_spatial.as_mut() {
+            engine.set_debug_enabled(debug_enabled);
+        }
+        if !debug_enabled && self.spatial_debug_published_frames.is_some() {
+            clear_spatial_debug_snapshot();
+            self.spatial_debug_published_frames = None;
+        }
 
-        // AVS3 5.1.4/7.1.4 retains authored channel geometry until the native binaural renderer.
         if let Some(layout) = native_spatial_layout(input_channels) {
-            if self.render_native_spatial_into(input, input_rate, layout) {
+            if self.render_native_spatial_into(input, input_rate, layout, debug_enabled) {
                 self.resampler.process_into(
                     &self.native_spatial_scratch,
                     input_rate,
@@ -249,7 +259,6 @@ impl AudioProcessor {
                 .process_into(&self.stereo_scratch, input_rate, output_rate, output);
         }
 
-        let debug_enabled = audio_debug_enabled();
         if debug_enabled {
             copy_reuse(output, &mut self.source_debug_scratch);
         }
@@ -259,9 +268,6 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        // Native multichannel is spatialized exactly once from its authored speaker geometry.
-        // Ordinary mono/stereo uses the self-owned stereo virtual-source renderer. The legacy
-        // Spatializer remains only as a recoverable fallback if construction/rendering fails.
         if !native_multichannel {
             let settings = self.spatial.settings().clone();
             let handled = self
@@ -274,6 +280,17 @@ impl AudioProcessor {
         }
 
         if debug_enabled {
+            let spatial_snapshot = if native_multichannel {
+                self.native_spatial
+                    .as_ref()
+                    .and_then(SpatialEngine::debug_snapshot)
+            } else {
+                self.stereo_spatial
+                    .as_ref()
+                    .and_then(StereoSpatializer::debug_snapshot)
+            };
+            self.publish_spatial_debug_if_due(spatial_snapshot);
+
             capture_audio_debug_frame(
                 &self.source_debug_scratch,
                 &self.eq_debug_scratch,
@@ -298,18 +315,39 @@ impl AudioProcessor {
         yinqidao_audio_simd::gain_clamp_in_place(output, gain);
     }
 
+    fn publish_spatial_debug_if_due(&mut self, snapshot: Option<SpatialDebugSnapshot>) {
+        let Some(snapshot) = snapshot else {
+            if self.spatial_debug_published_frames.take().is_some() {
+                clear_spatial_debug_snapshot();
+            }
+            return;
+        };
+        let interval_frames = (u64::from(snapshot.sample_rate.max(1)) / 30).max(1);
+        let due = match self.spatial_debug_published_frames {
+            None => true,
+            Some(previous) if snapshot.rendered_frames < previous => true,
+            Some(previous) => snapshot.rendered_frames.saturating_sub(previous) >= interval_frames,
+        };
+        if due {
+            publish_spatial_debug_snapshot(snapshot);
+            self.spatial_debug_published_frames = Some(snapshot.rendered_frames);
+        }
+    }
+
     fn render_native_spatial_into(
         &mut self,
         input: &[f32],
         input_rate: u32,
         layout: ChannelLayout,
+        debug_enabled: bool,
     ) -> bool {
         let input_rate = input_rate.max(1);
         if self.native_spatial_rate != input_rate || self.native_spatial.is_none() {
             let mut config = NativeSpatialConfig::new(input_rate);
             config.environment.mix = 0.0;
             match SpatialEngine::new(config) {
-                Ok(engine) => {
+                Ok(mut engine) => {
+                    engine.set_debug_enabled(debug_enabled);
                     self.native_spatial = Some(engine);
                     self.native_spatial_rate = input_rate;
                 }
@@ -335,6 +373,7 @@ impl AudioProcessor {
         let Some(engine) = self.native_spatial.as_mut() else {
             return false;
         };
+        engine.set_debug_enabled(debug_enabled);
         engine
             .render_interleaved_layout(input, layout, &mut self.native_spatial_scratch)
             .is_ok()

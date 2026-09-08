@@ -1,6 +1,7 @@
 use crate::model::{SpatialMotionMode, SpatialSettings};
 use yinqidao_audio_spatial::{
-    EngineConfig, EnvironmentSettings, SourcePose, SpatialEngine, Trajectory, TrajectoryKind, Vec3,
+    EngineConfig, EnvironmentSettings, SourcePose, SpatialDebugSnapshot, SpatialEngine, Trajectory,
+    TrajectoryKind, Vec3,
 };
 
 const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
@@ -76,8 +77,6 @@ struct StereoField {
 
 impl StereoField {
     fn from_settings(settings: &SpatialSettings) -> Self {
-        // Crossfeed narrows the virtual speaker arc instead of mixing channels before the binaural
-        // renderer. This preserves authored L/R phase while making the same control meaningful.
         let effective_width =
             settings.width.clamp(0.0, 1.0) * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.30);
         let half_angle_degrees =
@@ -132,11 +131,6 @@ impl EnvironmentSignature {
     }
 }
 
-/// Root-player stereo bridge for the self-owned virtual-source renderer.
-///
-/// Both authored stereo channels remain independent full-range sources. Static presets render them
-/// on a front stereo arc; motion presets rotate the whole pair around the listener using the audio
-/// sample clock. The realtime path owns only fixed-size scratch allocated at construction.
 #[derive(Clone, Debug)]
 pub(crate) struct StereoSpatializer {
     sample_rate: u32,
@@ -182,8 +176,14 @@ impl StereoSpatializer {
         }
     }
 
-    /// Process stereo in-place. `true` means the self-owned engine handled the block (including a
-    /// disabled/no-op setting); `false` is reserved for renderer failure so the caller may fallback.
+    pub(crate) fn set_debug_enabled(&mut self, enabled: bool) {
+        self.engine.set_debug_enabled(enabled);
+    }
+
+    pub(crate) fn debug_snapshot(&self) -> Option<SpatialDebugSnapshot> {
+        self.engine.debug_snapshot()
+    }
+
     pub(crate) fn process_in_place(
         &mut self,
         samples: &mut [f32],
@@ -309,8 +309,6 @@ fn stereo_pair(center: SourcePose, field: StereoField) -> (SourcePose, SourcePos
     )
 }
 
-/// Rotate around listener-up/Y without trigonometry on the audio hot path; sin/cos are cached in
-/// `StereoField` and only recomputed when the user changes the stereo field geometry.
 #[inline]
 fn rotate_y(position: Vec3, sin: f32, cos: f32) -> Vec3 {
     Vec3::new(
@@ -361,6 +359,18 @@ mod tests {
         assert!(spatializer.process_in_place(&mut samples, &settings));
         assert_eq!(spatializer.sample_clock(), None);
         assert!(samples.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn debug_snapshot_tracks_rendered_stereo_pair() {
+        let settings = SpatialPreset::Orbit360.settings();
+        let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
+        spatializer.set_debug_enabled(true);
+        let mut samples = vec![0.10_f32; 64 * 2];
+        assert!(spatializer.process_in_place(&mut samples, &settings));
+        let snapshot = spatializer.debug_snapshot().expect("debug snapshot");
+        assert_eq!(snapshot.source_count, 2);
+        assert_eq!(snapshot.rendered_frames, 64);
     }
 
     #[test]

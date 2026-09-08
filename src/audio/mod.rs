@@ -9,6 +9,7 @@ mod engine;
 mod facade;
 mod fingerprint;
 mod smart_profile;
+mod spatial_debug;
 mod transition;
 
 pub use debug::{
@@ -20,3 +21,4 @@ pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::AudioEngine;
 pub(crate) use fingerprint::fingerprint_file;
 pub use smart_profile::classify as classify_smart_audio;
+pub use spatial_debug::spatial_debug_latest_snapshot;
