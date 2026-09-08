@@ -18,7 +18,7 @@ use symphonia::core::{
 use thiserror::Error;
 use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, Avs3SpecificConfig, parse_dca3, probe_av3a_path};
 
-use super::avs3_backend::Av3aRustBackend;
+use super::{avs3_backend::Av3aRustBackend, dsp::request_transport_reset};
 
 const AV3A_PCM_FRAMES_PER_CHUNK: usize = 1024;
 
@@ -523,6 +523,9 @@ impl DecoderStream {
 
         self.decoded_frames =
             (resolved_position.as_secs_f64() * self.info.sample_rate.max(1) as f64) as u64;
+        // Only a successful decoder seek advances the generation. A failed seek must leave the
+        // current DSP timeline untouched because playback may continue from the old decoder state.
+        request_transport_reset();
         Ok(())
     }
 
