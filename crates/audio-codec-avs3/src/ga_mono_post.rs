@@ -32,12 +32,23 @@ impl BasicMonoPreFdWorkspace {
 /// The same post-neural state is reused by Basic and Low-Complexity inverse-QC profiles. Neural
 /// scratch, BWE/TNS state, FD-shaping buffers, FFT plans/scratch, overlap history and the
 /// intermediate 1024-line spectrum all live here and are reused across frames.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BasicMonoSynthesisWorkspace {
     pre_fd: BasicMonoPreFdWorkspace,
     fd: FdShapingWorkspace,
     synthesis: Avs3SynthesisWorkspace,
     spectrum: [f32; BASE_OUTPUT_POSITIONS],
+}
+
+impl Default for BasicMonoSynthesisWorkspace {
+    fn default() -> Self {
+        Self {
+            pre_fd: BasicMonoPreFdWorkspace::default(),
+            fd: FdShapingWorkspace::default(),
+            synthesis: Avs3SynthesisWorkspace::default(),
+            spectrum: [0.0; BASE_OUTPUT_POSITIONS],
+        }
+    }
 }
 
 impl BasicMonoSynthesisWorkspace {
