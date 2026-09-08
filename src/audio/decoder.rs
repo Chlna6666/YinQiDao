@@ -505,7 +505,12 @@ impl DecoderStream {
                 backend.decoder.reset();
                 position
             }
-            DecoderBackend::Av3aRust(backend) => backend.seek(position),
+            DecoderBackend::Av3aRust(backend) => {
+                backend.seek(position).map_err(|error| DecodeError::Seek {
+                    path: self.path.clone(),
+                    reason: error.to_string(),
+                })?
+            }
             DecoderBackend::Av3aProcess(backend) => {
                 backend.restart(position)?;
                 position

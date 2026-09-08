@@ -278,21 +278,20 @@ impl Av3aRustBackend {
 
     /// Reset codec history on the codec worker and select the independently decodable sample that
     /// contains `position`. Seek is not on the playback hot path, so a rendezvous reply keeps the
-    /// existing exact resolved-position semantics without another shared lock.
-    pub(crate) fn seek(&mut self, position: Duration) -> Duration {
+    /// existing exact resolved-position semantics without another shared lock. Both a dead worker
+    /// before command delivery and a worker that dies before replying are surfaced explicitly.
+    pub(crate) fn seek(&mut self, position: Duration) -> Result<Duration, Av3aRustError> {
         self.first_frame = None;
         let (reply_tx, reply_rx) = mpsc::sync_channel(0);
-        if self
-            .command_tx
+        self.command_tx
             .send(CodecCommand::Seek {
                 position,
                 reply: reply_tx,
             })
-            .is_err()
-        {
-            return position;
-        }
-        reply_rx.recv().unwrap_or(position)
+            .map_err(|_| Av3aRustError::CodecWorkerStopped)?;
+        reply_rx
+            .recv()
+            .map_err(|_| Av3aRustError::CodecWorkerStopped)
     }
 }
 
@@ -355,6 +354,24 @@ mod tests {
         }
     }
 
+    fn backend_for_seek_test(
+        command_tx: SyncSender<CodecCommand>,
+        worker: Option<JoinHandle<()>>,
+    ) -> Av3aRustBackend {
+        let (_decode_tx, decode_rx) =
+            mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
+        Av3aRustBackend {
+            command_tx,
+            decode_rx,
+            worker,
+            first_frame: None,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_count: 0,
+            duration: Duration::ZERO,
+        }
+    }
+
     #[test]
     fn accepts_multichannel_and_hoa_frame_geometry() {
         assert!(
@@ -371,5 +388,33 @@ mod tests {
         assert!(
             validate_frame_geometry(&frame(6, 6 * AVS3_FRAME_SAMPLES_PER_CHANNEL - 1)).is_err()
         );
+    }
+
+    #[test]
+    fn seek_reports_worker_stopped_before_command_delivery() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        drop(command_rx);
+        let mut backend = backend_for_seek_test(command_tx, None);
+
+        assert!(matches!(
+            backend.seek(Duration::from_secs(1)),
+            Err(Av3aRustError::CodecWorkerStopped)
+        ));
+    }
+
+    #[test]
+    fn seek_reports_worker_stopped_before_reply() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            if let Ok(CodecCommand::Seek { reply, .. }) = command_rx.recv() {
+                drop(reply);
+            }
+        });
+        let mut backend = backend_for_seek_test(command_tx, Some(worker));
+
+        assert!(matches!(
+            backend.seek(Duration::from_secs(1)),
+            Err(Av3aRustError::CodecWorkerStopped)
+        ));
     }
 }
