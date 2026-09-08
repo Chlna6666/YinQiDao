@@ -56,7 +56,7 @@ fn test_track(id: TrackId, path: std::path::PathBuf) -> Track {
 }
 
 fn pcm_wav() -> Vec<u8> {
-    let samples = [0i16, 8_000, -8_000, 0];
+    let samples = [0i16; 800];
     let data_size = samples.len() * 2;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"RIFF");
@@ -418,4 +418,31 @@ fn smooth_crossfade_does_not_boost_correlated_material() {
 
     let opposite = mix_crossfade_sample(0.8, -0.8, 0.5, 0.5);
     assert!(opposite.abs() < 1.0e-6);
+}
+
+#[test]
+fn user_av3a_m4a_7_1_4_playback() {
+    let path = std::path::Path::new(r"C:\Users\Administrator\Music\GAI周延 - 兰花草.m4a");
+    if !path.exists() {
+        return;
+    }
+    let demuxer = yinqidao_codec_avs3::Av3aIsoBmffDemuxer::open(path)
+        .expect("open demuxer")
+        .expect("av3a track present");
+    let mut backend = crate::audio::avs3_backend::Av3aRustBackend::from_demuxer(demuxer)
+        .expect("backend creation")
+        .expect("valid audio track");
+    assert_eq!(backend.channels(), 12);
+    assert_eq!(backend.sample_rate(), 44_100);
+
+    let mut samples = Vec::new();
+    let mut frames = 0;
+    while let Ok(true) = backend.next_chunk_into(&mut samples) {
+        frames += 1;
+        assert_eq!(samples.len(), 12 * 1024);
+        if frames >= 20 {
+            break;
+        }
+    }
+    assert!(frames >= 20);
 }

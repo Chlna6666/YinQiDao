@@ -14,9 +14,13 @@ pub enum BweMode {
     /// Multichannel/object path. `non_lfe_channels` is the number of coded signals participating in
     /// the equivalent-stereo bitrate calculation. A channel bed with one LFE subtracts that LFE;
     /// object channels are ordinary full-band signals and remain in the count.
-    Multichannel { non_lfe_channels: u16 },
+    Multichannel {
+        non_lfe_channels: u16,
+    },
     /// HOA uses dedicated bitrate tables selected by ambisonic order instead of equivalent CPE rate.
-    Hoa { order: u8 },
+    Hoa {
+        order: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,13 +230,7 @@ fn multichannel_config(rate_num: u64, rate_den: u64) -> BweConfig {
             &[0, 2, 4],
         )
     } else {
-        make_config(
-            mode,
-            &[672, 736, 832],
-            &[672, 832],
-            &[192],
-            &[0, 2],
-        )
+        make_config(mode, &[672, 736, 832], &[672, 832], &[192], &[0, 2])
     }
 }
 
@@ -253,13 +251,7 @@ fn hoa_config(order: u8, rate: u32) -> Result<BweConfig, CodecError> {
             &[144, 192],
             &[0, 2, 4],
         ),
-        (1, 256) => make_config(
-            mode,
-            &[672, 736, 832],
-            &[672, 832],
-            &[192],
-            &[0, 2],
-        ),
+        (1, 256) => make_config(mode, &[672, 736, 832], &[672, 832], &[192], &[0, 2]),
         (2, 192) => make_config(
             mode,
             &[352, 416, 480, 544, 736],
@@ -281,13 +273,9 @@ fn hoa_config(order: u8, rate: u32) -> Result<BweConfig, CodecError> {
             &[144, 192],
             &[0, 2, 4],
         ),
-        (2, 384 | 480) | (3, 640 | 896) => make_config(
-            mode,
-            &[672, 736, 832],
-            &[672, 832],
-            &[192],
-            &[0, 2],
-        ),
+        (2, 384 | 480) | (3, 640 | 896) => {
+            make_config(mode, &[672, 736, 832], &[672, 832], &[192], &[0, 2])
+        }
         _ => {
             return Err(CodecError::Unsupported(
                 "unsupported AVS3 HOA BWE order/bitrate combination",
@@ -358,8 +346,16 @@ mod tests {
 
     #[test]
     fn stereo_disables_above_128_kbps() {
-        assert!(BweConfig::for_bitrate(BweMode::Stereo, 128).unwrap().is_some());
-        assert!(BweConfig::for_bitrate(BweMode::Stereo, 129).unwrap().is_none());
+        assert!(
+            BweConfig::for_bitrate(BweMode::Stereo, 128)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            BweConfig::for_bitrate(BweMode::Stereo, 129)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

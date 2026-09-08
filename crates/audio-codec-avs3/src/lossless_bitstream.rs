@@ -12,8 +12,8 @@ pub use entropy::{
     LOSSLESS_ENTROPY_MODE_BITS, LosslessEntropyMode, decode_lossless_entropy_mode_at,
 };
 pub use frame::{
-    LOSSLESS_FRAME_ERROR_CHECK_BITS, LosslessAatfEnvelope,
-    decode_lossless_frame_error_check_at, parse_lossless_aatf_envelope,
+    LOSSLESS_FRAME_ERROR_CHECK_BITS, LosslessAatfEnvelope, decode_lossless_frame_error_check_at,
+    parse_lossless_aatf_envelope,
 };
 pub use lpc::{
     LOSSLESS_LPC_ORDER_MAX, LOSSLESS_LPC_ORDER_MIN, LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE,
@@ -26,24 +26,27 @@ pub use prepost::{
     lossless_residual_shift_plan,
 };
 pub use stereo::{
-    LosslessStereoDecorrelationMode, restore_lossless_anti_phase,
-    restore_lossless_stereo_in_place, restore_lossless_stereo_pair,
+    LosslessStereoDecorrelationMode, restore_lossless_anti_phase, restore_lossless_stereo_in_place,
+    restore_lossless_stereo_pair,
 };
 
 /// Standardized arithmetic-coding block counts exercised by the AVS2 Lossless conformance suite.
 ///
 /// This is a semantic value set only. It deliberately does not imply how `sbk_no` is represented
 /// on the wire inside `ll_raw_data_block()`.
+#[allow(dead_code)]
 pub const LOSSLESS_ARITHMETIC_BLOCK_COUNTS: [u8; 4] = [1, 2, 4, 8];
 
 /// Standardized lifting-wavelet levels exercised by the AVS2 Lossless conformance suite.
 ///
 /// This is a semantic value set only. The eventual syntax parser must obtain the field width and
 /// coding from the normative Chapter 8 syntax table rather than deriving it from this range.
+#[allow(dead_code)]
 pub const LOSSLESS_WAVELET_LEVELS: [u8; 2] = [0, 1];
 
 /// Validate the semantic arithmetic-coder block count without assuming its wire representation.
 #[inline]
+#[allow(dead_code)]
 pub fn validate_lossless_arithmetic_block_count(block_count: u8) -> Result<usize, CodecError> {
     if LOSSLESS_ARITHMETIC_BLOCK_COUNTS.contains(&block_count) {
         Ok(usize::from(block_count))
@@ -56,6 +59,7 @@ pub fn validate_lossless_arithmetic_block_count(block_count: u8) -> Result<usize
 
 /// Validate the semantic lifting-wavelet level without assuming its wire representation.
 #[inline]
+#[allow(dead_code)]
 pub fn validate_lossless_wavelet_level(level: u8) -> Result<usize, CodecError> {
     if LOSSLESS_WAVELET_LEVELS.contains(&level) {
         Ok(usize::from(level))
@@ -179,8 +183,7 @@ mod tests {
     #[test]
     fn decodes_base_rice_codeword_without_repacking() {
         // q=3 => 0001, m=2 remainder=2 => 10. Symbol = (3<<2)|2 = 14.
-        let (value, next) =
-            decode_lossless_rice_base_codeword_at(&[0b0001_1000], 0, 2).unwrap();
+        let (value, next) = decode_lossless_rice_base_codeword_at(&[0b0001_1000], 0, 2).unwrap();
         assert_eq!(value, 14);
         assert_eq!(next, 6);
     }
@@ -193,8 +196,14 @@ mod tests {
 
     #[test]
     fn restores_flattened_residual_with_direct_low_bits() {
-        assert_eq!(restore_lossless_flattened_residual(7, 3, 2, false).unwrap(), 31);
-        assert_eq!(restore_lossless_flattened_residual(7, 3, 2, true).unwrap(), -31);
+        assert_eq!(
+            restore_lossless_flattened_residual(7, 3, 2, false).unwrap(),
+            31
+        );
+        assert_eq!(
+            restore_lossless_flattened_residual(7, 3, 2, true).unwrap(),
+            -31
+        );
         assert!(restore_lossless_flattened_residual(7, 4, 2, false).is_err());
     }
 }

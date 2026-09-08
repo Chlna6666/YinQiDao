@@ -304,30 +304,34 @@ mod tests {
     fn basic_frontend_rejects_truncated_core_before_neural_work() {
         let mut workspace = BasicMonoNeuralWorkspace::new();
         let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_and_decode_basic_mono_neural_mdct(
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
+        assert!(
+            parse_and_decode_basic_mono_neural_mdct(
+                &[],
+                0,
+                false,
+                None,
+                &mut workspace,
+                &mut output,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn low_complexity_frontend_rejects_truncated_core_before_neural_work() {
         let mut workspace = BasicMonoNeuralWorkspace::new();
         let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_and_decode_mono_neural_mdct(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
+        assert!(
+            parse_and_decode_mono_neural_mdct(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                &mut workspace,
+                &mut output,
+            )
+            .is_err()
+        );
     }
 }

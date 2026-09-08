@@ -44,9 +44,7 @@ pub fn apply_stereo_ms_upmix(
     }
 
     let StereoCouplingSideInfo::Ms {
-        is_ms,
-        ild_q_idx,
-        ..
+        is_ms, ild_q_idx, ..
     } = side.coupling
     else {
         return Err(CodecError::Unsupported(

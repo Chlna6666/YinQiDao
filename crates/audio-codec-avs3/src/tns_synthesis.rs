@@ -181,12 +181,8 @@ mod tests {
         };
         let mut spectrum = [0.0_f32; MDCT_LINES];
         let mut workspace = TnsSynthesisWorkspace::new();
-        assert!(apply_inverse_tns(
-            &side,
-            TransformType::Long,
-            &mut spectrum,
-            &mut workspace,
-        )
-        .is_err());
+        assert!(
+            apply_inverse_tns(&side, TransformType::Long, &mut spectrum, &mut workspace,).is_err()
+        );
     }
 }

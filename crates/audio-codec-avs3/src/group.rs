@@ -97,7 +97,11 @@ pub fn inverse_group_spectrum(
         ));
     }
 
-    let transient_blocks = group.group_indicator.iter().filter(|&&other| !other).count();
+    let transient_blocks = group
+        .group_indicator
+        .iter()
+        .filter(|&&other| !other)
+        .count();
     let other_blocks = SHORT_BLOCKS - transient_blocks;
 
     if group.num_groups == 1 {
@@ -142,7 +146,11 @@ mod tests {
 
     #[test]
     fn non_short_windows_consume_no_bits() {
-        for transform in [TransformType::Long, TransformType::CutIn, TransformType::CutOut] {
+        for transform in [
+            TransformType::Long,
+            TransformType::CutIn,
+            TransformType::CutOut,
+        ] {
             let info = parse_group_bits_at(&[], 13, transform).unwrap();
             assert_eq!(info.num_groups, 1);
             assert_eq!(info.group_indicator, [false; 8]);
@@ -226,7 +234,10 @@ mod tests {
         inverse_group_spectrum(TransformType::Short, group, &mut grouped, &mut workspace).unwrap();
         for block in 0..SHORT_BLOCKS {
             for line in 0..SHORT_LINES {
-                assert_eq!(grouped[block + SHORT_BLOCKS * line], (block * 1000 + line) as f32);
+                assert_eq!(
+                    grouped[block + SHORT_BLOCKS * line],
+                    (block * 1000 + line) as f32
+                );
             }
         }
     }
@@ -240,12 +251,9 @@ mod tests {
         };
         let mut spectrum = [0.0_f32; MDCT_LINES];
         let mut workspace = SpectrumDegroupWorkspace::new();
-        assert!(inverse_group_spectrum(
-            TransformType::Short,
-            group,
-            &mut spectrum,
-            &mut workspace,
-        )
-        .is_err());
+        assert!(
+            inverse_group_spectrum(TransformType::Short, group, &mut spectrum, &mut workspace,)
+                .is_err()
+        );
     }
 }

@@ -19,7 +19,10 @@ impl<'a> BitReader<'a> {
     }
 
     pub(crate) fn bits_remaining(&self) -> usize {
-        self.bytes.len().saturating_mul(8).saturating_sub(self.bit_pos)
+        self.bytes
+            .len()
+            .saturating_mul(8)
+            .saturating_sub(self.bit_pos)
     }
 
     pub(crate) fn position_bits(&self) -> usize {

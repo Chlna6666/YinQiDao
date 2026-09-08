@@ -1,14 +1,13 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace, BweConfig,
-    BweSideInfo, BweSynthesisWorkspace, CoreSidePrefix, FdShapingWorkspace,
-    GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, LsfCodebooks, NeuralNetworkType,
-    SpectrumDegroupWorkspace, StereoSideInfo, TnsSynthesisWorkspace, apply_bwe_synthesis,
-    apply_inverse_fd_spectrum_shaping, apply_inverse_tns, apply_mcr_stereo_upmix,
-    apply_stereo_ms_upmix, decode_channel_neural_mdct, inverse_group_spectrum,
-    normative_lsf_codebooks, parse_stereo_frame_side_info, parse_stereo_mcr_frame_side_info,
-    synthesize_mdct_frame,
+    Avs3SynthesisWorkspace, BASE_OUTPUT_POSITIONS, BasicMonoNeuralWorkspace, BweConfig,
+    BweSideInfo, BweSynthesisWorkspace, CoreSidePrefix, FdShapingWorkspace, GaStereoFrameSideInfo,
+    GaStereoMcrFrameSideInfo, LsfCodebooks, NeuralNetworkType, SpectrumDegroupWorkspace,
+    StereoSideInfo, TnsSynthesisWorkspace, apply_bwe_synthesis, apply_inverse_fd_spectrum_shaping,
+    apply_inverse_tns, apply_mcr_stereo_upmix, apply_stereo_ms_upmix, decode_channel_neural_mdct,
+    inverse_group_spectrum, normative_lsf_codebooks, parse_stereo_frame_side_info,
+    parse_stereo_mcr_frame_side_info, synthesize_mdct_frame,
 };
 
 const STEREO_CHANNELS: usize = 2;
@@ -104,18 +103,8 @@ fn post_synthesize_channel(
     }
 
     apply_inverse_tns(&core.tns, core.transform_type, spectrum, tns_workspace)?;
-    apply_inverse_fd_spectrum_shaping(
-        &core.fd_shaping,
-        codebooks,
-        spectrum,
-        fd_workspace,
-    )?;
-    synthesize_mdct_frame(
-        core.transform_type,
-        spectrum,
-        pcm,
-        synthesis_workspace,
-    )
+    apply_inverse_fd_spectrum_shaping(&core.fd_shaping, codebooks, spectrum, fd_workspace)?;
+    synthesize_mdct_frame(core.transform_type, spectrum, pcm, synthesis_workspace)
 }
 
 fn decode_conventional_stereo(
@@ -240,10 +229,13 @@ pub fn parse_decode_stereo_pcm(
                 )?;
             }
             GaStereoPcmSideInfo {
-                channels: frame.channels.each_ref().map(|channel| GaStereoPcmChannelInfo {
-                    core: channel.core,
-                    bwe: channel.bwe,
-                }),
+                channels: frame
+                    .channels
+                    .each_ref()
+                    .map(|channel| GaStereoPcmChannelInfo {
+                        core: channel.core,
+                        bwe: channel.bwe,
+                    }),
                 stereo: frame.stereo,
                 is_mcr: false,
                 next_bit_offset: frame.next_bit_offset,
@@ -331,33 +323,37 @@ mod tests {
     fn rejects_non_interleaved_output_geometry_before_parsing() {
         let mut workspace = BasicStereoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_stereo_pcm(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            64,
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_stereo_pcm(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                64,
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn truncated_low_complexity_mcr_payload_selects_mcr_layout() {
         let mut workspace = BasicStereoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; STEREO_PCM_SAMPLES];
-        assert!(parse_decode_stereo_pcm(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            32,
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_stereo_pcm(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                32,
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 }

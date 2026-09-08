@@ -5,6 +5,16 @@
 //! evolve independently and be tested on desktop and mobile targets. No FFmpeg process or native
 //! codec DLL is required.
 
+#![allow(
+    clippy::too_many_arguments,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::needless_range_loop,
+    clippy::doc_lazy_continuation,
+    clippy::manual_is_multiple_of
+)]
+
+pub mod engine;
+
 mod allocation;
 mod base_b10;
 mod base_neural;
@@ -29,11 +39,11 @@ mod frame;
 mod ga;
 mod ga_frame;
 mod ga_hoa_pcm;
-mod ga_multichannel_pcm;
 mod ga_mono;
 mod ga_mono_neural;
 mod ga_mono_pcm;
 mod ga_mono_post;
+mod ga_multichannel_pcm;
 mod ga_stereo;
 mod ga_stereo_pcm;
 mod group;
@@ -69,10 +79,9 @@ pub use base_neural::{
 };
 pub use base_normative::decode_basic_base_to_mdct_normative;
 pub use base_params::{
-    BASE_LAYER_1_BIAS, BASE_LAYER_1_IGDN_BETA, BASE_LAYER_1_IGDN_GAMMA,
-    BASE_LAYER_1_KERNEL, BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA,
-    BASE_LAYER_2_IGDN_GAMMA, BASE_LAYER_2_KERNEL, BASE_LAYER_3_BIAS,
-    BASE_LAYER_3_IGDN_BETA, BASE_LAYER_3_IGDN_GAMMA, BASE_LAYER_3_KERNEL,
+    BASE_LAYER_1_BIAS, BASE_LAYER_1_IGDN_BETA, BASE_LAYER_1_IGDN_GAMMA, BASE_LAYER_1_KERNEL,
+    BASE_LAYER_2_BIAS, BASE_LAYER_2_IGDN_BETA, BASE_LAYER_2_IGDN_GAMMA, BASE_LAYER_2_KERNEL,
+    BASE_LAYER_3_BIAS, BASE_LAYER_3_IGDN_BETA, BASE_LAYER_3_IGDN_GAMMA, BASE_LAYER_3_KERNEL,
     BASE_LAYER_4_BIAS, BASE_LAYER_4_KERNEL, base_decoder_params,
 };
 pub use base_pipeline::{
@@ -88,20 +97,18 @@ pub use config::{
 };
 pub use container::{Av3aSampleEntry, probe_av3a_bytes, probe_av3a_path};
 pub use context_params::{
-    CONTEXT_LAYER_1_BIAS, CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_2_BIAS,
-    CONTEXT_LAYER_2_KERNEL, CONTEXT_LAYER_3_BIAS, CONTEXT_LAYER_3_KERNEL,
-    context_decoder_params,
+    CONTEXT_LAYER_1_BIAS, CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_2_BIAS, CONTEXT_LAYER_2_KERNEL,
+    CONTEXT_LAYER_3_BIAS, CONTEXT_LAYER_3_KERNEL, context_decoder_params,
 };
 pub use context_pipeline::{
     ContextModelParams, ContextPipelineWorkspace, decode_context_and_select_base_models,
     decode_context_and_select_base_models_default, decode_context_stddev_into,
-    default_context_model_params, dequantize_context_latents_into,
-    select_base_range_models_into,
+    default_context_model_params, dequantize_context_latents_into, select_base_range_models_into,
 };
 pub use core::{
-    CoreSidePrefix, FdShapingSideInfo, TnsSideBoundary, TransformType,
-    parse_core_side_prefix_at, parse_core_transform_type, parse_core_transform_type_at,
-    parse_fd_shaping_at, parse_tns_boundary_at,
+    CoreSidePrefix, FdShapingSideInfo, TnsSideBoundary, TransformType, parse_core_side_prefix_at,
+    parse_core_transform_type, parse_core_transform_type_at, parse_fd_shaping_at,
+    parse_tns_boundary_at,
 };
 pub use decoder::Avs3Decoder;
 pub use dynamic_metadata::{
@@ -114,12 +121,11 @@ pub use entropy::{
     decode_context_latents_into,
 };
 pub use fd_lsf::{
-    FD_SHAPING_SFB_BOUNDARIES, FD_SHAPING_SUBBANDS, LSF_MEAN, LSF_ORDER,
-    LsfCodebook, LsfCodebooks, dequantize_lsf,
+    FD_SHAPING_SFB_BOUNDARIES, FD_SHAPING_SUBBANDS, LSF_MEAN, LSF_ORDER, LsfCodebook, LsfCodebooks,
+    dequantize_lsf,
 };
 pub use fd_lsf_tables::{
-    FD_LSF_TABLE_BYTES, FD_LSF_TABLE_FNV1A, FD_LSF_TABLE_VALUES,
-    normative_lsf_codebooks,
+    FD_LSF_TABLE_BYTES, FD_LSF_TABLE_FNV1A, FD_LSF_TABLE_VALUES, normative_lsf_codebooks,
 };
 pub use fd_shaping::{
     FdShapingWorkspace, apply_inverse_fd_spectrum_shaping, lsf_to_lsp, lsp_to_lpc,
@@ -132,27 +138,26 @@ pub use ga_frame::{
 pub use ga_hoa_pcm::{
     HoaTransportSynthesisWorkspace, apply_inverse_hoa_dmx, decode_hoa_transport_frame,
 };
-pub use ga_multichannel_pcm::{
-    BasicMultichannelSynthesisWorkspace, MC_LFE_RESERVED_LINES,
-    apply_multichannel_lfe_restriction, parse_decode_basic_multichannel_pcm,
-    parse_decode_multichannel_pcm,
-};
 pub use ga_mono::{GaMonoFrameSideInfo, parse_mono_frame_side_info};
 pub use ga_mono_neural::{
-    BasicMonoNeuralWorkspace, decode_basic_channel_neural_mdct,
-    decode_basic_mono_neural_mdct, decode_channel_neural_mdct,
-    decode_channel_neural_mdct_with_noise_fill_lines, decode_low_complexity_mono_neural_mdct,
-    parse_and_decode_basic_mono_neural_mdct, parse_and_decode_mono_neural_mdct,
+    BasicMonoNeuralWorkspace, decode_basic_channel_neural_mdct, decode_basic_mono_neural_mdct,
+    decode_channel_neural_mdct, decode_channel_neural_mdct_with_noise_fill_lines,
+    decode_low_complexity_mono_neural_mdct, parse_and_decode_basic_mono_neural_mdct,
+    parse_and_decode_mono_neural_mdct,
 };
 pub use ga_mono_pcm::{parse_decode_basic_mono_pcm, parse_decode_mono_pcm};
 pub use ga_mono_post::{
     BasicMonoPreFdWorkspace, BasicMonoSynthesisWorkspace, parse_decode_basic_mono_pre_fd,
     parse_decode_mono_pcm_with_codebooks, parse_decode_mono_pre_fd,
 };
+pub use ga_multichannel_pcm::{
+    BasicMultichannelSynthesisWorkspace, MC_LFE_RESERVED_LINES, apply_multichannel_lfe_restriction,
+    parse_decode_basic_multichannel_pcm, parse_decode_multichannel_pcm,
+};
 pub use ga_stereo::{
-    GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, StereoCouplingSideInfo,
-    StereoSideInfo, allocate_stereo_mcr_bytes, allocate_stereo_ms_bytes,
-    parse_stereo_frame_side_info, parse_stereo_mcr_frame_side_info, parse_stereo_side_info_at,
+    GaStereoFrameSideInfo, GaStereoMcrFrameSideInfo, StereoCouplingSideInfo, StereoSideInfo,
+    allocate_stereo_mcr_bytes, allocate_stereo_ms_bytes, parse_stereo_frame_side_info,
+    parse_stereo_mcr_frame_side_info, parse_stereo_side_info_at,
 };
 pub use ga_stereo_pcm::{
     BasicStereoSynthesisWorkspace, GaStereoPcmChannelInfo, GaStereoPcmSideInfo,
@@ -162,16 +167,16 @@ pub use group::{
     GroupSideInfo, SpectrumDegroupWorkspace, inverse_group_spectrum, parse_group_bits_at,
 };
 pub use hoa_side::{
-    HOA_BASIS_TABLE_LEN, HOA_NO_ILD_INDEX, HOA_SCALE_FACTOR_BANDS, HOA_SFB_BOUNDARIES,
-    GaHoaFrameSideInfo, HoaBitAllocation, HoaConfig, HoaDmxMode, HoaGroupConfig,
-    HoaGroupSideInfo, HoaPairSideInfo, HoaSideInfo, MAX_HOA_BASIS, MAX_HOA_GROUP_PAIRS,
-    MAX_HOA_GROUPS, allocate_hoa_bytes, hoa_pair_index_bits, parse_hoa_frame_side_info,
-    parse_hoa_side_info_at, resolve_hoa_pair_index,
+    GaHoaFrameSideInfo, HOA_BASIS_TABLE_LEN, HOA_NO_ILD_INDEX, HOA_SCALE_FACTOR_BANDS,
+    HOA_SFB_BOUNDARIES, HoaBitAllocation, HoaConfig, HoaDmxMode, HoaGroupConfig, HoaGroupSideInfo,
+    HoaPairSideInfo, HoaSideInfo, MAX_HOA_BASIS, MAX_HOA_GROUP_PAIRS, MAX_HOA_GROUPS,
+    allocate_hoa_bytes, hoa_pair_index_bits, parse_hoa_frame_side_info, parse_hoa_side_info_at,
+    resolve_hoa_pair_index,
 };
 pub use hoa_synthesis::{
-    HOA_FRAME_SAMPLES, HOA_OVERLAP_SIZE, HOA_SPATIAL_TABLE_BYTES_LEN,
-    HOA_SPATIAL_TABLE_FNV1A, HoaPostSynthesisWorkspace, HoaSynthesisWorkspace,
-    hoa_basis_coefficients, hoa_spatial_table_bytes, parse_decode_hoa_pcm,
+    HOA_FRAME_SAMPLES, HOA_OVERLAP_SIZE, HOA_SPATIAL_TABLE_BYTES_LEN, HOA_SPATIAL_TABLE_FNV1A,
+    HoaPostSynthesisWorkspace, HoaSynthesisWorkspace, hoa_basis_coefficients,
+    hoa_spatial_table_bytes, parse_decode_hoa_pcm,
 };
 pub use hoa_transform::{HOA_TRANSFORM_BINS, HOA_TRANSFORM_LEN, HoaTransformWorkspace};
 pub use imdct_synthesis::{Avs3SynthesisWorkspace, synthesize_mdct_frame};
@@ -192,26 +197,22 @@ pub use lossless_bitstream::{
     decode_lossless_frame_error_check_at, decode_lossless_rice_base_codeword_at,
     dequantize_lossless_uniform_parcor_q20, dequantize_lossless_uniform_parcor_tail_q20,
     lossless_ra_shift, lossless_ra_shift12, lossless_residual_shift_plan,
-    parse_lossless_aatf_envelope, restore_lossless_anti_phase,
-    restore_lossless_flattened_residual, restore_lossless_stereo_in_place,
-    restore_lossless_stereo_pair, validate_lossless_lpc_order,
+    parse_lossless_aatf_envelope, restore_lossless_anti_phase, restore_lossless_flattened_residual,
+    restore_lossless_stereo_in_place, restore_lossless_stereo_pair, validate_lossless_lpc_order,
 };
 pub use lossless_primitives::{
-    LOSSLESS_RICE_BLOCK_SIZES, LOSSLESS_RICE_MAX_PREFIX, LOSSLESS_RICE_WINDOW,
-    LosslessRiceState, lossless_rice_escape_parameter, lossless_rice_map_signed,
-    lossless_rice_split, lossless_rice_unmap_signed, merge_lossless_lifting_branches,
-    restore_lossless_mid_side, restore_lossless_mid_side_in_place,
-    validate_lossless_rice_block_size,
+    LOSSLESS_RICE_BLOCK_SIZES, LOSSLESS_RICE_MAX_PREFIX, LOSSLESS_RICE_WINDOW, LosslessRiceState,
+    lossless_rice_escape_parameter, lossless_rice_map_signed, lossless_rice_split,
+    lossless_rice_unmap_signed, merge_lossless_lifting_branches, restore_lossless_mid_side,
+    restore_lossless_mid_side_in_place, validate_lossless_rice_block_size,
 };
 pub use mcac_synthesis::{
-    MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor,
-    resolve_multichannel_pair_index,
+    MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor, resolve_multichannel_pair_index,
 };
 pub use mcr_synthesis::{
-    MCR_LONG_CODEBOOK_ENTRIES, MCR_ROTATION_BYTES_LEN, MCR_ROTATION_FNV1A,
-    MCR_ROTATION_VALUES, MCR_SCALE_FACTOR_BANDS, MCR_SHORT_CODEBOOK_ENTRIES,
-    MCR_SUBSPECTRA, MCR_SUBVECTOR_DIMENSIONS, MCR_SUBVECTORS, apply_mcr_stereo_upmix,
-    mcr_rotation_bytes,
+    MCR_LONG_CODEBOOK_ENTRIES, MCR_ROTATION_BYTES_LEN, MCR_ROTATION_FNV1A, MCR_ROTATION_VALUES,
+    MCR_SCALE_FACTOR_BANDS, MCR_SHORT_CODEBOOK_ENTRIES, MCR_SUBSPECTRA, MCR_SUBVECTOR_DIMENSIONS,
+    MCR_SUBVECTORS, apply_mcr_stereo_upmix, mcr_rotation_bytes,
 };
 pub use metadata::{MetadataBoundary, parse_metadata_boundary};
 pub use metadata_prefix::{
@@ -242,7 +243,7 @@ pub use range_tables::{
 pub use stereo_synthesis::apply_stereo_ms_upmix;
 pub use synthesis::{apply_window_in_place, overlap_add, scale_pcm_in_place, spectral_dot};
 pub use tns::{
-    TNS_REFLECTION_COEFFICIENTS, TnsFilterSideInfo, TnsSideInfo,
-    parse_tns_side_info_at, reflection_coefficient,
+    TNS_REFLECTION_COEFFICIENTS, TnsFilterSideInfo, TnsSideInfo, parse_tns_side_info_at,
+    reflection_coefficient,
 };
 pub use tns_synthesis::{TnsSynthesisWorkspace, apply_inverse_tns};

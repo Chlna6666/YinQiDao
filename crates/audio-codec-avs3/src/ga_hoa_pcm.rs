@@ -1,9 +1,9 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace,
-    BweSynthesisWorkspace, FdShapingWorkspace, GaHoaFrameSideInfo, HoaConfig, HoaSideInfo,
-    NeuralNetworkType, SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
+    Avs3SynthesisWorkspace, BASE_OUTPUT_POSITIONS, BasicMonoNeuralWorkspace, BweSynthesisWorkspace,
+    FdShapingWorkspace, GaHoaFrameSideInfo, HoaConfig, HoaSideInfo, NeuralNetworkType,
+    SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
     apply_inverse_fd_spectrum_shaping, apply_inverse_tns,
     decode_channel_neural_mdct_with_noise_fill_lines, inverse_group_spectrum, mc_ild_factor,
     normative_lsf_codebooks, parse_hoa_frame_side_info, synthesize_mdct_frame,
@@ -77,9 +77,17 @@ fn two_spectra_mut(
     spectra: &mut [[f32; BASE_OUTPUT_POSITIONS]],
     first: usize,
     second: usize,
-) -> Result<(&mut [f32; BASE_OUTPUT_POSITIONS], &mut [f32; BASE_OUTPUT_POSITIONS]), CodecError> {
+) -> Result<
+    (
+        &mut [f32; BASE_OUTPUT_POSITIONS],
+        &mut [f32; BASE_OUTPUT_POSITIONS],
+    ),
+    CodecError,
+> {
     if first == second || first >= spectra.len() || second >= spectra.len() {
-        return Err(CodecError::InvalidData("invalid HOA transport-channel pair"));
+        return Err(CodecError::InvalidData(
+            "invalid HOA transport-channel pair",
+        ));
     }
     if first < second {
         let (before_second, from_second) = spectra.split_at_mut(second);
@@ -171,17 +179,10 @@ pub fn decode_hoa_transport_frame(
     total_bitrate_kbps: u32,
     workspace: &mut HoaTransportSynthesisWorkspace,
 ) -> Result<GaHoaFrameSideInfo, CodecError> {
-    let side = parse_hoa_frame_side_info(
-        payload,
-        core_bit_offset,
-        order,
-        total_bitrate_kbps,
-        nn_type,
-    )?;
+    let side =
+        parse_hoa_frame_side_info(payload, core_bit_offset, order, total_bitrate_kbps, nn_type)?;
     let channel_count = usize::from(side.config.transport_channels);
-    if side.channels.len() != channel_count
-        || side.channel_bwe_configs.len() != channel_count
-    {
+    if side.channels.len() != channel_count || side.channel_bwe_configs.len() != channel_count {
         return Err(CodecError::Internal(
             "HOA frame parser returned inconsistent transport geometry".into(),
         ));
@@ -308,14 +309,9 @@ mod tests {
     #[test]
     fn transport_frontend_rejects_truncated_payload_before_neural_decode() {
         let mut workspace = HoaTransportSynthesisWorkspace::new();
-        assert!(decode_hoa_transport_frame(
-            NeuralNetworkType::Basic,
-            &[],
-            0,
-            1,
-            96,
-            &mut workspace,
-        )
-        .is_err());
+        assert!(
+            decode_hoa_transport_frame(NeuralNetworkType::Basic, &[], 0, 1, 96, &mut workspace,)
+                .is_err()
+        );
     }
 }

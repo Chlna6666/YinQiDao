@@ -107,19 +107,18 @@ pub fn parse_aatf_frame_header(packet: &[u8]) -> Result<AatfFrameHeader, CodecEr
     }
 
     let sampling_frequency_index = reader.read_bits(4)? as u8;
-    let explicit_sample_rate = if coding_method == AudioCodingMethod::Lossless
-        && sampling_frequency_index == 0xF
-    {
-        let sample_rate = reader.read_bits(24)?;
-        if sample_rate == 0xFF_FFFF {
-            return Err(CodecError::InvalidData(
-                "reserved explicit AATF sampling frequency",
-            ));
-        }
-        Some(sample_rate)
-    } else {
-        None
-    };
+    let explicit_sample_rate =
+        if coding_method == AudioCodingMethod::Lossless && sampling_frequency_index == 0xF {
+            let sample_rate = reader.read_bits(24)?;
+            if sample_rate == 0xFF_FFFF {
+                return Err(CodecError::InvalidData(
+                    "reserved explicit AATF sampling frequency",
+                ));
+            }
+            Some(sample_rate)
+        } else {
+            None
+        };
     let sample_rate = match coding_method {
         AudioCodingMethod::GeneralFullRate => full_rate_sample_rate(sampling_frequency_index),
         AudioCodingMethod::Lossless => {
@@ -242,7 +241,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {

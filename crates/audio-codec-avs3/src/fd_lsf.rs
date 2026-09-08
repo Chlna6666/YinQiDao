@@ -5,11 +5,9 @@ use crate::FdShapingSideInfo;
 pub const LSF_ORDER: usize = 16;
 pub const FD_SHAPING_SUBBANDS: usize = 49;
 pub const FD_SHAPING_SFB_BOUNDARIES: [u16; FD_SHAPING_SUBBANDS + 1] = [
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36,
-    40, 48, 56, 64, 72, 80, 88, 96, 108, 120,
-    132, 144, 160, 176, 196, 216, 240, 264, 292, 320,
-    352, 384, 416, 448, 480, 512, 544, 576, 608, 640,
-    672, 704, 736, 768, 800, 832, 864, 896, 928, 1024,
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 108, 120, 132, 144, 160,
+    176, 196, 216, 240, 264, 292, 320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704,
+    736, 768, 800, 832, 864, 896, 928, 1024,
 ];
 
 /// GY/T 363-2023 Annex B table B.46.
@@ -17,14 +15,22 @@ pub const FD_SHAPING_SFB_BOUNDARIES: [u16; FD_SHAPING_SUBBANDS + 1] = [
 /// The published decimal values are materialized as binary32 constants once in source so the
 /// decoder never parses text or allocates model data at runtime.
 pub const LSF_MEAN: [f32; LSF_ORDER] = [
-    f32::from_bits(0x444C_20B4), f32::from_bits(0x450B_7D3A),
-    f32::from_bits(0x4563_F247), f32::from_bits(0x459E_33AA),
-    f32::from_bits(0x45CA_6E31), f32::from_bits(0x45F6_A8B7),
-    f32::from_bits(0x4611_719F), f32::from_bits(0x4627_8EE2),
-    f32::from_bits(0x463D_AC25), f32::from_bits(0x4653_C969),
-    f32::from_bits(0x4669_E6AC), f32::from_bits(0x4680_01F7),
-    f32::from_bits(0x468B_1099), f32::from_bits(0x4696_1F3B),
-    f32::from_bits(0x46A1_2DDC), f32::from_bits(0x46AC_3C7E),
+    f32::from_bits(0x444C_20B4),
+    f32::from_bits(0x450B_7D3A),
+    f32::from_bits(0x4563_F247),
+    f32::from_bits(0x459E_33AA),
+    f32::from_bits(0x45CA_6E31),
+    f32::from_bits(0x45F6_A8B7),
+    f32::from_bits(0x4611_719F),
+    f32::from_bits(0x4627_8EE2),
+    f32::from_bits(0x463D_AC25),
+    f32::from_bits(0x4653_C969),
+    f32::from_bits(0x4669_E6AC),
+    f32::from_bits(0x4680_01F7),
+    f32::from_bits(0x468B_1099),
+    f32::from_bits(0x4696_1F3B),
+    f32::from_bits(0x46A1_2DDC),
+    f32::from_bits(0x46AC_3C7E),
 ];
 
 const LSF_MIN_GAP_HZ: f32 = 50.0;
@@ -51,20 +57,60 @@ struct SubvectorSpec {
 }
 
 const STAGE1_SPECS: [SubvectorSpec; 2] = [
-    SubvectorSpec { start: 0, dimension: 9, entries: 256 },
-    SubvectorSpec { start: 9, dimension: 7, entries: 256 },
+    SubvectorSpec {
+        start: 0,
+        dimension: 9,
+        entries: 256,
+    },
+    SubvectorSpec {
+        start: 9,
+        dimension: 7,
+        entries: 256,
+    },
 ];
 const HIGH_STAGE2_SPECS: [SubvectorSpec; 5] = [
-    SubvectorSpec { start: 0, dimension: 3, entries: 128 },
-    SubvectorSpec { start: 3, dimension: 3, entries: 128 },
-    SubvectorSpec { start: 6, dimension: 3, entries: 64 },
-    SubvectorSpec { start: 9, dimension: 3, entries: 32 },
-    SubvectorSpec { start: 12, dimension: 4, entries: 32 },
+    SubvectorSpec {
+        start: 0,
+        dimension: 3,
+        entries: 128,
+    },
+    SubvectorSpec {
+        start: 3,
+        dimension: 3,
+        entries: 128,
+    },
+    SubvectorSpec {
+        start: 6,
+        dimension: 3,
+        entries: 64,
+    },
+    SubvectorSpec {
+        start: 9,
+        dimension: 3,
+        entries: 32,
+    },
+    SubvectorSpec {
+        start: 12,
+        dimension: 4,
+        entries: 32,
+    },
 ];
 const LOW_STAGE2_SPECS: [SubvectorSpec; 3] = [
-    SubvectorSpec { start: 0, dimension: 5, entries: 128 },
-    SubvectorSpec { start: 5, dimension: 4, entries: 128 },
-    SubvectorSpec { start: 9, dimension: 7, entries: 64 },
+    SubvectorSpec {
+        start: 0,
+        dimension: 5,
+        entries: 128,
+    },
+    SubvectorSpec {
+        start: 5,
+        dimension: 4,
+        entries: 128,
+    },
+    SubvectorSpec {
+        start: 9,
+        dimension: 7,
+        entries: 64,
+    },
 ];
 
 fn codeword<'a>(
@@ -75,18 +121,24 @@ fn codeword<'a>(
     let expected = spec
         .entries
         .checked_mul(spec.dimension)
-        .ok_or(CodecError::InvalidData("LSF codebook geometry overflows address space"))?;
+        .ok_or(CodecError::InvalidData(
+            "LSF codebook geometry overflows address space",
+        ))?;
     if table.values.len() != expected {
         return Err(CodecError::InvalidData(
             "LSF codebook length does not match Annex B geometry",
         ));
     }
     if table.values.iter().any(|value| !value.is_finite()) {
-        return Err(CodecError::InvalidData("LSF codebook contains a non-finite value"));
+        return Err(CodecError::InvalidData(
+            "LSF codebook contains a non-finite value",
+        ));
     }
     let index = usize::from(index);
     if index >= spec.entries {
-        return Err(CodecError::InvalidData("LSF VQ index exceeds codebook size"));
+        return Err(CodecError::InvalidData(
+            "LSF VQ index exceeds codebook size",
+        ));
     }
     let start = index * spec.dimension;
     Ok(&table.values[start..start + spec.dimension])
@@ -97,7 +149,9 @@ fn require_index(side: &FdShapingSideInfo, slot: usize) -> Result<u8, CodecError
         .get(slot)
         .copied()
         .flatten()
-        .ok_or(CodecError::InvalidData("frequency shaping is missing an LSF VQ index"))
+        .ok_or(CodecError::InvalidData(
+            "frequency shaping is missing an LSF VQ index",
+        ))
 }
 
 fn decode_stage1(
@@ -121,7 +175,11 @@ fn add_stage2<const N: usize>(
 ) -> Result<(), CodecError> {
     for slot in 0..N {
         let spec = specs[slot];
-        let vector = codeword(tables[slot], spec, require_index(side, index_offset + slot)?)?;
+        let vector = codeword(
+            tables[slot],
+            spec,
+            require_index(side, index_offset + slot)?,
+        )?;
         for (destination, residual) in output[spec.start..spec.start + spec.dimension]
             .iter_mut()
             .zip(vector)
@@ -179,7 +237,9 @@ pub fn dequantize_lsf(
         *value += mean;
     }
     if output.iter().any(|value| !value.is_finite()) {
-        return Err(CodecError::InvalidData("inverse-quantized LSF contains a non-finite value"));
+        return Err(CodecError::InvalidData(
+            "inverse-quantized LSF contains a non-finite value",
+        ));
     }
 
     stabilize_lsf(output);
@@ -206,7 +266,11 @@ mod tests {
         assert_eq!(FD_SHAPING_SFB_BOUNDARIES.len(), 50);
         assert_eq!(FD_SHAPING_SFB_BOUNDARIES[0], 0);
         assert_eq!(FD_SHAPING_SFB_BOUNDARIES[49], 1024);
-        assert!(FD_SHAPING_SFB_BOUNDARIES.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            FD_SHAPING_SFB_BOUNDARIES
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
         assert_eq!(LSF_MEAN[0].to_bits(), 0x444C_20B4);
         assert_eq!(LSF_MEAN[15].to_bits(), 0x46AC_3C7E);
     }
@@ -217,7 +281,10 @@ mod tests {
         stabilize_lsf(&mut lsf);
         assert_eq!(lsf[LSF_ORDER - 1], 23_950.0);
         assert_eq!(lsf[0], 23_200.0);
-        assert!(lsf.windows(2).all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ));
+        assert!(
+            lsf.windows(2)
+                .all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ)
+        );
     }
 
     #[test]
@@ -233,21 +300,38 @@ mod tests {
         let codebooks = LsfCodebooks {
             high_stage1: [LsfCodebook { values: &h11 }, LsfCodebook { values: &h12 }],
             high_stage2: [
-                LsfCodebook { values: &h21 }, LsfCodebook { values: &h22 },
-                LsfCodebook { values: &h23 }, LsfCodebook { values: &h24 },
+                LsfCodebook { values: &h21 },
+                LsfCodebook { values: &h22 },
+                LsfCodebook { values: &h23 },
+                LsfCodebook { values: &h24 },
                 LsfCodebook { values: &h25 },
             ],
-            low_stage1: [LsfCodebook { values: &dummy }, LsfCodebook { values: &dummy }],
+            low_stage1: [
+                LsfCodebook { values: &dummy },
+                LsfCodebook { values: &dummy },
+            ],
             low_stage2: [LsfCodebook { values: &dummy }; 3],
         };
         let side = FdShapingSideInfo {
             low_bitrate_precision: false,
-            lsf_vq_indices: [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7)],
+            lsf_vq_indices: [
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                Some(7),
+            ],
             next_bit_offset: 0,
         };
         let mut output = [0.0_f32; LSF_ORDER];
         dequantize_lsf(&side, codebooks, &mut output).unwrap();
-        assert!(output.windows(2).all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ));
+        assert!(
+            output
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] >= LSF_MIN_GAP_HZ)
+        );
         assert!(output[15] <= LSF_NYQUIST_HZ - LSF_MIN_GAP_HZ);
     }
 
@@ -264,7 +348,8 @@ mod tests {
             high_stage2: [LsfCodebook { values: &dummy }; 5],
             low_stage1: [LsfCodebook { values: &s11 }, LsfCodebook { values: &s12 }],
             low_stage2: [
-                LsfCodebook { values: &s21 }, LsfCodebook { values: &s22 },
+                LsfCodebook { values: &s21 },
+                LsfCodebook { values: &s22 },
                 LsfCodebook { values: &s23 },
             ],
         };

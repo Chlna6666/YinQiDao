@@ -64,9 +64,7 @@ pub fn parse_qc_side_info_at(
             Some(reader.read_bits(7)? as u8),
             None,
         ),
-        NeuralNetworkType::LowComplexity => {
-            (None, None, Some(reader.read_bits(8)? as u8))
-        }
+        NeuralNetworkType::LowComplexity => (None, None, Some(reader.read_bits(8)? as u8)),
         NeuralNetworkType::Reserved(_) => {
             return Err(CodecError::Unsupported(
                 "reserved AVS3 neural-network type in DecodeQcBits",
@@ -125,7 +123,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {
@@ -144,8 +145,14 @@ mod tests {
 
     #[test]
     fn fixed_header_size_tracks_group_count() {
-        assert_eq!(qc_fixed_header_bits(NeuralNetworkType::Basic, 1).unwrap(), 19);
-        assert_eq!(qc_fixed_header_bits(NeuralNetworkType::Basic, 2).unwrap(), 22);
+        assert_eq!(
+            qc_fixed_header_bits(NeuralNetworkType::Basic, 1).unwrap(),
+            19
+        );
+        assert_eq!(
+            qc_fixed_header_bits(NeuralNetworkType::Basic, 2).unwrap(),
+            22
+        );
         assert_eq!(
             qc_fixed_header_bits(NeuralNetworkType::LowComplexity, 2).unwrap(),
             22
@@ -166,14 +173,8 @@ mod tests {
         writer.push(0x123456, 24);
         let expected_end = writer.bit_pos;
 
-        let info = parse_qc_side_info_at(
-            &writer.bytes,
-            start,
-            NeuralNetworkType::Basic,
-            2,
-            5,
-        )
-        .unwrap();
+        let info =
+            parse_qc_side_info_at(&writer.bytes, start, NeuralNetworkType::Basic, 2, 5).unwrap();
         assert_eq!(info.is_feat_amplified, Some(true));
         assert_eq!(info.scale_q_idx, Some(77));
         assert_eq!(info.nf_param_q_idx, [Some(3), Some(5)]);
@@ -191,13 +192,7 @@ mod tests {
         writer.push(0, 3);
         writer.push(1, 8); // contextNumBytes=1, but channelBytes=0
         assert_eq!(
-            parse_qc_side_info_at(
-                &writer.bytes,
-                0,
-                NeuralNetworkType::Basic,
-                1,
-                0,
-            ),
+            parse_qc_side_info_at(&writer.bytes, 0, NeuralNetworkType::Basic, 1, 0,),
             Err(CodecError::InvalidData(
                 "DecodeQcBits contextNumBytes exceeds allocated channelBytes"
             ))

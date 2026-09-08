@@ -3,7 +3,10 @@ use std::{f32::consts::PI, fmt, sync::Arc};
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use yinqidao_codec_core::CodecError;
 
-use crate::{TransformType, synthesis::{apply_window_in_place, overlap_add}};
+use crate::{
+    TransformType,
+    synthesis::{apply_window_in_place, overlap_add},
+};
 
 const FRAME_LINES: usize = 1024;
 const LONG_TIME_LEN: usize = FRAME_LINES * 2;
@@ -104,7 +107,10 @@ impl Avs3SynthesisWorkspace {
                 apply_window_in_place(&mut self.long_time[..FRAME_LINES], &self.long_left);
                 let short_start = FRAME_LINES + TRANSITION_PADDING;
                 let short_end = short_start + SHORT_LINES;
-                apply_window_in_place(&mut self.long_time[short_start..short_end], &self.short_right);
+                apply_window_in_place(
+                    &mut self.long_time[short_start..short_end],
+                    &self.short_right,
+                );
                 self.long_time[short_end..].fill(0.0);
             }
             TransformType::CutOut => {
@@ -239,11 +245,15 @@ fn inverse_mdct_into(
     }
     let fft_len = n / 4;
     if ifft.len() != fft_len || fft_buffer.len() < fft_len {
-        return Err(CodecError::Internal("IMDCT FFT workspace geometry mismatch".into()));
+        return Err(CodecError::Internal(
+            "IMDCT FFT workspace geometry mismatch".into(),
+        ));
     }
     let scratch_len = ifft.get_inplace_scratch_len();
     if scratch.len() < scratch_len {
-        return Err(CodecError::Internal("IMDCT FFT scratch buffer is too small".into()));
+        return Err(CodecError::Internal(
+            "IMDCT FFT scratch buffer is too small".into(),
+        ));
     }
 
     let frequency = 2.0 * PI / n as f32;
@@ -262,10 +272,7 @@ fn inverse_mdct_into(
         sin_phase = next_sin;
     }
 
-    ifft.process_with_scratch(
-        &mut fft_buffer[..fft_len],
-        &mut scratch[..scratch_len],
-    );
+    ifft.process_with_scratch(&mut fft_buffer[..fft_len], &mut scratch[..scratch_len]);
 
     time.fill(0.0);
     let post_scale = 0.5 * (n as f32).sqrt() / fft_len as f32;
@@ -380,8 +387,14 @@ mod tests {
         let workspace = Avs3SynthesisWorkspace::new();
         assert!(workspace.long_left[0] > 0.0);
         assert!(workspace.long_left[0] < workspace.long_left[FRAME_LINES - 1]);
-        assert_eq!(workspace.long_right[0], workspace.long_left[FRAME_LINES - 1]);
-        assert_eq!(workspace.short_right[SHORT_LINES - 1], workspace.short_left[0]);
+        assert_eq!(
+            workspace.long_right[0],
+            workspace.long_left[FRAME_LINES - 1]
+        );
+        assert_eq!(
+            workspace.short_right[SHORT_LINES - 1],
+            workspace.short_left[0]
+        );
     }
 
     #[test]

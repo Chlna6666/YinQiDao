@@ -58,22 +58,24 @@ mod tests {
         let mut workspace = BasePipelineWorkspace::new();
         let mut output = [];
 
-        assert!(decode_basic_base_to_mdct_normative(
-            &[],
-            BitRange {
-                bit_offset: 0,
-                bit_len: 0,
-            },
-            &model_indices,
-            0,
-            group,
-            [Some(0), None],
-            false,
-            127,
-            &mut rng,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
+        assert!(
+            decode_basic_base_to_mdct_normative(
+                &[],
+                BitRange {
+                    bit_offset: 0,
+                    bit_len: 0,
+                },
+                &model_indices,
+                0,
+                group,
+                [Some(0), None],
+                false,
+                127,
+                &mut rng,
+                &mut workspace,
+                &mut output,
+            )
+            .is_err()
+        );
     }
 }

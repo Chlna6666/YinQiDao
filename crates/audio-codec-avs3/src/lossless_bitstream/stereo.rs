@@ -30,31 +30,23 @@ pub enum LosslessStereoDecorrelationMode {
 /// `Sid +/- parity` is always even, so the divisions are exact for both positive and negative
 /// odd values. Arithmetic is widened before narrowing back to the 32-bit PCM working domain.
 #[inline]
-pub fn restore_lossless_anti_phase(
-    mid: i32,
-    side: i32,
-) -> Result<(i32, i32), CodecError> {
+pub fn restore_lossless_anti_phase(mid: i32, side: i32) -> Result<(i32, i32), CodecError> {
     let mid = i64::from(mid);
     let side = i64::from(side);
     let parity = side & 1;
     let half_up = (side + parity) / 2;
     let half_down = (side - parity) / 2;
 
-    let left = mid
-        .checked_add(half_up)
-        .ok_or(CodecError::InvalidData(
-            "lossless anti-phase left reconstruction overflow",
-        ))?;
-    let right = half_down
-        .checked_sub(mid)
-        .ok_or(CodecError::InvalidData(
-            "lossless anti-phase right reconstruction overflow",
-        ))?;
+    let left = mid.checked_add(half_up).ok_or(CodecError::InvalidData(
+        "lossless anti-phase left reconstruction overflow",
+    ))?;
+    let right = half_down.checked_sub(mid).ok_or(CodecError::InvalidData(
+        "lossless anti-phase right reconstruction overflow",
+    ))?;
 
     Ok((
-        i32::try_from(left).map_err(|_| {
-            CodecError::InvalidData("lossless anti-phase left channel exceeds i32")
-        })?,
+        i32::try_from(left)
+            .map_err(|_| CodecError::InvalidData("lossless anti-phase left channel exceeds i32"))?,
         i32::try_from(right).map_err(|_| {
             CodecError::InvalidData("lossless anti-phase right channel exceeds i32")
         })?,
@@ -75,9 +67,7 @@ pub fn restore_lossless_stereo_pair(
         LosslessStereoDecorrelationMode::AntiPhase => {
             restore_lossless_anti_phase(primary, secondary)
         }
-        LosslessStereoDecorrelationMode::InPhase => {
-            restore_lossless_mid_side(primary, secondary)
-        }
+        LosslessStereoDecorrelationMode::InPhase => restore_lossless_mid_side(primary, secondary),
         LosslessStereoDecorrelationMode::Passthrough => Ok((primary, secondary)),
     }
 }
@@ -101,8 +91,7 @@ pub fn restore_lossless_stereo_in_place(
     }
 
     for (primary_sample, secondary_sample) in primary.iter_mut().zip(secondary.iter_mut()) {
-        let (left, right) =
-            restore_lossless_stereo_pair(mode, *primary_sample, *secondary_sample)?;
+        let (left, right) = restore_lossless_stereo_pair(mode, *primary_sample, *secondary_sample)?;
         *primary_sample = left;
         *secondary_sample = right;
     }
@@ -168,12 +157,8 @@ mod tests {
             let (mid, side) = in_phase_downmix(left, right);
             let expected = restore_lossless_mid_side(mid, side).unwrap();
             assert_eq!(
-                restore_lossless_stereo_pair(
-                    LosslessStereoDecorrelationMode::InPhase,
-                    mid,
-                    side,
-                )
-                .unwrap(),
+                restore_lossless_stereo_pair(LosslessStereoDecorrelationMode::InPhase, mid, side,)
+                    .unwrap(),
                 expected
             );
             assert_eq!(expected, (left, right));
@@ -183,12 +168,8 @@ mod tests {
     #[test]
     fn passthrough_mode_preserves_transmitted_channels() {
         assert_eq!(
-            restore_lossless_stereo_pair(
-                LosslessStereoDecorrelationMode::Passthrough,
-                -123,
-                456,
-            )
-            .unwrap(),
+            restore_lossless_stereo_pair(LosslessStereoDecorrelationMode::Passthrough, -123, 456,)
+                .unwrap(),
             (-123, 456)
         );
     }

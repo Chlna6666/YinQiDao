@@ -89,10 +89,7 @@ mod tests {
             dequantize_lossless_uniform_parcor_q20(-64).unwrap(),
             -1_040_384
         );
-        assert_eq!(
-            dequantize_lossless_uniform_parcor_q20(-1).unwrap(),
-            -8_192
-        );
+        assert_eq!(dequantize_lossless_uniform_parcor_q20(-1).unwrap(), -8_192);
         assert_eq!(dequantize_lossless_uniform_parcor_q20(0).unwrap(), 8_192);
         assert_eq!(
             dequantize_lossless_uniform_parcor_q20(63).unwrap(),

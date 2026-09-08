@@ -93,8 +93,8 @@ pub fn probe_av3a_bytes(bytes: &[u8]) -> Option<Av3aSampleEntry> {
         ]);
         let legacy_sample_rate = sample_rate_fixed >> 16;
 
-        let decoder_config = child_box_payload(bytes, type_pos, box_end, b"dca3")
-            .unwrap_or_default();
+        let decoder_config =
+            child_box_payload(bytes, type_pos, box_end, b"dca3").unwrap_or_default();
         let parsed = (!decoder_config.is_empty())
             .then(|| parse_dca3(&decoder_config).ok())
             .flatten();
@@ -257,6 +257,7 @@ mod tests {
         let start = 64;
         bytes[start..start + 4].copy_from_slice(&(64_u32).to_be_bytes());
         bytes[start + 4..start + 8].copy_from_slice(b"av3a");
+        bytes[start + 8..start + 14].copy_from_slice(&[0_u8; 6]);
         bytes[start + 14..start + 16].copy_from_slice(&1_u16.to_be_bytes());
         bytes[start + 24..start + 26].copy_from_slice(&2_u16.to_be_bytes());
         bytes[start + 26..start + 28].copy_from_slice(&24_u16.to_be_bytes());

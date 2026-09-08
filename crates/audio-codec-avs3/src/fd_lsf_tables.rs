@@ -1,4 +1,4 @@
-use crate::fd_lsf::{LSF_MEAN, LsfCodebook, LsfCodebooks};
+use crate::fd_lsf::{LsfCodebook, LsfCodebooks};
 
 pub const FD_LSF_TABLE_VALUES: usize = 10_992;
 pub const FD_LSF_TABLE_BYTES: usize = FD_LSF_TABLE_VALUES * 4;
@@ -126,6 +126,7 @@ pub fn normative_lsf_codebooks() -> LsfCodebooks<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fd_lsf::LSF_MEAN;
 
     fn asset_fnv1a() -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;

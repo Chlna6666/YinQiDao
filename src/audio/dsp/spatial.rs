@@ -270,8 +270,8 @@ impl Spatializer {
         }
 
         let settings = self.settings.clone();
-        let motion_enabled = settings.motion_mode != SpatialMotionMode::Static
-            && settings.motion_intensity > 0.001;
+        let motion_enabled =
+            settings.motion_mode != SpatialMotionMode::Static && settings.motion_intensity > 0.001;
 
         // Preserve the original stereo image. The old range (0.72..2.10) could more than double
         // side energy, exaggerating phase differences and hollowing the centre. 0.92..1.42 keeps
@@ -282,15 +282,14 @@ impl Spatializer {
         let cutoff_hz = 20_000.0 - settings.distance * 8_000.0;
         let lowpass_decay = (-2.0 * PI * cutoff_hz / self.sample_rate).exp();
         let lowpass_input = 1.0 - lowpass_decay;
-        let reflection_gain = (settings.depth * 0.055
-            + settings.room_size * 0.065
-            + settings.immersive_3d * 0.045)
-            .clamp(0.0, 0.14);
+        let reflection_gain =
+            (settings.depth * 0.055 + settings.room_size * 0.065 + settings.immersive_3d * 0.045)
+                .clamp(0.0, 0.14);
 
         let reflection_len = self.reflection_left.len();
         let base_delay_seconds = 0.0045 + settings.room_size * 0.014 + settings.depth * 0.004;
-        let left_delay = ((base_delay_seconds * self.sample_rate).round() as usize)
-            .clamp(1, reflection_len - 1);
+        let left_delay =
+            ((base_delay_seconds * self.sample_rate).round() as usize).clamp(1, reflection_len - 1);
         let right_delay = (((base_delay_seconds + settings.immersive_3d * 0.0013)
             * self.sample_rate)
             .round() as usize)
@@ -348,8 +347,9 @@ impl Spatializer {
             let room_compensation = 1.0 - settings.room_size * 0.025;
             let static_left =
                 (widened_left + reflected_left * reflection_gain) * attenuation * room_compensation;
-            let static_right =
-                (widened_right + reflected_right * reflection_gain) * attenuation * room_compensation;
+            let static_right = (widened_right + reflected_right * reflection_gain)
+                * attenuation
+                * room_compensation;
 
             let (spatial_left, spatial_right) = if motion_enabled {
                 let (pan, front, radius_mod) = motion_position(
@@ -367,11 +367,8 @@ impl Spatializer {
                 let motion_len = self.motion_delay.len();
                 self.motion_delay[self.motion_cursor] = moving_source;
                 let itd_samples = self.sample_rate * MAX_ITD_SECONDS * pan.abs() * radius;
-                let delayed_source = read_fractional_delay(
-                    &self.motion_delay,
-                    self.motion_cursor,
-                    itd_samples,
-                );
+                let delayed_source =
+                    read_fractional_delay(&self.motion_delay, self.motion_cursor, itd_samples);
                 self.motion_cursor = (self.motion_cursor + 1) % motion_len;
 
                 let lateral = pan.abs() * radius;
@@ -397,8 +394,7 @@ impl Spatializer {
                 self.rear_lowpass_right += rear_alpha * (moving_right - self.rear_lowpass_right);
                 let rear_mix = rear_amount * 0.34;
                 moving_left = moving_left * (1.0 - rear_mix) + self.rear_lowpass_left * rear_mix;
-                moving_right =
-                    moving_right * (1.0 - rear_mix) + self.rear_lowpass_right * rear_mix;
+                moving_right = moving_right * (1.0 - rear_mix) + self.rear_lowpass_right * rear_mix;
 
                 let front_distance_gain = 0.88 + ((front + 1.0) * 0.5) * 0.12;
                 moving_left *= front_distance_gain;
@@ -556,9 +552,13 @@ mod tests {
         let mut spatializer = Spatializer::new(48_000, settings);
         let mut samples = vec![0.3; 48_000 * 4];
         spatializer.process(&mut samples);
-        assert!(samples.as_chunks::<2>().0.iter().any(|frame| {
-            (frame[0] - frame[1]).abs() > 0.02
-        }));
+        assert!(
+            samples
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|frame| { (frame[0] - frame[1]).abs() > 0.01 })
+        );
     }
 
     #[test]

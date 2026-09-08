@@ -242,10 +242,9 @@ impl Avs3SpecificConfig {
     pub fn sample_rate(&self) -> Option<u32> {
         match self {
             Self::GeneralFullRate(config) => config.sample_rate,
-            Self::Lossless(config) => lossless_sample_rate(
-                config.sampling_frequency_index,
-                config.explicit_sample_rate,
-            ),
+            Self::Lossless(config) => {
+                lossless_sample_rate(config.sampling_frequency_index, config.explicit_sample_rate)
+            }
         }
     }
 
@@ -290,7 +289,9 @@ pub fn parse_dca3(payload: &[u8]) -> Result<Avs3SpecificConfig, CodecError> {
     }
 }
 
-fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRateConfig, CodecError> {
+fn parse_general_full_rate(
+    reader: &mut BitReader<'_>,
+) -> Result<GeneralFullRateConfig, CodecError> {
     let sampling_frequency_index = reader.read_bits(4)? as u8;
     let sample_rate = full_rate_sample_rate(sampling_frequency_index).ok_or(
         CodecError::Unsupported("reserved general-full-rate sampling_frequency_index in dca3"),
@@ -425,7 +426,10 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
     }
     let channel_number = reader.read_bits(8)? as u8;
     let resolution = QuantizationResolution::from(reader.read_bits(2)? as u8);
-    if !matches!(resolution, QuantizationResolution::Pcm16 | QuantizationResolution::Pcm24) {
+    if !matches!(
+        resolution,
+        QuantizationResolution::Pcm16 | QuantizationResolution::Pcm24
+    ) {
         return Err(CodecError::Unsupported(
             "reserved lossless resolution in dca3",
         ));

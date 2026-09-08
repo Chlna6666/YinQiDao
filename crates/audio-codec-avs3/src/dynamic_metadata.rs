@@ -179,7 +179,9 @@ fn parse_level1(
         ObjectPosition::Cartesian { x, y, z, extent }
     };
 
-    let gain = has_gain.then(|| reader.read_bits(7).map(|value| value as u8)).transpose()?;
+    let gain = has_gain
+        .then(|| reader.read_bits(7).map(|value| value as u8))
+        .transpose()?;
     let diffuse = has_diffuse
         .then(|| reader.read_bits(7).map(|value| value as u8))
         .transpose()?;
@@ -389,7 +391,17 @@ mod tests {
 
         let metadata = parse_dynamic_metadata_at(&writer.bytes, 0, 2).unwrap();
         assert_eq!(metadata.core_bit_offset, expected_end);
-        assert!(metadata.objects.iter().all(|object| object.level1.is_none()));
-        assert!(metadata.objects.iter().all(|object| object.level2.is_none()));
+        assert!(
+            metadata
+                .objects
+                .iter()
+                .all(|object| object.level1.is_none())
+        );
+        assert!(
+            metadata
+                .objects
+                .iter()
+                .all(|object| object.level2.is_none())
+        );
     }
 }

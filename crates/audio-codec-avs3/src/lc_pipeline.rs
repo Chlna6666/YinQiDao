@@ -73,12 +73,7 @@ pub fn decode_low_complexity_base_to_mdct_normative(
     }
 
     workspace.prepare();
-    decode_base_latents_into(
-        packet,
-        base_range,
-        model_indices,
-        &mut workspace.quantized,
-    )?;
+    decode_base_latents_into(packet, base_range, model_indices, &mut workspace.quantized)?;
     dequantize_base_latents_into(
         &workspace.quantized,
         &BASE_QUANTILE_MEDIANS,
@@ -116,22 +111,24 @@ mod tests {
         let mut workspace = LowComplexityPipelineWorkspace::new();
         let mut output = [0.0_f32; 8];
 
-        assert!(decode_low_complexity_base_to_mdct_normative(
-            &[],
-            BitRange {
-                bit_offset: 0,
-                bit_len: 0,
-            },
-            &models,
-            0,
-            group,
-            [Some(0), None],
-            255,
-            &mut rng,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
+        assert!(
+            decode_low_complexity_base_to_mdct_normative(
+                &[],
+                BitRange {
+                    bit_offset: 0,
+                    bit_len: 0,
+                },
+                &models,
+                0,
+                group,
+                [Some(0), None],
+                255,
+                &mut rng,
+                &mut workspace,
+                &mut output,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -68,8 +68,7 @@ impl HoaTransformWorkspace {
                 signal[HOA_TRANSFORM_LEN / 4 + folded]
                     + signal[HOA_TRANSFORM_LEN + HOA_TRANSFORM_LEN / 4 - 1 - folded]
             } else {
-                signal[HOA_TRANSFORM_LEN / 4 + folded]
-                    - signal[HOA_TRANSFORM_LEN / 4 - 1 - folded]
+                signal[HOA_TRANSFORM_LEN / 4 + folded] - signal[HOA_TRANSFORM_LEN / 4 - 1 - folded]
             };
             let unfolded = 2 * index;
             let imaginary = if index < HOA_TRANSFORM_LEN / 8 {
@@ -198,7 +197,9 @@ mod tests {
         assert!(coefficients.iter().all(|value| *value == 0.0));
 
         let mut reconstructed = [1.0_f32; HOA_TRANSFORM_LEN];
-        workspace.inverse(&coefficients, &mut reconstructed).unwrap();
+        workspace
+            .inverse(&coefficients, &mut reconstructed)
+            .unwrap();
         assert!(reconstructed.iter().all(|value| *value == 0.0));
     }
 }

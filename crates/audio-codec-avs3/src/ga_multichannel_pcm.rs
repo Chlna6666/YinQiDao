@@ -1,7 +1,7 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace, BweConfig,
+    Avs3SynthesisWorkspace, BASE_OUTPUT_POSITIONS, BasicMonoNeuralWorkspace, BweConfig,
     BweSynthesisWorkspace, FdShapingWorkspace, GaMultichannelFrameSideInfo, NeuralNetworkType,
     SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
     apply_inverse_fd_spectrum_shaping, apply_inverse_tns, apply_multichannel_mcac,
@@ -269,26 +269,32 @@ mod tests {
         let preserved = spectrum[..MC_LFE_RESERVED_LINES].to_vec();
         apply_multichannel_lfe_restriction(&mut spectrum).unwrap();
         assert_eq!(&spectrum[..MC_LFE_RESERVED_LINES], preserved.as_slice());
-        assert!(spectrum[MC_LFE_RESERVED_LINES..].iter().all(|&value| value == 0.0));
+        assert!(
+            spectrum[MC_LFE_RESERVED_LINES..]
+                .iter()
+                .all(|&value| value == 0.0)
+        );
     }
 
     #[test]
     fn low_complexity_frontend_rejects_invalid_output_geometry_before_parsing() {
         let mut workspace = BasicMultichannelSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_multichannel_pcm(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            384,
-            6,
-            Some(3),
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_multichannel_pcm(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                384,
+                6,
+                Some(3),
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
         assert_eq!(workspace.channel_count(), 0);
     }
 

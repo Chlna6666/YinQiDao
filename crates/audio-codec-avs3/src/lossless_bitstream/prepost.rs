@@ -8,24 +8,22 @@ pub const LOSSLESS_PREPROCESS_MAX_SAMPLES: usize = 16;
 // abs(q) in 0..=64. Keeping the integer tables in Rust avoids libm and guarantees device-identical
 // shift decisions.
 const RA_SHIFT: [u16; 65] = [
-    0, 1, 6, 13, 23, 36, 52, 71, 93, 118, 146, 177, 211, 249, 290, 334, 381, 432, 487,
-    545, 607, 673, 743, 817, 896, 978, 1066, 1158, 1255, 1358, 1466, 1580, 1700, 1826,
-    1960, 2100, 2248, 2404, 2569, 2743, 2927, 3122, 3329, 3548, 3781, 4030, 4296, 4580,
-    4885, 5214, 5570, 5956, 6378, 6841, 7354, 7927, 8573, 9313, 10176, 11205, 12476,
-    14128, 16477, 20526, 23147,
+    0, 1, 6, 13, 23, 36, 52, 71, 93, 118, 146, 177, 211, 249, 290, 334, 381, 432, 487, 545, 607,
+    673, 743, 817, 896, 978, 1066, 1158, 1255, 1358, 1466, 1580, 1700, 1826, 1960, 2100, 2248,
+    2404, 2569, 2743, 2927, 3122, 3329, 3548, 3781, 4030, 4296, 4580, 4885, 5214, 5570, 5956, 6378,
+    6841, 7354, 7927, 8573, 9313, 10176, 11205, 12476, 14128, 16477, 20526, 23147,
 ];
 
 const RA_SHIFT12: [u16; 128] = [
-    58348, 48794, 43108, 39207, 36249, 33866, 31870, 30151, 28643, 27298, 26083, 24977,
-    23959, 23018, 22141, 21321, 20551, 19824, 19136, 18483, 17862, 17269, 16702, 16159,
-    15638, 15136, 14654, 14189, 13740, 13305, 12885, 12479, 12084, 11702, 11330, 10969,
-    10618, 10277, 9944, 9620, 9305, 8997, 8697, 8404, 8118, 7839, 7566, 7300, 7039, 6785,
-    6536, 6293, 6055, 5822, 5594, 5372, 5154, 4941, 4733, 4529, 4330, 4135, 3944, 3758,
-    3577, 3399, 3226, 3056, 2891, 2730, 2573, 2420, 2271, 2127, 1986, 1849, 1717, 1589,
-    1465, 1345, 1229, 1118, 1012, 909, 812, 719, 631, 548, 469, 397, 329, 267, 211, 161,
-    117, 79, 49, 25, 9, 1, 1, 10, 29, 58, 98, 149, 213, 291, 384, 493, 621, 769, 939,
-    1135, 1360, 1618, 1915, 2258, 2655, 3119, 3667, 4320, 5117, 6113, 7409, 9209, 12043,
-    18365,
+    58348, 48794, 43108, 39207, 36249, 33866, 31870, 30151, 28643, 27298, 26083, 24977, 23959,
+    23018, 22141, 21321, 20551, 19824, 19136, 18483, 17862, 17269, 16702, 16159, 15638, 15136,
+    14654, 14189, 13740, 13305, 12885, 12479, 12084, 11702, 11330, 10969, 10618, 10277, 9944, 9620,
+    9305, 8997, 8697, 8404, 8118, 7839, 7566, 7300, 7039, 6785, 6536, 6293, 6055, 5822, 5594, 5372,
+    5154, 4941, 4733, 4529, 4330, 4135, 3944, 3758, 3577, 3399, 3226, 3056, 2891, 2730, 2573, 2420,
+    2271, 2127, 1986, 1849, 1717, 1589, 1465, 1345, 1229, 1118, 1012, 909, 812, 719, 631, 548, 469,
+    397, 329, 267, 211, 161, 117, 79, 49, 25, 9, 1, 1, 10, 29, 58, 98, 149, 213, 291, 384, 493,
+    621, 769, 939, 1135, 1360, 1618, 1915, 2258, 2655, 3119, 3667, 4320, 5117, 6113, 7409, 9209,
+    12043, 18365,
 ];
 
 #[inline]
@@ -43,9 +41,8 @@ fn validate_quantized_parcor(value: i8) -> Result<(), CodecError> {
 pub fn lossless_ra_shift12(value: i8) -> Result<u16, CodecError> {
     validate_quantized_parcor(value)?;
     let index = i16::from(value) + 64;
-    Ok(RA_SHIFT12[usize::try_from(index).map_err(|_| {
-        CodecError::InvalidData("lossless RA_shift12 index conversion failed")
-    })?])
+    Ok(RA_SHIFT12[usize::try_from(index)
+        .map_err(|_| CodecError::InvalidData("lossless RA_shift12 index conversion failed"))?])
 }
 
 /// Return one fixed `RA_shift` entry for the magnitude of a quantized PARCOR coefficient.
@@ -80,9 +77,8 @@ pub fn lossless_residual_shift_plan(
     }
 
     let mut accumulated = u32::from(lossless_ra_shift12(quantized_parcor[0])?);
-    output[0] = u8::try_from((4096_u32 + accumulated) >> 13).map_err(|_| {
-        CodecError::InvalidData("lossless residual shift exceeds u8")
-    })?;
+    output[0] = u8::try_from((4096_u32 + accumulated) >> 13)
+        .map_err(|_| CodecError::InvalidData("lossless residual shift exceeds u8"))?;
 
     if count >= 2 {
         accumulated = accumulated
@@ -90,9 +86,8 @@ pub fn lossless_residual_shift_plan(
             .ok_or(CodecError::InvalidData(
                 "lossless residual shift accumulator overflows",
             ))?;
-        output[1] = u8::try_from((4096_u32 + accumulated) >> 13).map_err(|_| {
-            CodecError::InvalidData("lossless residual shift exceeds u8")
-        })?;
+        output[1] = u8::try_from((4096_u32 + accumulated) >> 13)
+            .map_err(|_| CodecError::InvalidData("lossless residual shift exceeds u8"))?;
     }
 
     for index in 2..count {
@@ -101,9 +96,8 @@ pub fn lossless_residual_shift_plan(
             .ok_or(CodecError::InvalidData(
                 "lossless residual shift accumulator overflows",
             ))?;
-        output[index] = u8::try_from((4096_u32 + accumulated) >> 13).map_err(|_| {
-            CodecError::InvalidData("lossless residual shift exceeds u8")
-        })?;
+        output[index] = u8::try_from((4096_u32 + accumulated) >> 13)
+            .map_err(|_| CodecError::InvalidData("lossless residual shift exceeds u8"))?;
     }
     Ok(count)
 }

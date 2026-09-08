@@ -1,9 +1,7 @@
 use yinqidao_audio_simd::dot_product;
 use yinqidao_codec_core::CodecError;
 
-use crate::{
-    ConvTranspose1dParams, ConvTranspose1dSpec, NeuralActivation, conv1d_transpose_same,
-};
+use crate::{ConvTranspose1dParams, ConvTranspose1dSpec, NeuralActivation, conv1d_transpose_same};
 
 pub const BASE_INPUT_POSITIONS: usize = 64;
 pub const BASE_INPUT_CHANNELS: usize = 16;
@@ -104,7 +102,10 @@ pub fn apply_igdn_in_place(
             "AVS3 base IGDN parameter shape does not match channel count",
         ));
     }
-    if params.beta.iter().any(|value| !value.is_finite() || *value < 0.0)
+    if params
+        .beta
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
         || params.gamma.iter().any(|value| !value.is_finite())
     {
         return Err(CodecError::InvalidData(
@@ -124,8 +125,7 @@ pub fn apply_igdn_in_place(
         }
         for channel in 0..channels {
             let gamma_row = &params.gamma[channel * channels..(channel + 1) * channels];
-            let normalization = params.beta[channel]
-                + dot_product(&squared[..channels], gamma_row);
+            let normalization = params.beta[channel] + dot_product(&squared[..channels], gamma_row);
             if !normalization.is_finite() || normalization < 0.0 {
                 return Err(CodecError::InvalidData(
                     "AVS3 base IGDN normalization is negative or non-finite",
@@ -193,12 +193,7 @@ pub fn decode_base_network(
     )?;
     apply_igdn_in_place(&mut workspace.layer_3, 2, params.igdn_3)?;
 
-    conv1d_transpose_same(
-        &workspace.layer_3,
-        512,
-        params.layer_4,
-        output,
-    )
+    conv1d_transpose_same(&workspace.layer_3, 512, params.layer_4, output)
 }
 
 #[cfg(test)]
@@ -210,7 +205,15 @@ mod tests {
         let mut values = [1.0_f32, -2.0, 3.0, -4.0];
         let beta = [1.0_f32, 1.0];
         let gamma = [0.0_f32; 4];
-        apply_igdn_in_place(&mut values, 2, IgdnParams { beta: &beta, gamma: &gamma }).unwrap();
+        apply_igdn_in_place(
+            &mut values,
+            2,
+            IgdnParams {
+                beta: &beta,
+                gamma: &gamma,
+            },
+        )
+        .unwrap();
         assert_eq!(values, [1.0, -2.0, 3.0, -4.0]);
     }
 
@@ -219,7 +222,15 @@ mod tests {
         let mut values = [3.0_f32, 4.0];
         let beta = [1.0_f32, 1.0];
         let gamma = [1.0_f32, 0.0, 0.0, 1.0];
-        apply_igdn_in_place(&mut values, 2, IgdnParams { beta: &beta, gamma: &gamma }).unwrap();
+        apply_igdn_in_place(
+            &mut values,
+            2,
+            IgdnParams {
+                beta: &beta,
+                gamma: &gamma,
+            },
+        )
+        .unwrap();
         assert!((values[0] - 3.0 * 10.0_f32.sqrt()).abs() < 1.0e-6);
         assert!((values[1] - 4.0 * 17.0_f32.sqrt()).abs() < 1.0e-6);
     }
@@ -241,13 +252,38 @@ mod tests {
         let gamma_2 = [0.0_f32; 16];
         let gamma_3 = [0.0_f32; 4];
         let params = BaseDecoderParams {
-            layer_1: ConvTranspose1dParams { spec: BASE_LAYER_1_SPEC, kernel: &kernel_1, bias: &bias_1 },
-            igdn_1: IgdnParams { beta: &beta_1, gamma: &gamma_1 },
-            layer_2: ConvTranspose1dParams { spec: BASE_LAYER_2_SPEC, kernel: &kernel_2, bias: &bias_2 },
-            igdn_2: IgdnParams { beta: &beta_2, gamma: &gamma_2 },
-            layer_3: ConvTranspose1dParams { spec: BASE_LAYER_3_SPEC, kernel: &kernel_3, bias: &bias_3 },
-            igdn_3: IgdnParams { beta: &beta_3, gamma: &gamma_3 },
-            layer_4: ConvTranspose1dParams { spec: BASE_LAYER_4_SPEC, kernel: &kernel_4, bias: &bias_4 },
+            layer_1: ConvTranspose1dParams {
+                spec: BASE_LAYER_1_SPEC,
+                kernel: &kernel_1,
+                bias: &bias_1,
+            },
+            igdn_1: IgdnParams {
+                beta: &beta_1,
+                gamma: &gamma_1,
+            },
+            layer_2: ConvTranspose1dParams {
+                spec: BASE_LAYER_2_SPEC,
+                kernel: &kernel_2,
+                bias: &bias_2,
+            },
+            igdn_2: IgdnParams {
+                beta: &beta_2,
+                gamma: &gamma_2,
+            },
+            layer_3: ConvTranspose1dParams {
+                spec: BASE_LAYER_3_SPEC,
+                kernel: &kernel_3,
+                bias: &bias_3,
+            },
+            igdn_3: IgdnParams {
+                beta: &beta_3,
+                gamma: &gamma_3,
+            },
+            layer_4: ConvTranspose1dParams {
+                spec: BASE_LAYER_4_SPEC,
+                kernel: &kernel_4,
+                bias: &bias_4,
+            },
         };
         let input = vec![0.0_f32; BASE_INPUT_POSITIONS * BASE_INPUT_CHANNELS];
         let mut output = vec![0.0_f32; BASE_OUTPUT_POSITIONS];
@@ -275,13 +311,38 @@ mod tests {
         let gamma_2 = [0.0_f32; 16];
         let gamma_3 = [0.0_f32; 4];
         let params = BaseDecoderParams {
-            layer_1: ConvTranspose1dParams { spec: wrong, kernel: &kernel_1, bias: &bias_1 },
-            igdn_1: IgdnParams { beta: &beta_1, gamma: &gamma_1 },
-            layer_2: ConvTranspose1dParams { spec: BASE_LAYER_2_SPEC, kernel: &kernel_2, bias: &bias_2 },
-            igdn_2: IgdnParams { beta: &beta_2, gamma: &gamma_2 },
-            layer_3: ConvTranspose1dParams { spec: BASE_LAYER_3_SPEC, kernel: &kernel_3, bias: &bias_3 },
-            igdn_3: IgdnParams { beta: &beta_3, gamma: &gamma_3 },
-            layer_4: ConvTranspose1dParams { spec: BASE_LAYER_4_SPEC, kernel: &kernel_4, bias: &bias_4 },
+            layer_1: ConvTranspose1dParams {
+                spec: wrong,
+                kernel: &kernel_1,
+                bias: &bias_1,
+            },
+            igdn_1: IgdnParams {
+                beta: &beta_1,
+                gamma: &gamma_1,
+            },
+            layer_2: ConvTranspose1dParams {
+                spec: BASE_LAYER_2_SPEC,
+                kernel: &kernel_2,
+                bias: &bias_2,
+            },
+            igdn_2: IgdnParams {
+                beta: &beta_2,
+                gamma: &gamma_2,
+            },
+            layer_3: ConvTranspose1dParams {
+                spec: BASE_LAYER_3_SPEC,
+                kernel: &kernel_3,
+                bias: &bias_3,
+            },
+            igdn_3: IgdnParams {
+                beta: &beta_3,
+                gamma: &gamma_3,
+            },
+            layer_4: ConvTranspose1dParams {
+                spec: BASE_LAYER_4_SPEC,
+                kernel: &kernel_4,
+                bias: &bias_4,
+            },
         };
         let input = vec![0.0_f32; BASE_INPUT_POSITIONS * BASE_INPUT_CHANNELS];
         let mut output = vec![0.0_f32; BASE_OUTPUT_POSITIONS];

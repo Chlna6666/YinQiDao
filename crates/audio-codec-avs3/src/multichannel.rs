@@ -33,9 +33,7 @@ pub fn channel_pair_index_bits(couple_ch_num: u16) -> Result<u8, CodecError> {
             "multichannel pairing requires at least two coupled channels",
         ));
     }
-    let combinations = u32::from(couple_ch_num)
-        .saturating_mul(u32::from(couple_ch_num - 1))
-        / 2;
+    let combinations = u32::from(couple_ch_num).saturating_mul(u32::from(couple_ch_num - 1)) / 2;
     if combinations <= 1 {
         return Ok(0);
     }
@@ -80,9 +78,8 @@ pub fn parse_multichannel_side_info_at(
     } else {
         channel_pair_index_bits(couple_ch_num)?
     };
-    let pair_combinations = u32::from(couple_ch_num)
-        .saturating_mul(u32::from(couple_ch_num.saturating_sub(1)))
-        / 2;
+    let pair_combinations =
+        u32::from(couple_ch_num).saturating_mul(u32::from(couple_ch_num.saturating_sub(1))) / 2;
 
     let mut pairs = Vec::with_capacity(usize::from(pair_count));
     for _ in 0..pair_count {
@@ -132,7 +129,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {
@@ -198,7 +198,10 @@ mod tests {
 
         let info = parse_multichannel_side_info_at(&writer.bytes, 0, 5).unwrap();
         assert_eq!(info.silence_flags, vec![false, true, false, true, false]);
-        assert_eq!(info.channel_bit_ratios, vec![Some(1), None, Some(2), None, Some(3)]);
+        assert_eq!(
+            info.channel_bit_ratios,
+            vec![Some(1), None, Some(2), None, Some(3)]
+        );
     }
 
     #[test]

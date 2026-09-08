@@ -1,12 +1,12 @@
 use yinqidao_codec_core::CodecError;
 
+use crate::context_params::context_decoder_params;
+use crate::quantizer_params::CONTEXT_QUANTILE_MEDIANS;
 use crate::{
     BitRange, CONTEXT_CHANNELS, CONTEXT_INPUT_POSITIONS, CONTEXT_OUTPUT_POSITIONS,
     ContextDecoderParams, ContextDecoderWorkspace, decode_context_latents_into,
     decode_context_network, select_base_range_model_index,
 };
-use crate::context_params::context_decoder_params;
-use crate::quantizer_params::CONTEXT_QUANTILE_MEDIANS;
 
 const CONTEXT_INPUT_VALUES: usize = CONTEXT_INPUT_POSITIONS * CONTEXT_CHANNELS;
 const CONTEXT_OUTPUT_VALUES: usize = CONTEXT_OUTPUT_POSITIONS * CONTEXT_CHANNELS;
@@ -131,7 +131,10 @@ pub fn decode_context_stddev_into(
         output,
     )?;
 
-    if output.iter().any(|value| !value.is_finite() || *value < 0.0) {
+    if output
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
         return Err(CodecError::InvalidData(
             "context decoder produced an invalid base-model standard deviation",
         ));
@@ -144,8 +147,7 @@ pub fn select_base_range_models_into(
     context_stddev: &[f32],
     model_indices: &mut [u8],
 ) -> Result<(), CodecError> {
-    if context_stddev.len() != CONTEXT_OUTPUT_VALUES
-        || model_indices.len() != CONTEXT_OUTPUT_VALUES
+    if context_stddev.len() != CONTEXT_OUTPUT_VALUES || model_indices.len() != CONTEXT_OUTPUT_VALUES
     {
         return Err(CodecError::InvalidData(
             "base range-model index tensor must be sixty-four positions by sixteen channels",
@@ -198,9 +200,8 @@ pub fn decode_context_and_select_base_models_default(
 mod tests {
     use super::*;
     use crate::{
-        CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_KERNEL,
-        CONTEXT_LAYER_2_SPEC, CONTEXT_LAYER_3_KERNEL, CONTEXT_LAYER_3_SPEC,
-        ConvTranspose1dParams,
+        CONTEXT_LAYER_1_KERNEL, CONTEXT_LAYER_1_SPEC, CONTEXT_LAYER_2_KERNEL, CONTEXT_LAYER_2_SPEC,
+        CONTEXT_LAYER_3_KERNEL, CONTEXT_LAYER_3_SPEC, ConvTranspose1dParams,
     };
 
     #[test]
@@ -208,12 +209,10 @@ mod tests {
         let mut quantized = [0_i32; CONTEXT_INPUT_VALUES];
         for position in 0..CONTEXT_INPUT_POSITIONS {
             for channel in 0..CONTEXT_CHANNELS {
-                quantized[position * CONTEXT_CHANNELS + channel] =
-                    position as i32 - channel as i32;
+                quantized[position * CONTEXT_CHANNELS + channel] = position as i32 - channel as i32;
             }
         }
-        let medians: [f32; CONTEXT_CHANNELS] =
-            std::array::from_fn(|channel| channel as f32 * 0.25);
+        let medians: [f32; CONTEXT_CHANNELS] = std::array::from_fn(|channel| channel as f32 * 0.25);
         let mut output = [0.0_f32; CONTEXT_INPUT_VALUES];
         dequantize_context_latents_into(&quantized, &medians, &mut output).unwrap();
         assert_eq!(output[0], 0.0);
@@ -274,10 +273,10 @@ mod tests {
     #[test]
     fn default_context_model_is_fully_static() {
         let params = default_context_model_params();
-        assert_eq!(params.quantile_medians.as_ptr(), CONTEXT_QUANTILE_MEDIANS.as_ptr());
-        assert_eq!(params.decoder.layer_1.kernel.as_ptr(), CONTEXT_LAYER_1_KERNEL.as_ptr());
-        assert_eq!(params.decoder.layer_2.kernel.as_ptr(), CONTEXT_LAYER_2_KERNEL.as_ptr());
-        assert_eq!(params.decoder.layer_3.kernel.as_ptr(), CONTEXT_LAYER_3_KERNEL.as_ptr());
+        assert_eq!(params.quantile_medians, &CONTEXT_QUANTILE_MEDIANS[..]);
+        assert_eq!(params.decoder.layer_1.kernel, &CONTEXT_LAYER_1_KERNEL[..]);
+        assert_eq!(params.decoder.layer_2.kernel, &CONTEXT_LAYER_2_KERNEL[..]);
+        assert_eq!(params.decoder.layer_3.kernel, &CONTEXT_LAYER_3_KERNEL[..]);
     }
 
     #[test]

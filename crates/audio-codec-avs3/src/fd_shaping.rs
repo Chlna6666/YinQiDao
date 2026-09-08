@@ -59,7 +59,9 @@ impl Default for FdShapingWorkspace {
 pub fn lsf_to_lsp(lsf: &[f32; LSF_ORDER], lsp: &mut [f32; LSF_ORDER]) -> Result<(), CodecError> {
     for (frequency, output) in lsf.iter().zip(lsp) {
         if !frequency.is_finite() || !(0.0..=24_000.0).contains(frequency) {
-            return Err(CodecError::InvalidData("LSF frequency is outside the 48-kHz Nyquist interval"));
+            return Err(CodecError::InvalidData(
+                "LSF frequency is outside the 48-kHz Nyquist interval",
+            ));
         }
         *output = (*frequency * (PI / 24_000.0)).cos();
     }
@@ -80,16 +82,21 @@ fn lsp_polynomial(
         let factor = -2.0 * root;
         output[degree] = factor.mul_add(output[degree - 1], 2.0 * output[degree - 2]);
         for coefficient in (2..degree).rev() {
-            output[coefficient] +=
-                factor.mul_add(output[coefficient - 1], output[coefficient - 2]);
+            output[coefficient] += factor.mul_add(output[coefficient - 1], output[coefficient - 2]);
         }
         output[1] += factor;
     }
 }
 
 /// Convert sixteen LSP roots to the order-16 LPC polynomial `A(z)`.
-pub fn lsp_to_lpc(lsp: &[f32; LSF_ORDER], lpc: &mut [f32; LPC_COEFFICIENTS]) -> Result<(), CodecError> {
-    if lsp.iter().any(|value| !value.is_finite() || *value < -1.0 || *value > 1.0) {
+pub fn lsp_to_lpc(
+    lsp: &[f32; LSF_ORDER],
+    lpc: &mut [f32; LPC_COEFFICIENTS],
+) -> Result<(), CodecError> {
+    if lsp
+        .iter()
+        .any(|value| !value.is_finite() || *value < -1.0 || *value > 1.0)
+    {
         return Err(CodecError::InvalidData("LSP root is outside [-1, 1]"));
     }
 
@@ -113,7 +120,9 @@ pub fn lsp_to_lpc(lsp: &[f32; LSF_ORDER], lpc: &mut [f32; LPC_COEFFICIENTS]) -> 
     }
 
     if lpc.iter().any(|value| !value.is_finite()) {
-        return Err(CodecError::InvalidData("LSP to LPC conversion produced a non-finite coefficient"));
+        return Err(CodecError::InvalidData(
+            "LSP to LPC conversion produced a non-finite coefficient",
+        ));
     }
     Ok(())
 }
@@ -156,17 +165,16 @@ fn raw_lpc_gain(
 
         let magnitude_squared = real.mul_add(real, imag * imag);
         if !magnitude_squared.is_finite() || magnitude_squared <= 0.0 {
-            return Err(CodecError::InvalidData("weighted LPC response has zero or invalid magnitude"));
+            return Err(CodecError::InvalidData(
+                "weighted LPC response has zero or invalid magnitude",
+            ));
         }
         *gain = magnitude_squared.sqrt().recip();
     }
     Ok(())
 }
 
-fn interpolate_lpc_gain(
-    raw: &[f32; LPC_GAIN_RAW_POINTS],
-    output: &mut [f32; MDCT_LINES],
-) {
+fn interpolate_lpc_gain(raw: &[f32; LPC_GAIN_RAW_POINTS], output: &mut [f32; MDCT_LINES]) {
     debug_assert_eq!(LPC_GAIN_INTERPOLATION, 4);
     for bin in 0..LPC_GAIN_BASE_POINTS {
         let start = raw[bin];
@@ -184,7 +192,9 @@ fn apply_subband_averaged_gain(
     spectrum: &mut [f32],
 ) -> Result<(), CodecError> {
     if spectrum.len() != MDCT_LINES {
-        return Err(CodecError::InvalidData("FD inverse shaping requires a 1024-line MDCT spectrum"));
+        return Err(CodecError::InvalidData(
+            "FD inverse shaping requires a 1024-line MDCT spectrum",
+        ));
     }
 
     for boundaries in FD_SHAPING_SFB_BOUNDARIES.windows(2) {
@@ -197,7 +207,9 @@ fn apply_subband_averaged_gain(
         }
         let average = sum / width as f32;
         if !average.is_finite() || average <= 0.0 {
-            return Err(CodecError::InvalidData("FD shaping subband has invalid LPC gain"));
+            return Err(CodecError::InvalidData(
+                "FD shaping subband has invalid LPC gain",
+            ));
         }
         for value in &mut spectrum[start..end] {
             *value *= average;
@@ -219,10 +231,14 @@ pub fn apply_inverse_fd_spectrum_shaping(
     workspace: &mut FdShapingWorkspace,
 ) -> Result<(), CodecError> {
     if spectrum.len() != MDCT_LINES {
-        return Err(CodecError::InvalidData("FD inverse shaping requires a 1024-line MDCT spectrum"));
+        return Err(CodecError::InvalidData(
+            "FD inverse shaping requires a 1024-line MDCT spectrum",
+        ));
     }
     if spectrum.iter().any(|value| !value.is_finite()) {
-        return Err(CodecError::InvalidData("FD inverse shaping input contains non-finite MDCT data"));
+        return Err(CodecError::InvalidData(
+            "FD inverse shaping input contains non-finite MDCT data",
+        ));
     }
 
     dequantize_lsf(side, codebooks, &mut workspace.lsf)?;
@@ -255,9 +271,8 @@ mod tests {
 
     #[test]
     fn lsf_to_lsp_maps_dc_and_nyquist_endpoints() {
-        let lsf: [f32; LSF_ORDER] = std::array::from_fn(|index| {
-            index as f32 * 24_000.0 / (LSF_ORDER - 1) as f32
-        });
+        let lsf: [f32; LSF_ORDER] =
+            std::array::from_fn(|index| index as f32 * 24_000.0 / (LSF_ORDER - 1) as f32);
         let mut lsp = [0.0_f32; LSF_ORDER];
         lsf_to_lsp(&lsf, &mut lsp).unwrap();
         assert_eq!(lsp[0], 1.0);
@@ -266,9 +281,8 @@ mod tests {
 
     #[test]
     fn lsp_to_lpc_produces_symmetric_endpoint_layout() {
-        let lsp: [f32; LSF_ORDER] = std::array::from_fn(|index| {
-            (((index + 1) as f32) * PI / (LSF_ORDER + 1) as f32).cos()
-        });
+        let lsp: [f32; LSF_ORDER] =
+            std::array::from_fn(|index| (((index + 1) as f32) * PI / (LSF_ORDER + 1) as f32).cos());
         let mut lpc = [0.0_f32; LPC_COEFFICIENTS];
         lsp_to_lpc(&lsp, &mut lpc).unwrap();
         assert_eq!(lpc[0], 1.0);

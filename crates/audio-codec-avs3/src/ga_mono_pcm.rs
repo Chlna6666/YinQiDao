@@ -4,8 +4,7 @@ use crate::{
     BweConfig, GaMonoFrameSideInfo, NeuralNetworkType,
     fd_lsf_tables::normative_lsf_codebooks,
     ga_mono_post::{
-        BasicMonoSynthesisWorkspace,
-        parse_decode_mono_pcm_with_codebooks as decode_with_codebooks,
+        BasicMonoSynthesisWorkspace, parse_decode_mono_pcm_with_codebooks as decode_with_codebooks,
     },
 };
 
@@ -60,30 +59,26 @@ mod tests {
     fn public_normative_frontend_checks_pcm_geometry_before_payload_decode() {
         let mut workspace = BasicMonoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; 8];
-        assert!(parse_decode_basic_mono_pcm(
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_basic_mono_pcm(&[], 0, false, None, &mut workspace, &mut pcm,).is_err()
+        );
     }
 
     #[test]
     fn low_complexity_frontend_uses_same_pcm_geometry_contract() {
         let mut workspace = BasicMonoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; 8];
-        assert!(parse_decode_mono_pcm(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_mono_pcm(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 }

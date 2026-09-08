@@ -26,44 +26,148 @@ const fn h(code: u16, bits: u8) -> HuffmanCode {
 /// `huffman_tables_are_prefix_free` permanently guards this interoperability erratum.
 const TNS_HUFFMAN_TABLES: [[HuffmanCode; TNS_QUANT_LEVELS]; TNS_MAX_ORDER] = [
     [
-        h(4053, 12), h(1012, 10), h(507, 9), h(127, 7), h(30, 5), h(0, 3),
-        h(1, 3), h(2, 3), h(2, 2), h(3, 3), h(6, 3), h(14, 4), h(62, 6),
-        h(252, 8), h(2027, 11), h(8105, 13),
+        h(4053, 12),
+        h(1012, 10),
+        h(507, 9),
+        h(127, 7),
+        h(30, 5),
+        h(0, 3),
+        h(1, 3),
+        h(2, 3),
+        h(2, 2),
+        h(3, 3),
+        h(6, 3),
+        h(14, 4),
+        h(62, 6),
+        h(252, 8),
+        h(2027, 11),
+        h(8105, 13),
     ],
     [
-        h(15360, 15), h(7681, 14), h(3841, 13), h(961, 11), h(241, 9), h(61, 7),
-        h(14, 5), h(2, 3), h(2, 2), h(3, 2), h(0, 2), h(6, 4), h(31, 6),
-        h(121, 8), h(481, 10), h(1921, 12),
+        h(15360, 15),
+        h(7681, 14),
+        h(3841, 13),
+        h(961, 11),
+        h(241, 9),
+        h(61, 7),
+        h(14, 5),
+        h(2, 3),
+        h(2, 2),
+        h(3, 2),
+        h(0, 2),
+        h(6, 4),
+        h(31, 6),
+        h(121, 8),
+        h(481, 10),
+        h(1921, 12),
     ],
     [
-        h(27136, 15), h(27137, 15), h(3393, 12), h(425, 9), h(107, 7), h(52, 6),
-        h(12, 4), h(7, 3), h(0, 1), h(2, 2), h(27, 5), h(213, 8), h(849, 10),
-        h(1697, 11), h(6785, 13), h(27138, 15),
+        h(27136, 15),
+        h(27137, 15),
+        h(3393, 12),
+        h(425, 9),
+        h(107, 7),
+        h(52, 6),
+        h(12, 4),
+        h(7, 3),
+        h(0, 1),
+        h(2, 2),
+        h(27, 5),
+        h(213, 8),
+        h(849, 10),
+        h(1697, 11),
+        h(6785, 13),
+        h(27138, 15),
     ],
     [
-        h(8708, 14), h(8709, 14), h(8710, 14), h(1089, 11), h(273, 9), h(137, 8),
-        h(35, 6), h(5, 3), h(0, 1), h(3, 2), h(9, 4), h(16, 5), h(69, 7),
-        h(545, 10), h(8711, 14), h(4352, 13),
+        h(8708, 14),
+        h(8709, 14),
+        h(8710, 14),
+        h(1089, 11),
+        h(273, 9),
+        h(137, 8),
+        h(35, 6),
+        h(5, 3),
+        h(0, 1),
+        h(3, 2),
+        h(9, 4),
+        h(16, 5),
+        h(69, 7),
+        h(545, 10),
+        h(8711, 14),
+        h(4352, 13),
     ],
     [
-        h(4100, 14), h(4101, 14), h(4102, 14), h(257, 10), h(65, 8), h(17, 6),
-        h(5, 4), h(0, 2), h(1, 1), h(3, 3), h(9, 5), h(33, 7), h(129, 9),
-        h(513, 11), h(4103, 14), h(2048, 13),
+        h(4100, 14),
+        h(4101, 14),
+        h(4102, 14),
+        h(257, 10),
+        h(65, 8),
+        h(17, 6),
+        h(5, 4),
+        h(0, 2),
+        h(1, 1),
+        h(3, 3),
+        h(9, 5),
+        h(33, 7),
+        h(129, 9),
+        h(513, 11),
+        h(4103, 14),
+        h(2048, 13),
     ],
     [
-        h(8272, 14), h(8273, 14), h(2069, 12), h(516, 10), h(128, 8), h(65, 7),
-        h(17, 5), h(5, 3), h(0, 1), h(3, 2), h(9, 4), h(33, 6), h(259, 9),
-        h(1035, 11), h(8274, 14), h(8275, 14),
+        h(8272, 14),
+        h(8273, 14),
+        h(2069, 12),
+        h(516, 10),
+        h(128, 8),
+        h(65, 7),
+        h(17, 5),
+        h(5, 3),
+        h(0, 1),
+        h(3, 2),
+        h(9, 4),
+        h(33, 6),
+        h(259, 9),
+        h(1035, 11),
+        h(8274, 14),
+        h(8275, 14),
     ],
     [
-        h(13312, 14), h(13313, 14), h(3329, 12), h(833, 10), h(209, 8), h(53, 6),
-        h(12, 4), h(2, 2), h(0, 1), h(7, 3), h(27, 5), h(105, 7), h(417, 9),
-        h(1665, 11), h(13314, 14), h(13315, 14),
+        h(13312, 14),
+        h(13313, 14),
+        h(3329, 12),
+        h(833, 10),
+        h(209, 8),
+        h(53, 6),
+        h(12, 4),
+        h(2, 2),
+        h(0, 1),
+        h(7, 3),
+        h(27, 5),
+        h(105, 7),
+        h(417, 9),
+        h(1665, 11),
+        h(13314, 14),
+        h(13315, 14),
     ],
     [
-        h(10496, 14), h(2625, 12), h(657, 10), h(165, 8), h(83, 7), h(21, 5),
-        h(4, 3), h(3, 2), h(10497, 14), h(0, 1), h(11, 4), h(40, 6), h(329, 9),
-        h(1313, 11), h(10498, 14), h(10499, 14),
+        h(10496, 14),
+        h(2625, 12),
+        h(657, 10),
+        h(165, 8),
+        h(83, 7),
+        h(21, 5),
+        h(4, 3),
+        h(3, 2),
+        h(10497, 14),
+        h(0, 1),
+        h(11, 4),
+        h(40, 6),
+        h(329, 9),
+        h(1313, 11),
+        h(10498, 14),
+        h(10499, 14),
     ],
 ];
 
@@ -131,10 +235,7 @@ pub fn reflection_coefficient(index: u8) -> Result<f32, CodecError> {
 }
 
 /// Decode the complete two-filter `DecodeTnsSideBits()` syntax.
-pub fn parse_tns_side_info_at(
-    bytes: &[u8],
-    bit_offset: usize,
-) -> Result<TnsSideInfo, CodecError> {
+pub fn parse_tns_side_info_at(bytes: &[u8], bit_offset: usize) -> Result<TnsSideInfo, CodecError> {
     let mut reader = BitReader::with_bit_position(bytes, bit_offset)?;
     let mut filters = [TnsFilterSideInfo::disabled(); TNS_FILTERS];
 
@@ -152,10 +253,7 @@ pub fn parse_tns_side_info_at(
         filter.enabled = true;
         filter.order = order;
         for dimension in 0..usize::from(order) {
-            filter.quant_indices[dimension] = Some(decode_huffman_index(
-                &mut reader,
-                dimension,
-            )?);
+            filter.quant_indices[dimension] = Some(decode_huffman_index(&mut reader, dimension)?);
         }
     }
 
@@ -165,13 +263,12 @@ pub fn parse_tns_side_info_at(
     })
 }
 
-fn decode_huffman_index(
-    reader: &mut BitReader<'_>,
-    dimension: usize,
-) -> Result<u8, CodecError> {
-    let table = TNS_HUFFMAN_TABLES.get(dimension).ok_or(CodecError::InvalidData(
-        "TNS Huffman dimension exceeds table B.32",
-    ))?;
+fn decode_huffman_index(reader: &mut BitReader<'_>, dimension: usize) -> Result<u8, CodecError> {
+    let table = TNS_HUFFMAN_TABLES
+        .get(dimension)
+        .ok_or(CodecError::InvalidData(
+            "TNS Huffman dimension exceeds table B.32",
+        ))?;
 
     let mut code = 0_u16;
     for bit_len in 1..=TNS_MAX_HUFFMAN_BITS {

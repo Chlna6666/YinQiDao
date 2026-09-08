@@ -1,10 +1,10 @@
 use yinqidao_codec_core::CodecError;
 
-use crate::{
-    BASE_OUTPUT_POSITIONS, GaHoaFrameSideInfo, HoaConfig, HoaSideInfo, HoaTransportSynthesisWorkspace,
-    MAX_HOA_BASIS, NeuralNetworkType, decode_hoa_transport_frame,
-};
 use crate::hoa_transform::{HOA_TRANSFORM_BINS, HOA_TRANSFORM_LEN, HoaTransformWorkspace};
+use crate::{
+    BASE_OUTPUT_POSITIONS, GaHoaFrameSideInfo, HoaConfig, HoaSideInfo,
+    HoaTransportSynthesisWorkspace, MAX_HOA_BASIS, NeuralNetworkType, decode_hoa_transport_frame,
+};
 
 pub const HOA_FRAME_SAMPLES: usize = BASE_OUTPUT_POSITIONS;
 pub const HOA_OVERLAP_SIZE: usize = HOA_FRAME_SAMPLES / 2;
@@ -168,8 +168,8 @@ pub struct HoaPostSynthesisWorkspace {
 impl HoaPostSynthesisWorkspace {
     pub fn new() -> Self {
         let window = std::array::from_fn(|index| {
-            let phase = core::f32::consts::PI / (2.0 * HOA_OVERLAP_SIZE as f32)
-                * (index as f32 + 0.5);
+            let phase =
+                core::f32::consts::PI / (2.0 * HOA_OVERLAP_SIZE as f32) * (index as f32 + 0.5);
             f64::from(phase).sin() as f32
         });
         Self {
@@ -254,10 +254,7 @@ impl HoaPostSynthesisWorkspace {
         Ok(())
     }
 
-    fn analyze(
-        &mut self,
-        transport_pcm: &[[f32; HOA_FRAME_SAMPLES]],
-    ) -> Result<(), CodecError> {
+    fn analyze(&mut self, transport_pcm: &[[f32; HOA_FRAME_SAMPLES]]) -> Result<(), CodecError> {
         for (channel, current) in transport_pcm.iter().enumerate() {
             for subframe in 0..2 {
                 for sample in 0..HOA_OVERLAP_SIZE {
@@ -334,10 +331,7 @@ impl HoaPostSynthesisWorkspace {
         Ok(())
     }
 
-    fn synthesize(
-        &mut self,
-        output: &mut [[f32; HOA_FRAME_SAMPLES]],
-    ) -> Result<(), CodecError> {
+    fn synthesize(&mut self, output: &mut [[f32; HOA_FRAME_SAMPLES]]) -> Result<(), CodecError> {
         for (channel, channel_output) in output.iter_mut().enumerate() {
             channel_output.fill(0.0);
             for subframe in 0..2 {
@@ -479,15 +473,17 @@ mod tests {
     fn full_hoa_frontend_checks_output_geometry_before_payload_parsing() {
         let mut workspace = HoaSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; HOA_FRAME_SAMPLES];
-        assert!(parse_decode_hoa_pcm(
-            NeuralNetworkType::Basic,
-            &[],
-            0,
-            1,
-            96,
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_hoa_pcm(
+                NeuralNetworkType::Basic,
+                &[],
+                0,
+                1,
+                96,
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 }

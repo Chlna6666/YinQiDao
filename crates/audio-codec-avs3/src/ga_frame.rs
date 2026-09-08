@@ -1,10 +1,9 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BweConfig, BweSideInfo, CoreSidePrefix, GroupSideInfo, McBitAllocation,
-    MultichannelSideInfo, NeuralNetworkType, QcSideInfo, allocate_multichannel_bytes,
-    parse_core_side_prefix_at, parse_group_bits_at, parse_multichannel_side_info_at,
-    parse_qc_side_info_at,
+    BweConfig, BweSideInfo, CoreSidePrefix, GroupSideInfo, McBitAllocation, MultichannelSideInfo,
+    NeuralNetworkType, QcSideInfo, allocate_multichannel_bytes, parse_core_side_prefix_at,
+    parse_group_bits_at, parse_multichannel_side_info_at, parse_qc_side_info_at,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,7 +86,9 @@ pub fn parse_multichannel_frame_side_info(
     offset = multichannel.next_bit_offset;
 
     let payload_bits = payload.len().saturating_mul(8);
-    let remaining_payload_bits = payload_bits.checked_sub(offset).ok_or(CodecError::Truncated)?;
+    let remaining_payload_bits = payload_bits
+        .checked_sub(offset)
+        .ok_or(CodecError::Truncated)?;
     let allocation = allocate_multichannel_bytes(
         remaining_payload_bits,
         nn_type,
@@ -99,18 +100,15 @@ pub fn parse_multichannel_frame_side_info(
 
     let mut qc = Vec::with_capacity(channel_count_usize);
     for (group, &channel_bytes) in groups.iter().zip(&allocation.channel_bytes) {
-        let info = parse_qc_side_info_at(
-            payload,
-            offset,
-            nn_type,
-            group.num_groups,
-            channel_bytes,
-        )?;
+        let info =
+            parse_qc_side_info_at(payload, offset, nn_type, group.num_groups, channel_bytes)?;
         offset = info.next_bit_offset;
         qc.push(info);
     }
 
-    let actual_tail = payload_bits.checked_sub(offset).ok_or(CodecError::Truncated)?;
+    let actual_tail = payload_bits
+        .checked_sub(offset)
+        .ok_or(CodecError::Truncated)?;
     if actual_tail != allocation.trailing_bits {
         return Err(CodecError::Internal(
             "multichannel QC parsing does not match McBitsAllocation payload accounting".into(),
@@ -151,7 +149,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {

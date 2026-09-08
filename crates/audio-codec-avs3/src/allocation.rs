@@ -73,11 +73,12 @@ fn apply_reference_channel_cap(
         let excess = channel_bytes[capped_channel] - MC_CHANNEL_MAX_BYTES;
         channel_bytes[capped_channel] = MC_CHANNEL_MAX_BYTES;
         used[capped_channel] = true;
-        ratio_sum = ratio_sum
-            .checked_sub(usize::from(capped_ratio))
-            .ok_or(CodecError::Internal(
-                "multichannel cap ratio sum underflow".into(),
-            ))?;
+        ratio_sum =
+            ratio_sum
+                .checked_sub(usize::from(capped_ratio))
+                .ok_or(CodecError::Internal(
+                    "multichannel cap ratio sum underflow".into(),
+                ))?;
 
         if excess == 0 {
             continue;
@@ -104,8 +105,8 @@ fn apply_reference_channel_cap(
         }
 
         // Keep reference-codec integer remainder behaviour for bitstream interoperability.
-        channel_bytes[most_bits_channel] = channel_bytes[most_bits_channel]
-            .saturating_add(excess - distributed);
+        channel_bytes[most_bits_channel] =
+            channel_bytes[most_bits_channel].saturating_add(excess - distributed);
     }
 
     Ok(())
@@ -175,7 +176,9 @@ pub fn allocate_multichannel_bytes(
     let lfe_bytes = if let Some(index) = lfe_index {
         let bytes = lfe_allocation_bytes(total_bitrate_kbps, coupled_indices.len())?;
         channel_bytes[index] = bytes;
-        fixed_bytes = fixed_bytes.checked_add(bytes).ok_or(CodecError::Truncated)?;
+        fixed_bytes = fixed_bytes
+            .checked_add(bytes)
+            .ok_or(CodecError::Truncated)?;
         Some(bytes)
     } else {
         None
@@ -193,7 +196,11 @@ pub fn allocate_multichannel_bytes(
         .zip(side_info.silence_flags.iter().copied())
         .zip(side_info.channel_bit_ratios.iter().copied())
         .filter_map(|((channel, silent), ratio)| {
-            if silent { None } else { ratio.map(|ratio| (channel, ratio)) }
+            if silent {
+                None
+            } else {
+                ratio.map(|ratio| (channel, ratio))
+            }
         })
         .collect();
     let ratio_sum: usize = active.iter().map(|(_, ratio)| usize::from(*ratio)).sum();

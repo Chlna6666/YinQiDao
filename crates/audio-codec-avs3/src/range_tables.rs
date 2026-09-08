@@ -18,39 +18,35 @@ pub const BASE_RANGE_MODEL_COUNT: usize = 64;
 
 const CONTEXT_CDF_DEFAULT: [u32; 5] = [0, 1, 65_534, 65_535, 65_536];
 const CONTEXT_CDF_5: [u32; 41] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 30, 69, 169, 405, 909, 1_885, 3_581,
-    6_203, 9_806, 14_349, 20_045, 27_710, 39_581, 63_884, 65_352, 65_478, 65_513,
-    65_523, 65_526, 65_527, 65_528, 65_529, 65_530, 65_531, 65_532, 65_533, 65_534,
-    65_535, 65_536,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 30, 69, 169, 405, 909, 1_885, 3_581, 6_203, 9_806,
+    14_349, 20_045, 27_710, 39_581, 63_884, 65_352, 65_478, 65_513, 65_523, 65_526, 65_527, 65_528,
+    65_529, 65_530, 65_531, 65_532, 65_533, 65_534, 65_535, 65_536,
 ];
 const CONTEXT_CDF_13: [u32; 17] = [
-    0, 1, 2, 3, 4, 16, 227, 4_637, 62_245, 65_417, 65_525, 65_531, 65_532,
-    65_533, 65_534, 65_535, 65_536,
+    0, 1, 2, 3, 4, 16, 227, 4_637, 62_245, 65_417, 65_525, 65_531, 65_532, 65_533, 65_534, 65_535,
+    65_536,
 ];
 
 // GY/T 363-2023 table B.8. Rust has no hexadecimal floating-point literal syntax, therefore the
 // normative binary32 values are stored by bit pattern to avoid decimal-rounding drift.
 pub const BASE_STDDEV_THRESHOLD_BITS: [u32; BASE_RANGE_MODEL_COUNT] = [
-    0x3DE147AE, 0x3DFEC794, 0x3E10122F, 0x3E22EFC6, 0x3E3845C8, 0x3E506705, 0x3E6BB124,
-    0x3E854709, 0x3E96BACD, 0x3EAA779A, 0x3EC0CA0D, 0x3EDA08CA, 0x3EF695CB, 0x3F0B6FF2,
-    0x3F1DB233, 0x3F325888, 0x3F49B317, 0x3F641C85, 0x3F80FDAB, 0x3F91E1BC, 0x3FA4FC06,
-    0x3FBA96AE, 0x3FD3058E, 0x3FEEA77B, 0x4006F3DB, 0x40189FC6, 0x402C9C15, 0x4043365A,
-    0x405CC650, 0x4079AF2F, 0x408D3096, 0x409FAD96, 0x40B4965C, 0x40CC3C0F, 0x40E6FA78,
-    0x41029CB2, 0x4113B71C, 0x41270EDD, 0x413CEF07, 0x4155AC84, 0x4171A75A, 0x4188A611,
-    0x419A8AD8, 0x41AEC774, 0x41C5AA73, 0x41DF8CA8, 0x41FCD28B, 0x420EF6DD, 0x4221AF5A,
-    0x4236DB67, 0x424ECD2F, 0x4269E1A4, 0x428440F1, 0x42959262, 0x42A9285F, 0x42BF4EEC,
-    0x42D85C03, 0x42F4B0E0, 0x430A5DBC, 0x431C7C15, 0x4330F9CF, 0x43482670, 0x43625BEE,
-    0x43800000,
+    0x3DE147AE, 0x3DFEC794, 0x3E10122F, 0x3E22EFC6, 0x3E3845C8, 0x3E506705, 0x3E6BB124, 0x3E854709,
+    0x3E96BACD, 0x3EAA779A, 0x3EC0CA0D, 0x3EDA08CA, 0x3EF695CB, 0x3F0B6FF2, 0x3F1DB233, 0x3F325888,
+    0x3F49B317, 0x3F641C85, 0x3F80FDAB, 0x3F91E1BC, 0x3FA4FC06, 0x3FBA96AE, 0x3FD3058E, 0x3FEEA77B,
+    0x4006F3DB, 0x40189FC6, 0x402C9C15, 0x4043365A, 0x405CC650, 0x4079AF2F, 0x408D3096, 0x409FAD96,
+    0x40B4965C, 0x40CC3C0F, 0x40E6FA78, 0x41029CB2, 0x4113B71C, 0x41270EDD, 0x413CEF07, 0x4155AC84,
+    0x4171A75A, 0x4188A611, 0x419A8AD8, 0x41AEC774, 0x41C5AA73, 0x41DF8CA8, 0x41FCD28B, 0x420EF6DD,
+    0x4221AF5A, 0x4236DB67, 0x424ECD2F, 0x4269E1A4, 0x428440F1, 0x42959262, 0x42A9285F, 0x42BF4EEC,
+    0x42D85C03, 0x42F4B0E0, 0x430A5DBC, 0x431C7C15, 0x4330F9CF, 0x43482670, 0x43625BEE, 0x43800000,
 ];
 
 // GY/T 363-2023 table B.9 signed symbol offsets. Keep these explicit rather than deriving them
 // from CDF length so table transcription errors cannot silently alter the reconstructed integer.
 pub const BASE_RANGE_MODEL_OFFSETS: [i32; BASE_RANGE_MODEL_COUNT] = [
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, -2, -2, -2, -2, -3,
-    -3, -3, -3, -4, -4, -5, -5, -6, -7, -7, -8, -9, -10, -12, -13, -15,
-    -17, -19, -21, -24, -27, -31, -35, -39, -44, -50, -56, -64, -72, -81,
-    -92, -104, -117, -132, -150, -169, -191, -216, -245, -277, -313, -354,
-    -400, -452, -511, -578, -654, -739,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, -2, -2, -2, -2, -3, -3, -3, -3, -4, -4, -5, -5, -6,
+    -7, -7, -8, -9, -10, -12, -13, -15, -17, -19, -21, -24, -27, -31, -35, -39, -44, -50, -56, -64,
+    -72, -81, -92, -104, -117, -132, -150, -169, -191, -216, -245, -277, -313, -354, -400, -452,
+    -511, -578, -654, -739,
 ];
 
 pub fn context_range_model(index: usize) -> Result<RangeModel<'static>, CodecError> {
@@ -100,7 +96,10 @@ pub fn base_range_model(index: usize) -> Result<RangeModel<'static>, CodecError>
 }
 
 pub fn base_stddev_threshold(index: usize) -> Option<f32> {
-    BASE_STDDEV_THRESHOLD_BITS.get(index).copied().map(f32::from_bits)
+    BASE_STDDEV_THRESHOLD_BITS
+        .get(index)
+        .copied()
+        .map(f32::from_bits)
 }
 
 pub fn select_base_range_model_index(stddev: f32) -> Result<usize, CodecError> {
@@ -201,7 +200,10 @@ mod tests {
         let second = base_stddev_threshold(1).unwrap();
         assert_eq!(select_base_range_model_index(0.0).unwrap(), 0);
         assert_eq!(select_base_range_model_index(first).unwrap(), 0);
-        assert_eq!(select_base_range_model_index((first + second) * 0.5).unwrap(), 1);
+        assert_eq!(
+            select_base_range_model_index((first + second) * 0.5).unwrap(),
+            1
+        );
         assert_eq!(select_base_range_model_index(256.0).unwrap(), 63);
         assert_eq!(select_base_range_model_index(1_000.0).unwrap(), 63);
         assert!(select_base_range_model_index(-0.01).is_err());

@@ -41,7 +41,9 @@ pub fn parse_mono_frame_side_info(
     offset = group.next_bit_offset;
 
     let payload_bits = payload.len().saturating_mul(8);
-    let remaining = payload_bits.checked_sub(offset).ok_or(CodecError::Truncated)?;
+    let remaining = payload_bits
+        .checked_sub(offset)
+        .ok_or(CodecError::Truncated)?;
     let fixed_qc_bits = qc_fixed_header_bits(nn_type, group.num_groups)?;
     let coded_bits = remaining
         .checked_sub(fixed_qc_bits)
@@ -49,13 +51,7 @@ pub fn parse_mono_frame_side_info(
     let channel_bytes = coded_bits / 8;
     let trailing_bits = coded_bits & 7;
 
-    let qc = parse_qc_side_info_at(
-        payload,
-        offset,
-        nn_type,
-        group.num_groups,
-        channel_bytes,
-    )?;
+    let qc = parse_qc_side_info_at(payload, offset, nn_type, group.num_groups, channel_bytes)?;
     let actual_tail = payload_bits
         .checked_sub(qc.next_bit_offset)
         .ok_or(CodecError::Truncated)?;
@@ -128,14 +124,9 @@ mod tests {
         writer.push(0, 8); // contextNumBytes
         writer.zeros(4 * 8); // four base range-coded bytes
 
-        let info = parse_mono_frame_side_info(
-            &writer.bytes,
-            0,
-            NeuralNetworkType::Basic,
-            false,
-            None,
-        )
-        .unwrap();
+        let info =
+            parse_mono_frame_side_info(&writer.bytes, 0, NeuralNetworkType::Basic, false, None)
+                .unwrap();
 
         assert_eq!(info.channel.group.num_groups, 1);
         assert_eq!(info.channel.qc.channel_bytes, 4);
@@ -148,13 +139,9 @@ mod tests {
     #[test]
     fn mono_parser_rejects_frame_without_room_for_qc_header() {
         let payload = [0_u8; 7]; // 56 bits: only six bits remain after the 50-bit core.
-        assert!(parse_mono_frame_side_info(
-            &payload,
-            0,
-            NeuralNetworkType::Basic,
-            false,
-            None,
-        )
-        .is_err());
+        assert!(
+            parse_mono_frame_side_info(&payload, 0, NeuralNetworkType::Basic, false, None,)
+                .is_err()
+        );
     }
 }

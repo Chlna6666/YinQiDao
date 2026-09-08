@@ -75,11 +75,12 @@ pub fn conv1d_transpose_same(
             "transpose CNN channel count must be non-zero",
         ));
     }
-    let expected_input = input_positions
-        .checked_mul(spec.input_channels)
-        .ok_or(CodecError::InvalidData(
-            "transpose CNN input geometry overflows address space",
-        ))?;
+    let expected_input =
+        input_positions
+            .checked_mul(spec.input_channels)
+            .ok_or(CodecError::InvalidData(
+                "transpose CNN input geometry overflows address space",
+            ))?;
     if input.len() != expected_input {
         return Err(CodecError::InvalidData(
             "transpose CNN input length does not match geometry",
@@ -97,11 +98,12 @@ pub fn conv1d_transpose_same(
     }
 
     let output_positions = spec.output_positions(input_positions)?;
-    let expected_output = output_positions
-        .checked_mul(spec.output_channels)
-        .ok_or(CodecError::InvalidData(
-            "transpose CNN output geometry overflows address space",
-        ))?;
+    let expected_output =
+        output_positions
+            .checked_mul(spec.output_channels)
+            .ok_or(CodecError::InvalidData(
+                "transpose CNN output geometry overflows address space",
+            ))?;
     if output.len() != expected_output {
         return Err(CodecError::InvalidData(
             "transpose CNN output length does not match geometry",
@@ -116,11 +118,12 @@ pub fn conv1d_transpose_same(
     for input_position in 0..input_positions {
         let input_row_start = input_position * spec.input_channels;
         let input_row = &input[input_row_start..input_row_start + spec.input_channels];
-        let base_output = input_position
-            .checked_mul(spec.stride)
-            .ok_or(CodecError::InvalidData(
-                "transpose CNN output position overflows address space",
-            ))?;
+        let base_output =
+            input_position
+                .checked_mul(spec.stride)
+                .ok_or(CodecError::InvalidData(
+                    "transpose CNN output position overflows address space",
+                ))?;
 
         for kernel_position in 0..spec.kernel_size {
             let Some(output_position) = base_output
@@ -134,8 +137,8 @@ pub fn conv1d_transpose_same(
             }
 
             let kernel_plane = kernel_position * spec.output_channels * spec.input_channels;
-            let output_row = &mut output
-                [output_position * spec.output_channels..(output_position + 1) * spec.output_channels];
+            let output_row = &mut output[output_position * spec.output_channels
+                ..(output_position + 1) * spec.output_channels];
             for (output_channel, value) in output_row.iter_mut().enumerate() {
                 let kernel_start = kernel_plane + output_channel * spec.input_channels;
                 let kernel_row = &params.kernel[kernel_start..kernel_start + spec.input_channels];
@@ -194,7 +197,8 @@ impl ContextDecoderWorkspace {
 
     fn prepare(&mut self) {
         self.layer_1.resize(32 * CONTEXT_CHANNELS, 0.0);
-        self.layer_2.resize(CONTEXT_OUTPUT_POSITIONS * CONTEXT_CHANNELS, 0.0);
+        self.layer_2
+            .resize(CONTEXT_OUTPUT_POSITIONS * CONTEXT_CHANNELS, 0.0);
     }
 }
 

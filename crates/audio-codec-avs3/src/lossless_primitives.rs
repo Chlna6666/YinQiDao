@@ -61,10 +61,7 @@ pub fn lossless_rice_split(value: u64, parameter: u8) -> Result<(u64, u64), Code
 /// The lossless bitstream carries this temporary increment after the Rice separator when the
 /// original quotient would exceed the normative prefix limit. This helper deliberately does not
 /// parse that syntax; it provides the exact arithmetic needed by the eventual bitstream frontend.
-pub fn lossless_rice_escape_parameter(
-    value: u64,
-    parameter: u8,
-) -> Result<(u8, u8), CodecError> {
+pub fn lossless_rice_escape_parameter(value: u64, parameter: u8) -> Result<(u8, u8), CodecError> {
     if parameter > 63 {
         return Err(CodecError::InvalidData(
             "lossless Rice parameter exceeds 64-bit symbol geometry",
@@ -283,17 +280,7 @@ mod tests {
 
     #[test]
     fn signed_rice_mapping_round_trips_entire_edge_geometry() {
-        for value in [
-            i32::MIN,
-            -1_000_000,
-            -2,
-            -1,
-            0,
-            1,
-            2,
-            1_000_000,
-            i32::MAX,
-        ] {
+        for value in [i32::MIN, -1_000_000, -2, -1, 0, 1, 2, 1_000_000, i32::MAX] {
             let mapped = lossless_rice_map_signed(value);
             assert_eq!(lossless_rice_unmap_signed(mapped).unwrap(), value);
         }

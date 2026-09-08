@@ -5,9 +5,7 @@ use crate::BitRange;
 pub const RANGE_DEFAULT_PRECISION: u8 = 16;
 pub const RANGE_OVERFLOW_WIDTH: u8 = 4;
 
-const OVERFLOW_CDF: [u32; 17] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-];
+const OVERFLOW_CDF: [u32; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 /// One zero-copy byte window inside a bit-packed AVS3 packet.
 ///
@@ -77,11 +75,7 @@ pub struct RangeModel<'a> {
 }
 
 impl<'a> RangeModel<'a> {
-    pub fn new(
-        cumulative: &'a [u32],
-        offset: i32,
-        precision: u8,
-    ) -> Result<Self, CodecError> {
+    pub fn new(cumulative: &'a [u32], offset: i32, precision: u8) -> Result<Self, CodecError> {
         if !(1..=16).contains(&precision) {
             return Err(CodecError::InvalidData(
                 "range CDF precision must be between one and sixteen bits",
@@ -93,9 +87,7 @@ impl<'a> RangeModel<'a> {
             ));
         }
         let total = 1_u32 << precision;
-        if cumulative.first().copied() != Some(0)
-            || cumulative.last().copied() != Some(total)
-        {
+        if cumulative.first().copied() != Some(0) || cumulative.last().copied() != Some(total) {
             return Err(CodecError::InvalidData(
                 "range CDF endpoints do not match configured precision",
             ));
@@ -162,17 +154,15 @@ impl<'a> RangeDecoder<'a> {
         let symbol = self.decode_symbol(model.cumulative, model.precision)?;
         let escape = model.escape_symbol();
         let decoded = if symbol != escape {
-            i64::try_from(symbol).map_err(|_| CodecError::InvalidData(
-                "range symbol exceeds signed decode domain",
-            ))?
+            i64::try_from(symbol)
+                .map_err(|_| CodecError::InvalidData("range symbol exceeds signed decode domain"))?
         } else {
             let overflow = self.decode_overflow()?;
             map_escape_value(escape, overflow)?
         };
         let restored = decoded + i64::from(model.offset);
-        i32::try_from(restored).map_err(|_| CodecError::InvalidData(
-            "range-decoded value exceeds i32 domain",
-        ))
+        i32::try_from(restored)
+            .map_err(|_| CodecError::InvalidData("range-decoded value exceeds i32 domain"))
     }
 
     pub fn decode_sequence(
@@ -187,9 +177,12 @@ impl<'a> RangeDecoder<'a> {
             ));
         }
         for (slot, &model_index) in output.iter_mut().zip(model_indices) {
-            let model = models.get(model_index).copied().ok_or(CodecError::InvalidData(
-                "range CDF index exceeds model table",
-            ))?;
+            let model = models
+                .get(model_index)
+                .copied()
+                .ok_or(CodecError::InvalidData(
+                    "range CDF index exceeds model table",
+                ))?;
             *slot = self.decode_value(model)?;
         }
         Ok(())
@@ -299,9 +292,9 @@ fn map_escape_value(escape_symbol: usize, overflow: u32) -> Result<i64, CodecErr
     if overflow & 1 != 0 {
         Ok(-half - 1)
     } else {
-        let escape = i64::try_from(escape_symbol).map_err(|_| CodecError::InvalidData(
-            "range escape symbol exceeds signed decode domain",
-        ))?;
+        let escape = i64::try_from(escape_symbol).map_err(|_| {
+            CodecError::InvalidData("range escape symbol exceeds signed decode domain")
+        })?;
         escape.checked_add(half).ok_or(CodecError::InvalidData(
             "range positive overflow exceeds signed decode domain",
         ))
@@ -347,10 +340,7 @@ mod tests {
         )
         .unwrap();
         let mut decoder = RangeDecoder::new(input);
-        assert_eq!(
-            decoder.decode_symbol(&[0, 32_768, 65_536], 16).unwrap(),
-            1
-        );
+        assert_eq!(decoder.decode_symbol(&[0, 32_768, 65_536], 16).unwrap(), 1);
     }
 
     #[test]
@@ -368,10 +358,7 @@ mod tests {
         .unwrap();
         let mut decoder = RangeDecoder::new(input);
         assert_eq!(decoder.decode_symbol(&[0, 1, 65_536], 16).unwrap(), 0);
-        assert_eq!(
-            decoder.decode_symbol(&[0, 32_768, 65_536], 16).unwrap(),
-            1
-        );
+        assert_eq!(decoder.decode_symbol(&[0, 32_768, 65_536], 16).unwrap(), 1);
     }
 
     #[test]

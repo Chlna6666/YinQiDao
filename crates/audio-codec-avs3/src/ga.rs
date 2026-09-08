@@ -31,11 +31,9 @@ impl GaDecodePlan {
         }
 
         let format = match header.coding_profile {
-            CodingProfile::Basic => match header
-                .channel_number_index
-                .ok_or(CodecError::InvalidData(
-                    "basic AVS3 profile is missing channel_number_index",
-                ))? {
+            CodingProfile::Basic => match header.channel_number_index.ok_or(
+                CodecError::InvalidData("basic AVS3 profile is missing channel_number_index"),
+            )? {
                 0 => GaCodecFormat::Mono,
                 1 => GaCodecFormat::Stereo,
                 _ => GaCodecFormat::Multichannel,
@@ -43,15 +41,15 @@ impl GaDecodePlan {
             CodingProfile::ObjectMetadata => match header.sound_bed_type.ok_or(
                 CodecError::InvalidData("object AVS3 profile is missing soundBedType"),
             )? {
-                SoundBedType::ObjectsOnly => match header.object_channel_number.ok_or(
-                    CodecError::InvalidData(
+                SoundBedType::ObjectsOnly => {
+                    match header.object_channel_number.ok_or(CodecError::InvalidData(
                         "object-only AVS3 frame is missing object_channel_number",
-                    ),
-                )? {
-                    0 => GaCodecFormat::Mono,
-                    1 => GaCodecFormat::Stereo,
-                    _ => GaCodecFormat::Multichannel,
-                },
+                    ))? {
+                        0 => GaCodecFormat::Mono,
+                        1 => GaCodecFormat::Stereo,
+                        _ => GaCodecFormat::Multichannel,
+                    }
+                }
                 // The 2023 profile requires at least three aggregate signals for mixed content and
                 // explicitly reuses the multichannel decoder path.
                 SoundBedType::ChannelBedAndObjects => GaCodecFormat::Multichannel,
@@ -117,7 +115,10 @@ mod tests {
         let mut mono = header(CodingProfile::Basic);
         mono.channel_number_index = Some(0);
         mono.channel_configuration = Some(ChannelConfiguration::Mono);
-        assert_eq!(GaDecodePlan::from_header(&mono).unwrap().format, GaCodecFormat::Mono);
+        assert_eq!(
+            GaDecodePlan::from_header(&mono).unwrap().format,
+            GaCodecFormat::Mono
+        );
 
         let mut stereo = header(CodingProfile::Basic);
         stereo.channel_number_index = Some(1);
@@ -170,6 +171,9 @@ mod tests {
         frame.payload_offset_bytes = 3;
         assert_eq!(coded_payload(&[1, 2, 3, 4, 5], &frame).unwrap(), &[4, 5]);
         frame.payload_offset_bytes = 6;
-        assert_eq!(coded_payload(&[1, 2, 3], &frame), Err(CodecError::Truncated));
+        assert_eq!(
+            coded_payload(&[1, 2, 3], &frame),
+            Err(CodecError::Truncated)
+        );
     }
 }

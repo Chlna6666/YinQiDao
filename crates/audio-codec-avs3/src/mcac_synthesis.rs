@@ -64,9 +64,7 @@ pub fn resolve_multichannel_pair_index(
             "multichannel pair resolution requires at least two coupled channels",
         ));
     }
-    let total_pairs = u32::from(couple_ch_num)
-        .saturating_mul(u32::from(couple_ch_num - 1))
-        / 2;
+    let total_pairs = u32::from(couple_ch_num).saturating_mul(u32::from(couple_ch_num - 1)) / 2;
     if u32::from(pair_index) >= total_pairs {
         return Err(CodecError::InvalidData(
             "channelPairIndex exceeds available channel pairs",

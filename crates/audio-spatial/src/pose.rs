@@ -10,6 +10,7 @@ impl Vec3 {
     pub const FORWARD: Self = Self::new(0.0, 0.0, 1.0);
     pub const UP: Self = Self::new(0.0, 1.0, 0.0);
     pub const RIGHT: Self = Self::new(1.0, 0.0, 0.0);
+    pub const LEFT: Self = Self::new(-1.0, 0.0, 0.0);
 
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }

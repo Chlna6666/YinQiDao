@@ -1,10 +1,6 @@
 use yinqidao_codec_core::CodecError;
 
-use crate::{
-    bitreader::BitReader,
-    config::AudioCodingMethod,
-    frame::AatfFrameHeader,
-};
+use crate::{bitreader::BitReader, config::AudioCodingMethod, frame::AatfFrameHeader};
 
 /// Width of `frame_error_check().crc_check` in the AATF syntax.
 pub const LOSSLESS_FRAME_ERROR_CHECK_BITS: u8 = 8;

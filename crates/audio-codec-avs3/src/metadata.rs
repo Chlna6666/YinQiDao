@@ -53,7 +53,9 @@ mod tests {
     fn static_metadata_stops_before_unknown_static_payload() {
         assert_eq!(
             parse_metadata_boundary(&[0b10_000000]).unwrap(),
-            MetadataBoundary::StaticPresent { static_bit_offset: 1 }
+            MetadataBoundary::StaticPresent {
+                static_bit_offset: 1
+            }
         );
     }
 
@@ -61,7 +63,9 @@ mod tests {
     fn dynamic_metadata_stops_after_flags() {
         assert_eq!(
             parse_metadata_boundary(&[0b01_000000]).unwrap(),
-            MetadataBoundary::DynamicPresent { dynamic_bit_offset: 2 }
+            MetadataBoundary::DynamicPresent {
+                dynamic_bit_offset: 2
+            }
         );
     }
 

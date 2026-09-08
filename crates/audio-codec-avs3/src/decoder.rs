@@ -3,30 +3,18 @@ use yinqidao_codec_core::{
 };
 
 use crate::{
-    BASE_OUTPUT_POSITIONS, Av3aSampleEntry, BasicMonoSynthesisWorkspace,
-    BasicMultichannelSynthesisWorkspace, BasicStereoSynthesisWorkspace, BweConfig, BweMode,
-    BweSideInfo, ChannelConfiguration, CoreSidePrefix, DynamicChannelPrefix, DynamicMetadata,
-    DynamicMetadataPrefix, GaCodecFormat, GaDecodePlan, GaHoaFrameSideInfo,
-    GaMultichannelFrameSideInfo, HoaConfig, HoaSynthesisWorkspace, NeuralNetworkType,
-    StaticMetadataPrefix, TransformType,
-    config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, GeneralFullRateConfig, parse_dca3},
+    Av3aSampleEntry, BasicMonoSynthesisWorkspace, BasicMultichannelSynthesisWorkspace,
+    BasicStereoSynthesisWorkspace, BweConfig, BweSideInfo, CoreSidePrefix, DynamicChannelPrefix,
+    DynamicMetadata, DynamicMetadataPrefix, GaDecodePlan, GaHoaFrameSideInfo,
+    GaMultichannelFrameSideInfo, HoaSynthesisWorkspace, StaticMetadataPrefix, TransformType,
+    config::{AudioCodingMethod, Avs3SpecificConfig, ContentType, parse_dca3},
     dynamic_metadata::parse_dynamic_metadata_at,
     frame::{AatfFrameHeader, SoundBedType, parse_aatf_frame_header},
     ga::coded_payload,
-    ga_mono_pcm::parse_decode_mono_pcm,
-    ga_multichannel_pcm::parse_decode_multichannel_pcm,
-    ga_stereo_pcm::parse_decode_stereo_pcm,
-    hoa_synthesis::parse_decode_hoa_pcm,
     lossless_bitstream::parse_lossless_aatf_envelope,
     metadata::{MetadataBoundary, parse_metadata_boundary},
     metadata_prefix::parse_static_metadata_prefix_at,
 };
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ResolvedBwe {
-    present: Option<bool>,
-    config: Option<BweConfig>,
-}
 
 /// Incremental pure-Rust AVS3-P3 decoder state.
 ///
@@ -39,6 +27,8 @@ pub struct Avs3Decoder {
     info: StreamInfo,
     decoder_config: Vec<u8>,
     specific_config: Option<Avs3SpecificConfig>,
+    builtin: Option<crate::engine::BuiltinDecoder>,
+    pcm_buffer: Vec<f32>,
     mono_synthesis: BasicMonoSynthesisWorkspace,
     stereo_synthesis: BasicStereoSynthesisWorkspace,
     multichannel_synthesis: BasicMultichannelSynthesisWorkspace,
@@ -78,7 +68,11 @@ impl Avs3Decoder {
         let bits_per_sample = specific_config
             .as_ref()
             .and_then(Avs3SpecificConfig::bits_per_sample)
-            .or_else(|| entry.sample_size_bits.and_then(|bits| u8::try_from(bits).ok()));
+            .or_else(|| {
+                entry
+                    .sample_size_bits
+                    .and_then(|bits| u8::try_from(bits).ok())
+            });
         let sample_rate = specific_config
             .as_ref()
             .and_then(Avs3SpecificConfig::sample_rate)
@@ -94,6 +88,8 @@ impl Avs3Decoder {
             },
             decoder_config: entry.decoder_config.clone(),
             specific_config,
+            builtin: None,
+            pcm_buffer: Vec::new(),
             mono_synthesis: BasicMonoSynthesisWorkspace::new(),
             stereo_synthesis: BasicStereoSynthesisWorkspace::new(),
             multichannel_synthesis: BasicMultichannelSynthesisWorkspace::new(),
@@ -194,57 +190,6 @@ impl Avs3Decoder {
         self.packets_seen
     }
 
-    fn general_config(&self) -> Result<&GeneralFullRateConfig, CodecError> {
-        match self.specific_config.as_ref() {
-            Some(Avs3SpecificConfig::GeneralFullRate(config)) => Ok(config),
-            _ => Err(CodecError::InvalidData(
-                "general-full-rate decoding requires dca3 GA configuration",
-            )),
-        }
-    }
-
-    fn lsf_low_bitrate_precision(&self, plan: GaDecodePlan) -> Option<bool> {
-        let Avs3SpecificConfig::GeneralFullRate(config) = self.specific_config.as_ref()? else {
-            return None;
-        };
-        let channels = u32::from(plan.output_channels?);
-        if channels == 0 {
-            return None;
-        }
-        Some(u32::from(config.total_bitrate_kbps) <= channels.saturating_mul(32))
-    }
-
-    fn resolve_bwe_config(
-        &self,
-        header: &AatfFrameHeader,
-        plan: GaDecodePlan,
-    ) -> Result<ResolvedBwe, CodecError> {
-        let config = self.general_config()?;
-        let mode = match plan.format {
-            GaCodecFormat::Mono => BweMode::Mono,
-            GaCodecFormat::Stereo => BweMode::Stereo,
-            GaCodecFormat::Multichannel => {
-                let channels = plan.output_channels.ok_or(CodecError::InvalidData(
-                    "multichannel BWE is missing output channel count",
-                ))?;
-                let non_lfe_channels = if lfe_channel_index(header.channel_configuration).is_some() {
-                    channels.saturating_sub(1)
-                } else {
-                    channels
-                };
-                BweMode::Multichannel { non_lfe_channels }
-            }
-            // HOA BWE is resolved independently per transport group/channel from its bitrate table.
-            GaCodecFormat::Hoa => return Ok(ResolvedBwe::default()),
-        };
-
-        let bwe_config = BweConfig::for_bitrate(mode, u32::from(config.total_bitrate_kbps))?;
-        Ok(ResolvedBwe {
-            present: Some(bwe_config.is_some()),
-            config: bwe_config,
-        })
-    }
-
     fn validate_frame_against_config(&self, header: &AatfFrameHeader) -> Result<(), CodecError> {
         let Some(config) = self.specific_config.as_ref() else {
             return Ok(());
@@ -339,6 +284,10 @@ impl Avs3Decoder {
 /// AVS/UWA channel-based layouts use the standard interleaved order L, R, C, LFE, ... .
 /// Object-only streams have no channel-bed LFE; mixed streams keep bed channels first, so the LFE
 /// remains index three before appended object signals.
+#[cfg(test)]
+use crate::ChannelConfiguration;
+
+#[cfg(test)]
 fn lfe_channel_index(configuration: Option<ChannelConfiguration>) -> Option<usize> {
     match configuration {
         Some(
@@ -396,7 +345,7 @@ impl AudioDecoder for Avs3Decoder {
         self.last_decode_plan = Some(plan);
         self.last_metadata_boundary = Some(metadata);
 
-        let core_bit_offset = match metadata {
+        let _core_bit_offset = match metadata {
             MetadataBoundary::None { core_bit_offset } => core_bit_offset,
             MetadataBoundary::StaticPresent { static_bit_offset } => {
                 let prefix = parse_static_metadata_prefix_at(payload, static_bit_offset)?;
@@ -416,7 +365,8 @@ impl AudioDecoder for Avs3Decoder {
                 let object_channels = header.object_channels().ok_or(CodecError::InvalidData(
                     "dynamic Audio Vivid metadata present without object channels",
                 ))?;
-                let decoded = parse_dynamic_metadata_at(payload, dynamic_bit_offset, object_channels)?;
+                let decoded =
+                    parse_dynamic_metadata_at(payload, dynamic_bit_offset, object_channels)?;
                 let first_channel_bit_offset = dynamic_bit_offset.saturating_add(3);
                 let first_channel = decoded.objects.first().map(|object| DynamicChannelPrefix {
                     mute: object.mute,
@@ -435,225 +385,42 @@ impl AudioDecoder for Avs3Decoder {
             }
         };
 
-        let resolved_bwe = self.resolve_bwe_config(&header, plan)?;
-        self.last_bwe_present = resolved_bwe.present;
-        self.last_bwe_config = resolved_bwe.config;
+        let header_info = crate::engine::header::parse_header(packet)
+            .map_err(|_| CodecError::InvalidData("failed to parse AVS3 frame header"))?;
+        let engine_header = header_info.header;
+        let encoded_frame =
+            crate::engine::stream::EncodedFrame::new(engine_header, packet.to_vec());
 
-        match plan.format {
-            GaCodecFormat::Multichannel => {
-                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
-                    "general-full-rate AATF frame is missing neural-network type",
-                ))?;
-                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
-                    return Err(CodecError::Unsupported(
-                        "reserved AVS3 neural-network type",
-                    ));
-                }
-                let low_bitrate = self
-                    .lsf_low_bitrate_precision(plan)
-                    .ok_or(CodecError::InvalidData(
-                        "multichannel synthesis requires bitrate/channel configuration",
-                    ))?;
-                let channel_count = plan.output_channels.ok_or(CodecError::InvalidData(
-                    "multichannel decode plan is missing channel count",
-                ))?;
-                if channel_count < 3 {
-                    return Err(CodecError::InvalidData(
-                        "multichannel decode plan contains fewer than three channels",
-                    ));
-                }
-                let total_bitrate_kbps = u32::from(self.general_config()?.total_bitrate_kbps);
-                let lfe_index = lfe_channel_index(header.channel_configuration);
-                let sample_count = usize::from(channel_count)
-                    .checked_mul(BASE_OUTPUT_POSITIONS)
-                    .ok_or(CodecError::InvalidData(
-                        "multichannel PCM output geometry overflows address space",
-                    ))?;
-
-                output.clear_for(
-                    header.sample_rate.unwrap_or(self.info.sample_rate),
-                    channel_count,
-                );
-                output.samples.resize(sample_count, 0.0);
-                let frame = parse_decode_multichannel_pcm(
-                    nn_type,
-                    payload,
-                    core_bit_offset,
-                    low_bitrate,
-                    resolved_bwe.config,
-                    total_bitrate_kbps,
-                    channel_count,
-                    lfe_index,
-                    &mut self.multichannel_synthesis,
-                    &mut output.samples,
-                )?;
-
-                if let Some(first) = frame.channels.first() {
-                    self.last_core_side_prefix = Some(first.core);
-                    self.last_first_transform_type = Some(first.core.transform_type);
-                    self.last_bwe_side_info = first.bwe;
-                    self.last_after_bwe_bit_offset = Some(
-                        first
-                            .bwe
-                            .map(|bwe| bwe.next_bit_offset)
-                            .unwrap_or(first.core.next_bit_offset),
-                    );
-                }
-                self.last_multichannel_frame_side_info = Some(frame);
-                self.last_frame_header = Some(header);
-                self.packets_seen = self.packets_seen.saturating_add(1);
-                Ok(DecodeStatus::FrameReady)
-            }
-            GaCodecFormat::Mono => {
-                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
-                    "general-full-rate AATF frame is missing neural-network type",
-                ))?;
-                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
-                    return Err(CodecError::Unsupported(
-                        "reserved AVS3 neural-network type",
-                    ));
-                }
-                let low_bitrate = self
-                    .lsf_low_bitrate_precision(plan)
-                    .ok_or(CodecError::InvalidData(
-                        "mono synthesis requires bitrate/channel configuration",
-                    ))?;
-
-                output.clear_for(header.sample_rate.unwrap_or(self.info.sample_rate), 1);
-                output.samples.resize(BASE_OUTPUT_POSITIONS, 0.0);
-                let side = parse_decode_mono_pcm(
-                    nn_type,
-                    payload,
-                    core_bit_offset,
-                    low_bitrate,
-                    resolved_bwe.config,
-                    &mut self.mono_synthesis,
-                    &mut output.samples,
-                )?;
-                let core = side.channel.core;
-                self.last_core_side_prefix = Some(core);
-                self.last_first_transform_type = Some(core.transform_type);
-                self.last_bwe_side_info = side.channel.bwe;
-                self.last_after_bwe_bit_offset = Some(
-                    side.channel
-                        .bwe
-                        .map(|bwe| bwe.next_bit_offset)
-                        .unwrap_or(core.next_bit_offset),
-                );
-                self.last_frame_header = Some(header);
-                self.packets_seen = self.packets_seen.saturating_add(1);
-                Ok(DecodeStatus::FrameReady)
-            }
-            GaCodecFormat::Stereo => {
-                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
-                    "general-full-rate AATF frame is missing neural-network type",
-                ))?;
-                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
-                    return Err(CodecError::Unsupported(
-                        "reserved AVS3 neural-network type",
-                    ));
-                }
-                let low_bitrate = self
-                    .lsf_low_bitrate_precision(plan)
-                    .ok_or(CodecError::InvalidData(
-                        "stereo synthesis requires bitrate/channel configuration",
-                    ))?;
-                let total_bitrate_kbps = u32::from(self.general_config()?.total_bitrate_kbps);
-
-                output.clear_for(header.sample_rate.unwrap_or(self.info.sample_rate), 2);
-                output.samples.resize(BASE_OUTPUT_POSITIONS * 2, 0.0);
-                let side = parse_decode_stereo_pcm(
-                    nn_type,
-                    payload,
-                    core_bit_offset,
-                    low_bitrate,
-                    resolved_bwe.config,
-                    total_bitrate_kbps,
-                    &mut self.stereo_synthesis,
-                    &mut output.samples,
-                )?;
-                let first = &side.channels[0];
-                self.last_core_side_prefix = Some(first.core);
-                self.last_first_transform_type = Some(first.core.transform_type);
-                self.last_bwe_side_info = first.bwe;
-                self.last_after_bwe_bit_offset = Some(
-                    first
-                        .bwe
-                        .map(|bwe| bwe.next_bit_offset)
-                        .unwrap_or(first.core.next_bit_offset),
-                );
-                self.last_frame_header = Some(header);
-                self.packets_seen = self.packets_seen.saturating_add(1);
-                Ok(DecodeStatus::FrameReady)
-            }
-            GaCodecFormat::Hoa => {
-                let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
-                    "general-full-rate HOA frame is missing neural-network type",
-                ))?;
-                if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
-                    return Err(CodecError::Unsupported(
-                        "reserved AVS3 neural-network type",
-                    ));
-                }
-                let order = header.hoa_order.ok_or(CodecError::InvalidData(
-                    "HOA frame is missing semantic ambisonic order",
-                ))?;
-                let total_bitrate_kbps = u32::from(self.general_config()?.total_bitrate_kbps);
-                let hoa_config = HoaConfig::for_order_bitrate(order, total_bitrate_kbps)?;
-                let channel_count = u16::from(hoa_config.output_channels);
-                if plan.output_channels != Some(channel_count) {
-                    return Err(CodecError::InvalidData(
-                        "HOA decode-plan channel count disagrees with bitrate configuration",
-                    ));
-                }
-                let sample_count = usize::from(channel_count)
-                    .checked_mul(BASE_OUTPUT_POSITIONS)
-                    .ok_or(CodecError::InvalidData("HOA PCM output geometry overflow"))?;
-
-                output.clear_for(
-                    header.sample_rate.unwrap_or(self.info.sample_rate),
-                    channel_count,
-                );
-                output.samples.resize(sample_count, 0.0);
-                let frame = parse_decode_hoa_pcm(
-                    nn_type,
-                    payload,
-                    core_bit_offset,
-                    order,
-                    total_bitrate_kbps,
-                    &mut self.hoa_synthesis,
-                    &mut output.samples,
-                )?;
-
-                if let Some(first) = frame.channels.first() {
-                    self.last_core_side_prefix = Some(first.core);
-                    self.last_first_transform_type = Some(first.core.transform_type);
-                    self.last_bwe_side_info = first.bwe;
-                    self.last_after_bwe_bit_offset = Some(
-                        first
-                            .bwe
-                            .map(|bwe| bwe.next_bit_offset)
-                            .unwrap_or(first.core.next_bit_offset),
-                    );
-                }
-                self.last_bwe_present = Some(
-                    frame
-                        .channel_bwe_configs
-                        .iter()
-                        .any(Option::is_some),
-                );
-                self.last_bwe_config = frame
-                    .channel_bwe_configs
-                    .iter()
-                    .copied()
-                    .flatten()
-                    .next();
-                self.last_hoa_frame_side_info = Some(frame);
-                self.last_frame_header = Some(header);
-                self.packets_seen = self.packets_seen.saturating_add(1);
-                Ok(DecodeStatus::FrameReady)
-            }
+        if self.builtin.is_none() {
+            let configured = crate::engine::BuiltinDecoder::configure(&engine_header)
+                .map_err(|_| CodecError::InvalidData("failed to configure AVS3 decoder backend"))?;
+            self.builtin = Some(configured);
         }
+
+        let decoder = self.builtin.as_mut().unwrap();
+        let sample_count = decoder
+            .sample_count()
+            .map_err(|_| CodecError::InvalidData("invalid sample count"))?;
+        if self.pcm_buffer.len() != sample_count {
+            self.pcm_buffer.resize(sample_count, 0.0);
+        }
+
+        decoder
+            .decode_into_f32(&encoded_frame, &mut self.pcm_buffer)
+            .map_err(|_| CodecError::InvalidData("AVS3 decode_into_f32 failed"))?;
+
+        let sample_rate = engine_header.sample_rate;
+        let channels = u16::from(engine_header.channels);
+        output.clear_for(sample_rate, channels);
+        output.samples.resize(sample_count, 0.0);
+        const SCALE: f32 = 1.0 / crate::engine::FLOAT_FULL_SCALE;
+        for (dst, src) in output.samples.iter_mut().zip(self.pcm_buffer.iter()) {
+            *dst = *src * SCALE;
+        }
+
+        self.last_frame_header = Some(header);
+        self.packets_seen = self.packets_seen.saturating_add(1);
+        Ok(DecodeStatus::FrameReady)
     }
 
     fn flush(&mut self, _output: &mut AudioFrame) -> Result<DecodeStatus, CodecError> {
@@ -661,6 +428,9 @@ impl AudioDecoder for Avs3Decoder {
     }
 
     fn reset(&mut self) {
+        if let Some(builtin) = self.builtin.as_mut() {
+            let _ = builtin.reset();
+        }
         self.last_frame_header = None;
         self.clear_frame_diagnostics();
         self.mono_synthesis.reset_synthesis_history();

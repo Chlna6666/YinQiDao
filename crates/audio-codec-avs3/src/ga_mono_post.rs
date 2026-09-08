@@ -1,7 +1,7 @@
 use yinqidao_codec_core::CodecError;
 
 use crate::{
-    BASE_OUTPUT_POSITIONS, Avs3SynthesisWorkspace, BasicMonoNeuralWorkspace, BweConfig,
+    Avs3SynthesisWorkspace, BASE_OUTPUT_POSITIONS, BasicMonoNeuralWorkspace, BweConfig,
     BweSynthesisWorkspace, FdShapingWorkspace, GaMonoFrameSideInfo, LsfCodebooks,
     NeuralNetworkType, SpectrumDegroupWorkspace, TnsSynthesisWorkspace, apply_bwe_synthesis,
     apply_inverse_fd_spectrum_shaping, apply_inverse_tns, inverse_group_spectrum,
@@ -187,6 +187,7 @@ pub fn parse_decode_mono_pcm_with_codebooks(
 }
 
 /// Compatibility Basic-profile mono PCM entry point with explicit LSF codebooks.
+#[allow(dead_code)]
 pub fn parse_decode_basic_mono_pcm(
     payload: &[u8],
     core_bit_offset: usize,
@@ -227,48 +228,54 @@ mod tests {
     fn rejects_wrong_output_geometry_before_parsing() {
         let mut workspace = BasicMonoPreFdWorkspace::new();
         let mut output = [0.0_f32; 8];
-        assert!(parse_decode_mono_pre_fd(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            &mut workspace,
-            &mut output,
-        )
-        .is_err());
+        assert!(
+            parse_decode_mono_pre_fd(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                &mut workspace,
+                &mut output,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn complete_pcm_frontend_checks_geometry_before_codebooks() {
         let mut workspace = BasicMonoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; 8];
-        assert!(parse_decode_basic_mono_pcm(
-            &[],
-            0,
-            false,
-            None,
-            dummy_codebooks(),
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_basic_mono_pcm(
+                &[],
+                0,
+                false,
+                None,
+                dummy_codebooks(),
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn low_complexity_pcm_frontend_rejects_truncated_payload_before_table_lookup() {
         let mut workspace = BasicMonoSynthesisWorkspace::new();
         let mut pcm = [0.0_f32; BASE_OUTPUT_POSITIONS];
-        assert!(parse_decode_mono_pcm_with_codebooks(
-            NeuralNetworkType::LowComplexity,
-            &[],
-            0,
-            false,
-            None,
-            dummy_codebooks(),
-            &mut workspace,
-            &mut pcm,
-        )
-        .is_err());
+        assert!(
+            parse_decode_mono_pcm_with_codebooks(
+                NeuralNetworkType::LowComplexity,
+                &[],
+                0,
+                false,
+                None,
+                dummy_codebooks(),
+                &mut workspace,
+                &mut pcm,
+            )
+            .is_err()
+        );
     }
 }

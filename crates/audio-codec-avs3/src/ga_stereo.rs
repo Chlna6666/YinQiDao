@@ -130,7 +130,9 @@ pub fn allocate_stereo_ms_bytes(
     bits_ratio: u8,
 ) -> Result<([usize; STEREO_CHANNELS], usize), CodecError> {
     if bits_ratio >= STEREO_RATIO_GROUPS as u8 {
-        return Err(CodecError::InvalidData("stereo bitsRatio exceeds its 3-bit domain"));
+        return Err(CodecError::InvalidData(
+            "stereo bitsRatio exceeds its 3-bit domain",
+        ));
     }
     let fixed_qc_bits = qc_fixed_header_bits(nn_type, groups[0].num_groups)?
         .checked_add(qc_fixed_header_bits(nn_type, groups[1].num_groups)?)
@@ -195,18 +197,10 @@ pub fn parse_stereo_frame_side_info(
         ));
     }
 
-    let (core0, bwe0, after_core0) = parse_channel_core_and_bwe(
-        payload,
-        core_bit_offset,
-        low_bitrate_precision,
-        bwe_config,
-    )?;
-    let (core1, bwe1, after_core1) = parse_channel_core_and_bwe(
-        payload,
-        after_core0,
-        low_bitrate_precision,
-        bwe_config,
-    )?;
+    let (core0, bwe0, after_core0) =
+        parse_channel_core_and_bwe(payload, core_bit_offset, low_bitrate_precision, bwe_config)?;
+    let (core1, bwe1, after_core1) =
+        parse_channel_core_and_bwe(payload, after_core0, low_bitrate_precision, bwe_config)?;
 
     let group0 = parse_group_bits_at(payload, after_core1, core0.transform_type)?;
     let group1 = parse_group_bits_at(payload, group0.next_bit_offset, core1.transform_type)?;
@@ -295,18 +289,10 @@ pub fn parse_stereo_mcr_frame_side_info(
         ));
     }
 
-    let (left_core, left_bwe, after_left) = parse_channel_core_and_bwe(
-        payload,
-        core_bit_offset,
-        low_bitrate_precision,
-        bwe_config,
-    )?;
-    let (right_core, right_bwe, after_right) = parse_channel_core_and_bwe(
-        payload,
-        after_left,
-        low_bitrate_precision,
-        bwe_config,
-    )?;
+    let (left_core, left_bwe, after_left) =
+        parse_channel_core_and_bwe(payload, core_bit_offset, low_bitrate_precision, bwe_config)?;
+    let (right_core, right_bwe, after_right) =
+        parse_channel_core_and_bwe(payload, after_left, low_bitrate_precision, bwe_config)?;
     let left_group = parse_group_bits_at(payload, after_right, left_core.transform_type)?;
     let stereo = parse_stereo_side_info_at(
         payload,
@@ -444,13 +430,9 @@ mod tests {
             group_indicator: [false; 8],
             next_bit_offset: 0,
         };
-        let (bytes, tail) = allocate_stereo_ms_bytes(
-            38 + 16 * 8 + 6,
-            NeuralNetworkType::Basic,
-            [group, group],
-            3,
-        )
-        .unwrap();
+        let (bytes, tail) =
+            allocate_stereo_ms_bytes(38 + 16 * 8 + 6, NeuralNetworkType::Basic, [group, group], 3)
+                .unwrap();
         assert_eq!(bytes, [6, 10]);
         assert_eq!(tail, 6);
     }
@@ -534,6 +516,9 @@ mod tests {
         assert_eq!(frame.left.qc.channel_bytes, 4);
         assert_eq!(frame.next_bit_offset, writer.bit_pos);
         assert_eq!(frame.trailing_bits, writer.bytes.len() * 8 - writer.bit_pos);
-        assert!(matches!(frame.stereo.coupling, StereoCouplingSideInfo::Mcr { .. }));
+        assert!(matches!(
+            frame.stereo.coupling,
+            StereoCouplingSideInfo::Mcr { .. }
+        ));
     }
 }

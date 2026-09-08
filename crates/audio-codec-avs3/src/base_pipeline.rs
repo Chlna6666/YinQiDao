@@ -24,7 +24,11 @@ impl NoiseFillingRng {
     pub fn new(seed: u64) -> Self {
         // xorshift64* cannot use the all-zero state.
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -135,7 +139,11 @@ fn noise_fill_ranges(
         return Ok([(0, num_nf_positions), (0, 0)]);
     }
 
-    let transient_blocks = group.group_indicator.iter().filter(|&&other| !other).count();
+    let transient_blocks = group
+        .group_indicator
+        .iter()
+        .filter(|&&other| !other)
+        .count();
     let other_blocks = SHORT_BLOCKS - transient_blocks;
 
     // Mirror the normative short-window mapping without floating-point rounding: both source
@@ -227,12 +235,7 @@ pub fn decode_basic_base_to_mdct(
     }
 
     workspace.prepare();
-    decode_base_latents_into(
-        packet,
-        base_range,
-        model_indices,
-        &mut workspace.quantized,
-    )?;
+    decode_base_latents_into(packet, base_range, model_indices, &mut workspace.quantized)?;
     dequantize_base_latents_into(
         &workspace.quantized,
         quantile_medians,
@@ -273,13 +276,38 @@ mod tests {
         gammas: [&'a [f32]; 3],
     ) -> BaseDecoderParams<'a> {
         BaseDecoderParams {
-            layer_1: ConvTranspose1dParams { spec: BASE_LAYER_1_SPEC, kernel: kernels[0], bias: biases[0] },
-            igdn_1: IgdnParams { beta: betas[0], gamma: gammas[0] },
-            layer_2: ConvTranspose1dParams { spec: BASE_LAYER_2_SPEC, kernel: kernels[1], bias: biases[1] },
-            igdn_2: IgdnParams { beta: betas[1], gamma: gammas[1] },
-            layer_3: ConvTranspose1dParams { spec: BASE_LAYER_3_SPEC, kernel: kernels[2], bias: biases[2] },
-            igdn_3: IgdnParams { beta: betas[2], gamma: gammas[2] },
-            layer_4: ConvTranspose1dParams { spec: BASE_LAYER_4_SPEC, kernel: kernels[3], bias: biases[3] },
+            layer_1: ConvTranspose1dParams {
+                spec: BASE_LAYER_1_SPEC,
+                kernel: kernels[0],
+                bias: biases[0],
+            },
+            igdn_1: IgdnParams {
+                beta: betas[0],
+                gamma: gammas[0],
+            },
+            layer_2: ConvTranspose1dParams {
+                spec: BASE_LAYER_2_SPEC,
+                kernel: kernels[1],
+                bias: biases[1],
+            },
+            igdn_2: IgdnParams {
+                beta: betas[1],
+                gamma: gammas[1],
+            },
+            layer_3: ConvTranspose1dParams {
+                spec: BASE_LAYER_3_SPEC,
+                kernel: kernels[2],
+                bias: biases[2],
+            },
+            igdn_3: IgdnParams {
+                beta: betas[2],
+                gamma: gammas[2],
+            },
+            layer_4: ConvTranspose1dParams {
+                spec: BASE_LAYER_4_SPEC,
+                kernel: kernels[3],
+                bias: biases[3],
+            },
         }
     }
 
@@ -391,7 +419,10 @@ mod tests {
         let mut output = [0.0_f32; BASE_OUTPUT_POSITIONS];
         decode_basic_base_to_mdct(
             &[],
-            BitRange { bit_offset: 0, bit_len: 0 },
+            BitRange {
+                bit_offset: 0,
+                bit_len: 0,
+            },
             &model_indices,
             &medians,
             0,

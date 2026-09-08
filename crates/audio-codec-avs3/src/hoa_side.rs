@@ -1,10 +1,10 @@
 use yinqidao_codec_core::CodecError;
 
+use crate::bitreader::BitReader;
 use crate::{
     BweConfig, BweMode, GaChannelSideInfo, GroupSideInfo, NeuralNetworkType,
     parse_core_side_prefix_at, parse_group_bits_at, parse_qc_side_info_at, qc_fixed_header_bits,
 };
-use crate::bitreader::BitReader;
 
 pub const MAX_HOA_GROUPS: usize = 3;
 pub const MAX_HOA_BASIS: usize = 4;
@@ -14,8 +14,8 @@ pub const HOA_BASIS_TABLE_LEN: usize = 1_343;
 pub const HOA_NO_ILD_INDEX: u8 = 30;
 
 pub const HOA_SFB_BOUNDARIES: [usize; HOA_SCALE_FACTOR_BANDS + 1] = [
-    0, 8, 24, 40, 56, 72, 88, 104, 128, 160, 192, 224, 256, 288, 336, 384, 432, 480,
-    544, 608, 672, 768,
+    0, 8, 24, 40, 56, 72, 88, 104, 128, 160, 192, 224, 256, 288, 336, 384, 432, 480, 544, 608, 672,
+    768,
 ];
 
 const HOA_RATIO_RANGE: usize = 16;
@@ -42,8 +42,12 @@ pub struct HoaConfig {
 
 impl HoaConfig {
     pub fn for_order_bitrate(order: u8, total_bitrate_kbps: u32) -> Result<Self, CodecError> {
-        let (default_spatial_analysis, group_channels, core_lines, group_bwe):
-            (bool, &[u8], &[u16], &[bool]) = match (order, total_bitrate_kbps) {
+        let (default_spatial_analysis, group_channels, core_lines, group_bwe): (
+            bool,
+            &[u8],
+            &[u16],
+            &[bool],
+        ) = match (order, total_bitrate_kbps) {
             (1, 48 | 96 | 128 | 192 | 256) => (false, &[4], &[1_024], &[true]),
             (2, 192) => (false, &[9], &[352], &[true]),
             (2, 256) => (false, &[9], &[384], &[true]),
@@ -78,17 +82,19 @@ impl HoaConfig {
                 core_lines: core_lines[index],
                 bwe_enabled: group_bwe[index],
             });
-            offset = offset
-                .checked_add(channels)
-                .ok_or(CodecError::InvalidData("HOA transport channel count overflow"))?;
+            offset = offset.checked_add(channels).ok_or(CodecError::InvalidData(
+                "HOA transport channel count overflow",
+            ))?;
         }
         let foreground_channels = if order == 1 { 0 } else { group_channels[0] };
         let residual_channels = if order == 1 {
             0
         } else {
-            offset.checked_sub(foreground_channels).ok_or(CodecError::Internal(
-                "HOA residual channel accounting underflow".into(),
-            ))?
+            offset
+                .checked_sub(foreground_channels)
+                .ok_or(CodecError::Internal(
+                    "HOA residual channel accounting underflow".into(),
+                ))?
         };
 
         Ok(Self {
@@ -133,14 +139,11 @@ impl HoaConfig {
         if !group.bwe_enabled {
             return Ok(None);
         }
-        BweConfig::for_bitrate(
-            BweMode::Hoa { order: self.order },
-            total_bitrate_kbps,
-        )?
-        .ok_or(CodecError::Internal(
-            "HOA group enables BWE but no HOA BWE configuration was selected".into(),
-        ))
-        .map(Some)
+        BweConfig::for_bitrate(BweMode::Hoa { order: self.order }, total_bitrate_kbps)?
+            .ok_or(CodecError::Internal(
+                "HOA group enables BWE but no HOA BWE configuration was selected".into(),
+            ))
+            .map(Some)
     }
 }
 
@@ -206,8 +209,7 @@ pub fn hoa_pair_index_bits(channels: u8) -> Result<u8, CodecError> {
     let count = u32::from(channels);
     let combinations = count.saturating_mul(count - 1) / 2;
     let bits = u32::BITS - (combinations - 1).leading_zeros();
-    u8::try_from(bits.max(1))
-        .map_err(|_| CodecError::InvalidData("HOA pair index width overflow"))
+    u8::try_from(bits.max(1)).map_err(|_| CodecError::InvalidData("HOA pair index width overflow"))
 }
 
 /// HOA uses the reference decoder's `(0,1),(0,2),(1,2),(0,3),...` pair enumeration.
@@ -320,9 +322,7 @@ pub fn parse_hoa_side_info_at(
                     0..=29 => Some(index),
                     HOA_NO_ILD_INDEX => None,
                     _ => {
-                        return Err(CodecError::InvalidData(
-                            "HOA ILD index 31 is reserved",
-                        ));
+                        return Err(CodecError::InvalidData("HOA ILD index 31 is reserved"));
                     }
                 };
             }
@@ -383,7 +383,9 @@ pub fn allocate_hoa_bytes(
         for group_index in 0..config.groups.len() - 1 {
             let requested = total_bytes
                 .checked_mul(usize::from(side.groups[group_index].group_bits_ratio))
-                .ok_or(CodecError::InvalidData("HOA group byte allocation overflow"))?
+                .ok_or(CodecError::InvalidData(
+                    "HOA group byte allocation overflow",
+                ))?
                 / HOA_RATIO_RANGE;
             if requested > remaining_bytes {
                 return Err(CodecError::InvalidData(
@@ -409,13 +411,13 @@ pub fn allocate_hoa_bytes(
                 "HOA group side information does not match bitrate configuration",
             ));
         }
-        let ratio_sum = group_side.channel_bits_ratio.iter().try_fold(
-            0_usize,
-            |sum, ratio| {
+        let ratio_sum = group_side
+            .channel_bits_ratio
+            .iter()
+            .try_fold(0_usize, |sum, ratio| {
                 sum.checked_add(usize::from(*ratio))
                     .ok_or(CodecError::InvalidData("HOA channel ratio sum overflow"))
-            },
-        )?;
+            })?;
         if ratio_sum == 0 {
             return Err(CodecError::InvalidData(
                 "HOA group channel bit ratios sum to zero",
@@ -429,23 +431,33 @@ pub fn allocate_hoa_bytes(
         for (destination, ratio) in output.iter_mut().zip(&group_side.channel_bits_ratio) {
             *destination = unit
                 .checked_mul(usize::from(*ratio))
-                .ok_or(CodecError::InvalidData("HOA channel byte allocation overflow"))?;
+                .ok_or(CodecError::InvalidData(
+                    "HOA channel byte allocation overflow",
+                ))?;
         }
 
         if residual >= output.len() {
             let increment = residual / output.len();
             for destination in output.iter_mut() {
-                *destination = destination
-                    .checked_add(increment)
-                    .ok_or(CodecError::InvalidData("HOA residual byte allocation overflow"))?;
+                *destination =
+                    destination
+                        .checked_add(increment)
+                        .ok_or(CodecError::InvalidData(
+                            "HOA residual byte allocation overflow",
+                        ))?;
             }
-            output[0] = output[0]
-                .checked_add(residual % output.len())
-                .ok_or(CodecError::InvalidData("HOA residual byte allocation overflow"))?;
+            output[0] =
+                output[0]
+                    .checked_add(residual % output.len())
+                    .ok_or(CodecError::InvalidData(
+                        "HOA residual byte allocation overflow",
+                    ))?;
         } else {
             output[0] = output[0]
                 .checked_add(residual)
-                .ok_or(CodecError::InvalidData("HOA residual byte allocation overflow"))?;
+                .ok_or(CodecError::InvalidData(
+                    "HOA residual byte allocation overflow",
+                ))?;
         }
     }
 
@@ -468,9 +480,7 @@ pub fn parse_hoa_frame_side_info(
     nn_type: NeuralNetworkType,
 ) -> Result<GaHoaFrameSideInfo, CodecError> {
     if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
-        return Err(CodecError::Unsupported(
-            "reserved AVS3 neural-network type",
-        ));
+        return Err(CodecError::Unsupported("reserved AVS3 neural-network type"));
     }
     let config = HoaConfig::for_order_bitrate(order, total_bitrate_kbps)?;
     let low_bitrate_precision = config.low_bitrate_lsf_precision(total_bitrate_kbps);
@@ -509,27 +519,17 @@ pub fn parse_hoa_frame_side_info(
     let remaining_payload_bits = payload_bits
         .checked_sub(offset)
         .ok_or(CodecError::Truncated)?;
-    let allocation = allocate_hoa_bytes(
-        remaining_payload_bits,
-        nn_type,
-        &groups,
-        &config,
-        &hoa,
-    )?;
+    let allocation = allocate_hoa_bytes(remaining_payload_bits, nn_type, &groups, &config, &hoa)?;
 
     let mut qcs = Vec::with_capacity(channel_count);
     for (group, &channel_bytes) in groups.iter().zip(&allocation.channel_bytes) {
-        let qc = parse_qc_side_info_at(
-            payload,
-            offset,
-            nn_type,
-            group.num_groups,
-            channel_bytes,
-        )?;
+        let qc = parse_qc_side_info_at(payload, offset, nn_type, group.num_groups, channel_bytes)?;
         offset = qc.next_bit_offset;
         qcs.push(qc);
     }
-    let actual_tail = payload_bits.checked_sub(offset).ok_or(CodecError::Truncated)?;
+    let actual_tail = payload_bits
+        .checked_sub(offset)
+        .ok_or(CodecError::Truncated)?;
     if actual_tail != allocation.trailing_bits {
         return Err(CodecError::Internal(
             "HOA QC parsing does not match payload byte allocation".into(),
@@ -641,6 +641,9 @@ mod tests {
         .unwrap();
         assert_eq!(allocation.channel_bytes.iter().sum::<usize>(), 100);
         assert_eq!(allocation.trailing_bits, 3);
-        assert_eq!(allocation.channel_bytes[0] + allocation.channel_bytes[1], 25);
+        assert_eq!(
+            allocation.channel_bytes[0] + allocation.channel_bytes[1],
+            25
+        );
     }
 }

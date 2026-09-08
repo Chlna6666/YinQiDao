@@ -198,7 +198,9 @@ fn memory_boxes(bytes: &[u8]) -> io::Result<Vec<MemoryBox<'_>>> {
 }
 
 fn child<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> io::Result<Option<MemoryBox<'a>>> {
-    Ok(memory_boxes(bytes)?.into_iter().find(|item| &item.kind == kind))
+    Ok(memory_boxes(bytes)?
+        .into_iter()
+        .find(|item| &item.kind == kind))
 }
 
 fn read_top_level_moov(file: &mut File, file_len: u64) -> io::Result<Option<Vec<u8>>> {
@@ -235,7 +237,9 @@ fn read_top_level_moov(file: &mut File, file_len: u64) -> io::Result<Option<Vec<
         if &kind == b"moov" {
             let payload_len = size - header_len;
             if payload_len > MAX_MOOV_BYTES {
-                return Err(unsupported("ISO-BMFF moov exceeds the demuxer safety limit"));
+                return Err(unsupported(
+                    "ISO-BMFF moov exceeds the demuxer safety limit",
+                ));
             }
             let mut payload = vec![0u8; payload_len as usize];
             file.seek(SeekFrom::Start(cursor + header_len))?;
@@ -276,12 +280,14 @@ fn parse_trak(trak: &[u8], file_len: u64) -> io::Result<Option<ParsedTrack>> {
         return Ok(None);
     };
 
-    let mdhd = child(mdia.payload, b"mdhd")?
-        .ok_or_else(|| invalid("av3a track is missing mdhd"))?;
+    let mdhd =
+        child(mdia.payload, b"mdhd")?.ok_or_else(|| invalid("av3a track is missing mdhd"))?;
     let timescale = parse_mdhd_timescale(mdhd.payload)?;
     let stsz = child(stbl.payload, b"stsz")?;
     if stsz.is_none() && child(stbl.payload, b"stz2")?.is_some() {
-        return Err(unsupported("compact stz2 sample sizes are not implemented yet"));
+        return Err(unsupported(
+            "compact stz2 sample sizes are not implemented yet",
+        ));
     }
     let sample_sizes = parse_stsz(
         stsz.ok_or_else(|| unsupported("fragmented/stsz-less av3a track is not implemented yet"))?
@@ -370,7 +376,9 @@ fn parse_stsz(payload: &[u8]) -> io::Result<Vec<u32>> {
     let constant_size = be_u32(&payload[4..8])?;
     let sample_count = be_u32(&payload[8..12])? as usize;
     if sample_count > MAX_SAMPLE_COUNT {
-        return Err(unsupported("av3a sample count exceeds the demuxer safety limit"));
+        return Err(unsupported(
+            "av3a sample count exceeds the demuxer safety limit",
+        ));
     }
     if constant_size != 0 {
         return Ok(vec![constant_size; sample_count]);
@@ -413,13 +421,18 @@ fn parse_stsc(payload: &[u8]) -> io::Result<Vec<StscEntry>> {
             samples_per_chunk: be_u32(&raw[4..8])?,
             sample_description_index: be_u32(&raw[8..12])?,
         };
-        if entry.first_chunk == 0 || entry.samples_per_chunk == 0 || entry.sample_description_index == 0 {
+        if entry.first_chunk == 0
+            || entry.samples_per_chunk == 0
+            || entry.sample_description_index == 0
+        {
             return Err(invalid("stsc entries must use non-zero one-based fields"));
         }
         if let Some(previous) = entries.last()
             && previous.first_chunk >= entry.first_chunk
         {
-            return Err(invalid("stsc first_chunk values must be strictly increasing"));
+            return Err(invalid(
+                "stsc first_chunk values must be strictly increasing",
+            ));
         }
         entries.push(entry);
     }
@@ -509,9 +522,7 @@ fn build_sample_locations(
     let mut stsc_index = 0usize;
     for (chunk_zero, &chunk_offset) in chunk_offsets.iter().enumerate() {
         let chunk_number = chunk_zero as u32 + 1;
-        while stsc_index + 1 < stsc.len()
-            && chunk_number >= stsc[stsc_index + 1].first_chunk
-        {
+        while stsc_index + 1 < stsc.len() && chunk_number >= stsc[stsc_index + 1].first_chunk {
             stsc_index += 1;
         }
         let mapping = stsc[stsc_index];
@@ -578,9 +589,7 @@ fn duration_to_ticks(duration: Duration, timescale: u32) -> u64 {
         .as_secs()
         .saturating_mul(u64::from(timescale))
         .saturating_add(
-            u64::from(duration.subsec_nanos())
-                .saturating_mul(u64::from(timescale))
-                / 1_000_000_000,
+            u64::from(duration.subsec_nanos()).saturating_mul(u64::from(timescale)) / 1_000_000_000,
         )
 }
 
@@ -642,8 +651,8 @@ mod tests {
                 sample_description_index: 1,
             },
         ];
-        let locations = build_sample_locations(&sizes, &stsc, &[100, 200, 300], 1, 1_000)
-            .expect("locations");
+        let locations =
+            build_sample_locations(&sizes, &stsc, &[100, 200, 300], 1, 1_000).expect("locations");
         assert_eq!(locations.len(), 5);
         assert_eq!((locations[0].offset, locations[1].offset), (100, 110));
         assert_eq!((locations[2].offset, locations[3].offset), (200, 212));
@@ -653,14 +662,25 @@ mod tests {
     #[test]
     fn stts_expansion_produces_monotonic_sample_times() {
         let mut samples = vec![
-            SampleLocation { offset: 0, size: 1, start_tick: 0, duration_ticks: 0 };
+            SampleLocation {
+                offset: 0,
+                size: 1,
+                start_tick: 0,
+                duration_ticks: 0
+            };
             4
         ];
         let end = apply_sample_timing(
             &mut samples,
             &[
-                SttsEntry { sample_count: 2, sample_delta: 1_024 },
-                SttsEntry { sample_count: 2, sample_delta: 960 },
+                SttsEntry {
+                    sample_count: 2,
+                    sample_delta: 1_024,
+                },
+                SttsEntry {
+                    sample_count: 2,
+                    sample_delta: 960,
+                },
             ],
         )
         .expect("timing");

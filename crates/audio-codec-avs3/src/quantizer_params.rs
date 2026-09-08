@@ -32,7 +32,11 @@ mod tests {
 
     #[test]
     fn base_quantizer_medians_are_exact_zero() {
-        assert!(BASE_QUANTILE_MEDIANS.iter().all(|value| value.to_bits() == 0));
+        assert!(
+            BASE_QUANTILE_MEDIANS
+                .iter()
+                .all(|value| value.to_bits() == 0)
+        );
     }
 
     #[test]

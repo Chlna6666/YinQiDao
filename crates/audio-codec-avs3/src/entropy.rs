@@ -23,7 +23,13 @@ pub fn decode_context_latents(
             "context latent geometry overflows address space",
         ))?;
     let mut output = vec![0_i32; len];
-    decode_context_latents_into(packet, range, latent_positions, latent_channels, &mut output)?;
+    decode_context_latents_into(
+        packet,
+        range,
+        latent_positions,
+        latent_channels,
+        &mut output,
+    )?;
     Ok(output)
 }
 

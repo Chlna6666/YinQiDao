@@ -19,7 +19,11 @@ pub struct BweWhiteningRng {
 impl BweWhiteningRng {
     pub fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -79,22 +83,30 @@ impl Default for BweSynthesisWorkspace {
 }
 
 fn boundary(value: Option<u16>, message: &'static str) -> Result<usize, CodecError> {
-    value.map(usize::from).ok_or(CodecError::InvalidData(message))
+    value
+        .map(usize::from)
+        .ok_or(CodecError::InvalidData(message))
 }
 
 fn validate_layout(config: BweConfig, side: BweSideInfo) -> Result<(usize, usize), CodecError> {
     let num_sfb = usize::from(config.num_sfb);
     let num_tiles = usize::from(config.num_tiles);
     if num_sfb == 0 || num_sfb > side.envelope_indices.len() {
-        return Err(CodecError::InvalidData("BWE SFB count is outside supported tables"));
+        return Err(CodecError::InvalidData(
+            "BWE SFB count is outside supported tables",
+        ));
     }
     if num_tiles == 0 || num_tiles > side.whitening_levels.len() {
-        return Err(CodecError::InvalidData("BWE tile count is outside supported tables"));
+        return Err(CodecError::InvalidData(
+            "BWE tile count is outside supported tables",
+        ));
     }
 
     for index in 0..num_sfb {
         if side.envelope_indices[index].is_none() {
-            return Err(CodecError::InvalidData("BWE SFB is missing its envelope index"));
+            return Err(CodecError::InvalidData(
+                "BWE SFB is missing its envelope index",
+            ));
         }
         let start = boundary(config.sfb_boundaries[index], "BWE SFB start is missing")?;
         let end = boundary(config.sfb_boundaries[index + 1], "BWE SFB end is missing")?;
@@ -105,31 +117,59 @@ fn validate_layout(config: BweConfig, side: BweSideInfo) -> Result<(usize, usize
 
     for index in 0..num_tiles {
         if side.whitening_levels[index].is_none() {
-            return Err(CodecError::InvalidData("BWE tile is missing its whitening level"));
+            return Err(CodecError::InvalidData(
+                "BWE tile is missing its whitening level",
+            ));
         }
-        let start = boundary(config.target_tiles[index], "BWE target tile start is missing")?;
-        let end = boundary(config.target_tiles[index + 1], "BWE target tile end is missing")?;
-        let source = boundary(config.source_tiles[index], "BWE source tile start is missing")?;
+        let start = boundary(
+            config.target_tiles[index],
+            "BWE target tile start is missing",
+        )?;
+        let end = boundary(
+            config.target_tiles[index + 1],
+            "BWE target tile end is missing",
+        )?;
+        let source = boundary(
+            config.source_tiles[index],
+            "BWE source tile start is missing",
+        )?;
         if start >= end || end > MDCT_LINES {
-            return Err(CodecError::InvalidData("BWE target tile boundaries are invalid"));
+            return Err(CodecError::InvalidData(
+                "BWE target tile boundaries are invalid",
+            ));
         }
         let width = end - start;
-        if source.checked_add(width).is_none_or(|source_end| source_end > MDCT_LINES) {
-            return Err(CodecError::InvalidData("BWE source tile exceeds MDCT geometry"));
+        if source
+            .checked_add(width)
+            .is_none_or(|source_end| source_end > MDCT_LINES)
+        {
+            return Err(CodecError::InvalidData(
+                "BWE source tile exceeds MDCT geometry",
+            ));
         }
         if matches!(side.whitening_levels[index], Some(WhiteningLevel::Mid))
             && (start < MID_WHITEN_RADIUS || end + MID_WHITEN_RADIUS > MDCT_LINES)
         {
-            return Err(CodecError::InvalidData("BWE MID whitening neighborhood exceeds MDCT geometry"));
+            return Err(CodecError::InvalidData(
+                "BWE MID whitening neighborhood exceeds MDCT geometry",
+            ));
         }
     }
 
     let start = boundary(config.target_tiles[0], "BWE start line is missing")?;
     let stop = boundary(config.target_tiles[num_tiles], "BWE stop line is missing")?;
-    let sfb_start = boundary(config.sfb_boundaries[0], "BWE first SFB boundary is missing")?;
-    let sfb_stop = boundary(config.sfb_boundaries[num_sfb], "BWE final SFB boundary is missing")?;
+    let sfb_start = boundary(
+        config.sfb_boundaries[0],
+        "BWE first SFB boundary is missing",
+    )?;
+    let sfb_stop = boundary(
+        config.sfb_boundaries[num_sfb],
+        "BWE final SFB boundary is missing",
+    )?;
     if start != sfb_start || stop != sfb_stop {
-        return Err(CodecError::InvalidData("BWE tile and SFB extents do not match"));
+        return Err(CodecError::InvalidData(
+            "BWE tile and SFB extents do not match",
+        ));
     }
     Ok((start, stop))
 }
@@ -144,9 +184,18 @@ fn prepare_replicated(
     workspace.replicated[..start].copy_from_slice(&spectrum[..start]);
 
     for tile in 0..usize::from(config.num_tiles) {
-        let target_start = boundary(config.target_tiles[tile], "BWE target tile start is missing")?;
-        let target_end = boundary(config.target_tiles[tile + 1], "BWE target tile end is missing")?;
-        let source_start = boundary(config.source_tiles[tile], "BWE source tile start is missing")?;
+        let target_start = boundary(
+            config.target_tiles[tile],
+            "BWE target tile start is missing",
+        )?;
+        let target_end = boundary(
+            config.target_tiles[tile + 1],
+            "BWE target tile end is missing",
+        )?;
+        let source_start = boundary(
+            config.source_tiles[tile],
+            "BWE source tile start is missing",
+        )?;
         let width = target_end - target_start;
         let source_end = source_start + width;
         workspace.replicated[target_start..target_end]
@@ -163,20 +212,25 @@ fn apply_whitening(
     workspace.whitened.fill(0.0);
 
     for tile in 0..usize::from(config.num_tiles) {
-        let start = boundary(config.target_tiles[tile], "BWE target tile start is missing")?;
-        let stop = boundary(config.target_tiles[tile + 1], "BWE target tile end is missing")?;
+        let start = boundary(
+            config.target_tiles[tile],
+            "BWE target tile start is missing",
+        )?;
+        let stop = boundary(
+            config.target_tiles[tile + 1],
+            "BWE target tile end is missing",
+        )?;
         match side.whitening_levels[tile].ok_or(CodecError::InvalidData(
             "BWE tile is missing its whitening level",
         ))? {
             WhiteningLevel::Off => {
-                workspace.whitened[start..stop]
-                    .copy_from_slice(&workspace.replicated[start..stop]);
+                workspace.whitened[start..stop].copy_from_slice(&workspace.replicated[start..stop]);
             }
             WhiteningLevel::Mid => {
                 for line in start..stop {
                     let mut energy = 0.0_f32;
-                    for value in &workspace.replicated
-                        [line - MID_WHITEN_RADIUS..=line + MID_WHITEN_RADIUS]
+                    for value in
+                        &workspace.replicated[line - MID_WHITEN_RADIUS..=line + MID_WHITEN_RADIUS]
                     {
                         energy = value.mul_add(*value, energy);
                     }
@@ -216,10 +270,14 @@ pub fn apply_bwe_synthesis(
     workspace: &mut BweSynthesisWorkspace,
 ) -> Result<(), CodecError> {
     if spectrum.len() != MDCT_LINES {
-        return Err(CodecError::InvalidData("BWE synthesis requires a 1024-line MDCT spectrum"));
+        return Err(CodecError::InvalidData(
+            "BWE synthesis requires a 1024-line MDCT spectrum",
+        ));
     }
     if spectrum.iter().any(|value| !value.is_finite()) {
-        return Err(CodecError::InvalidData("BWE input spectrum contains non-finite values"));
+        return Err(CodecError::InvalidData(
+            "BWE input spectrum contains non-finite values",
+        ));
     }
 
     let (bwe_start, bwe_stop) = validate_layout(config, side)?;
@@ -239,9 +297,12 @@ pub fn apply_bwe_synthesis(
         let envelope_index = side.envelope_indices[sfb].ok_or(CodecError::InvalidData(
             "BWE SFB is missing its envelope index",
         ))?;
-        let target_energy = 2.0_f32.powf(envelope_index as f32 / ENVELOPE_Q_STEP - ENVELOPE_Q_OFFSET);
+        let target_energy =
+            2.0_f32.powf(envelope_index as f32 / ENVELOPE_Q_STEP - ENVELOPE_Q_OFFSET);
         if !target_energy.is_finite() || target_energy < 0.0 {
-            return Err(CodecError::InvalidData("BWE envelope produced invalid target energy"));
+            return Err(CodecError::InvalidData(
+                "BWE envelope produced invalid target energy",
+            ));
         }
         let gain = if current_energy != 0.0 {
             (target_energy / current_energy).sqrt()
@@ -268,11 +329,17 @@ mod tests {
 
     fn off_side(config: BweConfig, env: u8) -> BweSideInfo {
         let mut envelope_indices = [None; 6];
-        for slot in envelope_indices.iter_mut().take(usize::from(config.num_sfb)) {
+        for slot in envelope_indices
+            .iter_mut()
+            .take(usize::from(config.num_sfb))
+        {
             *slot = Some(env);
         }
         let mut whitening_levels = [None; 3];
-        for slot in whitening_levels.iter_mut().take(usize::from(config.num_tiles)) {
+        for slot in whitening_levels
+            .iter_mut()
+            .take(usize::from(config.num_tiles))
+        {
             *slot = Some(WhiteningLevel::Off);
         }
         BweSideInfo {
@@ -296,7 +363,11 @@ mod tests {
         assert_eq!(&spectrum[..672], core_before.as_slice());
 
         let target = 2.0_f32.powf(34.0 / ENVELOPE_Q_STEP - ENVELOPE_Q_OFFSET);
-        let energy = spectrum[672..736].iter().map(|value| value * value).sum::<f32>() / 64.0;
+        let energy = spectrum[672..736]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            / 64.0;
         assert!((energy - target).abs() <= target.max(1.0) * 1.0e-5);
         assert!(spectrum[832..].iter().all(|&value| value == 0.0));
     }
@@ -306,7 +377,13 @@ mod tests {
         let config = BweConfig::for_bitrate(BweMode::Mono, 96).unwrap().unwrap();
         let mut side = off_side(config, 20);
         side.whitening_levels[0] = Some(WhiteningLevel::High);
-        let input: [f32; MDCT_LINES] = std::array::from_fn(|i| if i < 672 { (i as f32 + 1.0) * 0.01 } else { 0.0 });
+        let input: [f32; MDCT_LINES] = std::array::from_fn(|i| {
+            if i < 672 {
+                (i as f32 + 1.0) * 0.01
+            } else {
+                0.0
+            }
+        });
         let mut a = input;
         let mut b = input;
         let mut wa = BweSynthesisWorkspace::with_seed(1234);

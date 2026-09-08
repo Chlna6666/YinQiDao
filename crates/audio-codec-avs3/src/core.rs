@@ -134,11 +134,8 @@ pub fn parse_core_side_prefix_at(
     low_bitrate_precision: bool,
 ) -> Result<CoreSidePrefix, CodecError> {
     let transform_type = parse_core_transform_type_at(bytes, bit_offset)?;
-    let fd_shaping = parse_fd_shaping_at(
-        bytes,
-        bit_offset.saturating_add(2),
-        low_bitrate_precision,
-    )?;
+    let fd_shaping =
+        parse_fd_shaping_at(bytes, bit_offset.saturating_add(2), low_bitrate_precision)?;
     let tns = parse_tns_side_info_at(bytes, fd_shaping.next_bit_offset)?;
 
     Ok(CoreSidePrefix {
@@ -155,10 +152,22 @@ mod tests {
 
     #[test]
     fn maps_all_normative_transform_types() {
-        assert_eq!(parse_core_transform_type(&[0b00_000000]).unwrap(), TransformType::Long);
-        assert_eq!(parse_core_transform_type(&[0b01_000000]).unwrap(), TransformType::Short);
-        assert_eq!(parse_core_transform_type(&[0b10_000000]).unwrap(), TransformType::CutIn);
-        assert_eq!(parse_core_transform_type(&[0b11_000000]).unwrap(), TransformType::CutOut);
+        assert_eq!(
+            parse_core_transform_type(&[0b00_000000]).unwrap(),
+            TransformType::Long
+        );
+        assert_eq!(
+            parse_core_transform_type(&[0b01_000000]).unwrap(),
+            TransformType::Short
+        );
+        assert_eq!(
+            parse_core_transform_type(&[0b10_000000]).unwrap(),
+            TransformType::CutIn
+        );
+        assert_eq!(
+            parse_core_transform_type(&[0b11_000000]).unwrap(),
+            TransformType::CutOut
+        );
         assert_eq!(TransformType::Short.window_len(), 256);
         assert_eq!(TransformType::Long.window_len(), 2048);
     }

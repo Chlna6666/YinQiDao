@@ -128,10 +128,22 @@ mod tests {
     #[test]
     fn b6_official_tail_block_keeps_binary32_bits() {
         const TAIL: [u32; 16] = [
-            0x3E23_003D, 0x3DF2_2AA3, 0xBEDF_EF0E, 0xBE51_C400,
-            0xBE87_7CE3, 0xBE1F_CDC9, 0xBCD4_F26C, 0xBF4C_ECE7,
-            0x3E86_CE3C, 0x3DE4_DF2F, 0x3E26_2A9A, 0x3EB1_C6D8,
-            0xBE06_E9CD, 0x3E84_CBAD, 0xBEE7_59F0, 0x3DE9_78F6,
+            0x3E23_003D,
+            0x3DF2_2AA3,
+            0xBEDF_EF0E,
+            0xBE51_C400,
+            0xBE87_7CE3,
+            0xBE1F_CDC9,
+            0xBCD4_F26C,
+            0xBF4C_ECE7,
+            0x3E86_CE3C,
+            0x3DE4_DF2F,
+            0x3E26_2A9A,
+            0x3EB1_C6D8,
+            0xBE06_E9CD,
+            0x3E84_CBAD,
+            0xBEE7_59F0,
+            0x3DE9_78F6,
         ];
         assert_eq!(&BITS[752..], &TAIL);
     }
