@@ -1,4 +1,5 @@
 mod entropy;
+mod lpc;
 mod prepost;
 mod stereo;
 
@@ -8,6 +9,11 @@ use crate::{LOSSLESS_RICE_MAX_PREFIX, bitreader::BitReader};
 
 pub use entropy::{
     LOSSLESS_ENTROPY_MODE_BITS, LosslessEntropyMode, decode_lossless_entropy_mode_at,
+};
+pub use lpc::{
+    LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE, LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP,
+    LOSSLESS_UNIFORM_PARCOR_Q20_STEP, dequantize_lossless_uniform_parcor_q20,
+    dequantize_lossless_uniform_parcor_tail_q20,
 };
 pub use prepost::{
     LOSSLESS_PREPROCESS_MAX_SAMPLES, lossless_ra_shift, lossless_ra_shift12,
