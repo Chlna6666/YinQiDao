@@ -4,7 +4,7 @@ use crate::{
     bitreader::BitReader,
     config::{
         AudioCodingMethod, ChannelConfiguration, CodingProfile, NeuralNetworkType,
-        QuantizationResolution, full_rate_sample_rate,
+        QuantizationResolution, full_rate_sample_rate, lossless_sample_rate,
     },
 };
 
@@ -120,10 +120,17 @@ pub fn parse_aatf_frame_header(packet: &[u8]) -> Result<AatfFrameHeader, CodecEr
     } else {
         None
     };
-    let sample_rate = if coding_method == AudioCodingMethod::GeneralFullRate {
-        full_rate_sample_rate(sampling_frequency_index)
-    } else {
-        explicit_sample_rate
+    let sample_rate = match coding_method {
+        AudioCodingMethod::GeneralFullRate => full_rate_sample_rate(sampling_frequency_index),
+        AudioCodingMethod::Lossless => {
+            let sample_rate = lossless_sample_rate(sampling_frequency_index, explicit_sample_rate);
+            if sample_rate.is_none() {
+                return Err(CodecError::Unsupported(
+                    "reserved lossless AATF sampling_frequency_index",
+                ));
+            }
+            sample_rate
+        }
     };
 
     let raw_frame_length = if coding_method != AudioCodingMethod::GeneralFullRate {
@@ -324,6 +331,44 @@ mod tests {
         let header = parse_aatf_frame_header(&writer.bytes).unwrap();
         assert_eq!(header.resolved_channels(), Some(8));
         assert_eq!(header.bitrate_index, Some(4));
+    }
+
+    #[test]
+    fn parses_indexed_lossless_sample_rate() {
+        let mut writer = BitWriter::new();
+        writer.push(AATF_SYNCWORD.into(), 12);
+        writer.push(1, 4); // lossless
+        writer.push(0, 1); // no ancillary data
+        writer.push(0, 3); // basic profile
+        writer.push(2, 4); // 48 kHz
+        writer.push(2048, 16); // raw frame length in the coded bitstream
+        writer.push(0x5A, 8); // aatf_error_check
+        writer.push(2, 4); // two channels
+        writer.push(1, 2); // 16-bit
+
+        let header = parse_aatf_frame_header(&writer.bytes).unwrap();
+        assert_eq!(header.coding_method, AudioCodingMethod::Lossless);
+        assert_eq!(header.sample_rate, Some(48_000));
+        assert_eq!(header.raw_frame_length, Some(2048));
+        assert_eq!(header.resolved_channels(), Some(2));
+        assert_eq!(header.frame_crc, None);
+    }
+
+    #[test]
+    fn rejects_reserved_lossless_sample_rate_index() {
+        let mut writer = BitWriter::new();
+        writer.push(AATF_SYNCWORD.into(), 12);
+        writer.push(1, 4);
+        writer.push(0, 1);
+        writer.push(0, 3);
+        writer.push(4, 4);
+
+        assert_eq!(
+            parse_aatf_frame_header(&writer.bytes),
+            Err(CodecError::Unsupported(
+                "reserved lossless AATF sampling_frequency_index"
+            ))
+        );
     }
 
     #[test]

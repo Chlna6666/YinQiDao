@@ -171,6 +171,21 @@ pub const fn full_rate_sample_rate(index: u8) -> Option<u32> {
     }
 }
 
+/// Resolve a lossless sampling frequency from the AASF/AATF index and optional extension.
+///
+/// Indices 0..=3 use the same normative frequency table as general full-rate coding. Lossless
+/// alone may use 0xF as an extension marker followed by a 24-bit explicit frequency.
+pub(crate) const fn lossless_sample_rate(
+    index: u8,
+    explicit_sample_rate: Option<u32>,
+) -> Option<u32> {
+    match index {
+        0x0..=0x3 => full_rate_sample_rate(index),
+        0xF => explicit_sample_rate,
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneralFullRateConfig {
     pub sampling_frequency_index: u8,
@@ -215,7 +230,10 @@ impl Avs3SpecificConfig {
     pub fn sample_rate(&self) -> Option<u32> {
         match self {
             Self::GeneralFullRate(config) => config.sample_rate,
-            Self::Lossless(config) => config.explicit_sample_rate,
+            Self::Lossless(config) => lossless_sample_rate(
+                config.sampling_frequency_index,
+                config.explicit_sample_rate,
+            ),
         }
     }
 
@@ -307,6 +325,11 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
         }
         Some(value)
     } else {
+        if full_rate_sample_rate(sampling_frequency_index).is_none() {
+            return Err(CodecError::Unsupported(
+                "reserved lossless sampling_frequency_index in dca3",
+            ));
+        }
         None
     };
     let anc_data_index = reader.read_bit()?;
@@ -425,11 +448,47 @@ mod tests {
         writer.push(0xCD, 8);
         writer.push(0, 2);
 
-        let Avs3SpecificConfig::Lossless(config) = parse_dca3(&writer.bytes).unwrap() else {
+        let config = parse_dca3(&writer.bytes).unwrap();
+        let Avs3SpecificConfig::Lossless(lossless) = &config else {
             panic!("lossless config");
         };
-        assert_eq!(config.explicit_sample_rate, Some(88_200));
-        assert_eq!(config.channel_number, 18);
-        assert_eq!(config.additional_info, [0xAB, 0xCD]);
+        assert_eq!(lossless.explicit_sample_rate, Some(88_200));
+        assert_eq!(config.sample_rate(), Some(88_200));
+        assert_eq!(lossless.channel_number, 18);
+        assert_eq!(lossless.additional_info, [0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn resolves_indexed_lossless_frequency() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 4);
+        writer.push(0x2, 4); // 48 kHz
+        writer.push(0, 1);
+        writer.push(0, 3);
+        writer.push(2, 8);
+        writer.push(1, 2);
+        writer.push(0, 16);
+        writer.push(0, 2);
+
+        let config = parse_dca3(&writer.bytes).unwrap();
+        let Avs3SpecificConfig::Lossless(lossless) = &config else {
+            panic!("lossless config");
+        };
+        assert_eq!(lossless.explicit_sample_rate, None);
+        assert_eq!(config.sample_rate(), Some(48_000));
+    }
+
+    #[test]
+    fn rejects_reserved_lossless_frequency_index() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 4);
+        writer.push(0x4, 4);
+
+        assert_eq!(
+            parse_dca3(&writer.bytes),
+            Err(CodecError::Unsupported(
+                "reserved lossless sampling_frequency_index in dca3"
+            ))
+        );
     }
 }
