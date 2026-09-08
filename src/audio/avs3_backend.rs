@@ -6,10 +6,10 @@ use yinqidao_codec_avs3::{
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
 
 const AVS3_FRAME_SAMPLES_PER_CHANNEL: usize = 1024;
-/// `Avs3Decoder::new()` currently materializes several large fixed-size synthesis workspaces before
-/// the decoder is moved behind a `Box`. Keep that one-time construction away from the small generic
-/// audio-worker stack, especially in Windows debug builds where stack-slot reuse is less aggressive.
-const AVS3_DECODER_INIT_STACK_BYTES: usize = 16 * 1024 * 1024;
+/// `Avs3Decoder` still owns several large fixed-size synthesis workspaces. Build the decoder and
+/// execute the first capability-probe frame away from the small generic audio-worker stack,
+/// especially in Windows debug builds where stack-slot reuse is less aggressive.
+const AVS3_CAPABILITY_PROBE_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum Av3aRustError {
@@ -25,7 +25,7 @@ impl fmt::Display for Av3aRustError {
         match self {
             Self::Io(error) => write!(formatter, "AV3A ISO-BMFF 读取失败: {error}"),
             Self::Codec(error) => write!(formatter, "AVS3-P3 解码失败: {error}"),
-            Self::DecoderInitPanicked => formatter.write_str("AVS3-P3 解码器初始化线程异常退出"),
+            Self::DecoderInitPanicked => formatter.write_str("AVS3-P3 解码器能力探测线程异常退出"),
             Self::UnexpectedStatus => formatter.write_str("AVS3-P3 完整 sample 未产生 PCM frame"),
             Self::InvalidFrame => formatter.write_str("AVS3-P3 Pure Rust PCM 输出几何不合法"),
         }
@@ -65,8 +65,8 @@ impl From<CodecError> for Av3aRustError {
 /// reduction/rendering before device output.
 pub(crate) struct Av3aRustBackend {
     demuxer: Av3aIsoBmffDemuxer,
-    /// Keep the very large synthesis state on the heap. Construction itself is performed on a
-    /// dedicated large-stack thread below so debug builds never materialize it on audio-worker.
+    /// Keep the very large synthesis state on the heap. Construction and the first decode happen on
+    /// a dedicated large-stack probe thread so audio-worker only ever receives the boxed state.
     decoder: Box<Avs3Decoder>,
     packet: Vec<u8>,
     frame: AudioFrame,
@@ -105,30 +105,36 @@ impl Av3aRustBackend {
         }
 
         let duration = demuxer.duration();
-        // `Avs3Decoder` still contains four large inline synthesis workspaces. In debug builds the
-        // constructor can exceed the default Windows child-thread stack before `Box::new` has a
-        // chance to move the completed value to the heap. Construct and box it on a temporary
-        // large-stack thread, then only move the pointer back to audio-worker.
-        let mut decoder = thread::Builder::new()
-            .name("yinqidao-avs3-init".into())
-            .stack_size(AVS3_DECODER_INIT_STACK_BYTES)
-            .spawn(move || Avs3Decoder::new(&entry).map(Box::new))?
-            .join()
-            .map_err(|_| Av3aRustError::DecoderInitPanicked)??;
-
         let mut packet = Vec::new();
         let Some(_) = demuxer.next_sample_into(&mut packet)? else {
             return Ok(None);
         };
 
-        let mut frame = AudioFrame::default();
-        match decoder.decode_packet(&packet, &mut frame) {
-            Ok(DecodeStatus::FrameReady) => {}
-            Ok(DecodeStatus::NeedMoreData | DecodeStatus::EndOfStream) => {
-                return Err(Av3aRustError::UnexpectedStatus);
-            }
+        // The constructor and the first decode are both part of capability probing. Keeping both on
+        // this large-stack thread means unsupported GFR syntax (or malformed first samples) is
+        // rejected before the long-lived audio-worker ever executes the heavyweight codec path.
+        let probe = thread::Builder::new()
+            .name("yinqidao-avs3-probe".into())
+            .stack_size(AVS3_CAPABILITY_PROBE_STACK_BYTES)
+            .spawn(move || -> Result<_, CodecError> {
+                let mut decoder = Box::new(Avs3Decoder::new(&entry)?);
+                let mut frame = AudioFrame::default();
+                let status = decoder.decode_packet(&packet, &mut frame)?;
+                Ok((decoder, packet, frame, status))
+            })?
+            .join()
+            .map_err(|_| Av3aRustError::DecoderInitPanicked)?;
+
+        let (decoder, packet, frame, status) = match probe {
+            Ok(probe) => probe,
             Err(CodecError::Unsupported(_)) => return Ok(None),
             Err(error) => return Err(error.into()),
+        };
+        match status {
+            DecodeStatus::FrameReady => {}
+            DecodeStatus::NeedMoreData | DecodeStatus::EndOfStream => {
+                return Err(Av3aRustError::UnexpectedStatus);
+            }
         }
         validate_frame_geometry(&frame)?;
 
