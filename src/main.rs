@@ -23,7 +23,8 @@ mod window_platform;
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowCornerPreference,
+    WindowOptions, px, size,
 };
 use settings::ConfigStore;
 use ui::MusicApp;
@@ -75,7 +76,11 @@ fn main() -> Result<()> {
                 appears_transparent: true,
                 ..Default::default()
             });
+            // Match the BMCBL fork's sharp-text path: an opaque client surface avoids compositor
+            // resampling, while the explicit corner preference lets Windows 11 use DWM corners and
+            // Windows 10 fall back to the fork's pixel-aligned window region.
             options.window_background = gpui::WindowBackgroundAppearance::Opaque;
+            options.window_corner_preference = WindowCornerPreference::Rounded;
         }
 
         let main_window = match cx.open_window(options, |_, cx| cx.new(|_| MusicApp::new(true))) {
