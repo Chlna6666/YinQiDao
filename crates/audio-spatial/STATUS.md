@@ -37,7 +37,7 @@
 - [x] head-shadow 一阶低通基础模型。
 - [x] front/rear、elevation、distance 参数化线索基础。
 - [x] LFE 独立低通并对称注入双耳。
-- [x] block 首尾参数插值。
+- [x] block 参数使用 end-exclusive `[n, n + frames)` 时钟语义；修复 64-frame 轨迹约 `64/63` 的速度漂移。
 - [x] sample-clock 轨迹：Orbit360 / FigureEight / Pendulum / FrontBack / Planetary / NearEar / Helix。
 - [x] 轨迹支持 clockwise / counter-clockwise。
 - [x] 每个运动 block 只在轨迹端点计算三角函数。
@@ -55,7 +55,7 @@
 - [x] 原生多声道禁止再次进入 stereo effect renderer，避免 double-spatialize。
 - [x] native spatial engine 按输入 sample rate 缓存；采样率变化才重建，不逐 chunk 构造。
 - [x] seek / track reopen / processing timeline discontinuity 会 reset EQ、resampler、native spatial、stereo spatial delay/filter/trajectory state。
-- [x] seek transport generation 改为 audio-worker thread-local，避免多个播放器/预加载线程互相触发 reset。
+- [x] seek transport generation 使用 audio-worker thread-local，避免多个播放器/预加载线程互相触发 reset。
 - [x] stereo Static/Immersive3d 进入 L/R 双虚拟声源 front-arc renderer。
 - [x] stereo Orbit8d / Orbit360 / Pendulum / FrontBack / Planetary / NearEar 进入 audio-clock `Trajectory`。
 - [x] 动态 stereo 保留 L/R 两个 source，整组 stereo pair 作为刚性声场运动，不再只移动 mono centre。
@@ -72,14 +72,15 @@
 - [x] LFE direction-independent 路径跳过双耳 pose 参数求解。
 - [x] `CubicDelayLine::read_pair` 共享双耳 cursor/length；整数 delay 走直接历史读取。
 - [x] stereo L/R pair 直接读取 interleaved source stride，无 mono scratch / per-channel Vec。
+- [x] 近场使用左右耳几何距离修正 ILD，并小比例混合 point-to-ear 几何到 Woodworth ITD；近场不额外放大整体增益，避免 headroom 负担。
+- [x] 距离大于 1 m 后加入平滑的高频空气吸收参数，normal music distance 下保持保守。
+- [x] front/rear/elevation 高频线索按连续参数调整；后方、下方与远距离逐步降低 upper-band 能量，不使用外部 HRTF 数据。
+- [x] 输入 PCM、source gain/spread/position 的 NaN/Inf 在进入持久 delay/IIR 状态前隔离。
 - [ ] interleave/deinterleave、双耳 source gain、双耳 accumulation、filter bank 等热点继续下沉到 `audio-simd`。
 - [ ] 4-point Lagrange 与 Thiran fractional delay 质量/成本对比。
-- [ ] 更完整 front/back pinna-like spectral cue（仍保持参数化，不伪称 measured HRTF）。
-- [ ] near-field ILD/ITD 修正和小于 1 m 的距离模型。
-- [ ] air absorption / 高频随距离衰减。
+- [ ] 更完整 front/back pinna-like notch / spectral cue（仍保持参数化，不伪称 measured HRTF）。
 - [ ] 参数 crossfade/smoothing 自动化测试。
 - [ ] 5.1/7.1/5.1.4/7.1.4 channel-order conformance vectors。
-- [ ] NaN/Inf 隔离。
 - [ ] 峰值/能量 headroom 与 limiter 重新标定。
 
 ## Phase 3 — 自适应 CPU 多线程
@@ -158,8 +159,8 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一笔建议
 
-1. 先跑 `cargo check/test`；修掉所有类型/借用/Clippy 问题后再删除 legacy stereo renderer。
-2. 给 `cpu_bench` 增加 stereo static / Orbit360 / FigureEight case，形成迁移后的真实 serial baseline。
-3. 完善 near-field、front/back spectral cue、air absorption、NaN/Inf 隔离和 headroom。
-4. 再实现 `SpatialDebugSnapshot`，为完整 GPUI 立体声场可视化提供稳定、无锁、低开销的数据层。
+1. 给 `cpu_bench` 增加 stereo static / Orbit360 / FigureEight case，测新增 `is_finite`、近场和 air 参数 solve 的真实成本。
+2. 完善稳定的参数化 front/back notch / elevation spectral cue，并以 A/B 和 correlation/headroom 约束避免过度音染。
+3. 实现 `SpatialDebugSnapshot`，给完整 GPUI 立体声场可视化提供稳定、无锁、低开销的数据层。
+4. 完成 headroom / limiter 标定与 channel-order conformance vectors 后，再删除 legacy stereo renderer。
 5. 有 serial baseline 后才设计 realtime worker pool 与 parallel threshold；GPU 继续暂缓。
