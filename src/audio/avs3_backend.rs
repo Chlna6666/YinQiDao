@@ -7,7 +7,9 @@ use std::{
 };
 
 use yinqidao_codec_avs3::{
-    Av3aIsoBmffDemuxer, Avs3Decoder, Avs3SpecificConfig, parse_dca3,
+    AatfFrameHeader, AudioCodingMethod, Av3aIsoBmffDemuxer, Av3aSampleEntry, Avs3Decoder,
+    Avs3SpecificConfig, ChannelConfiguration, CodingProfile, NeuralNetworkType,
+    QuantizationResolution, parse_aatf_frame_header, parse_dca3,
 };
 use yinqidao_codec_core::{AudioDecoder, AudioFrame, CodecError, DecodeStatus};
 
@@ -95,16 +97,17 @@ pub(crate) struct Av3aRustBackend {
 impl Av3aRustBackend {
     pub(crate) fn from_demuxer(demuxer: Av3aIsoBmffDemuxer) -> Result<Option<Self>, Av3aRustError> {
         let entry = demuxer.sample_entry().clone();
-        if entry.decoder_config.is_empty() {
-            return Ok(None);
-        }
 
         // Lossless remains deliberately gated until Chapter 8 is bit-exact. Do this cheap dca3
         // classification before starting any GA codec worker or allocating heavy synthesis state.
-        if matches!(
-            parse_dca3(&entry.decoder_config)?,
-            Avs3SpecificConfig::Lossless(_)
-        ) {
+        // Some Lavf-produced AV3A files omit dca3 entirely; those are classified from the first
+        // AATF frame on the codec worker below instead of being rejected here.
+        if !entry.decoder_config.is_empty()
+            && matches!(
+                parse_dca3(&entry.decoder_config)?,
+                Avs3SpecificConfig::Lossless(_)
+            )
+        {
             tracing::debug!(
                 "AV3A Lossless 尚未打开 pure-Rust synthesis gate，跳过重型 GA codec worker"
             );
@@ -136,7 +139,12 @@ impl Av3aRustBackend {
                         return Ok(None);
                     };
 
-                    let mut decoder = match Avs3Decoder::new(&entry) {
+                    let runtime_entry = match runtime_entry_from_first_packet(&entry, &packet) {
+                        Ok(entry) => entry,
+                        Err(CodecError::Unsupported(_)) => return Ok(None),
+                        Err(error) => return Err(error.into()),
+                    };
+                    let mut decoder = match Avs3Decoder::new(&runtime_entry) {
                         Ok(decoder) => Box::new(decoder),
                         Err(CodecError::Unsupported(_)) => return Ok(None),
                         Err(error) => return Err(error.into()),
@@ -304,6 +312,152 @@ impl Drop for Av3aRustBackend {
     }
 }
 
+/// Normalize an AV3A sample entry that omits `dca3` by reconstructing the equivalent in-memory
+/// general-full-rate configuration from the first complete AATF frame. Several Lavf 58 builds emit
+/// `av3a + btrt` without CA3SpecificBox even though every sample carries all parameters required to
+/// recover the channel-based configuration. The source file is never modified.
+fn runtime_entry_from_first_packet(
+    entry: &Av3aSampleEntry,
+    packet: &[u8],
+) -> Result<Av3aSampleEntry, CodecError> {
+    if !entry.decoder_config.is_empty() {
+        return Ok(entry.clone());
+    }
+
+    let header = parse_aatf_frame_header(packet)?;
+    if header.coding_method != AudioCodingMethod::GeneralFullRate {
+        return Err(CodecError::Unsupported(
+            "dca3-less AVS3 Lossless carriage remains behind the Chapter 8 gate",
+        ));
+    }
+    if header.coding_profile != CodingProfile::Basic {
+        return Err(CodecError::Unsupported(
+            "dca3-less object/HOA Audio Vivid carriage is not normalized yet",
+        ));
+    }
+
+    let nn_type = header.nn_type.ok_or(CodecError::InvalidData(
+        "general-full-rate AATF frame is missing neural-network type",
+    ))?;
+    let nn_type_bits = match nn_type {
+        NeuralNetworkType::Basic => 0,
+        NeuralNetworkType::LowComplexity => 1,
+        NeuralNetworkType::Reserved(_) => {
+            return Err(CodecError::Unsupported(
+                "reserved AVS3 neural-network type in dca3-less AATF",
+            ));
+        }
+    };
+    let channel_number_index = header.channel_number_index.ok_or(CodecError::InvalidData(
+        "basic dca3-less AATF frame is missing channel_number_index",
+    ))?;
+    let configuration = ChannelConfiguration::from_index(channel_number_index);
+    if matches!(configuration, ChannelConfiguration::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "unsupported channel_number_index in dca3-less AATF",
+        ));
+    }
+    let bitrate_index = header.bitrate_index.ok_or(CodecError::InvalidData(
+        "basic dca3-less AATF frame is missing bitrate_index",
+    ))?;
+    let total_bitrate_kbps = basic_channel_bitrate_kbps(channel_number_index, bitrate_index)
+        .ok_or(CodecError::Unsupported(
+            "unsupported channel/bitrate combination in dca3-less AATF",
+        ))?;
+    let resolution_bits = match header.resolution {
+        QuantizationResolution::Pcm8 => 0,
+        QuantizationResolution::Pcm16 => 1,
+        QuantizationResolution::Pcm24 => 2,
+        QuantizationResolution::Reserved(_) => {
+            return Err(CodecError::Unsupported(
+                "reserved resolution in dca3-less AATF",
+            ));
+        }
+    };
+
+    let mut writer = Dca3BitWriter::new();
+    writer.push(2, 4); // general-full-rate audio_codec_id
+    writer.push(u32::from(header.sampling_frequency_index), 4);
+    writer.push(nn_type_bits, 3);
+    writer.push(0, 1); // reserved
+    writer.push(0, 4); // channel-based content_type
+    writer.push(u32::from(channel_number_index), 7);
+    writer.push(0, 1); // reserved
+    writer.push(u32::from(total_bitrate_kbps), 16);
+    writer.push(resolution_bits, 2);
+    writer.push(0, 6); // reserved
+
+    let mut runtime = entry.clone();
+    runtime.decoder_config = writer.finish();
+    runtime.sample_rate = header.sample_rate.ok_or(CodecError::Unsupported(
+        "reserved sampling_frequency_index in dca3-less AATF",
+    ))?;
+    runtime.channels = header.resolved_channels().ok_or(CodecError::Unsupported(
+        "dca3-less AATF channel layout does not resolve to a signal count",
+    ))?;
+    runtime.sample_size_bits = header.resolution.bits_per_sample().map(u16::from);
+    Ok(runtime)
+}
+
+fn basic_channel_bitrate_kbps(channel_number_index: u8, bitrate_index: u8) -> Option<u16> {
+    const MONO: &[u16] = &[16, 32, 44, 56, 64, 72, 80, 96, 128, 144, 164, 192];
+    const STEREO: &[u16] = &[24, 32, 48, 64, 80, 96, 128, 144, 192, 256, 320];
+    const SURROUND_5_1: &[u16] = &[192, 256, 320, 384, 448, 512, 640, 720, 144, 96, 128, 160];
+    const SURROUND_7_1: &[u16] = &[192, 480, 256, 384, 576, 640, 128, 160];
+    const SURROUND_4_0: &[u16] = &[48, 96, 128, 192, 256];
+    const SURROUND_5_1_2: &[u16] = &[152, 320, 480, 576];
+    const SURROUND_5_1_4: &[u16] = &[176, 384, 576, 704, 256, 448];
+    const SURROUND_7_1_2: &[u16] = &[216, 480, 576, 384, 768];
+    const SURROUND_7_1_4: &[u16] = &[240, 608, 384, 512, 832];
+
+    let table = match channel_number_index {
+        0 => MONO,
+        1 => STEREO,
+        2 => SURROUND_5_1,
+        3 => SURROUND_7_1,
+        6 => SURROUND_4_0,
+        7 => SURROUND_5_1_2,
+        8 => SURROUND_5_1_4,
+        9 => SURROUND_7_1_2,
+        10 => SURROUND_7_1_4,
+        _ => return None,
+    };
+    table.get(usize::from(bitrate_index)).copied()
+}
+
+struct Dca3BitWriter {
+    bytes: Vec<u8>,
+    bit_position: usize,
+}
+
+impl Dca3BitWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(7),
+            bit_position: 0,
+        }
+    }
+
+    fn push(&mut self, value: u32, width: u8) {
+        debug_assert!(width <= 32);
+        debug_assert!(width == 32 || value < (1_u32 << width));
+        for shift in (0..width).rev() {
+            if self.bit_position & 7 == 0 {
+                self.bytes.push(0);
+            }
+            if (value >> shift) & 1 != 0 {
+                let index = self.bytes.len() - 1;
+                self.bytes[index] |= 1 << (7 - (self.bit_position & 7));
+            }
+            self.bit_position += 1;
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 fn decode_next_frame(
     demuxer: &mut Av3aIsoBmffDemuxer,
     decoder: &mut Avs3Decoder,
@@ -388,6 +542,39 @@ mod tests {
         assert!(
             validate_frame_geometry(&frame(6, 6 * AVS3_FRAME_SAMPLES_PER_CHANNEL - 1)).is_err()
         );
+    }
+
+    #[test]
+    fn reconstructs_missing_dca3_from_real_lavf_7_1_4_header() {
+        // First seven AATF bytes from the two reported Lavf58.76.100 files. Header CRC differs per
+        // file, but both describe Basic NN, 44.1 kHz, 7.1.4, 16-bit and bitrate index 4.
+        let packet = [0xFF, 0xF2, 0x00, 0x73, 0xE2, 0x94, 0xD7];
+        let entry = Av3aSampleEntry {
+            sample_rate: 0,
+            channels: 0,
+            sample_size_bits: None,
+            decoder_config: Vec::new(),
+        };
+
+        let runtime = runtime_entry_from_first_packet(&entry, &packet).expect("runtime dca3");
+        assert_eq!(runtime.sample_rate, 44_100);
+        assert_eq!(runtime.channels, 12);
+        assert_eq!(runtime.sample_size_bits, Some(16));
+        assert_eq!(runtime.decoder_config, [0x23, 0x00, 0x14, 0x03, 0x40, 0x40]);
+
+        let Avs3SpecificConfig::GeneralFullRate(config) =
+            parse_dca3(&runtime.decoder_config).expect("parse synthesized dca3")
+        else {
+            panic!("general-full-rate config");
+        };
+        assert_eq!(config.sample_rate, Some(44_100));
+        assert_eq!(config.nn_type, NeuralNetworkType::Basic);
+        assert_eq!(
+            config.channel_configuration,
+            Some(ChannelConfiguration::Surround7_1_4)
+        );
+        assert_eq!(config.total_bitrate_kbps, 832);
+        assert_eq!(config.resolution, QuantizationResolution::Pcm16);
     }
 
     #[test]
