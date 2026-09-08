@@ -44,6 +44,7 @@ mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
 mod lc_pipeline;
+mod lossless_primitives;
 mod mcac_synthesis;
 mod mcr_synthesis;
 mod metadata;
@@ -180,6 +181,13 @@ pub use inverse_qc::{
 pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
 pub use lc_pipeline::{
     LowComplexityPipelineWorkspace, decode_low_complexity_base_to_mdct_normative,
+};
+pub use lossless_primitives::{
+    LOSSLESS_RICE_BLOCK_SIZES, LOSSLESS_RICE_MAX_PREFIX, LOSSLESS_RICE_WINDOW,
+    LosslessRiceState, lossless_rice_escape_parameter, lossless_rice_map_signed,
+    lossless_rice_split, lossless_rice_unmap_signed, merge_lossless_lifting_branches,
+    restore_lossless_mid_side, restore_lossless_mid_side_in_place,
+    validate_lossless_rice_block_size,
 };
 pub use mcac_synthesis::{
     MC_ILD_CODEBOOK, apply_multichannel_mcac, mc_ild_factor,
