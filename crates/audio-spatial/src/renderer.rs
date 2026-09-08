@@ -63,18 +63,53 @@ struct SourceState {
     lfe_state: f32,
     scratch_left: Vec<f32>,
     scratch_right: Vec<f32>,
+    cached_pose: Option<SourcePose>,
+    cached_listener: Option<ListenerPose>,
+    cached_parameters: RenderParameters,
 }
 
 impl SourceState {
     fn new(delay_capacity: usize, block_frames: usize) -> Self {
         Self {
-            delay: CubicDelayLine::new(delay_capacity), filter_left: 0.0, filter_right: 0.0,
-            lfe_state: 0.0, scratch_left: vec![0.0; block_frames], scratch_right: vec![0.0; block_frames],
+            delay: CubicDelayLine::new(delay_capacity),
+            filter_left: 0.0,
+            filter_right: 0.0,
+            lfe_state: 0.0,
+            scratch_left: vec![0.0; block_frames],
+            scratch_right: vec![0.0; block_frames],
+            cached_pose: None,
+            cached_listener: None,
+            cached_parameters: RenderParameters::default(),
         }
     }
+
+    #[inline]
+    fn parameters_for(
+        &mut self,
+        sample_rate: f32,
+        pose: SourcePose,
+        listener: ListenerPose,
+    ) -> RenderParameters {
+        if self.cached_pose == Some(pose) && self.cached_listener == Some(listener) {
+            return self.cached_parameters;
+        }
+        let parameters = parameters_for_pose(sample_rate, pose, listener);
+        self.cached_pose = Some(pose);
+        self.cached_listener = Some(listener);
+        self.cached_parameters = parameters;
+        parameters
+    }
+
     fn reset(&mut self) {
-        self.delay.reset(); self.filter_left = 0.0; self.filter_right = 0.0; self.lfe_state = 0.0;
-        self.scratch_left.fill(0.0); self.scratch_right.fill(0.0);
+        self.delay.reset();
+        self.filter_left = 0.0;
+        self.filter_right = 0.0;
+        self.lfe_state = 0.0;
+        self.scratch_left.fill(0.0);
+        self.scratch_right.fill(0.0);
+        self.cached_pose = None;
+        self.cached_listener = None;
+        self.cached_parameters = RenderParameters::default();
     }
 }
 
@@ -112,17 +147,24 @@ impl CpuRenderer {
         debug_assert!(frames <= self.block_frames);
         debug_assert!(frames <= mix_left.len());
         debug_assert!(frames <= mix_right.len());
-        let start = parameters_for_pose(self.sample_rate, start_pose, listener);
-        let end = parameters_for_pose(self.sample_rate, end_pose, listener);
         let lfe_alpha = self.lfe_alpha;
+        let sample_rate = self.sample_rate;
         let state = &mut self.sources[source_index];
 
         match kind {
             SourceKind::FullRange => {
+                // Fixed speaker layouts reuse the exact same pose/listener for every block. Cache
+                // the expensive atan2/sin/cos/sqrt/exp parameter solve per source; trajectories also
+                // benefit because the previous block's end pose is normally the next block's start.
+                let start = state.parameters_for(sample_rate, start_pose, listener);
+                let end = if start_pose == end_pose {
+                    start
+                } else {
+                    state.parameters_for(sample_rate, end_pose, listener)
+                };
+
                 // Pose-derived parameters are linear within one small render block. Compute the six
-                // increments once here instead of rebuilding `t` and six lerps for every source
-                // sample. This keeps the realtime inner loop to strided PCM access, delay/filter DSP
-                // and additions only.
+                // increments once here instead of rebuilding `t` and six lerps for every sample.
                 let mut parameters = start;
                 let parameter_step = start.step_to(end, frames);
                 let mut input_index = input_channel;
@@ -140,6 +182,8 @@ impl CpuRenderer {
                 }
             }
             SourceKind::Lfe => {
+                // LFE is direction-independent in this renderer. Do not pay for binaural pose
+                // solving at all; only its gain ramp and 120 Hz low-pass belong on this path.
                 let mut gain = start_pose.gain;
                 let gain_step = if frames <= 1 {
                     0.0
@@ -237,6 +281,24 @@ mod tests {
         let parameters = parameters_for_pose(48_000.0, SourcePose::new(Vec3::FORWARD), ListenerPose::identity());
         assert!((parameters.left_delay - parameters.right_delay).abs() < 1.0e-6);
         assert!((parameters.left_gain - parameters.right_gain).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn source_parameter_cache_tracks_pose_and_listener() {
+        let mut state = SourceState::new(64, 64);
+        let listener = ListenerPose::identity();
+        let pose = SourcePose::new(Vec3::RIGHT);
+        let first = state.parameters_for(48_000.0, pose, listener);
+        assert_eq!(state.cached_pose, Some(pose));
+        assert_eq!(state.cached_listener, Some(listener));
+        let second = state.parameters_for(48_000.0, pose, listener);
+        assert!((first.left_delay - second.left_delay).abs() < f32::EPSILON);
+        assert!((first.right_gain - second.right_gain).abs() < f32::EPSILON);
+
+        let moved = SourcePose::new(Vec3::LEFT);
+        let third = state.parameters_for(48_000.0, moved, listener);
+        assert_eq!(state.cached_pose, Some(moved));
+        assert!(third.right_delay > third.left_delay);
     }
 
     #[test]
