@@ -67,16 +67,20 @@ impl SpatialEngine {
     pub fn config(&self) -> &EngineConfig {
         &self.config
     }
+
     pub fn simd_backend(&self) -> yinqidao_audio_simd::SimdBackend {
         yinqidao_audio_simd::best_backend()
     }
+
     pub fn set_listener(&mut self, listener: ListenerPose) {
         self.listener = listener;
     }
+
     pub fn set_environment(&mut self, settings: EnvironmentSettings) {
         self.config.environment = settings;
         self.environment.set_settings(settings);
     }
+
     pub fn reset(&mut self) {
         self.renderer.reset();
         self.environment.reset();
@@ -151,6 +155,94 @@ impl SpatialEngine {
         Ok(frames)
     }
 
+    /// Render the authored left/right channels as two independent virtual full-range sources.
+    ///
+    /// This is the preferred stereo virtualization primitive: it preserves the source programme's
+    /// left/right information instead of collapsing it to mono before applying ITD/ILD/head-shadow.
+    /// Start/end poses use end-exclusive sample-clock semantics: `end` is the state at n + frames.
+    /// Internally the renderer still works in the configured fixed block size without allocations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_interleaved_stereo_pair(
+        &mut self,
+        input: &[f32],
+        left_start: SourcePose,
+        left_end: SourcePose,
+        right_start: SourcePose,
+        right_end: SourcePose,
+        output: &mut [f32],
+    ) -> Result<usize, SpatialError> {
+        if self.renderer.source_capacity() < 2 {
+            return Err(SpatialError::SourceCapacityExceeded);
+        }
+        if input.len() % 2 != 0 {
+            return Err(SpatialError::ChannelCountMismatch);
+        }
+        let frames = input.len() / 2;
+        if output.len() < frames.saturating_mul(2) {
+            return Err(SpatialError::OutputTooSmall);
+        }
+        if frames == 0 {
+            return Ok(0);
+        }
+
+        let denominator = frames as f32;
+        let mut frame_offset = 0usize;
+        while frame_offset < frames {
+            let block_frames = (frames - frame_offset).min(self.config.block_frames);
+            let block_end_exclusive = frame_offset + block_frames;
+            let start_t = frame_offset as f32 / denominator;
+            let end_t = block_end_exclusive as f32 / denominator;
+            let left_block_start = left_start.lerp(left_end, start_t);
+            let left_block_end = left_start.lerp(left_end, end_t);
+            let right_block_start = right_start.lerp(right_end, start_t);
+            let right_block_end = right_start.lerp(right_end, end_t);
+
+            self.mix_left[..block_frames].fill(0.0);
+            self.mix_right[..block_frames].fill(0.0);
+            let block_start = frame_offset * 2;
+            let block_end = block_start + block_frames * 2;
+            let block = &input[block_start..block_end];
+
+            self.renderer.render_strided_source(
+                0,
+                block,
+                2,
+                0,
+                block_frames,
+                left_block_start,
+                left_block_end,
+                self.listener,
+                crate::SourceKind::FullRange,
+                &mut self.mix_left,
+                &mut self.mix_right,
+            )?;
+            self.renderer.render_strided_source(
+                1,
+                block,
+                2,
+                1,
+                block_frames,
+                right_block_start,
+                right_block_end,
+                self.listener,
+                crate::SourceKind::FullRange,
+                &mut self.mix_left,
+                &mut self.mix_right,
+            )?;
+            self.environment.process_planar(
+                &mut self.mix_left[..block_frames],
+                &mut self.mix_right[..block_frames],
+            );
+            for frame in 0..block_frames {
+                let output_index = (frame_offset + frame) * 2;
+                output[output_index] = self.mix_left[frame];
+                output[output_index + 1] = self.mix_right[frame];
+            }
+            frame_offset += block_frames;
+        }
+        Ok(frames)
+    }
+
     /// Render one mono source along an audio-clock-driven trajectory for 360/8D-style effects.
     pub fn render_mono_trajectory(
         &mut self,
@@ -200,6 +292,8 @@ impl SpatialEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Vec3;
+
     #[test]
     fn seven_one_four_renders_without_intermediate_channel_copy() {
         let mut config = EngineConfig::new(48_000);
@@ -215,5 +309,49 @@ mod tests {
             frames
         );
         assert!(output.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn stereo_pair_preserves_independent_authored_channels() {
+        let mut config = EngineConfig::new(48_000);
+        config.environment.mix = 0.0;
+        let mut engine = SpatialEngine::new(config).unwrap();
+        let frames = 64;
+        let mut input = vec![0.0_f32; frames * 2];
+        for frame in input.as_chunks_mut::<2>().0 {
+            frame[0] = 0.25;
+            frame[1] = -0.10;
+        }
+        let mut output = vec![0.0_f32; frames * 2];
+        let left = SourcePose {
+            position: Vec3::new(-0.5, 0.0, 0.866_025_4),
+            gain: std::f32::consts::FRAC_1_SQRT_2,
+            ..SourcePose::default()
+        };
+        let right = SourcePose {
+            position: Vec3::new(0.5, 0.0, 0.866_025_4),
+            gain: std::f32::consts::FRAC_1_SQRT_2,
+            ..SourcePose::default()
+        };
+        assert_eq!(
+            engine
+                .render_interleaved_stereo_pair(&input, left, left, right, right, &mut output)
+                .unwrap(),
+            frames
+        );
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().any(|sample| sample.abs() > 1.0e-4));
+    }
+
+    #[test]
+    fn stereo_pair_block_pose_span_is_end_exclusive() {
+        let start = SourcePose::new(Vec3::FORWARD);
+        let end = SourcePose::new(Vec3::RIGHT);
+        let frames = 64usize;
+        let denominator = frames as f32;
+        let first_t = 0.0_f32 / denominator;
+        let next_block_t = frames as f32 / denominator;
+        assert_eq!(start.lerp(end, first_t).position, start.position);
+        assert_eq!(start.lerp(end, next_block_t).position, end.position);
     }
 }

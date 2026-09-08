@@ -20,10 +20,14 @@ struct RenderParameters {
 impl RenderParameters {
     #[inline]
     fn step_to(self, end: Self, frames: usize) -> RenderParameterStep {
-        if frames <= 1 {
+        if frames == 0 {
             return RenderParameterStep::default();
         }
-        let scale = 1.0 / (frames - 1) as f32;
+        // `end` is the pose/parameter state at the next block boundary (n + frames), not at the
+        // final audible sample (n + frames - 1). Use an end-exclusive ramp so the hot loop consumes
+        // exactly `frames` sample-clock intervals before reaching that boundary. Using frames - 1
+        // made a 64-frame trajectory run 64/63 ~= 1.59% too fast.
+        let scale = 1.0 / frames as f32;
         RenderParameterStep {
             left_delay: (end.left_delay - self.left_delay) * scale,
             right_delay: (end.right_delay - self.right_delay) * scale,
@@ -218,10 +222,10 @@ impl CpuRenderer {
                 // LFE is direction-independent in this renderer. Do not pay for binaural pose
                 // solving at all; only its gain ramp and 120 Hz low-pass belong on this path.
                 let mut gain = start_pose.gain;
-                let gain_step = if frames <= 1 {
+                let gain_step = if frames == 0 {
                     0.0
                 } else {
-                    (end_pose.gain - start_pose.gain) / (frames - 1) as f32
+                    (end_pose.gain - start_pose.gain) / frames as f32
                 };
                 let mut input_index = input_channel;
                 for frame in 0..frames {
@@ -387,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn additive_parameter_ramp_reaches_block_endpoint() {
+    fn end_exclusive_parameter_ramp_reaches_next_block_start() {
         let start = RenderParameters {
             left_delay: 2.0,
             right_delay: 8.0,
@@ -407,7 +411,7 @@ mod tests {
         let frames = 64;
         let step = start.step_to(end, frames);
         let mut current = start;
-        for _ in 1..frames {
+        for _ in 0..frames {
             current.advance(step);
         }
 
@@ -420,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn single_frame_parameter_ramp_does_not_move() {
+    fn single_frame_parameter_ramp_advances_to_next_block_start_after_sample() {
         let start = parameters_for_pose(
             48_000.0,
             SourcePose::new(Vec3::RIGHT),
@@ -434,9 +438,9 @@ mod tests {
         let step = start.step_to(end, 1);
         let mut current = start;
         current.advance(step);
-        assert!((current.left_delay - start.left_delay).abs() < f32::EPSILON);
-        assert!((current.right_delay - start.right_delay).abs() < f32::EPSILON);
-        assert!((current.left_gain - start.left_gain).abs() < f32::EPSILON);
-        assert!((current.right_gain - start.right_gain).abs() < f32::EPSILON);
+        assert!((current.left_delay - end.left_delay).abs() < 1.0e-5);
+        assert!((current.right_delay - end.right_delay).abs() < 1.0e-5);
+        assert!((current.left_gain - end.left_gain).abs() < 1.0e-5);
+        assert!((current.right_gain - end.right_gain).abs() < 1.0e-5);
     }
 }

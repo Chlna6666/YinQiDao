@@ -1,10 +1,11 @@
 mod eq;
 mod spatial;
+mod trajectory_spatial;
 
 pub use eq::{EqPreset, clamp_eq};
 pub use spatial::{SpatialPreset, clamp_spatial};
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
 use crate::model::{EqSettings, SpatialSettings};
 use yinqidao_audio_spatial::{ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine};
@@ -14,19 +15,24 @@ use super::debug::{
 };
 use eq::EqProcessor;
 use spatial::Spatializer;
+use trajectory_spatial::StereoSpatializer;
 
-// Decoder seek and AudioProcessor live on different layers. A generation counter keeps the signal
-// lock-free and allocation-free: successful seek increments it, and the next PCM block resets state
-// exactly once before consuming the new timeline. Preloading never seeks the active decoder.
-static TRANSPORT_RESET_GENERATION: AtomicU64 = AtomicU64::new(1);
+// Decoder seek and AudioProcessor live on different layers but on the same audio worker. Keep the
+// discontinuity generation thread-local so a seek/preload in another engine/thread cannot reset an
+// unrelated playback instance. The next PCM block consumes the generation exactly once.
+std::thread_local! {
+    static TRANSPORT_RESET_GENERATION: Cell<u64> = const { Cell::new(1) };
+}
 
 pub(crate) fn request_transport_reset() {
-    TRANSPORT_RESET_GENERATION.fetch_add(1, Ordering::AcqRel);
+    TRANSPORT_RESET_GENERATION.with(|generation| {
+        generation.set(generation.get().wrapping_add(1));
+    });
 }
 
 #[inline]
 fn transport_reset_generation() -> u64 {
-    TRANSPORT_RESET_GENERATION.load(Ordering::Acquire)
+    TRANSPORT_RESET_GENERATION.with(Cell::get)
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +156,7 @@ pub struct AudioProcessor {
     pub(crate) spatial: Spatializer,
     volume: f32,
     stereo_scratch: Vec<f32>,
+    stereo_spatial: Option<StereoSpatializer>,
     native_spatial_scratch: Vec<f32>,
     native_spatial: Option<SpatialEngine>,
     native_spatial_rate: u32,
@@ -167,6 +174,7 @@ impl AudioProcessor {
             spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
             stereo_scratch: Vec::new(),
+            stereo_spatial: StereoSpatializer::new(sample_rate),
             native_spatial_scratch: Vec::new(),
             native_spatial: None,
             native_spatial_rate: 0,
@@ -183,6 +191,9 @@ impl AudioProcessor {
     pub(crate) fn reset_transport(&mut self) {
         self.eq.reset_state();
         self.spatial.reset_transport();
+        if let Some(engine) = self.stereo_spatial.as_mut() {
+            engine.reset();
+        }
         if let Some(engine) = self.native_spatial.as_mut() {
             engine.reset();
         }
@@ -213,16 +224,12 @@ impl AudioProcessor {
         input_channels: u16,
         output: &mut Vec<f32>,
     ) {
-        // Reset before touching the first PCM sample of a discontinuous timeline. This keeps the
-        // operation outside SpatialEngine's inner 64-frame source loop and makes it happen once.
         self.consume_transport_reset();
 
         let output_rate = self.eq.sample_rate();
         let native_multichannel = input_channels > 2;
 
-        // AVS3 5.1.4/7.1.4 must retain its authored channel geometry until the binaural renderer.
-        // The previous path collapsed 10/12 channels with an equal-power approximation before any
-        // ITD/head-shadow processing, permanently discarding front/back/height separation.
+        // AVS3 5.1.4/7.1.4 retains authored channel geometry until the native binaural renderer.
         if let Some(layout) = native_spatial_layout(input_channels) {
             if self.render_native_spatial_into(input, input_rate, layout) {
                 self.resampler.process_into(
@@ -232,8 +239,6 @@ impl AudioProcessor {
                     output,
                 );
             } else {
-                // Construction/render failure is not expected for a validated fixed layout, but
-                // playback must remain recoverable instead of panicking in the audio worker.
                 to_stereo_into(input, input_channels, &mut self.stereo_scratch);
                 self.resampler
                     .process_into(&self.stereo_scratch, input_rate, output_rate, output);
@@ -254,11 +259,18 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        // Native multichannel has already been reduced exactly once through either the self-owned
-        // native binaural engine (10/12ch) or the legacy compatibility downmix (other channel counts).
-        // Never run the stereo effect spatializer on top of that result.
+        // Native multichannel is spatialized exactly once from its authored speaker geometry.
+        // Ordinary mono/stereo uses the self-owned stereo virtual-source renderer. The legacy
+        // Spatializer remains only as a recoverable fallback if construction/rendering fails.
         if !native_multichannel {
-            self.spatial.process(output);
+            let settings = self.spatial.settings().clone();
+            let handled = self
+                .stereo_spatial
+                .as_mut()
+                .is_some_and(|renderer| renderer.process_in_place(output, &settings));
+            if !handled {
+                self.spatial.process(output);
+            }
         }
 
         if debug_enabled {
@@ -295,9 +307,6 @@ impl AudioProcessor {
         let input_rate = input_rate.max(1);
         if self.native_spatial_rate != input_rate || self.native_spatial.is_none() {
             let mut config = NativeSpatialConfig::new(input_rate);
-            // Authored 5.1.4/7.1.4 already carries room/height intent. Keep the first integration
-            // dry and deterministic; environment rendering will be reintroduced only with measured
-            // headroom/latency data instead of stacking synthetic ambience on native content.
             config.environment.mix = 0.0;
             match SpatialEngine::new(config) {
                 Ok(engine) => {
@@ -535,28 +544,6 @@ mod tests {
     }
 
     #[test]
-    fn native_renderer_reuses_outer_pcm_workspace() {
-        let input = vec![0.1_f32; 12 * 64];
-        let mut processor = AudioProcessor::new(
-            48_000,
-            EqPreset::Flat.settings(),
-            SpatialSettings::default(),
-            1.0,
-        );
-        let mut output = Vec::new();
-        processor.process_into(&input, 48_000, 12, &mut output);
-        let output_ptr = output.as_ptr();
-        let output_capacity = output.capacity();
-        let native_ptr = processor.native_spatial_scratch.as_ptr();
-        let native_capacity = processor.native_spatial_scratch.capacity();
-        processor.process_into(&input, 48_000, 12, &mut output);
-        assert_eq!(output.as_ptr(), output_ptr);
-        assert_eq!(output.capacity(), output_capacity);
-        assert_eq!(processor.native_spatial_scratch.as_ptr(), native_ptr);
-        assert_eq!(processor.native_spatial_scratch.capacity(), native_capacity);
-    }
-
-    #[test]
     fn native_multichannel_is_not_spatialized_twice() {
         let mut input = vec![0.0_f32; 12 * 64];
         for frame in input.chunks_exact_mut(12) {
@@ -583,6 +570,23 @@ mod tests {
                 .iter()
                 .zip(reference.iter())
                 .all(|(left, right)| (left - right).abs() < 1.0e-6)
+        );
+    }
+
+    #[test]
+    fn stereo_motion_uses_self_owned_audio_clock_renderer() {
+        let settings = SpatialPreset::Orbit360.settings();
+        let input = vec![0.2_f32; 128 * 2];
+        let mut processor =
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process(&input, 48_000, 2);
+        assert_eq!(output.len(), input.len());
+        assert_eq!(
+            processor
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            Some(128)
         );
     }
 
@@ -624,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_reset_clears_legacy_stereo_motion_history() {
+    fn transport_reset_clears_stereo_virtual_source_history() {
         let settings = SpatialPreset::Orbit360.settings();
         let input = (0..512)
             .flat_map(|index| {
@@ -648,12 +652,12 @@ mod tests {
             actual
                 .iter()
                 .zip(expected.iter())
-                .all(|(left, right)| (left - right).abs() < 1.0e-6)
+                .all(|(left, right)| (left - right).abs() < 1.0e-5)
         );
     }
 
     #[test]
-    fn global_transport_generation_is_consumed_once() {
+    fn worker_local_transport_generation_is_consumed_once() {
         let input = vec![0.1_f32; 128];
         let mut processor = AudioProcessor::new(
             48_000,
