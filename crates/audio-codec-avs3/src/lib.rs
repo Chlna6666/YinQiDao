@@ -44,6 +44,7 @@ mod imdct_synthesis;
 mod inverse_qc;
 mod isobmff;
 mod lc_pipeline;
+mod lossless_bitstream;
 mod lossless_primitives;
 mod mcac_synthesis;
 mod mcr_synthesis;
@@ -181,6 +182,9 @@ pub use inverse_qc::{
 pub use isobmff::{Av3aIsoBmffDemuxer, Av3aSampleTiming};
 pub use lc_pipeline::{
     LowComplexityPipelineWorkspace, decode_low_complexity_base_to_mdct_normative,
+};
+pub use lossless_bitstream::{
+    decode_lossless_rice_base_codeword_at, restore_lossless_flattened_residual,
 };
 pub use lossless_primitives::{
     LOSSLESS_RICE_BLOCK_SIZES, LOSSLESS_RICE_MAX_PREFIX, LOSSLESS_RICE_WINDOW,
