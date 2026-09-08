@@ -5,6 +5,9 @@ pub use eq::{EqPreset, clamp_eq};
 pub use spatial::{SpatialPreset, clamp_spatial};
 
 use crate::model::{EqSettings, SpatialSettings};
+use yinqidao_audio_spatial::{
+    ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialEngine,
+};
 
 use super::debug::{
     AudioDebugMonitorMode, audio_debug_enabled, audio_debug_monitor_mode,
@@ -134,6 +137,9 @@ pub struct AudioProcessor {
     pub(crate) spatial: Spatializer,
     volume: f32,
     stereo_scratch: Vec<f32>,
+    native_spatial_scratch: Vec<f32>,
+    native_spatial: Option<SpatialEngine>,
+    native_spatial_rate: u32,
     source_debug_scratch: Vec<f32>,
     eq_debug_scratch: Vec<f32>,
     resampler: StreamingLinearResampler,
@@ -147,6 +153,9 @@ impl AudioProcessor {
             spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
             stereo_scratch: Vec::new(),
+            native_spatial_scratch: Vec::new(),
+            native_spatial: None,
+            native_spatial_rate: 0,
             source_debug_scratch: Vec::new(),
             eq_debug_scratch: Vec::new(),
             resampler: StreamingLinearResampler::new(sample_rate),
@@ -170,17 +179,37 @@ impl AudioProcessor {
         let output_rate = self.eq.sample_rate();
         let native_multichannel = input_channels > 2;
 
-        // Decode-domain multichannel audio is reduced exactly once to a binaural stereo reference.
-        // Do not run the generic stereo spatializer on top of authored 5.1.4/7.1.4/AV3A content:
-        // that second pass used to widen, cross-delay and reverberate an already spatial mix and is
-        // the main reason native 3D material sounded less coherent than ordinary stereo tracks.
-        to_stereo_into(input, input_channels, &mut self.stereo_scratch);
-        self.resampler.process_into(
-            &self.stereo_scratch,
-            input_rate,
-            output_rate,
-            output,
-        );
+        // AVS3 5.1.4/7.1.4 must retain its authored channel geometry until the binaural renderer.
+        // The previous path collapsed 10/12 channels with an equal-power approximation before any
+        // ITD/head-shadow processing, permanently discarding front/back/height separation.
+        if let Some(layout) = native_spatial_layout(input_channels) {
+            if self.render_native_spatial_into(input, input_rate, layout) {
+                self.resampler.process_into(
+                    &self.native_spatial_scratch,
+                    input_rate,
+                    output_rate,
+                    output,
+                );
+            } else {
+                // Construction/render failure is not expected for a validated fixed layout, but
+                // playback must remain recoverable instead of panicking in the audio worker.
+                to_stereo_into(input, input_channels, &mut self.stereo_scratch);
+                self.resampler.process_into(
+                    &self.stereo_scratch,
+                    input_rate,
+                    output_rate,
+                    output,
+                );
+            }
+        } else {
+            to_stereo_into(input, input_channels, &mut self.stereo_scratch);
+            self.resampler.process_into(
+                &self.stereo_scratch,
+                input_rate,
+                output_rate,
+                output,
+            );
+        }
 
         let debug_enabled = audio_debug_enabled();
         if debug_enabled {
@@ -192,6 +221,9 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
+        // Native multichannel has already been reduced exactly once through either the self-owned
+        // native binaural engine (10/12ch) or the legacy compatibility downmix (other channel counts).
+        // Never run the stereo effect spatializer on top of that result.
         if !native_multichannel {
             self.spatial.process(output);
         }
@@ -219,6 +251,60 @@ impl AudioProcessor {
 
         let gain = perceptual_volume_gain(self.volume);
         yinqidao_audio_simd::gain_clamp_in_place(output, gain);
+    }
+
+    fn render_native_spatial_into(
+        &mut self,
+        input: &[f32],
+        input_rate: u32,
+        layout: ChannelLayout,
+    ) -> bool {
+        let input_rate = input_rate.max(1);
+        if self.native_spatial_rate != input_rate || self.native_spatial.is_none() {
+            let mut config = NativeSpatialConfig::new(input_rate);
+            // Authored 5.1.4/7.1.4 already carries room/height intent. Keep the first integration
+            // dry and deterministic; environment rendering will be reintroduced only with measured
+            // headroom/latency data instead of stacking synthetic ambience on native content.
+            config.environment.mix = 0.0;
+            match SpatialEngine::new(config) {
+                Ok(engine) => {
+                    self.native_spatial = Some(engine);
+                    self.native_spatial_rate = input_rate;
+                }
+                Err(_) => {
+                    self.native_spatial = None;
+                    self.native_spatial_rate = input_rate;
+                    return false;
+                }
+            }
+        }
+
+        let channels = match layout {
+            ChannelLayout::Surround5_1_4 => 10,
+            ChannelLayout::Surround7_1_4 => 12,
+            _ => return false,
+        };
+        if input.len() % channels != 0 {
+            return false;
+        }
+        let frames = input.len() / channels;
+        self.native_spatial_scratch
+            .resize(frames.saturating_mul(2), 0.0);
+        let Some(engine) = self.native_spatial.as_mut() else {
+            return false;
+        };
+        engine
+            .render_interleaved_layout(input, layout, &mut self.native_spatial_scratch)
+            .is_ok()
+    }
+}
+
+#[inline]
+fn native_spatial_layout(channels: u16) -> Option<ChannelLayout> {
+    match channels {
+        10 => Some(ChannelLayout::Surround5_1_4),
+        12 => Some(ChannelLayout::Surround7_1_4),
+        _ => None,
     }
 }
 
@@ -298,9 +384,6 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
             let speaker = speaker_for_channel(channels, index);
             let (mut left_gain, mut right_gain) = equal_power_pan(speaker.azimuth_deg);
 
-            // Height channels should remain audible as ambience, not merely become quieter copies
-            // of their floor counterparts. Keep a mild level offset and slightly pull them toward
-            // the centre to avoid an exaggerated hard-left/right ceiling image.
             let elevation_amount = (speaker.elevation_deg.abs() / 90.0).clamp(0.0, 1.0);
             let elevation_gain = 1.0 - elevation_amount * 0.08;
             if elevation_amount > 0.0 {
@@ -312,9 +395,6 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
             }
 
             if speaker.rear {
-                // Rear channels need a more diffuse binaural image than front speakers. This
-                // stateless crossfeed preserves rear energy without pretending the source is a
-                // second front speaker after azimuth folding.
                 let crossfeed = 0.18;
                 let l = left_gain;
                 let r = right_gain;
@@ -328,8 +408,6 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
             energy += gain * gain;
         }
 
-        // Energy normalisation keeps 10/12-channel material from driving the final limiter on
-        // every frame while preserving enough headroom for correlated centre/LFE content.
         let normalization = (2.0 / energy.max(2.0)).sqrt() * 0.90;
         output.push((left * normalization).clamp(-1.35, 1.35));
         output.push((right * normalization).clamp(-1.35, 1.35));
@@ -338,6 +416,8 @@ fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) 
 
 fn speaker_for_channel(channels: usize, index: usize) -> Speaker {
     match channels {
+        // These tables remain only as emergency compatibility fallback when native engine creation
+        // or validation fails. Normal 10/12-channel playback is routed through SpatialEngine.
         12 => LAYOUT_7_1_4[index.min(LAYOUT_7_1_4.len() - 1)],
         10 => LAYOUT_5_1_4[index.min(LAYOUT_5_1_4.len() - 1)],
         _ => {
@@ -399,16 +479,50 @@ mod tests {
     }
 
     #[test]
-    fn multichannel_binaural_reference_keeps_non_front_channels() {
-        let mut input = vec![0.0_f32; 12 * 8];
+    fn avs3_seven_one_four_uses_self_owned_native_renderer() {
+        let mut input = vec![0.0_f32; 12 * 64];
         for frame in input.chunks_exact_mut(12) {
-            frame[2] = 0.5;
-            frame[10] = 0.3;
+            frame[0] = 0.30;
+            frame[1] = -0.15;
+            frame[2] = 0.18;
+            frame[4] = 0.22;
+            frame[8] = 0.14;
+            frame[11] = -0.12;
         }
+
+        let mut processor = AudioProcessor::new(
+            48_000,
+            EqPreset::Flat.settings(),
+            SpatialSettings::default(),
+            1.0,
+        );
+        let output = processor.process(&input, 48_000, 12);
+        assert_eq!(output.len(), 128);
+        assert_eq!(processor.native_spatial_rate, 48_000);
+        assert!(processor.native_spatial.is_some());
+        assert!(output.iter().any(|sample| sample.abs() > 0.001));
+    }
+
+    #[test]
+    fn native_renderer_reuses_outer_pcm_workspace() {
+        let input = vec![0.1_f32; 12 * 64];
+        let mut processor = AudioProcessor::new(
+            48_000,
+            EqPreset::Flat.settings(),
+            SpatialSettings::default(),
+            1.0,
+        );
         let mut output = Vec::new();
-        to_stereo_into(&input, 12, &mut output);
-        assert_eq!(output.len(), 16);
-        assert!(output.iter().any(|sample| sample.abs() > 0.01));
+        processor.process_into(&input, 48_000, 12, &mut output);
+        let output_ptr = output.as_ptr();
+        let output_capacity = output.capacity();
+        let native_ptr = processor.native_spatial_scratch.as_ptr();
+        let native_capacity = processor.native_spatial_scratch.capacity();
+        processor.process_into(&input, 48_000, 12, &mut output);
+        assert_eq!(output.as_ptr(), output_ptr);
+        assert_eq!(output.capacity(), output_capacity);
+        assert_eq!(processor.native_spatial_scratch.as_ptr(), native_ptr);
+        assert_eq!(processor.native_spatial_scratch.capacity(), native_capacity);
     }
 
     #[test]
