@@ -1,6 +1,6 @@
 use crate::{
     ChannelLayout, EarlyReflectionNetwork, EnvironmentSettings, ListenerPose, SourcePose,
-    SpatialError, SpeakerLayout, Trajectory, renderer::CpuRenderer,
+    SpatialDebugSnapshot, SpatialError, SpeakerLayout, Trajectory, renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -37,6 +37,8 @@ pub struct SpatialEngine {
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
     listener: ListenerPose,
+    debug_enabled: bool,
+    debug_snapshot: SpatialDebugSnapshot,
 }
 
 impl SpatialEngine {
@@ -60,6 +62,8 @@ impl SpatialEngine {
             mix_left: vec![0.0; config.block_frames],
             mix_right: vec![0.0; config.block_frames],
             listener: ListenerPose::identity(),
+            debug_enabled: false,
+            debug_snapshot: SpatialDebugSnapshot::new(config.sample_rate),
             config,
         })
     }
@@ -81,9 +85,36 @@ impl SpatialEngine {
         self.environment.set_settings(settings);
     }
 
+    /// Enable the fixed-size spatial scene snapshot. Disabled is the default production path.
+    /// Enabling this never allocates in render calls; the snapshot is stored inside the engine.
+    pub fn set_debug_enabled(&mut self, enabled: bool) {
+        if self.debug_enabled == enabled {
+            return;
+        }
+        self.debug_enabled = enabled;
+        if enabled {
+            self.debug_snapshot
+                .reset_timeline(self.listener, self.config.environment);
+        }
+    }
+
+    pub fn debug_enabled(&self) -> bool {
+        self.debug_enabled
+    }
+
+    /// Return a by-value fixed-size snapshot. There is no lock, heap allocation or borrowed renderer
+    /// state involved; callers can publish this at a much lower UI/debug cadence than audio blocks.
+    pub fn debug_snapshot(&self) -> Option<SpatialDebugSnapshot> {
+        self.debug_enabled.then_some(self.debug_snapshot)
+    }
+
     pub fn reset(&mut self) {
         self.renderer.reset();
         self.environment.reset();
+        if self.debug_enabled {
+            self.debug_snapshot
+                .reset_timeline(self.listener, self.config.environment);
+        }
     }
 
     /// Render an interleaved native speaker layout directly to interleaved stereo.
@@ -109,6 +140,21 @@ impl SpatialEngine {
         let output_samples = frames.saturating_mul(2);
         if output.len() < output_samples {
             return Err(SpatialError::OutputTooSmall);
+        }
+
+        if self.debug_enabled {
+            self.debug_snapshot
+                .begin_capture(self.listener, self.config.environment);
+            for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
+                let pose = SourcePose {
+                    position: speaker.direction,
+                    velocity: crate::Vec3::ZERO,
+                    gain: speaker.gain,
+                    spread: 0.0,
+                };
+                self.debug_snapshot
+                    .record_source(source_index, speaker.kind, pose);
+            }
         }
 
         let mut frame_offset = 0usize;
@@ -151,6 +197,9 @@ impl SpatialEngine {
                 output[output_index + 1] = self.mix_right[frame] * normalization;
             }
             frame_offset += block_frames;
+        }
+        if self.debug_enabled {
+            self.debug_snapshot.finish_capture(frames);
         }
         Ok(frames)
     }
@@ -240,6 +289,15 @@ impl SpatialEngine {
             }
             frame_offset += block_frames;
         }
+        if self.debug_enabled {
+            self.debug_snapshot
+                .begin_capture(self.listener, self.config.environment);
+            self.debug_snapshot
+                .record_source(0, crate::SourceKind::FullRange, left_end);
+            self.debug_snapshot
+                .record_source(1, crate::SourceKind::FullRange, right_end);
+            self.debug_snapshot.finish_capture(frames);
+        }
         Ok(frames)
     }
 
@@ -254,6 +312,7 @@ impl SpatialEngine {
         if output.len() < frames.saturating_mul(2) {
             return Err(SpatialError::OutputTooSmall);
         }
+        let mut latest_pose = None;
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
@@ -261,6 +320,7 @@ impl SpatialEngine {
             self.mix_right[..block_frames].fill(0.0);
             let block = &input[frame_offset..frame_offset + block_frames];
             let (start_pose, end_pose) = trajectory.next_segment(block_frames);
+            latest_pose = Some(end_pose);
             self.renderer.render_strided_source(
                 0,
                 block,
@@ -284,6 +344,13 @@ impl SpatialEngine {
                 output[output_index + 1] = self.mix_right[frame];
             }
             frame_offset += block_frames;
+        }
+        if self.debug_enabled && let Some(pose) = latest_pose {
+            self.debug_snapshot
+                .begin_capture(self.listener, self.config.environment);
+            self.debug_snapshot
+                .record_source(0, crate::SourceKind::FullRange, pose);
+            self.debug_snapshot.finish_capture(frames);
         }
         Ok(frames)
     }
@@ -353,5 +420,30 @@ mod tests {
         let next_block_t = frames as f32 / denominator;
         assert_eq!(start.lerp(end, first_t).position, start.position);
         assert_eq!(start.lerp(end, next_block_t).position, end.position);
+    }
+
+    #[test]
+    fn debug_snapshot_is_fixed_size_and_opt_in() {
+        let mut config = EngineConfig::new(48_000);
+        config.environment.mix = 0.12;
+        let mut engine = SpatialEngine::new(config).unwrap();
+        assert!(engine.debug_snapshot().is_none());
+        engine.set_debug_enabled(true);
+
+        let frames = 64;
+        let input = vec![0.1_f32; frames * 12];
+        let mut output = vec![0.0_f32; frames * 2];
+        engine
+            .render_interleaved_layout(&input, ChannelLayout::Surround7_1_4, &mut output)
+            .unwrap();
+
+        let snapshot = engine.debug_snapshot().expect("enabled snapshot");
+        assert_eq!(snapshot.source_count, 12);
+        assert_eq!(snapshot.rendered_frames, frames as u64);
+        assert_eq!(snapshot.sequence, 1);
+        assert!((snapshot.environment_contribution - 0.12).abs() < 1.0e-6);
+        assert!(snapshot.sources[..snapshot.source_count]
+            .iter()
+            .all(|source| source.active));
     }
 }

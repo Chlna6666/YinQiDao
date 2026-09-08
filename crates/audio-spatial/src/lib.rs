@@ -6,6 +6,7 @@
 
 #![allow(clippy::manual_is_multiple_of)]
 
+mod debug;
 mod delay;
 mod engine;
 mod environment;
@@ -15,6 +16,9 @@ mod pose;
 mod renderer;
 mod trajectory;
 
+pub use debug::{
+    MAX_DEBUG_SOURCES, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
+};
 pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine};
 pub use environment::{EarlyReflectionNetwork, EnvironmentSettings};
 pub use error::SpatialError;
