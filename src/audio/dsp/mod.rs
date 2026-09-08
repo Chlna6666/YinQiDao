@@ -159,6 +159,17 @@ impl AudioProcessor {
         }
     }
 
+    /// Clear state tied to the previous playback timeline while retaining all allocated workspaces.
+    /// This is intentionally separate from parameter changes: seek/track reopen are discontinuities,
+    /// whereas normal consecutive decode chunks must preserve delay/filter/resampler history.
+    pub(crate) fn reset_transport(&mut self) {
+        self.spatial.reset_transport();
+        if let Some(engine) = self.native_spatial.as_mut() {
+            engine.reset();
+        }
+        self.resampler.reset();
+    }
+
     #[cfg(test)]
     pub fn process(&mut self, input: &[f32], input_rate: u32, input_channels: u16) -> Vec<f32> {
         let mut output = Vec::new();
@@ -335,141 +346,31 @@ struct Speaker {
 }
 
 const LAYOUT_7_1_4: [Speaker; 12] = [
-    Speaker {
-        azimuth_deg: -30.0,
-        elevation_deg: 0.0,
-        gain: 1.00,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 30.0,
-        elevation_deg: 0.0,
-        gain: 1.00,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        gain: 0.82,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        gain: 0.34,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: -145.0,
-        elevation_deg: 0.0,
-        gain: 0.70,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: 145.0,
-        elevation_deg: 0.0,
-        gain: 0.70,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: -90.0,
-        elevation_deg: 0.0,
-        gain: 0.76,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 90.0,
-        elevation_deg: 0.0,
-        gain: 0.76,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: -35.0,
-        elevation_deg: 45.0,
-        gain: 0.58,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 35.0,
-        elevation_deg: 45.0,
-        gain: 0.58,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: -145.0,
-        elevation_deg: 45.0,
-        gain: 0.52,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: 145.0,
-        elevation_deg: 45.0,
-        gain: 0.52,
-        rear: true,
-    },
+    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg: 30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
+    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
+    Speaker { azimuth_deg: 145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
+    Speaker { azimuth_deg: -90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
+    Speaker { azimuth_deg: 90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
+    Speaker { azimuth_deg: -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: 35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker { azimuth_deg: 145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
 ];
 
 const LAYOUT_5_1_4: [Speaker; 10] = [
-    Speaker {
-        azimuth_deg: -30.0,
-        elevation_deg: 0.0,
-        gain: 1.00,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 30.0,
-        elevation_deg: 0.0,
-        gain: 1.00,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        gain: 0.82,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        gain: 0.34,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: -125.0,
-        elevation_deg: 0.0,
-        gain: 0.72,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: 125.0,
-        elevation_deg: 0.0,
-        gain: 0.72,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: -35.0,
-        elevation_deg: 45.0,
-        gain: 0.58,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: 35.0,
-        elevation_deg: 45.0,
-        gain: 0.58,
-        rear: false,
-    },
-    Speaker {
-        azimuth_deg: -145.0,
-        elevation_deg: 45.0,
-        gain: 0.52,
-        rear: true,
-    },
-    Speaker {
-        azimuth_deg: 145.0,
-        elevation_deg: 45.0,
-        gain: 0.52,
-        rear: true,
-    },
+    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg: 30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
+    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
+    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
+    Speaker { azimuth_deg: -125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
+    Speaker { azimuth_deg: 125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
+    Speaker { azimuth_deg: -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: 35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
+    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
+    Speaker { azimuth_deg: 145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
 ];
 
 fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
@@ -650,6 +551,72 @@ mod tests {
             rendered
                 .iter()
                 .zip(reference.iter())
+                .all(|(left, right)| (left - right).abs() < 1.0e-6)
+        );
+    }
+
+    #[test]
+    fn transport_reset_matches_fresh_native_renderer_and_resampler() {
+        let mut input = vec![0.0_f32; 12 * 97];
+        for (frame_index, frame) in input.chunks_exact_mut(12).enumerate() {
+            let phase = frame_index as f32 * 0.031;
+            frame[0] = phase.sin() * 0.30;
+            frame[1] = phase.cos() * -0.17;
+            frame[2] = 0.08;
+            frame[4] = phase.sin() * 0.12;
+            frame[8] = phase.cos() * 0.09;
+            frame[11] = phase.sin() * -0.07;
+        }
+        let make_processor = || {
+            AudioProcessor::new(
+                48_000,
+                EqPreset::Flat.settings(),
+                SpatialSettings::default(),
+                1.0,
+            )
+        };
+
+        let mut reused = make_processor();
+        let _dirty = reused.process(&input, 44_100, 12);
+        reused.reset_transport();
+        let actual = reused.process(&input, 44_100, 12);
+
+        let mut fresh = make_processor();
+        let expected = fresh.process(&input, 44_100, 12);
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(left, right)| (left - right).abs() < 1.0e-5)
+        );
+    }
+
+    #[test]
+    fn transport_reset_clears_legacy_stereo_motion_history() {
+        let settings = SpatialPreset::Orbit360.settings();
+        let input = (0..512)
+            .flat_map(|index| {
+                let phase = index as f32 * 0.019;
+                [phase.sin() * 0.25, phase.cos() * 0.20]
+            })
+            .collect::<Vec<_>>();
+        let make_processor = || {
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings.clone(), 1.0)
+        };
+
+        let mut reused = make_processor();
+        let _dirty = reused.process(&input, 48_000, 2);
+        reused.reset_transport();
+        let actual = reused.process(&input, 48_000, 2);
+
+        let mut fresh = make_processor();
+        let expected = fresh.process(&input, 48_000, 2);
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
                 .all(|(left, right)| (left - right).abs() < 1.0e-6)
         );
     }

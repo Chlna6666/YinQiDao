@@ -264,6 +264,12 @@ impl Spatializer {
         &self.settings
     }
 
+    /// Reset all state that is coupled to the previous transport position while retaining buffers.
+    /// Seek/track reopen must not let reflection, ITD or filter history bleed into the new timeline.
+    pub(crate) fn reset_transport(&mut self) {
+        self.reset_state();
+    }
+
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
         if !self.settings.enabled {
             return;
