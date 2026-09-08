@@ -109,15 +109,20 @@
 
 目标是同时观察**原版输入、EQ 后、空间后、最终输出以及整个虚拟声场本身**，而不是只有频谱。
 
-- [ ] crate 提供 allocation-free `SpatialDebugSnapshot`：listener、source pose、ITD、ILD、distance、trajectory、environment contribution。
-- [ ] 音频线程固定容量/降采样发布 debug snapshot，不持有 UI 锁、不创建 Vec。
-- [ ] GPUI Top View：listener、L/R/native speaker/object source、轨迹、早期反射。
+- [x] crate 提供 allocation-free 固定尺寸 `SpatialDebugSnapshot`：listener、最多 32 个 source pose、azimuth/elevation/distance、ITD、ILD、near-field、head-shadow、air absorption、direct/environment contribution。
+- [x] `SpatialEngine` Debug 默认关闭；开启时复用内置固定数组，不创建 Vec、不向 UI 持锁。
+- [x] 根播放器通过固定原子槽 + odd/even seqlock 发布空间场景；最多 32 source，每 source 24 个固定 word，无 `Mutex` / channel / heap publication。
+- [x] `AudioProcessor` 仅在 Audio Laboratory 开启时启用 scene capture，并按 `sample_rate / 30` 帧间隔将发布频率限制到约 30 Hz；关闭后清理 published scene。
+- [x] GPUI Top View：listener、朝向、距离环、stereo L/R 与 native 5.1.4/7.1.4 当前 source position；高度声道通过 marker 与 elevation telemetry 区分，不错误投影为平面距离。
+- [x] GPUI Source Telemetry：最多展开 12 source，显示 azimuth / elevation / distance / ITD / ILD / L-R gain / near-field / head-shadow / air / direct contribution。
+- [ ] trajectory 历史尾迹 / 速度矢量可视化；当前快照只表示最新动态位置。
+- [ ] early-reflection 几何路径可视化；当前仅发布 environment contribution，不伪造反射几何。
 - [ ] GPUI Front/Elevation View。
-- [ ] Original / Post-EQ / Post-Spatial A/B reference。
-- [ ] Goniometer / vectorscope / stereo correlation。
-- [ ] Mid/Side energy、width、L/R balance、peak/RMS。
-- [ ] Original vs Processed / Mid-Side / Delta spectrum。
-- [ ] native 5.1.4/7.1.4 authored layout inspector。
+- [x] Original / Post-EQ / Post-Spatial A/B/C reference。
+- [x] Vectorscope / stereo correlation。
+- [x] Mid/Side spectrum、S/M energy、peak/RMS/crest/LUFS 工程分析。
+- [x] Original vs Processed transfer ΔdB / Mid-Side / spectrogram / waveform overlay。
+- [ ] native 5.1.4/7.1.4 channel-name/order inspector；当前 Top View 与 telemetry 已显示全部当前 source index/position，但尚未给每个 index 标注规范声道名。
 
 ## Phase 6 — GPU（暂缓）
 
@@ -134,9 +139,17 @@
 cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 ```
 
-当前覆盖 5.1.4 / 7.1.4 的 32 / 64 / 128 frames，输出 current SIMD backend、average / p50 / p95 / p99 / worst 和 realtime deadline 百分比。
+当前源码基准覆盖以下 workload，全部提供 32 / 64 / 128 frames：
 
-后续必须补：stereo static pair、stereo Orbit360/FigureEight、5.1、7.1、AV3A 7.1.4、16/32/64 objects。worker-pool 版本必须把 dispatch/wakeup/reduction 全部计入，不允许只测 worker kernel。
+- stereo static virtual pair；
+- stereo Orbit360；
+- stereo FigureEight / Orbit8d 核心轨迹；
+- 5.1.4；
+- 7.1.4。
+
+输出 current SIMD backend、average / p50 / p95 / p99 / worst 和 realtime deadline 百分比。**这些 case 已加入源码，但本会话尚未实际运行 benchmark。**
+
+后续必须补：5.1、7.1、AV3A 7.1.4 end-to-end、16/32/64 objects，以及 Debug off/on 对比。worker-pool 版本必须把 dispatch/wakeup/reduction 全部计入，不允许只测 worker kernel。
 
 ## 当前验证状态
 
@@ -159,8 +172,8 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一笔建议
 
-1. 给 `cpu_bench` 增加 stereo static / Orbit360 / FigureEight case，测新增 `is_finite`、近场和 air 参数 solve 的真实成本。
-2. 完善稳定的参数化 front/back notch / elevation spectral cue，并以 A/B 和 correlation/headroom 约束避免过度音染。
-3. 实现 `SpatialDebugSnapshot`，给完整 GPUI 立体声场可视化提供稳定、无锁、低开销的数据层。
-4. 完成 headroom / limiter 标定与 channel-order conformance vectors 后，再删除 legacy stereo renderer。
+1. 首先在可用 Rust toolchain 上执行 `cargo check/test`，修复任何类型/借用/GPUI API 问题；随后运行新增 stereo + native serial baseline，并对比 Debug off/on 成本。
+2. 给 Spatial Debug 增加固定容量 trajectory history 与 Front/Elevation View，再增加 early-reflection 几何调试数据；历史缓冲仍必须固定容量、无音频线程分配。
+3. 给 native 5.1.4/7.1.4 source index 加明确 channel-name/order inspector 和 conformance vectors。
+4. 完成 headroom / limiter 标定与 channel-order conformance 后，再删除 legacy stereo renderer。
 5. 有 serial baseline 后才设计 realtime worker pool 与 parallel threshold；GPU 继续暂缓。

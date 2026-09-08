@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{f32::consts::TAU, time::Duration};
 
 use anyhow::Result;
 use gpui::{
@@ -6,14 +6,16 @@ use gpui::{
     Render, Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, fill, hsla,
     point, prelude::*, px, rgb, size,
 };
+use yinqidao_audio_spatial::{SpatialDebugSnapshot, SpatialDebugSourceKind};
 
 use crate::audio::{
     AudioDebugMonitorMode, AudioDebugSnapshot, AudioDebugStage, audio_debug_latest_snapshot,
-    set_audio_debug_enabled, set_audio_debug_monitor_mode,
+    set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
 
 const DEBUG_UI_TICK: Duration = Duration::from_millis(33);
 const DB_FLOOR: f32 = -120.0;
+const SPATIAL_TELEMETRY_SOURCES: usize = 12;
 
 #[derive(Default)]
 struct AudioDebugWindowState {
@@ -94,10 +96,21 @@ fn start_debug_ui_service(window: WindowHandle<AudioDebugView>, cx: &mut App) {
         loop {
             Timer::after(DEBUG_UI_TICK).await;
             let snapshot = audio_debug_latest_snapshot();
+            let spatial_snapshot = spatial_debug_latest_snapshot();
             let still_open = cx.update(|cx| {
                 let result = window.update(cx, |view, window, view_cx| {
-                    if !view.frozen && snapshot.sequence != view.snapshot.sequence {
+                    if view.frozen {
+                        return;
+                    }
+                    let audio_changed = snapshot.sequence != view.snapshot.sequence;
+                    let spatial_changed = spatial_snapshot.as_ref().map(|snapshot| snapshot.sequence)
+                        != view
+                            .spatial_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.sequence);
+                    if audio_changed || spatial_changed {
                         view.snapshot = snapshot;
+                        view.spatial_snapshot = spatial_snapshot;
                         view_cx.notify();
                         window.refresh();
                     }
@@ -125,12 +138,14 @@ fn start_debug_ui_service(window: WindowHandle<AudioDebugView>, cx: &mut App) {
 #[derive(Default)]
 pub(crate) struct AudioDebugView {
     snapshot: AudioDebugSnapshot,
+    spatial_snapshot: Option<SpatialDebugSnapshot>,
     frozen: bool,
 }
 
 impl Render for AudioDebugView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.snapshot.clone();
+        let spatial_snapshot = self.spatial_snapshot;
         let frozen = self.frozen;
         let source_color = color(0x8f_a3_ba);
         let eq_color = color(0xff_a6_3d);
@@ -168,10 +183,11 @@ impl Render for AudioDebugView {
                                     .text_sm()
                                     .text_color(rgb(0x9b_a4_b0))
                                     .child(format!(
-                                        "实时 DSP 探针 · {} Hz · frame #{} · 监听 {}",
+                                        "实时 DSP 探针 · {} Hz · frame #{} · 监听 {} · scene {}",
                                         snapshot.sample_rate,
                                         snapshot.sequence,
-                                        snapshot.monitor_mode.label()
+                                        snapshot.monitor_mode.label(),
+                                        spatial_snapshot.map_or(0, |scene| scene.sequence),
                                     )),
                             ),
                     )
@@ -238,6 +254,7 @@ impl Render for AudioDebugView {
                         spatial_color,
                     )),
             )
+            .child(spatial_scene_section(spatial_snapshot))
             .child(panel(
                 "频谱 A/B/C · 20 Hz → Nyquist-safe",
                 Some(format!(
@@ -342,10 +359,314 @@ impl Render for AudioDebugView {
                     .text_xs()
                     .text_color(rgb(0x7f_88_94))
                     .child(
-                        "分析口径：Peak/RMS/Crest/Correlation/S·M 为实时工程测量；LUFS 使用 K-weighting + 绝对/相对门限积分的工程实现，True Peak 为 4× 插值估计。它适合播放器内 A/B/C 与回归分析，但当前不宣称通过 EBU R128 / ITU-R BS.1770 合规测试。",
+                        "分析口径：Peak/RMS/Crest/Correlation/S·M 为实时工程测量；LUFS 使用 K-weighting + 绝对/相对门限积分的工程实现，True Peak 为 4× 插值估计。空间场 Top View 读取 SpatialEngine 的参数化 ITD/ILD/距离快照，不代表 measured HRTF。",
                     ),
             )
     }
+}
+
+fn spatial_scene_section(snapshot: Option<SpatialDebugSnapshot>) -> gpui::Div {
+    let subtitle = snapshot.map_or_else(
+        || "等待 SpatialEngine scene".to_string(),
+        |scene| {
+            format!(
+                "{} sources · {} Hz · rendered {} frames · env {:.0}%",
+                scene.source_count,
+                scene.sample_rate,
+                scene.rendered_frames,
+                scene.environment_contribution * 100.0,
+            )
+        },
+    );
+
+    div()
+        .flex()
+        .gap_3()
+        .child(
+            panel(
+                "Virtual Space · TOP VIEW",
+                Some(subtitle),
+                chart(330.0, spatial_top_view_canvas(snapshot)),
+            )
+            .flex_1()
+            .min_w(px(0.0)),
+        )
+        .child(
+            panel(
+                "Source Telemetry",
+                Some("azimuth / elevation / distance / ITD / ILD".into()),
+                spatial_telemetry(snapshot),
+            )
+            .w(px(455.0)),
+        )
+}
+
+fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement {
+    let mut body = div().flex().flex_col().gap_2();
+    let Some(snapshot) = snapshot else {
+        return body
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x82_8c_99))
+                    .child("播放并开启 Audio Laboratory 后显示虚拟声源参数。"),
+            )
+            .into_any_element();
+    };
+
+    body = body.child(
+        div()
+            .flex()
+            .gap_2()
+            .child(metric("Room", format!("{:.0}%", snapshot.environment.room_size * 100.0)))
+            .child(metric("Damping", format!("{:.0}%", snapshot.environment.damping * 100.0)))
+            .child(metric("Wet", format!("{:.0}%", snapshot.environment.mix * 100.0))),
+    );
+
+    let visible = snapshot.source_count.min(SPATIAL_TELEMETRY_SOURCES);
+    for source in snapshot.sources[..visible].iter().copied() {
+        let kind = match source.kind {
+            SpatialDebugSourceKind::FullRange => "FULL",
+            SpatialDebugSourceKind::Lfe => "LFE",
+        };
+        let accent = spatial_source_color(source.kind, source.elevation_degrees);
+        body = body.child(
+            div()
+                .py_1()
+                .border_b_1()
+                .border_color(rgb(0x20_25_2d))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(accent)
+                                .child(format!("#{:02} {kind}", source.source_index)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xa5_ad_b8))
+                                .child(format!(
+                                    "az {:+.1}° · el {:+.1}° · {:.2} m",
+                                    source.azimuth_degrees,
+                                    source.elevation_degrees,
+                                    source.distance_meters,
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x7f_88_94))
+                        .child(format!(
+                            "ITD {:.2} smp · ILD {:+.2} dB · L/R {:.3}/{:.3}",
+                            source.itd_samples, source.ild_db, source.left_gain, source.right_gain,
+                        )),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6f_79_85))
+                        .child(format!(
+                            "near {:.0}% · shadow {:.0}% · air {:.0}% · direct {:.3}",
+                            source.near_field_amount * 100.0,
+                            source.head_shadow_amount * 100.0,
+                            source.air_absorption_amount * 100.0,
+                            source.direct_contribution,
+                        )),
+                ),
+        );
+    }
+    if snapshot.source_count > visible {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x7f_88_94))
+                .child(format!("另有 {} 个 source 未在列表展开", snapshot.source_count - visible)),
+        );
+    }
+    body.into_any_element()
+}
+
+fn spatial_top_view_canvas(snapshot: Option<SpatialDebugSnapshot>) -> impl IntoElement {
+    canvas(
+        move |bounds, _window, _cx| bounds,
+        move |bounds, _prepaint, window, _cx| {
+            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            let left = f32::from(bounds.left());
+            let top = f32::from(bounds.top());
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let center_x = left + width * 0.5;
+            let center_y = top + height * 0.52;
+            let plot_radius = width.min(height) * 0.42;
+
+            paint_line(
+                window,
+                left + width * 0.06,
+                center_y,
+                left + width * 0.94,
+                center_y,
+                color(0x22_28_30),
+                px(1.0),
+            );
+            paint_line(
+                window,
+                center_x,
+                top + height * 0.06,
+                center_x,
+                top + height * 0.94,
+                color(0x22_28_30),
+                px(1.0),
+            );
+            for fraction in [0.25_f32, 0.50, 0.75, 1.0] {
+                paint_circle(
+                    window,
+                    center_x,
+                    center_y,
+                    plot_radius * fraction,
+                    color(0x20_26_2e),
+                    px(1.0),
+                );
+            }
+
+            let Some(snapshot) = snapshot else {
+                paint_marker(window, center_x, center_y, 7.0, color(0xee_f1_f5));
+                return;
+            };
+            let active = &snapshot.sources[..snapshot.source_count.min(snapshot.sources.len())];
+            let max_horizontal_distance = active
+                .iter()
+                .filter(|source| source.active)
+                .map(|source| {
+                    let x = source.position.x - snapshot.listener.position.x;
+                    let z = source.position.z - snapshot.listener.position.z;
+                    (x * x + z * z).sqrt()
+                })
+                .fold(1.0_f32, f32::max)
+                .clamp(1.0, 6.0);
+            let scale = plot_radius / max_horizontal_distance;
+
+            let forward_x = snapshot.listener.forward.x;
+            let forward_z = snapshot.listener.forward.z;
+            let forward_length = (forward_x * forward_x + forward_z * forward_z).sqrt();
+            let (forward_x, forward_z) = if forward_length > 1.0e-5 {
+                (forward_x / forward_length, forward_z / forward_length)
+            } else {
+                (0.0, 1.0)
+            };
+            paint_line(
+                window,
+                center_x,
+                center_y,
+                center_x + forward_x * plot_radius * 0.24,
+                center_y - forward_z * plot_radius * 0.24,
+                color(0xee_f1_f5),
+                px(1.8),
+            );
+            paint_marker(window, center_x, center_y, 7.0, color(0xee_f1_f5));
+
+            for source in active.iter().copied().filter(|source| source.active) {
+                let relative_x = source.position.x - snapshot.listener.position.x;
+                let relative_z = source.position.z - snapshot.listener.position.z;
+                let source_x = center_x + relative_x * scale;
+                let source_y = center_y - relative_z * scale;
+                let source_color = spatial_source_color(source.kind, source.elevation_degrees);
+                paint_line(
+                    window,
+                    center_x,
+                    center_y,
+                    source_x,
+                    source_y,
+                    hsla(0.38, 0.28, 0.24, 0.55),
+                    px(1.0),
+                );
+                if source.near_field_amount > 0.35 {
+                    paint_circle(
+                        window,
+                        source_x,
+                        source_y,
+                        7.5 + source.near_field_amount * 4.0,
+                        hsla(0.10, 0.82, 0.58, 0.55),
+                        px(1.0),
+                    );
+                }
+                let marker_half = 3.5 + (source.elevation_degrees.abs() / 90.0).clamp(0.0, 1.0) * 2.5;
+                paint_marker(window, source_x, source_y, marker_half, source_color);
+            }
+        },
+    )
+}
+
+fn spatial_source_color(kind: SpatialDebugSourceKind, elevation_degrees: f32) -> Hsla {
+    match kind {
+        SpatialDebugSourceKind::Lfe => color(0xff_a6_3d),
+        SpatialDebugSourceKind::FullRange if elevation_degrees.abs() >= 20.0 => color(0x70_d6_ff),
+        SpatialDebugSourceKind::FullRange => color(0x56_d3_8f),
+    }
+}
+
+fn paint_line(
+    window: &mut Window,
+    from_x: f32,
+    from_y: f32,
+    to_x: f32,
+    to_y: f32,
+    line_color: Hsla,
+    line_width: gpui::Pixels,
+) {
+    let mut builder = PathBuilder::stroke(line_width);
+    builder.move_to(point(px(from_x), px(from_y)));
+    builder.line_to(point(px(to_x), px(to_y)));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, line_color);
+    }
+}
+
+fn paint_circle(
+    window: &mut Window,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    line_color: Hsla,
+    line_width: gpui::Pixels,
+) {
+    const SEGMENTS: usize = 48;
+    let mut builder = PathBuilder::stroke(line_width);
+    for segment in 0..=SEGMENTS {
+        let angle = segment as f32 / SEGMENTS as f32 * TAU;
+        let p = point(
+            px(center_x + angle.cos() * radius),
+            px(center_y + angle.sin() * radius),
+        );
+        if segment == 0 {
+            builder.move_to(p);
+        } else {
+            builder.line_to(p);
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, line_color);
+    }
+}
+
+fn paint_marker(window: &mut Window, x: f32, y: f32, half_size: f32, marker_color: Hsla) {
+    window.paint_quad(fill(
+        Bounds {
+            origin: point(px(x - half_size), px(y - half_size)),
+            size: size(px(half_size * 2.0), px(half_size * 2.0)),
+        },
+        marker_color,
+    ));
 }
 
 fn monitor_button(mode: AudioDebugMonitorMode, active: AudioDebugMonitorMode) -> impl IntoElement {
@@ -406,10 +727,6 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
 }
 
 fn chart(height: f32, body: impl IntoElement) -> gpui::AnyElement {
-    // Canvas has no intrinsic size. In a normal flow container it can therefore collapse to a
-    // zero-height/zero-width layout node and all plots appear as a single flat line. A one-cell
-    // grid gives the Canvas an explicit stretch constraint on both axes without relying on the
-    // opaque `impl IntoElement` return type to expose `Styled` methods.
     div()
         .w_full()
         .h(px(height))
