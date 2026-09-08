@@ -1,6 +1,6 @@
 use crate::{
-    ChannelLayout, EarlyReflectionNetwork, EnvironmentSettings, ListenerPose, SourcePose,
-    SpatialDebugSnapshot, SpatialError, SpeakerLayout, Trajectory, renderer::CpuRenderer,
+    ChannelLayout, EnvironmentSettings, ListenerPose, SourcePose, SpatialDebugSnapshot, SpatialError,
+    SpeakerLayout, Trajectory, renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -33,7 +33,6 @@ impl EngineConfig {
 pub struct SpatialEngine {
     config: EngineConfig,
     renderer: CpuRenderer,
-    environment: EarlyReflectionNetwork,
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
     listener: ListenerPose,
@@ -52,13 +51,14 @@ impl SpatialEngine {
         if config.max_sources == 0 {
             return Err(SpatialError::InvalidSourceCapacity);
         }
+        let mut renderer = CpuRenderer::new(
+            config.sample_rate,
+            config.block_frames,
+            config.max_sources,
+        )?;
+        renderer.set_environment(config.environment);
         Ok(Self {
-            renderer: CpuRenderer::new(
-                config.sample_rate,
-                config.block_frames,
-                config.max_sources,
-            )?,
-            environment: EarlyReflectionNetwork::new(config.sample_rate, config.environment),
+            renderer,
             mix_left: vec![0.0; config.block_frames],
             mix_right: vec![0.0; config.block_frames],
             listener: ListenerPose::identity(),
@@ -82,7 +82,7 @@ impl SpatialEngine {
 
     pub fn set_environment(&mut self, settings: EnvironmentSettings) {
         self.config.environment = settings;
-        self.environment.set_settings(settings);
+        self.renderer.set_environment(settings);
     }
 
     /// Enable the fixed-size spatial scene snapshot. Disabled is the default production path.
@@ -110,7 +110,6 @@ impl SpatialEngine {
 
     pub fn reset(&mut self) {
         self.renderer.reset();
-        self.environment.reset();
         if self.debug_enabled {
             self.debug_snapshot
                 .reset_timeline(self.listener, self.config.environment);
@@ -186,10 +185,6 @@ impl SpatialEngine {
                     &mut self.mix_right,
                 )?;
             }
-            self.environment.process_planar(
-                &mut self.mix_left[..block_frames],
-                &mut self.mix_right[..block_frames],
-            );
             let normalization = layout.normalization();
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
@@ -278,10 +273,6 @@ impl SpatialEngine {
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
-            self.environment.process_planar(
-                &mut self.mix_left[..block_frames],
-                &mut self.mix_right[..block_frames],
-            );
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
                 output[output_index] = self.mix_left[frame];
@@ -334,10 +325,6 @@ impl SpatialEngine {
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
-            self.environment.process_planar(
-                &mut self.mix_left[..block_frames],
-                &mut self.mix_right[..block_frames],
-            );
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
                 output[output_index] = self.mix_left[frame];

@@ -1,6 +1,11 @@
 use std::f32::consts::PI;
 
-use crate::{ListenerPose, SourceKind, SourcePose, SpatialError, Vec3, delay::CubicDelayLine};
+use crate::{
+    EnvironmentSettings, ListenerPose, SourceKind, SourcePose, SpatialError, Vec3,
+    delay::CubicDelayLine,
+    environment::EARLY_REFLECTION_TAP_COUNT,
+    image_source::{MAX_REFLECTION_DELAY_SECONDS, source_reflection_descriptors},
+};
 
 const SPEED_OF_SOUND_M_S: f32 = 343.0;
 const HEAD_RADIUS_M: f32 = 0.0875;
@@ -9,6 +14,7 @@ const MAX_DISTANCE_METERS: f32 = 32.0;
 const NEAR_FIELD_FULL_METERS: f32 = 0.25;
 const NEAR_FIELD_FADE_METERS: f32 = 1.20;
 const AIR_ABSORPTION_START_METERS: f32 = 1.0;
+const REFLECTION_EPSILON: f32 = 1.0e-5;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderParameters {
@@ -26,9 +32,8 @@ impl RenderParameters {
         if frames == 0 {
             return RenderParameterStep::default();
         }
-        // `end` is the pose/parameter state at the next block boundary (n + frames), not at the
-        // final audible sample (n + frames - 1). Use an end-exclusive ramp so the hot loop consumes
-        // exactly `frames` sample-clock intervals before reaching that boundary.
+        // `end` is the state at n + frames. Use an end-exclusive ramp so the realtime loop consumes
+        // exactly `frames` sample-clock intervals before reaching the next block boundary.
         let scale = 1.0 / frames as f32;
         RenderParameterStep {
             left_delay: (end.left_delay - self.left_delay) * scale,
@@ -66,12 +71,18 @@ struct SourceState {
     delay: CubicDelayLine,
     filter_left: f32,
     filter_right: f32,
+    reflection_filter_left: [f32; EARLY_REFLECTION_TAP_COUNT],
+    reflection_filter_right: [f32; EARLY_REFLECTION_TAP_COUNT],
     lfe_state: f32,
     scratch_left: Vec<f32>,
     scratch_right: Vec<f32>,
     cached_pose: Option<SourcePose>,
     cached_listener: Option<ListenerPose>,
     cached_parameters: RenderParameters,
+    cached_reflection_pose: Option<SourcePose>,
+    cached_reflection_listener: Option<ListenerPose>,
+    cached_reflection_environment: Option<EnvironmentSettings>,
+    cached_reflection_parameters: [RenderParameters; EARLY_REFLECTION_TAP_COUNT],
 }
 
 impl SourceState {
@@ -80,12 +91,18 @@ impl SourceState {
             delay: CubicDelayLine::new(delay_capacity),
             filter_left: 0.0,
             filter_right: 0.0,
+            reflection_filter_left: [0.0; EARLY_REFLECTION_TAP_COUNT],
+            reflection_filter_right: [0.0; EARLY_REFLECTION_TAP_COUNT],
             lfe_state: 0.0,
             scratch_left: vec![0.0; block_frames],
             scratch_right: vec![0.0; block_frames],
             cached_pose: None,
             cached_listener: None,
             cached_parameters: RenderParameters::default(),
+            cached_reflection_pose: None,
+            cached_reflection_listener: None,
+            cached_reflection_environment: None,
+            cached_reflection_parameters: [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT],
         }
     }
 
@@ -106,6 +123,64 @@ impl SourceState {
         parameters
     }
 
+    #[inline]
+    fn reflection_parameters_for(
+        &mut self,
+        sample_rate: f32,
+        pose: SourcePose,
+        listener: ListenerPose,
+        environment: EnvironmentSettings,
+    ) -> [RenderParameters; EARLY_REFLECTION_TAP_COUNT] {
+        if environment.mix <= REFLECTION_EPSILON {
+            return [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
+        }
+        if self.cached_reflection_pose == Some(pose)
+            && self.cached_reflection_listener == Some(listener)
+            && self.cached_reflection_environment == Some(environment)
+        {
+            return self.cached_reflection_parameters;
+        }
+
+        let descriptors = source_reflection_descriptors(sample_rate, pose, listener, environment);
+        let parameters = std::array::from_fn(|index| {
+            let reflection = descriptors[index];
+            let reflected_pose = SourcePose {
+                position: reflection.image_position,
+                velocity: pose.velocity,
+                gain: finite_or_zero(pose.gain).clamp(0.0, 4.0)
+                    * environment.mix
+                    * reflection.wall_reflectance,
+                spread: finite_or_zero(pose.spread).clamp(0.0, 1.0),
+            };
+            let mut parameters = parameters_for_pose(sample_rate, reflected_pose, listener);
+            // Direct rendering intentionally omits absolute propagation latency. The image-source
+            // solver therefore contributes only the excess path delay, while the virtual image
+            // position still drives binaural direction, distance attenuation and air absorption.
+            parameters.left_delay += reflection.excess_delay_samples;
+            parameters.right_delay += reflection.excess_delay_samples;
+            let wall_alpha = one_pole_alpha(sample_rate, reflection.damping_cutoff_hz);
+            parameters.left_filter_alpha = parameters.left_filter_alpha.min(wall_alpha);
+            parameters.right_filter_alpha = parameters.right_filter_alpha.min(wall_alpha);
+            parameters
+        });
+
+        self.cached_reflection_pose = Some(pose);
+        self.cached_reflection_listener = Some(listener);
+        self.cached_reflection_environment = Some(environment);
+        self.cached_reflection_parameters = parameters;
+        parameters
+    }
+
+    fn invalidate_environment(&mut self) {
+        self.reflection_filter_left.fill(0.0);
+        self.reflection_filter_right.fill(0.0);
+        self.cached_reflection_pose = None;
+        self.cached_reflection_listener = None;
+        self.cached_reflection_environment = None;
+        self.cached_reflection_parameters =
+            [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
+    }
+
     fn reset(&mut self) {
         self.delay.reset();
         self.filter_left = 0.0;
@@ -116,6 +191,7 @@ impl SourceState {
         self.cached_pose = None;
         self.cached_listener = None;
         self.cached_parameters = RenderParameters::default();
+        self.invalidate_environment();
     }
 }
 
@@ -125,6 +201,7 @@ pub(crate) struct CpuRenderer {
     block_frames: usize,
     sources: Vec<SourceState>,
     lfe_alpha: f32,
+    environment: EnvironmentSettings,
 }
 
 impl CpuRenderer {
@@ -144,7 +221,12 @@ impl CpuRenderer {
         }
         let sample_rate_f32 = sample_rate as f32;
         let maximum_itd_seconds = HEAD_RADIUS_M / SPEED_OF_SOUND_M_S * (PI * 0.5 + 1.0);
-        let delay_capacity = (sample_rate_f32 * (maximum_itd_seconds + 0.0015)).ceil() as usize + 8;
+        // One ring per source now serves direct ITD and all first-order reflections. This avoids a
+        // second PCM copy/ring for the room path while keeping the render-time storage fixed.
+        let delay_capacity = (sample_rate_f32
+            * (MAX_REFLECTION_DELAY_SECONDS + maximum_itd_seconds + 0.0035))
+            .ceil() as usize
+            + 8;
         let lfe_alpha = 1.0 - (-2.0 * PI * 120.0 / sample_rate_f32).exp();
         let mut sources = Vec::with_capacity(max_sources);
         for _ in 0..max_sources {
@@ -155,11 +237,23 @@ impl CpuRenderer {
             block_frames,
             sources,
             lfe_alpha,
+            environment: EnvironmentSettings::default(),
         })
     }
 
     pub(crate) fn source_capacity(&self) -> usize {
         self.sources.len()
+    }
+
+    pub(crate) fn set_environment(&mut self, settings: EnvironmentSettings) {
+        let settings = sanitize_environment(settings);
+        if settings == self.environment {
+            return;
+        }
+        self.environment = settings;
+        for source in &mut self.sources {
+            source.invalidate_environment();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -185,26 +279,42 @@ impl CpuRenderer {
         debug_assert!(frames <= mix_right.len());
         let lfe_alpha = self.lfe_alpha;
         let sample_rate = self.sample_rate;
+        let environment = self.environment;
+        let reflections_enabled = environment.mix > REFLECTION_EPSILON;
         let state = &mut self.sources[source_index];
 
         match kind {
             SourceKind::FullRange => {
-                // Fixed speaker layouts reuse the exact same pose/listener for every block. Cache
-                // the expensive pose solve; trajectories normally reuse the previous end as start.
                 let start = state.parameters_for(sample_rate, start_pose, listener);
                 let end = if start_pose == end_pose {
                     start
                 } else {
                     state.parameters_for(sample_rate, end_pose, listener)
                 };
-
                 let mut parameters = start;
                 let parameter_step = start.step_to(end, frames);
+
+                let reflection_start = if reflections_enabled {
+                    state.reflection_parameters_for(sample_rate, start_pose, listener, environment)
+                } else {
+                    [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT]
+                };
+                let reflection_end = if !reflections_enabled || start_pose == end_pose {
+                    reflection_start
+                } else {
+                    state.reflection_parameters_for(sample_rate, end_pose, listener, environment)
+                };
+                let mut reflection_parameters = reflection_start;
+                let reflection_steps = std::array::from_fn(|index| {
+                    reflection_start[index].step_to(reflection_end[index], frames)
+                });
+
                 let mut input_index = input_channel;
                 for frame in 0..frames {
                     let sample = sanitize_sample(input[input_index]);
                     input_index += input_stride;
                     state.delay.push(sample);
+
                     let (delayed_left, delayed_right) = state
                         .delay
                         .read_pair(parameters.left_delay, parameters.right_delay);
@@ -212,13 +322,36 @@ impl CpuRenderer {
                         parameters.left_filter_alpha * (delayed_left - state.filter_left);
                     state.filter_right +=
                         parameters.right_filter_alpha * (delayed_right - state.filter_right);
-                    state.scratch_left[frame] = state.filter_left * parameters.left_gain;
-                    state.scratch_right[frame] = state.filter_right * parameters.right_gain;
+                    let mut output_left = state.filter_left * parameters.left_gain;
+                    let mut output_right = state.filter_right * parameters.right_gain;
+
+                    if reflections_enabled {
+                        for tap in 0..EARLY_REFLECTION_TAP_COUNT {
+                            let reflection = reflection_parameters[tap];
+                            let (reflected_left, reflected_right) = state
+                                .delay
+                                .read_pair(reflection.left_delay, reflection.right_delay);
+                            state.reflection_filter_left[tap] += reflection.left_filter_alpha
+                                * (reflected_left - state.reflection_filter_left[tap]);
+                            state.reflection_filter_right[tap] += reflection.right_filter_alpha
+                                * (reflected_right - state.reflection_filter_right[tap]);
+                            output_left +=
+                                state.reflection_filter_left[tap] * reflection.left_gain;
+                            output_right +=
+                                state.reflection_filter_right[tap] * reflection.right_gain;
+                            reflection_parameters[tap].advance(reflection_steps[tap]);
+                        }
+                    }
+
+                    state.scratch_left[frame] = output_left;
+                    state.scratch_right[frame] = output_right;
                     parameters.advance(parameter_step);
                 }
             }
             SourceKind::Lfe => {
-                // LFE is direction-independent: only a causal delay, 120 Hz low-pass and gain ramp.
+                // LFE remains direction-independent. First-order directional room reflections are
+                // intentionally skipped here; the future diffuse/FDN low-frequency field owns that
+                // responsibility without inventing a localized LFE wall image.
                 let mut gain = finite_or_zero(start_pose.gain).clamp(0.0, 4.0);
                 let end_gain = finite_or_zero(end_pose.gain).clamp(0.0, 4.0);
                 let gain_step = if frames == 0 {
@@ -267,9 +400,6 @@ fn parameters_for_pose(
     pose: SourcePose,
     listener: ListenerPose,
 ) -> RenderParameters {
-    // Object metadata and future debug injection are not allowed to poison persistent delay/IIR
-    // state. Non-finite pose coordinates collapse to the listener origin and then use FORWARD as
-    // the direction fallback; non-finite gains become silence.
     let raw_relative = pose.position - listener.position;
     let relative = Vec3::new(
         finite_or_zero(raw_relative.x),
@@ -293,9 +423,6 @@ fn parameters_for_pose(
     let elevation_up = elevation_sin.max(0.0);
     let elevation_down = (-elevation_sin).max(0.0);
 
-    // Woodworth spherical-head ITD remains the far-field baseline. For close sources blend a small
-    // amount of exact point-to-ear geometric path difference. This is a deterministic parametric
-    // near-field correction, not a measured HRTF/HRTF database substitute.
     let theta = azimuth.abs().clamp(0.0, PI);
     let path_term = if theta <= PI * 0.5 {
         theta + theta.sin()
@@ -338,8 +465,6 @@ fn parameters_for_pose(
         )
     };
 
-    // Base spherical-head ILD plus a close-range ear-distance correction. The square root keeps the
-    // point-source 1/r geometry from becoming an exaggerated hard-pan effect next to the listener.
     let base_far_ear_attenuation =
         (1.0 - lateral * (0.18 + 0.10 / distance.max(0.35))).clamp(0.62, 1.0);
     let (near_ear_distance, far_ear_distance) = if azimuth >= 0.0 {
@@ -353,9 +478,6 @@ fn parameters_for_pose(
         * (1.0
             + (geometric_far_ear_attenuation - 1.0) * (near_field_amount * 0.55));
 
-    // Conservative distance law: avoid near-field gain boost/headroom loss, but attenuate remote
-    // sources smoothly. Frequency-dependent air loss is represented by a high-frequency cutoff that
-    // only starts after one metre and remains subtle at normal music-listening distances.
     let distance_gain = if distance <= 1.0 {
         1.0
     } else {
@@ -372,8 +494,6 @@ fn parameters_for_pose(
         * rear_gain
         * elevation_gain;
 
-    // Front/back and elevation cues stay deliberately parametric and smooth. Rear, lower and far
-    // positions progressively reduce upper-band energy; overhead sources receive a smaller tilt.
     let near_cutoff = (20_000.0
         - rear * 4_200.0
         - elevation_up * 900.0
@@ -408,6 +528,15 @@ fn parameters_for_pose(
 #[inline]
 fn one_pole_alpha(sample_rate: f32, cutoff_hz: f32) -> f32 {
     1.0 - (-2.0 * PI * cutoff_hz.min(sample_rate * 0.45) / sample_rate).exp()
+}
+
+#[inline]
+fn sanitize_environment(settings: EnvironmentSettings) -> EnvironmentSettings {
+    EnvironmentSettings {
+        mix: finite_or_zero(settings.mix).clamp(0.0, 0.45),
+        room_size: finite_or_zero(settings.room_size).clamp(0.0, 1.0),
+        damping: finite_or_zero(settings.damping).clamp(0.0, 1.0),
+    }
 }
 
 #[inline]
@@ -488,7 +617,7 @@ mod tests {
 
     #[test]
     fn source_parameter_cache_tracks_pose_and_listener() {
-        let mut state = SourceState::new(64, 64);
+        let mut state = SourceState::new(4_096, 64);
         let listener = ListenerPose::identity();
         let pose = SourcePose::new(Vec3::RIGHT);
         let first = state.parameters_for(48_000.0, pose, listener);
@@ -502,6 +631,57 @@ mod tests {
         let third = state.parameters_for(48_000.0, moved, listener);
         assert_eq!(state.cached_pose, Some(moved));
         assert!(third.right_delay > third.left_delay);
+    }
+
+    #[test]
+    fn image_source_reflections_add_excess_delay_and_respect_environment_mix() {
+        let mut state = SourceState::new(4_096, 64);
+        let listener = ListenerPose::identity();
+        let pose = SourcePose::new(Vec3::new(0.5, 0.0, 1.0));
+        let dry = state.reflection_parameters_for(
+            48_000.0,
+            pose,
+            listener,
+            EnvironmentSettings {
+                mix: 0.0,
+                ..EnvironmentSettings::default()
+            },
+        );
+        assert!(dry.iter().all(|parameters| parameters.left_gain == 0.0));
+        let wet = state.reflection_parameters_for(
+            48_000.0,
+            pose,
+            listener,
+            EnvironmentSettings {
+                mix: 0.12,
+                ..EnvironmentSettings::default()
+            },
+        );
+        let direct = parameters_for_pose(48_000.0, pose, listener);
+        assert!(wet.iter().all(|parameters| parameters.left_delay >= direct.left_delay));
+        assert!(wet.iter().any(|parameters| parameters.left_gain > 0.0));
+    }
+
+    #[test]
+    fn environment_change_invalidates_only_reflection_cache() {
+        let mut renderer = CpuRenderer::new(48_000, 64, 2).unwrap();
+        let pose = SourcePose::new(Vec3::FORWARD);
+        let listener = ListenerPose::identity();
+        let direct = renderer.sources[0].parameters_for(48_000.0, pose, listener);
+        renderer.sources[0].reflection_parameters_for(
+            48_000.0,
+            pose,
+            listener,
+            EnvironmentSettings::default(),
+        );
+        renderer.set_environment(EnvironmentSettings {
+            mix: 0.2,
+            room_size: 0.8,
+            damping: 0.7,
+        });
+        assert_eq!(renderer.sources[0].cached_pose, Some(pose));
+        assert!((renderer.sources[0].cached_parameters.left_gain - direct.left_gain).abs() < f32::EPSILON);
+        assert!(renderer.sources[0].cached_reflection_pose.is_none());
     }
 
     #[test]

@@ -21,8 +21,8 @@
 
 - [x] 独立 crate：`crates/audio-spatial`。
 - [x] 默认 64-frame 固定内部 block，可配置。
-- [x] `SpatialEngine` / source / environment workspace 初始化时预分配。
-- [x] `Vec3` / `SourcePose` / `ListenerPose`，并补齐无分配 `Add/Sub/Mul<f32>` 几何 primitive。
+- [x] `SpatialEngine` / source workspace 初始化时预分配。
+- [x] `Vec3` / `SourcePose` / `ListenerPose`，具备无分配 `Add/Sub/Mul<f32>` 几何 primitive。
 - [x] Stereo / 5.1 / 7.1 / 5.1.4 / 7.1.4 speaker scene。
 - [x] 7.1.4 顺序与当前 AVS3 PCM 约定对齐，LFE index 3。
 - [x] interleaved N-channel stride 直读，无 per-channel Vec。
@@ -35,7 +35,6 @@
 - [x] end-exclusive `[n, n + frames)` 参数 ramp，修复 64-frame trajectory `64/63` 时钟漂移。
 - [x] Orbit360 / FigureEight / Pendulum / FrontBack / Planetary / NearEar / Helix audio-clock trajectory。
 - [x] clockwise / counter-clockwise。
-- [x] early-reflection ring network，无 render-time allocation。
 - [x] source accumulation 复用 `yinqidao-audio-simd::mix_accumulate`。
 - [x] NaN/Inf 在进入 delay/IIR persistent state 前隔离。
 
@@ -64,6 +63,11 @@
 - [x] `CubicDelayLine::read_pair` 共用 ring cursor；整数 delay direct-read fast path。
 - [x] stereo L/R stride 直读，无 mono scratch。
 - [x] conservative near-field / air / front-back / elevation cues。
+- [x] FullRange source 的同一条 delay ring 同时服务 direct ITD 与 4 条 first-order reflection arrival，不复制 PCM、不创建额外 source object。
+- [x] delay history 扩到约 80 ms reflection budget + ITD margin；初始化后固定容量。
+- [x] reflection filter state 为每 source 固定 `[f32; 4]` 左/右数组；reflection parameters/cache 也是固定数组。
+- [x] environment `mix=0` 时完全跳过 reflection geometry/read/filter 热循环。
+- [x] environment 改变只 invalidates reflection cache/filter，不清 direct ITD/history。
 - [ ] 更多 hot kernel 下沉 `audio-simd`。
 - [ ] Lagrange vs Thiran fractional delay 质量/成本对比。
 - [ ] 更完整的参数化 pinna-like front/back notch。
@@ -84,7 +88,12 @@
 
 ## Phase 4 — 专业空间场 / 对象音频
 
-- [ ] 将当前 4-tap room-level early reflection 升级为 source/listener image-source 几何模型。
+- [x] 新增独立 `image_source.rs`，实现 listener-local rectangular room 的 first-order image-source 几何：Left/Right/Front/Rear 四墙、image position、真实 bounce point、full/excess path、excess delay、wall reflectance、damping cutoff。
+- [x] 正式播放路径从全局 post-mix 4-tap network 切换为**per-source first-order image-source reflections**；每条反射按 image arrival direction 再经过同一套 binaural ITD/ILD/head-shadow/distance/air 模型。
+- [x] direct path 不引入绝对传播延迟；reflection 只增加 excess path delay，保证音乐实时播放延迟不被整体 room propagation 推高。
+- [x] LFE 不做伪方向化 image-source reflection；后续交给 diffuse/FDN low-frequency field。
+- [ ] ceiling / floor first-order reflections。
+- [ ] absolute room transform / listener-room position，而不是当前 listener-centric scalar room。
 - [ ] diffuse late field / 低成本 FDN room。
 - [ ] Audio Vivid object metadata 接入。
 - [ ] HOA 参数化 binaural path。
@@ -97,23 +106,17 @@
 目标：同时观察原版输入、EQ 后、空间后、最终输出，以及整个虚拟场景与空间 DSP 内部 cue。
 
 - [x] allocation-free 固定尺寸 `SpatialDebugSnapshot`：listener、最多 32 source、ITD/ILD/distance/near-field/head-shadow/air/direct/environment。
-- [x] snapshot 额外携带 4 条**与当前 EarlyReflectionNetwork 真正 delay/gain 一致**的 reflection tap：wall、delay samples/ms、path length、gain、wet contribution、cross-ear route。
 - [x] Debug 默认关闭；开启时复用 engine 内固定数组。
 - [x] 根播放器固定原子槽 + odd/even seqlock 发布，无 Mutex/channel/heap publication。
 - [x] scene publish 限制到约 30 Hz，关闭 Audio Laboratory 后清理 published scene。
-- [x] GPUI Top View：listener、heading、distance rings、stereo/native source、near-field、height-source visual distinction。
-- [x] Top View 叠加真实 DSP reflection tap virtual-wall path。
-- [x] GPUI Front/Elevation View：X=left/right，Y=elevation，Z depth 参与 marker/line 表达。
+- [x] GPUI Top View + Front/Elevation View。
 - [x] UI-only 120-frame stereo/object trajectory trail；history 不写回 audio thread。
-- [x] Source Telemetry：channel name、azimuth/elevation/distance、ITD/ILD、L/R gain、near/shadow/air/direct。
-- [x] native 5.1.4 / 7.1.4 channel-name inspector：`FL/FR/C/LFE/.../TFL/TFR/TRL/TRR`。
-- [x] Early Reflection Tap inspector：wall / delay / path / gain / wet / route。
-- [x] Original / Post-EQ / Post-Spatial A/B/C reference。
-- [x] Vectorscope / stereo correlation。
-- [x] Mid/Side spectrum、S/M、Peak/RMS/Crest/LUFS 工程分析。
-- [x] Transfer ΔdB / spectrogram / waveform overlay。
+- [x] Source Telemetry + native 5.1.4/7.1.4 channel-name inspector。
+- [x] Original / Post-EQ / Post-Spatial A/B/C、Vectorscope、correlation、M/S、Transfer ΔdB、spectrogram、waveform。
+- [x] 当前固定 4-reflection Debug 槽已改为**第一个 FullRange source 的真实 image-source bounce geometry**，不再展示已退出正式播放路径的全局 post-mix tap。
+- [ ] 将 reflection Debug 扩展为至少 `12 sources × 4 taps`，每条包含 source index、image position、bounce position、full/excess path、arrival direction 与实际 binaural gains/filter。
+- [ ] Top/Front View 改为完整 `source → wall bounce → listener` 两段路径，而不是只画 primary-source bounce marker。
 - [ ] source velocity vector 与 object ID / Audio Vivid metadata 可视化。
-- [ ] image-source 几何升级后显示 source→wall→listener 两段真实 bounce path；当前 virtual-wall point 来自实际 tap round-trip path length，不伪称 ray-traced room。
 
 ## Phase 6 — GPU（暂缓）
 
@@ -130,15 +133,16 @@
 cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 ```
 
-源码 case 已覆盖 32 / 64 / 128 frames：
+源码 case 已覆盖 32 / 64 / 128 frames：stereo static、Orbit360、FigureEight/Orbit8d、5.1.4、7.1.4。
 
-- stereo static virtual pair；
-- stereo Orbit360；
-- stereo FigureEight / Orbit8d；
-- 5.1.4；
-- 7.1.4。
+下一批 benchmark 必须增加：
 
-后续补：5.1、7.1、AVS3 7.1.4 end-to-end、16/32/64 objects、Debug off/on。
+- environment mix=0 / 0.10 / 0.30；
+- stereo 2-source image-source reflections；
+- native 5.1.4 / 7.1.4 image-source reflections；
+- Debug off/on；
+- 16/32/64 future objects；
+- AVS3 7.1.4 end-to-end。
 
 ## 当前验证状态
 
@@ -161,8 +165,9 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一步
 
-1. 首先实际 `cargo check/test`，修复任何 GPUI / type / borrow 问题；随后跑 Debug off/on 与 stereo/native serial baseline。
-2. 将 4-tap room-level reflection 升级为真正 source/listener-aware image-source first-order reflections，并让 Debug 显示 source→wall→listener bounce geometry。
-3. 加 source velocity vector、listener runtime orientation 与 Audio Vivid object metadata inspector。
-4. 完成 channel-order conformance + headroom/limiter 标定后删除 legacy stereo renderer。
-5. 只有 serial baseline 数据证明收益后才实现 realtime worker pool；GPU 继续暂缓。
+1. 实际 `cargo check/test`，优先修复 renderer 借用/类型与 GPUI API 问题；随后跑 environment mix=0/0.10/0.30 的 serial baseline。
+2. 把 reflection Debug 扩成 `12 source × 4 tap` 固定矩阵，并让 UI 绘制 source→bounce→listener 两段真实路径。
+3. 加 ceiling/floor、absolute room transform，以及低成本 diffuse/FDN late field；所有新状态仍必须固定容量。
+4. 加 source velocity、listener runtime orientation 与 Audio Vivid object metadata inspector。
+5. 完成 channel-order conformance + headroom/limiter 标定后删除 legacy stereo renderer。
+6. 只有 serial baseline 数据证明收益后才实现 realtime worker pool；GPU 继续暂缓。

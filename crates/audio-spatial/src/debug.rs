@@ -1,10 +1,8 @@
 use std::f32::consts::PI;
 
 use crate::{EnvironmentSettings, ListenerPose, SourceKind, SourcePose, Vec3};
-use crate::environment::{
-    EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S, reflection_ring_len,
-    reflection_tap_descriptors,
-};
+use crate::environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S};
+use crate::image_source::source_reflection_descriptors;
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
 pub const MAX_DEBUG_REFLECTIONS: usize = EARLY_REFLECTION_TAP_COUNT;
@@ -72,14 +70,18 @@ pub struct SpatialDebugReflection {
     pub active: bool,
     pub tap_index: u8,
     pub wall: SpatialDebugReflectionWall,
-    /// Virtual wall point used only for scene visualization. Its radial distance is half of the
-    /// actual round-trip delay path length of the DSP tap.
+    /// Compatibility field name: source-aware image-source mode stores the actual first-order wall
+    /// bounce position here, not the old delay-derived virtual wall point.
     pub virtual_position: Vec3,
+    /// Excess source->wall->listener path delay relative to the direct path.
     pub delay_samples: u32,
     pub delay_milliseconds: f32,
+    /// Full first-order image-source path length.
     pub path_length_meters: f32,
     pub gain: f32,
     pub wet_contribution: f32,
+    /// Legacy display field. Image-source reflections are binauralized by arrival direction rather
+    /// than a fixed same-ear/cross-ear routing rule, so this remains false in the new path.
     pub cross_ear: bool,
 }
 
@@ -158,7 +160,7 @@ impl SpatialDebugSnapshot {
         self.environment = environment;
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
         self.source_count = 0;
-        self.capture_reflections();
+        self.reflection_count = 0;
     }
 
     pub(crate) fn record_source(
@@ -178,6 +180,13 @@ impl SpatialDebugSnapshot {
             self.listener,
         );
         self.source_count = self.source_count.max(source_index + 1);
+
+        // Until the fixed snapshot is widened to source×tap storage, publish the first FullRange
+        // source's four real image-source paths. This is truthful and bounded, unlike retaining the
+        // old global post-mix tap visualization after the DSP path has moved per-source.
+        if self.reflection_count == 0 && matches!(kind, SourceKind::FullRange) {
+            self.capture_reflections_for_source(pose);
+        }
     }
 
     pub(crate) fn finish_capture(&mut self, frames: usize) {
@@ -195,29 +204,17 @@ impl SpatialDebugSnapshot {
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
         self.rendered_frames = 0;
         self.source_count = 0;
-        self.capture_reflections();
+        self.reflection_count = 0;
     }
 
-    fn capture_reflections(&mut self) {
+    fn capture_reflections_for_source(&mut self, pose: SourcePose) {
         let sample_rate = self.sample_rate.max(1) as f32;
-        let descriptors = reflection_tap_descriptors(
-            sample_rate,
-            reflection_ring_len(sample_rate),
-            self.environment,
-        );
+        let descriptors =
+            source_reflection_descriptors(sample_rate, pose, self.listener, self.environment);
         for (index, descriptor) in descriptors.into_iter().enumerate() {
-            let delay_samples = descriptor.delay_samples.min(u32::MAX as usize) as u32;
-            let delay_seconds = delay_samples as f32 / sample_rate;
-            let path_length_meters = delay_seconds * SPEED_OF_SOUND_M_S;
-            let wall_distance = path_length_meters * 0.5;
-            let direction = match descriptor.wall {
-                ReflectionWall::Left => Vec3::new(-1.0, 0.0, 0.0),
-                ReflectionWall::Right => Vec3::RIGHT,
-                ReflectionWall::Front => Vec3::FORWARD,
-                ReflectionWall::Rear => Vec3::new(0.0, 0.0, -1.0),
-            };
+            let excess_delay_samples = descriptor.excess_delay_samples.max(0.0);
             self.reflections[index] = SpatialDebugReflection {
-                active: self.environment.mix > 1.0e-5 && descriptor.gain > 0.0,
+                active: self.environment.mix > 1.0e-5 && descriptor.wall_reflectance > 0.0,
                 tap_index: index.min(u8::MAX as usize) as u8,
                 wall: match descriptor.wall {
                     ReflectionWall::Left => SpatialDebugReflectionWall::Left,
@@ -225,13 +222,14 @@ impl SpatialDebugSnapshot {
                     ReflectionWall::Front => SpatialDebugReflectionWall::Front,
                     ReflectionWall::Rear => SpatialDebugReflectionWall::Rear,
                 },
-                virtual_position: self.listener.position + direction * wall_distance,
-                delay_samples,
-                delay_milliseconds: delay_seconds * 1_000.0,
-                path_length_meters,
-                gain: descriptor.gain,
-                wet_contribution: descriptor.gain * self.environment.mix.clamp(0.0, 1.0),
-                cross_ear: descriptor.cross_ear,
+                virtual_position: descriptor.bounce_position,
+                delay_samples: excess_delay_samples.round().min(u32::MAX as f32) as u32,
+                delay_milliseconds: excess_delay_samples / sample_rate * 1_000.0,
+                path_length_meters: descriptor.path_length_meters,
+                gain: descriptor.wall_reflectance,
+                wet_contribution: descriptor.wall_reflectance
+                    * self.environment.mix.clamp(0.0, 1.0),
+                cross_ear: false,
             };
         }
         self.reflection_count = MAX_DEBUG_REFLECTIONS;
@@ -433,9 +431,14 @@ mod tests {
     }
 
     #[test]
-    fn reflection_snapshot_uses_actual_tap_delay_and_virtual_wall_path() {
+    fn reflection_snapshot_uses_first_source_image_path() {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
+        snapshot.record_source(
+            0,
+            SourceKind::FullRange,
+            SourcePose::new(Vec3::new(0.25, 0.0, 1.0)),
+        );
         assert_eq!(snapshot.reflection_count, MAX_DEBUG_REFLECTIONS);
         let left = snapshot.reflections[0];
         assert!(left.active);
@@ -444,6 +447,7 @@ mod tests {
         assert!(left.delay_samples > 0);
         assert!(left.delay_milliseconds > 0.0);
         assert!(left.path_length_meters > 0.0);
+        assert!(!left.cross_ear);
     }
 
     #[test]
