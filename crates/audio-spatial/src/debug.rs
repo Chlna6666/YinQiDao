@@ -1,10 +1,14 @@
 use std::f32::consts::PI;
 
 use crate::{EnvironmentSettings, ListenerPose, SourceKind, SourcePose, Vec3};
+use crate::environment::{
+    EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S, reflection_ring_len,
+    reflection_tap_descriptors,
+};
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
+pub const MAX_DEBUG_REFLECTIONS: usize = EARLY_REFLECTION_TAP_COUNT;
 
-const SPEED_OF_SOUND_M_S: f32 = 343.0;
 const HEAD_RADIUS_M: f32 = 0.0875;
 const COMMON_CAUSAL_DELAY_SAMPLES: f32 = 2.0;
 const MAX_DISTANCE_METERS: f32 = 32.0;
@@ -49,6 +53,36 @@ pub struct SpatialDebugSource {
     pub direct_contribution: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpatialDebugReflectionWall {
+    Left,
+    Right,
+    Front,
+    Rear,
+}
+
+impl Default for SpatialDebugReflectionWall {
+    fn default() -> Self {
+        Self::Front
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpatialDebugReflection {
+    pub active: bool,
+    pub tap_index: u8,
+    pub wall: SpatialDebugReflectionWall,
+    /// Virtual wall point used only for scene visualization. Its radial distance is half of the
+    /// actual round-trip delay path length of the DSP tap.
+    pub virtual_position: Vec3,
+    pub delay_samples: u32,
+    pub delay_milliseconds: f32,
+    pub path_length_meters: f32,
+    pub gain: f32,
+    pub wet_contribution: f32,
+    pub cross_ear: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpatialDebugSnapshot {
     pub sequence: u64,
@@ -59,6 +93,8 @@ pub struct SpatialDebugSnapshot {
     pub environment_contribution: f32,
     pub source_count: usize,
     pub sources: [SpatialDebugSource; MAX_DEBUG_SOURCES],
+    pub reflection_count: usize,
+    pub reflections: [SpatialDebugReflection; MAX_DEBUG_REFLECTIONS],
 }
 
 impl SpatialDebugSnapshot {
@@ -97,6 +133,19 @@ impl SpatialDebugSnapshot {
                 air_absorption_amount: 0.0,
                 direct_contribution: 0.0,
             }; MAX_DEBUG_SOURCES],
+            reflection_count: 0,
+            reflections: [SpatialDebugReflection {
+                active: false,
+                tap_index: 0,
+                wall: SpatialDebugReflectionWall::Front,
+                virtual_position: Vec3::ZERO,
+                delay_samples: 0,
+                delay_milliseconds: 0.0,
+                path_length_meters: 0.0,
+                gain: 0.0,
+                wet_contribution: 0.0,
+                cross_ear: false,
+            }; MAX_DEBUG_REFLECTIONS],
         }
     }
 
@@ -109,6 +158,7 @@ impl SpatialDebugSnapshot {
         self.environment = environment;
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
         self.source_count = 0;
+        self.capture_reflections();
     }
 
     pub(crate) fn record_source(
@@ -145,6 +195,46 @@ impl SpatialDebugSnapshot {
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
         self.rendered_frames = 0;
         self.source_count = 0;
+        self.capture_reflections();
+    }
+
+    fn capture_reflections(&mut self) {
+        let sample_rate = self.sample_rate.max(1) as f32;
+        let descriptors = reflection_tap_descriptors(
+            sample_rate,
+            reflection_ring_len(sample_rate),
+            self.environment,
+        );
+        for (index, descriptor) in descriptors.into_iter().enumerate() {
+            let delay_samples = descriptor.delay_samples.min(u32::MAX as usize) as u32;
+            let delay_seconds = delay_samples as f32 / sample_rate;
+            let path_length_meters = delay_seconds * SPEED_OF_SOUND_M_S;
+            let wall_distance = path_length_meters * 0.5;
+            let direction = match descriptor.wall {
+                ReflectionWall::Left => Vec3::new(-1.0, 0.0, 0.0),
+                ReflectionWall::Right => Vec3::RIGHT,
+                ReflectionWall::Front => Vec3::FORWARD,
+                ReflectionWall::Rear => Vec3::new(0.0, 0.0, -1.0),
+            };
+            self.reflections[index] = SpatialDebugReflection {
+                active: self.environment.mix > 1.0e-5 && descriptor.gain > 0.0,
+                tap_index: index.min(u8::MAX as usize) as u8,
+                wall: match descriptor.wall {
+                    ReflectionWall::Left => SpatialDebugReflectionWall::Left,
+                    ReflectionWall::Right => SpatialDebugReflectionWall::Right,
+                    ReflectionWall::Front => SpatialDebugReflectionWall::Front,
+                    ReflectionWall::Rear => SpatialDebugReflectionWall::Rear,
+                },
+                virtual_position: self.listener.position + direction * wall_distance,
+                delay_samples,
+                delay_milliseconds: delay_seconds * 1_000.0,
+                path_length_meters,
+                gain: descriptor.gain,
+                wet_contribution: descriptor.gain * self.environment.mix.clamp(0.0, 1.0),
+                cross_ear: descriptor.cross_ear,
+            };
+        }
+        self.reflection_count = MAX_DEBUG_REFLECTIONS;
     }
 }
 
@@ -328,6 +418,7 @@ mod tests {
     fn fixed_snapshot_has_no_dynamic_storage() {
         let snapshot = SpatialDebugSnapshot::new(48_000);
         assert_eq!(snapshot.sources.len(), MAX_DEBUG_SOURCES);
+        assert_eq!(snapshot.reflections.len(), MAX_DEBUG_REFLECTIONS);
         assert_eq!(snapshot.source_count, 0);
     }
 
@@ -339,6 +430,20 @@ mod tests {
         assert_eq!(snapshot.source_count, 1);
         assert!(snapshot.sources[0].ild_db > 0.0);
         assert!(snapshot.sources[0].left_delay_samples > snapshot.sources[0].right_delay_samples);
+    }
+
+    #[test]
+    fn reflection_snapshot_uses_actual_tap_delay_and_virtual_wall_path() {
+        let mut snapshot = SpatialDebugSnapshot::new(48_000);
+        snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
+        assert_eq!(snapshot.reflection_count, MAX_DEBUG_REFLECTIONS);
+        let left = snapshot.reflections[0];
+        assert!(left.active);
+        assert_eq!(left.wall, SpatialDebugReflectionWall::Left);
+        assert!(left.virtual_position.x < 0.0);
+        assert!(left.delay_samples > 0);
+        assert!(left.delay_milliseconds > 0.0);
+        assert!(left.path_length_meters > 0.0);
     }
 
     #[test]

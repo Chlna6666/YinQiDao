@@ -17,7 +17,8 @@ mod renderer;
 mod trajectory;
 
 pub use debug::{
-    MAX_DEBUG_SOURCES, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
+    MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES, SpatialDebugReflection,
+    SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
 };
 pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine};
 pub use environment::{EarlyReflectionNetwork, EnvironmentSettings};

@@ -1,11 +1,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use yinqidao_audio_spatial::{
-    EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SpatialDebugSnapshot, SpatialDebugSource,
+    EnvironmentSettings, ListenerPose, MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES,
+    SpatialDebugReflection, SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource,
     SpatialDebugSourceKind, Vec3,
 };
 
 const SOURCE_WORDS: usize = 24;
+const REFLECTION_WORDS: usize = 12;
 const LISTENER_WORDS: usize = 9;
 const ENVIRONMENT_WORDS: usize = 4;
 const READ_RETRIES: usize = 4;
@@ -16,11 +18,14 @@ static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
 static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static SOURCE_COUNT: AtomicU32 = AtomicU32::new(0);
+static REFLECTION_COUNT: AtomicU32 = AtomicU32::new(0);
 static LISTENER: [AtomicU32; LISTENER_WORDS] = [const { AtomicU32::new(0) }; LISTENER_WORDS];
 static ENVIRONMENT: [AtomicU32; ENVIRONMENT_WORDS] =
     [const { AtomicU32::new(0) }; ENVIRONMENT_WORDS];
 static SOURCES: [AtomicU32; MAX_DEBUG_SOURCES * SOURCE_WORDS] =
     [const { AtomicU32::new(0) }; MAX_DEBUG_SOURCES * SOURCE_WORDS];
+static REFLECTIONS: [AtomicU32; MAX_DEBUG_REFLECTIONS * REFLECTION_WORDS] =
+    [const { AtomicU32::new(0) }; MAX_DEBUG_REFLECTIONS * REFLECTION_WORDS];
 
 /// Publish a spatial scene without allocation, locks or blocking. The surrounding odd/even epoch
 /// gives readers a consistent multi-atomic snapshot; all payload slots remain ordinary atomics so a
@@ -33,6 +38,10 @@ pub(crate) fn publish_spatial_debug_snapshot(snapshot: SpatialDebugSnapshot) {
     RENDERED_FRAMES.store(snapshot.rendered_frames, Ordering::Relaxed);
     SOURCE_COUNT.store(
         snapshot.source_count.min(MAX_DEBUG_SOURCES) as u32,
+        Ordering::Relaxed,
+    );
+    REFLECTION_COUNT.store(
+        snapshot.reflection_count.min(MAX_DEBUG_REFLECTIONS) as u32,
         Ordering::Relaxed,
     );
 
@@ -58,6 +67,14 @@ pub(crate) fn publish_spatial_debug_snapshot(snapshot: SpatialDebugSnapshot) {
     {
         store_source(index, source);
     }
+    for (index, reflection) in snapshot.reflections
+        [..snapshot.reflection_count.min(MAX_DEBUG_REFLECTIONS)]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        store_reflection(index, reflection);
+    }
 
     VALID.store(true, Ordering::Release);
     EPOCH.fetch_add(1, Ordering::Release);
@@ -81,9 +98,15 @@ pub fn spatial_debug_latest_snapshot() -> Option<SpatialDebugSnapshot> {
         }
 
         let source_count = (SOURCE_COUNT.load(Ordering::Relaxed) as usize).min(MAX_DEBUG_SOURCES);
+        let reflection_count =
+            (REFLECTION_COUNT.load(Ordering::Relaxed) as usize).min(MAX_DEBUG_REFLECTIONS);
         let mut sources = [SpatialDebugSource::default(); MAX_DEBUG_SOURCES];
         for (index, destination) in sources[..source_count].iter_mut().enumerate() {
             *destination = load_source(index);
+        }
+        let mut reflections = [SpatialDebugReflection::default(); MAX_DEBUG_REFLECTIONS];
+        for (index, destination) in reflections[..reflection_count].iter_mut().enumerate() {
+            *destination = load_reflection(index);
         }
 
         let snapshot = SpatialDebugSnapshot {
@@ -115,6 +138,8 @@ pub fn spatial_debug_latest_snapshot() -> Option<SpatialDebugSnapshot> {
             environment_contribution: load_f32(&ENVIRONMENT[3]),
             source_count,
             sources,
+            reflection_count,
+            reflections,
         };
 
         let end = EPOCH.load(Ordering::Acquire);
@@ -198,6 +223,57 @@ fn load_source(index: usize) -> SpatialDebugSource {
     }
 }
 
+fn store_reflection(index: usize, reflection: SpatialDebugReflection) {
+    let base = index * REFLECTION_WORDS;
+    REFLECTIONS[base].store(if reflection.active { 1 } else { 0 }, Ordering::Relaxed);
+    REFLECTIONS[base + 1].store(u32::from(reflection.tap_index), Ordering::Relaxed);
+    REFLECTIONS[base + 2].store(
+        match reflection.wall {
+            SpatialDebugReflectionWall::Left => 0,
+            SpatialDebugReflectionWall::Right => 1,
+            SpatialDebugReflectionWall::Front => 2,
+            SpatialDebugReflectionWall::Rear => 3,
+        },
+        Ordering::Relaxed,
+    );
+    store_f32(&REFLECTIONS[base + 3], reflection.virtual_position.x);
+    store_f32(&REFLECTIONS[base + 4], reflection.virtual_position.y);
+    store_f32(&REFLECTIONS[base + 5], reflection.virtual_position.z);
+    REFLECTIONS[base + 6].store(reflection.delay_samples, Ordering::Relaxed);
+    store_f32(&REFLECTIONS[base + 7], reflection.delay_milliseconds);
+    store_f32(&REFLECTIONS[base + 8], reflection.path_length_meters);
+    store_f32(&REFLECTIONS[base + 9], reflection.gain);
+    store_f32(&REFLECTIONS[base + 10], reflection.wet_contribution);
+    REFLECTIONS[base + 11].store(if reflection.cross_ear { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+fn load_reflection(index: usize) -> SpatialDebugReflection {
+    let base = index * REFLECTION_WORDS;
+    SpatialDebugReflection {
+        active: REFLECTIONS[base].load(Ordering::Relaxed) != 0,
+        tap_index: REFLECTIONS[base + 1]
+            .load(Ordering::Relaxed)
+            .min(u32::from(u8::MAX)) as u8,
+        wall: match REFLECTIONS[base + 2].load(Ordering::Relaxed) {
+            0 => SpatialDebugReflectionWall::Left,
+            1 => SpatialDebugReflectionWall::Right,
+            3 => SpatialDebugReflectionWall::Rear,
+            _ => SpatialDebugReflectionWall::Front,
+        },
+        virtual_position: Vec3::new(
+            load_f32(&REFLECTIONS[base + 3]),
+            load_f32(&REFLECTIONS[base + 4]),
+            load_f32(&REFLECTIONS[base + 5]),
+        ),
+        delay_samples: REFLECTIONS[base + 6].load(Ordering::Relaxed),
+        delay_milliseconds: load_f32(&REFLECTIONS[base + 7]),
+        path_length_meters: load_f32(&REFLECTIONS[base + 8]),
+        gain: load_f32(&REFLECTIONS[base + 9]),
+        wet_contribution: load_f32(&REFLECTIONS[base + 10]),
+        cross_ear: REFLECTIONS[base + 11].load(Ordering::Relaxed) != 0,
+    }
+}
+
 #[inline]
 fn store_f32(slot: &AtomicU32, value: f32) {
     slot.store(value.to_bits(), Ordering::Relaxed);
@@ -226,6 +302,19 @@ mod tests {
         snapshot.rendered_frames = 1_600;
         snapshot.source_count = 1;
         snapshot.sources[0] = source;
+        snapshot.reflection_count = 1;
+        snapshot.reflections[0] = SpatialDebugReflection {
+            active: true,
+            tap_index: 0,
+            wall: SpatialDebugReflectionWall::Left,
+            virtual_position: Vec3::new(-1.5, 0.0, 0.0),
+            delay_samples: 240,
+            delay_milliseconds: 5.0,
+            path_length_meters: 1.715,
+            gain: 0.30,
+            wet_contribution: 0.03,
+            cross_ear: true,
+        };
         publish_spatial_debug_snapshot(snapshot);
 
         let read = spatial_debug_latest_snapshot().expect("published snapshot");
@@ -234,6 +323,9 @@ mod tests {
         assert_eq!(read.source_count, 1);
         assert_eq!(read.sources[0].position, Vec3::RIGHT);
         assert!((read.sources[0].ild_db - 3.0).abs() < f32::EPSILON);
+        assert_eq!(read.reflection_count, 1);
+        assert_eq!(read.reflections[0].wall, SpatialDebugReflectionWall::Left);
+        assert_eq!(read.reflections[0].delay_samples, 240);
 
         clear_spatial_debug_snapshot();
         assert!(spatial_debug_latest_snapshot().is_none());
