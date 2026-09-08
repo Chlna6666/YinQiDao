@@ -172,8 +172,9 @@ impl CpuRenderer {
                     let sample = input[input_index];
                     input_index += input_stride;
                     state.delay.push(sample);
-                    let delayed_left = state.delay.read(parameters.left_delay);
-                    let delayed_right = state.delay.read(parameters.right_delay);
+                    let (delayed_left, delayed_right) = state
+                        .delay
+                        .read_pair(parameters.left_delay, parameters.right_delay);
                     state.filter_left += parameters.left_filter_alpha * (delayed_left - state.filter_left);
                     state.filter_right += parameters.right_filter_alpha * (delayed_right - state.filter_right);
                     state.scratch_left[frame] = state.filter_left * parameters.left_gain;
