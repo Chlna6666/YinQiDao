@@ -206,6 +206,7 @@ pub struct GeneralFullRateConfig {
 pub struct LosslessConfig {
     pub sampling_frequency_index: u8,
     pub explicit_sample_rate: Option<u32>,
+    /// `Avs3AudioLLSpecificConfig` reserves ancillary data in `dca3`; valid files carry zero.
     pub anc_data_index: bool,
     pub coding_profile: CodingProfile,
     pub channel_number: u8,
@@ -333,6 +334,11 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
         None
     };
     let anc_data_index = reader.read_bit()?;
+    if anc_data_index {
+        return Err(CodecError::InvalidData(
+            "lossless dca3 anc_data_index must be zero",
+        ));
+    }
     let coding_profile = CodingProfile::from(reader.read_bits(3)? as u8);
     let channel_number = reader.read_bits(8)? as u8;
     let resolution = QuantizationResolution::from(reader.read_bits(2)? as u8);
@@ -439,7 +445,7 @@ mod tests {
         writer.push(1, 4);
         writer.push(0xF, 4);
         writer.push(88_200, 24);
-        writer.push(1, 1);
+        writer.push(0, 1);
         writer.push(0, 3);
         writer.push(18, 8);
         writer.push(1, 2);
@@ -454,6 +460,7 @@ mod tests {
         };
         assert_eq!(lossless.explicit_sample_rate, Some(88_200));
         assert_eq!(config.sample_rate(), Some(88_200));
+        assert!(!lossless.anc_data_index);
         assert_eq!(lossless.channel_number, 18);
         assert_eq!(lossless.additional_info, [0xAB, 0xCD]);
     }
@@ -476,6 +483,21 @@ mod tests {
         };
         assert_eq!(lossless.explicit_sample_rate, None);
         assert_eq!(config.sample_rate(), Some(48_000));
+    }
+
+    #[test]
+    fn rejects_lossless_dca3_ancillary_flag() {
+        let mut writer = BitWriter::new();
+        writer.push(1, 4);
+        writer.push(0x2, 4);
+        writer.push(1, 1);
+
+        assert_eq!(
+            parse_dca3(&writer.bytes),
+            Err(CodecError::InvalidData(
+                "lossless dca3 anc_data_index must be zero"
+            ))
+        );
     }
 
     #[test]
