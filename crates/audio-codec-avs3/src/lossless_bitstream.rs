@@ -1,4 +1,5 @@
 mod entropy;
+mod frame;
 mod lpc;
 mod prepost;
 mod stereo;
@@ -9,6 +10,10 @@ use crate::{LOSSLESS_RICE_MAX_PREFIX, bitreader::BitReader};
 
 pub use entropy::{
     LOSSLESS_ENTROPY_MODE_BITS, LosslessEntropyMode, decode_lossless_entropy_mode_at,
+};
+pub use frame::{
+    LOSSLESS_FRAME_ERROR_CHECK_BITS, LosslessAatfEnvelope,
+    decode_lossless_frame_error_check_at, parse_lossless_aatf_envelope,
 };
 pub use lpc::{
     LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE, LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP,
