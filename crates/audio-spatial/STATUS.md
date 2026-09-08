@@ -58,6 +58,8 @@
 
 ## Phase 2 — CPU kernel 与质量
 
+- [x] FullRange 双耳参数在 block 起点一次生成六字段增量，sample 热循环只递增参数，不再逐 sample 计算 `t`、除法与六字段 `lerp`。
+- [x] LFE gain ramp 同样改为 block 级增量；strided PCM 读取改为递增 cursor，避免逐 sample 重算 `frame * stride + channel`。
 - [ ] interleave/deinterleave、双耳 source gain、双耳 accumulation、filter bank 等热点继续下沉到 `audio-simd`。
 - [ ] 4-point Lagrange 与 Thiran fractional delay 质量/成本对比。
 - [ ] 更完整 front/back、elevation、near-field、air absorption。
@@ -140,5 +142,6 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 ## 下一笔建议
 
 1. 给 `AudioProcessor` 增加显式 transport reset，并在 seek / track open / repeat reopen 上调用，清理 native ITD/filter/resampler history。
-2. 跑 serial baseline 后再设计固定 realtime worker pool 与 cost model；没有数据前不设默认 parallel threshold。
-3. 随后把 stereo Orbit360/8D/Pendulum 等迁入 `yinqidao-audio-spatial::Trajectory`，逐步删除旧 `src/audio/dsp/spatial.rs`。
+2. 继续审计 fractional-delay ring 的 modulo/indexing 热点，但每项优化都保留在 serial baseline 可单独比较的提交中。
+3. 跑 serial baseline 后再设计固定 realtime worker pool 与 cost model；没有数据前不设默认 parallel threshold。
+4. 随后把 stereo Orbit360/8D/Pendulum 等迁入 `yinqidao-audio-spatial::Trajectory`，逐步删除旧 `src/audio/dsp/spatial.rs`。

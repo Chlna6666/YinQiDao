@@ -19,16 +19,40 @@ struct RenderParameters {
 
 impl RenderParameters {
     #[inline]
-    fn lerp(self, other: Self, t: f32) -> Self {
-        Self {
-            left_delay: self.left_delay + (other.left_delay - self.left_delay) * t,
-            right_delay: self.right_delay + (other.right_delay - self.right_delay) * t,
-            left_gain: self.left_gain + (other.left_gain - self.left_gain) * t,
-            right_gain: self.right_gain + (other.right_gain - self.right_gain) * t,
-            left_filter_alpha: self.left_filter_alpha + (other.left_filter_alpha - self.left_filter_alpha) * t,
-            right_filter_alpha: self.right_filter_alpha + (other.right_filter_alpha - self.right_filter_alpha) * t,
+    fn step_to(self, end: Self, frames: usize) -> RenderParameterStep {
+        if frames <= 1 {
+            return RenderParameterStep::default();
+        }
+        let scale = 1.0 / (frames - 1) as f32;
+        RenderParameterStep {
+            left_delay: (end.left_delay - self.left_delay) * scale,
+            right_delay: (end.right_delay - self.right_delay) * scale,
+            left_gain: (end.left_gain - self.left_gain) * scale,
+            right_gain: (end.right_gain - self.right_gain) * scale,
+            left_filter_alpha: (end.left_filter_alpha - self.left_filter_alpha) * scale,
+            right_filter_alpha: (end.right_filter_alpha - self.right_filter_alpha) * scale,
         }
     }
+
+    #[inline]
+    fn advance(&mut self, step: RenderParameterStep) {
+        self.left_delay += step.left_delay;
+        self.right_delay += step.right_delay;
+        self.left_gain += step.left_gain;
+        self.right_gain += step.right_gain;
+        self.left_filter_alpha += step.left_filter_alpha;
+        self.right_filter_alpha += step.right_filter_alpha;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RenderParameterStep {
+    left_delay: f32,
+    right_delay: f32,
+    left_gain: f32,
+    right_gain: f32,
+    left_filter_alpha: f32,
+    right_filter_alpha: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -92,36 +116,47 @@ impl CpuRenderer {
         let end = parameters_for_pose(self.sample_rate, end_pose, listener);
         let lfe_alpha = self.lfe_alpha;
         let state = &mut self.sources[source_index];
-        let denominator = frames.saturating_sub(1).max(1) as f32;
 
         match kind {
             SourceKind::FullRange => {
+                // Pose-derived parameters are linear within one small render block. Compute the six
+                // increments once here instead of rebuilding `t` and six lerps for every source
+                // sample. This keeps the realtime inner loop to strided PCM access, delay/filter DSP
+                // and additions only.
+                let mut parameters = start;
+                let parameter_step = start.step_to(end, frames);
+                let mut input_index = input_channel;
                 for frame in 0..frames {
-                    let sample = input[frame * input_stride + input_channel];
+                    let sample = input[input_index];
+                    input_index += input_stride;
                     state.delay.push(sample);
-                    let t = frame as f32 / denominator;
-                    let parameters = start.lerp(end, t);
                     let delayed_left = state.delay.read(parameters.left_delay);
                     let delayed_right = state.delay.read(parameters.right_delay);
                     state.filter_left += parameters.left_filter_alpha * (delayed_left - state.filter_left);
                     state.filter_right += parameters.right_filter_alpha * (delayed_right - state.filter_right);
                     state.scratch_left[frame] = state.filter_left * parameters.left_gain;
                     state.scratch_right[frame] = state.filter_right * parameters.right_gain;
+                    parameters.advance(parameter_step);
                 }
             }
             SourceKind::Lfe => {
-                let gain_start = start_pose.gain;
-                let gain_end = end_pose.gain;
+                let mut gain = start_pose.gain;
+                let gain_step = if frames <= 1 {
+                    0.0
+                } else {
+                    (end_pose.gain - start_pose.gain) / (frames - 1) as f32
+                };
+                let mut input_index = input_channel;
                 for frame in 0..frames {
-                    let sample = input[frame * input_stride + input_channel];
+                    let sample = input[input_index];
+                    input_index += input_stride;
                     state.delay.push(sample);
                     let delayed = state.delay.read(COMMON_CAUSAL_DELAY_SAMPLES);
                     state.lfe_state += lfe_alpha * (delayed - state.lfe_state);
-                    let t = frame as f32 / denominator;
-                    let gain = gain_start + (gain_end - gain_start) * t;
                     let value = state.lfe_state * gain;
                     state.scratch_left[frame] = value;
                     state.scratch_right[frame] = value;
+                    gain += gain_step;
                 }
             }
         }
@@ -188,6 +223,7 @@ fn one_pole_alpha(sample_rate: f32, cutoff_hz: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::Vec3;
+
     #[test]
     fn right_source_delays_and_attenuates_far_left_ear() {
         let parameters = parameters_for_pose(48_000.0, SourcePose::new(Vec3::RIGHT), ListenerPose::identity());
@@ -195,10 +231,65 @@ mod tests {
         assert!(parameters.left_gain < parameters.right_gain);
         assert!(parameters.left_filter_alpha < parameters.right_filter_alpha);
     }
+
     #[test]
     fn front_source_is_symmetric() {
         let parameters = parameters_for_pose(48_000.0, SourcePose::new(Vec3::FORWARD), ListenerPose::identity());
         assert!((parameters.left_delay - parameters.right_delay).abs() < 1.0e-6);
         assert!((parameters.left_gain - parameters.right_gain).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn additive_parameter_ramp_reaches_block_endpoint() {
+        let start = RenderParameters {
+            left_delay: 2.0,
+            right_delay: 8.0,
+            left_gain: 0.4,
+            right_gain: 1.0,
+            left_filter_alpha: 0.2,
+            right_filter_alpha: 0.8,
+        };
+        let end = RenderParameters {
+            left_delay: 10.0,
+            right_delay: 3.0,
+            left_gain: 0.9,
+            right_gain: 0.5,
+            left_filter_alpha: 0.7,
+            right_filter_alpha: 0.3,
+        };
+        let frames = 64;
+        let step = start.step_to(end, frames);
+        let mut current = start;
+        for _ in 1..frames {
+            current.advance(step);
+        }
+
+        assert!((current.left_delay - end.left_delay).abs() < 1.0e-4);
+        assert!((current.right_delay - end.right_delay).abs() < 1.0e-4);
+        assert!((current.left_gain - end.left_gain).abs() < 1.0e-5);
+        assert!((current.right_gain - end.right_gain).abs() < 1.0e-5);
+        assert!((current.left_filter_alpha - end.left_filter_alpha).abs() < 1.0e-5);
+        assert!((current.right_filter_alpha - end.right_filter_alpha).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn single_frame_parameter_ramp_does_not_move() {
+        let start = parameters_for_pose(
+            48_000.0,
+            SourcePose::new(Vec3::RIGHT),
+            ListenerPose::identity(),
+        );
+        let end = parameters_for_pose(
+            48_000.0,
+            SourcePose::new(Vec3::LEFT),
+            ListenerPose::identity(),
+        );
+        let step = start.step_to(end, 1);
+        let mut current = start;
+        current.advance(step);
+        assert!((current.left_delay - start.left_delay).abs() < f32::EPSILON);
+        assert!((current.right_delay - start.right_delay).abs() < f32::EPSILON);
+        assert!((current.left_gain - start.left_gain).abs() < f32::EPSILON);
+        assert!((current.right_gain - start.right_gain).abs() < f32::EPSILON);
     }
 }
