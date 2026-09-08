@@ -85,6 +85,7 @@ impl ContentType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuantizationResolution {
+    Pcm8,
     Pcm16,
     Pcm24,
     Reserved(u8),
@@ -93,6 +94,7 @@ pub enum QuantizationResolution {
 impl QuantizationResolution {
     pub const fn bits_per_sample(self) -> Option<u8> {
         match self {
+            Self::Pcm8 => Some(8),
             Self::Pcm16 => Some(16),
             Self::Pcm24 => Some(24),
             Self::Reserved(_) => None,
@@ -103,6 +105,7 @@ impl QuantizationResolution {
 impl From<u8> for QuantizationResolution {
     fn from(value: u8) -> Self {
         match value {
+            0 => Self::Pcm8,
             1 => Self::Pcm16,
             2 => Self::Pcm24,
             value => Self::Reserved(value),
@@ -116,13 +119,11 @@ pub enum ChannelConfiguration {
     Stereo,
     Surround5_1,
     Surround7_1,
-    Foa,
+    Surround4_0,
     Surround5_1_2,
     Surround5_1_4,
     Surround7_1_2,
     Surround7_1_4,
-    Hoa3,
-    Hoa2,
     Reserved(u8),
 }
 
@@ -133,13 +134,13 @@ impl ChannelConfiguration {
             0x1 => Self::Stereo,
             0x2 => Self::Surround5_1,
             0x3 => Self::Surround7_1,
-            0x6 => Self::Foa,
+            // AVS3 GA channel-based coding uses index 6 for a discrete 4.0 bed. FOA/HOA is
+            // represented by the dedicated HOA coding profile and must not be inferred here.
+            0x6 => Self::Surround4_0,
             0x7 => Self::Surround5_1_2,
             0x8 => Self::Surround5_1_4,
             0x9 => Self::Surround7_1_2,
             0xA => Self::Surround7_1_4,
-            0xB => Self::Hoa3,
-            0xC => Self::Hoa2,
             value => Self::Reserved(value),
         }
     }
@@ -149,38 +150,48 @@ impl ChannelConfiguration {
             Self::Mono => Some(1),
             Self::Stereo => Some(2),
             Self::Surround5_1 => Some(6),
-            Self::Surround7_1 => Some(8),
-            Self::Foa => Some(4),
-            Self::Surround5_1_2 => Some(8),
+            Self::Surround7_1 | Self::Surround5_1_2 => Some(8),
+            Self::Surround4_0 => Some(4),
             Self::Surround5_1_4 | Self::Surround7_1_2 => Some(10),
             Self::Surround7_1_4 => Some(12),
-            Self::Hoa3 => Some(16),
-            Self::Hoa2 => Some(9),
             Self::Reserved(_) => None,
         }
     }
 }
 
+/// General-full-rate AVS3 sampling-frequency table.
+///
+/// Current Audio Vivid carriage/reference implementations define indices 0..=8. Lossless keeps
+/// its stricter 0..=3 + explicit-frequency (0xF) syntax and therefore does not reuse the extended
+/// part of this table when validating a Lossless `dca3`.
 pub const fn full_rate_sample_rate(index: u8) -> Option<u32> {
     match index {
         0x0 => Some(192_000),
         0x1 => Some(96_000),
         0x2 => Some(48_000),
         0x3 => Some(44_100),
+        0x4 => Some(32_000),
+        0x5 => Some(24_000),
+        0x6 => Some(22_050),
+        0x7 => Some(16_000),
+        0x8 => Some(8_000),
         _ => None,
     }
 }
 
 /// Resolve a lossless sampling frequency from the AASF/AATF index and optional extension.
 ///
-/// Indices 0..=3 use the same normative frequency table as general full-rate coding. Lossless
-/// alone may use 0xF as an extension marker followed by a 24-bit explicit frequency.
+/// Indices 0..=3 use the legacy/full-rate core frequency table. Lossless alone may use 0xF as an
+/// extension marker followed by a 24-bit explicit frequency; indices 4..=14 remain reserved here.
 pub(crate) const fn lossless_sample_rate(
     index: u8,
     explicit_sample_rate: Option<u32>,
 ) -> Option<u32> {
     match index {
-        0x0..=0x3 => full_rate_sample_rate(index),
+        0x0 => Some(192_000),
+        0x1 => Some(96_000),
+        0x2 => Some(48_000),
+        0x3 => Some(44_100),
         0xF => explicit_sample_rate,
         _ => None,
     }
@@ -196,7 +207,7 @@ pub struct GeneralFullRateConfig {
     pub channel_configuration: Option<ChannelConfiguration>,
     /// Semantic number of objects. The `dca3` field already carries the actual count.
     pub number_objects: Option<u8>,
-    /// Semantic HOA order. `dca3.hoa_order` equals AATF `order + 1`.
+    /// Semantic HOA order. `dca3.hoa_order` already equals AATF `order + 1`.
     pub hoa_order: Option<u8>,
     pub total_bitrate_kbps: u16,
     pub resolution: QuantizationResolution,
@@ -244,6 +255,27 @@ impl Avs3SpecificConfig {
             Self::Lossless(config) => config.resolution.bits_per_sample(),
         }
     }
+
+    /// Resolve the output-signal count exclusively from `dca3` semantics. AV3A decoders must not
+    /// rely on the legacy AudioSampleEntry ChannelCount field because CA3SpecificBox supersedes it.
+    pub fn channels(&self) -> Option<u16> {
+        match self {
+            Self::GeneralFullRate(config) => match config.content_type {
+                ContentType::Channel => config.channel_configuration?.channels(),
+                ContentType::Object => config.number_objects.map(u16::from),
+                ContentType::Mixed => config
+                    .channel_configuration?
+                    .channels()
+                    .zip(config.number_objects.map(u16::from))
+                    .map(|(bed, objects)| bed.saturating_add(objects)),
+                ContentType::Hoa => config.hoa_order.map(|order| {
+                    let side = u16::from(order).saturating_add(1);
+                    side.saturating_mul(side)
+                }),
+            },
+            Self::Lossless(config) => Some(u16::from(config.channel_number)),
+        }
+    }
 }
 
 pub fn parse_dca3(payload: &[u8]) -> Result<Avs3SpecificConfig, CodecError> {
@@ -260,7 +292,15 @@ pub fn parse_dca3(payload: &[u8]) -> Result<Avs3SpecificConfig, CodecError> {
 
 fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRateConfig, CodecError> {
     let sampling_frequency_index = reader.read_bits(4)? as u8;
+    let sample_rate = full_rate_sample_rate(sampling_frequency_index).ok_or(
+        CodecError::Unsupported("reserved general-full-rate sampling_frequency_index in dca3"),
+    )?;
     let nn_type = NeuralNetworkType::from(reader.read_bits(3)? as u8);
+    if matches!(nn_type, NeuralNetworkType::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "reserved general-full-rate nn_type in dca3",
+        ));
+    }
     reader.skip_bits(1)?;
     let content_type = ContentType::parse(reader.read_bits(4)? as u8)?;
 
@@ -273,28 +313,71 @@ fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRate
         ContentType::Channel => {
             let index = reader.read_bits(7)? as u8;
             reader.skip_bits(1)?;
+            let configuration = ChannelConfiguration::from_index(index);
+            if matches!(configuration, ChannelConfiguration::Reserved(_)) {
+                return Err(CodecError::Unsupported(
+                    "reserved channel_number_index in Audio Vivid dca3",
+                ));
+            }
             channel_number_index = Some(index);
-            channel_configuration = Some(ChannelConfiguration::from_index(index));
+            channel_configuration = Some(configuration);
         }
         ContentType::Object => {
-            number_objects = Some(reader.read_bits(7)? as u8);
+            let objects = reader.read_bits(7)? as u8;
             reader.skip_bits(1)?;
+            if objects == 0 {
+                return Err(CodecError::InvalidData(
+                    "object Audio Vivid dca3 declares zero objects",
+                ));
+            }
+            number_objects = Some(objects);
         }
         ContentType::Mixed => {
             let index = reader.read_bits(7)? as u8;
             reader.skip_bits(1)?;
+            let configuration = ChannelConfiguration::from_index(index);
+            if matches!(configuration, ChannelConfiguration::Reserved(_))
+                || configuration == ChannelConfiguration::Mono
+            {
+                return Err(CodecError::Unsupported(
+                    "reserved sound-bed channel_number_index in Audio Vivid dca3",
+                ));
+            }
             channel_number_index = Some(index);
-            channel_configuration = Some(ChannelConfiguration::from_index(index));
-            number_objects = Some(reader.read_bits(7)? as u8);
+            channel_configuration = Some(configuration);
+            let objects = reader.read_bits(7)? as u8;
             reader.skip_bits(1)?;
+            if objects == 0 {
+                return Err(CodecError::InvalidData(
+                    "mixed Audio Vivid dca3 declares zero objects",
+                ));
+            }
+            number_objects = Some(objects);
         }
         ContentType::Hoa => {
-            hoa_order = Some((reader.read_bits(4)? as u8).saturating_add(1));
+            let order = reader.read_bits(4)? as u8;
+            if !(1..=3).contains(&order) {
+                return Err(CodecError::Unsupported(
+                    "reserved HOA order in Audio Vivid dca3",
+                ));
+            }
+            // Unlike AATF, `dca3.hoa_order` already carries the semantic order (`order + 1`).
+            hoa_order = Some(order);
         }
     }
 
     let total_bitrate_kbps = reader.read_bits(16)? as u16;
+    if total_bitrate_kbps == 0 {
+        return Err(CodecError::InvalidData(
+            "Audio Vivid dca3 total_bitrate must be non-zero",
+        ));
+    }
     let resolution = QuantizationResolution::from(reader.read_bits(2)? as u8);
+    if matches!(resolution, QuantizationResolution::Reserved(_)) {
+        return Err(CodecError::Unsupported(
+            "reserved general-full-rate resolution in dca3",
+        ));
+    }
     if content_type == ContentType::Hoa {
         reader.skip_bits(2)?;
     } else {
@@ -303,7 +386,7 @@ fn parse_general_full_rate(reader: &mut BitReader<'_>) -> Result<GeneralFullRate
 
     Ok(GeneralFullRateConfig {
         sampling_frequency_index,
-        sample_rate: full_rate_sample_rate(sampling_frequency_index),
+        sample_rate: Some(sample_rate),
         nn_type,
         content_type,
         channel_number_index,
@@ -326,7 +409,7 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
         }
         Some(value)
     } else {
-        if full_rate_sample_rate(sampling_frequency_index).is_none() {
+        if lossless_sample_rate(sampling_frequency_index, None).is_none() {
             return Err(CodecError::Unsupported(
                 "reserved lossless sampling_frequency_index in dca3",
             ));
@@ -342,7 +425,7 @@ fn parse_lossless(reader: &mut BitReader<'_>) -> Result<LosslessConfig, CodecErr
     }
     let channel_number = reader.read_bits(8)? as u8;
     let resolution = QuantizationResolution::from(reader.read_bits(2)? as u8);
-    if matches!(resolution, QuantizationResolution::Reserved(_)) {
+    if !matches!(resolution, QuantizationResolution::Pcm16 | QuantizationResolution::Pcm24) {
         return Err(CodecError::Unsupported(
             "reserved lossless resolution in dca3",
         ));
@@ -380,7 +463,10 @@ mod tests {
 
     impl BitWriter {
         fn new() -> Self {
-            Self { bytes: Vec::new(), bit_pos: 0 }
+            Self {
+                bytes: Vec::new(),
+                bit_pos: 0,
+            }
         }
 
         fn push(&mut self, value: u32, bits: usize) {
@@ -426,23 +512,100 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_dca3_hoa_order_to_semantic_order() {
+    fn accepts_extended_full_rate_sampling_frequencies() {
+        for (index, sample_rate) in [
+            (0, 192_000),
+            (1, 96_000),
+            (2, 48_000),
+            (3, 44_100),
+            (4, 32_000),
+            (5, 24_000),
+            (6, 22_050),
+            (7, 16_000),
+            (8, 8_000),
+        ] {
+            assert_eq!(full_rate_sample_rate(index), Some(sample_rate));
+        }
+        assert_eq!(full_rate_sample_rate(9), None);
+    }
+
+    #[test]
+    fn channel_index_six_is_discrete_4_0_not_foa() {
+        assert_eq!(
+            ChannelConfiguration::from_index(6),
+            ChannelConfiguration::Surround4_0
+        );
+        assert_eq!(ChannelConfiguration::from_index(6).channels(), Some(4));
+        assert!(matches!(
+            ChannelConfiguration::from_index(0xB),
+            ChannelConfiguration::Reserved(0xB)
+        ));
+    }
+
+    #[test]
+    fn dca3_hoa_order_is_already_semantic() {
         let mut writer = BitWriter::new();
         writer.push(2, 4);
         writer.push(2, 4);
         writer.push(0, 3);
         writer.push(0, 1);
         writer.push(3, 4);
-        writer.push(2, 4); // AATF order value 2 means third-order HOA.
+        writer.push(3, 4); // dca3 carries semantic third-order HOA.
         writer.push(768, 16);
         writer.push(2, 2);
         writer.push(0, 2);
 
-        let Avs3SpecificConfig::GeneralFullRate(config) = parse_dca3(&writer.bytes).unwrap() else {
+        let config = parse_dca3(&writer.bytes).unwrap();
+        let Avs3SpecificConfig::GeneralFullRate(ga) = &config else {
             panic!("full-rate config");
         };
-        assert_eq!(config.content_type, ContentType::Hoa);
-        assert_eq!(config.hoa_order, Some(3));
+        assert_eq!(ga.content_type, ContentType::Hoa);
+        assert_eq!(ga.hoa_order, Some(3));
+        assert_eq!(config.channels(), Some(16));
+    }
+
+    #[test]
+    fn resolves_dca3_channel_object_and_hoa_counts() {
+        let mut channel = BitWriter::new();
+        channel.push(2, 4);
+        channel.push(2, 4);
+        channel.push(0, 3);
+        channel.push(0, 1);
+        channel.push(0, 4);
+        channel.push(8, 7);
+        channel.push(0, 1);
+        channel.push(704, 16);
+        channel.push(2, 2);
+        channel.push(0, 6);
+        assert_eq!(parse_dca3(&channel.bytes).unwrap().channels(), Some(10));
+
+        let mut objects = BitWriter::new();
+        objects.push(2, 4);
+        objects.push(2, 4);
+        objects.push(0, 3);
+        objects.push(0, 1);
+        objects.push(1, 4);
+        objects.push(6, 7);
+        objects.push(0, 1);
+        objects.push(384, 16);
+        objects.push(2, 2);
+        objects.push(0, 6);
+        assert_eq!(parse_dca3(&objects.bytes).unwrap().channels(), Some(6));
+
+        let mut mixed = BitWriter::new();
+        mixed.push(2, 4);
+        mixed.push(2, 4);
+        mixed.push(0, 3);
+        mixed.push(0, 1);
+        mixed.push(2, 4);
+        mixed.push(2, 7);
+        mixed.push(0, 1);
+        mixed.push(2, 7);
+        mixed.push(0, 1);
+        mixed.push(576, 16);
+        mixed.push(2, 2);
+        mixed.push(0, 6);
+        assert_eq!(parse_dca3(&mixed.bytes).unwrap().channels(), Some(8));
     }
 
     #[test]
