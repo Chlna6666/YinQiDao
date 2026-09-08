@@ -16,7 +16,9 @@ use symphonia::core::{
     meta::MetadataOptions,
 };
 use thiserror::Error;
-use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, probe_av3a_path};
+use yinqidao_codec_avs3::{
+    Av3aIsoBmffDemuxer, Avs3SpecificConfig, parse_dca3, probe_av3a_path,
+};
 
 use super::avs3_backend::Av3aRustBackend;
 
@@ -30,6 +32,8 @@ pub enum DecodeError {
     Probe { path: PathBuf, reason: String },
     #[error("音频没有可解码的默认轨道: {0}")]
     MissingTrack(PathBuf),
+    #[error("当前不支持音频编码 {path}: {reason}")]
+    Unsupported { path: PathBuf, reason: String },
     #[error("音频解码失败 {path}: {reason}")]
     Decode { path: PathBuf, reason: String },
     #[error("音频定位失败 {path}: {reason}")]
@@ -207,6 +211,20 @@ impl DecoderStream {
             source,
         })?;
         if let Some(entry) = av3a {
+            // Lossless is a deliberate codec capability gate, not an alternate-backend probe miss.
+            // Keep the Chapter 8 path explicit so an unsupported Lossless M4A never launches an
+            // external decoder after the pure-Rust preflight has already classified the stream.
+            if matches!(
+                parse_dca3(&entry.decoder_config),
+                Ok(Avs3SpecificConfig::Lossless(_))
+            ) {
+                return Err(DecodeError::Unsupported {
+                    path: path.to_path_buf(),
+                    reason: "AVS3-P3 Lossless Chapter 8 尚未完成 bit-exact syntax/reconstruction/vector 闭合，decoder gate 保持关闭"
+                        .into(),
+                });
+            }
+
             match Av3aIsoBmffDemuxer::open(path) {
                 Ok(Some(demuxer)) => match Av3aRustBackend::from_demuxer(demuxer) {
                     Ok(Some(backend)) => {
