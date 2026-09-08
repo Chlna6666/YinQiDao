@@ -16,9 +16,10 @@ pub use frame::{
     decode_lossless_frame_error_check_at, parse_lossless_aatf_envelope,
 };
 pub use lpc::{
-    LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE, LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP,
-    LOSSLESS_UNIFORM_PARCOR_Q20_STEP, dequantize_lossless_uniform_parcor_q20,
-    dequantize_lossless_uniform_parcor_tail_q20,
+    LOSSLESS_LPC_ORDER_MAX, LOSSLESS_LPC_ORDER_MIN, LOSSLESS_LPC_Q_BITS, LOSSLESS_LPC_Q_ONE,
+    LOSSLESS_UNIFORM_PARCOR_Q20_HALF_STEP, LOSSLESS_UNIFORM_PARCOR_Q20_STEP,
+    dequantize_lossless_uniform_parcor_q20, dequantize_lossless_uniform_parcor_tail_q20,
+    validate_lossless_lpc_order,
 };
 pub use prepost::{
     LOSSLESS_PREPROCESS_MAX_SAMPLES, lossless_ra_shift, lossless_ra_shift12,
