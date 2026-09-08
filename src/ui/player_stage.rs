@@ -292,11 +292,6 @@ fn stage_lyrics(
             2 => 0.28,
             _ => 0.18,
         };
-        let scale = match distance {
-            0 => 1.0,
-            1 => 0.955,
-            _ => 0.925,
-        };
         let timestamp = line.timestamp_ms;
         let weight = if index == active {
             gpui::FontWeight::BOLD
@@ -337,6 +332,10 @@ fn stage_lyrics(
             );
         }
 
+        // Do not keep glyphs under a permanent fractional transform. The old 0.955/0.925 scale
+        // rendered inactive lyric lines by resampling an already-rasterized text layer and was a
+        // direct source of blur on fractional-DPI displays. Weight + opacity preserve hierarchy
+        // while text remains at its native raster size.
         let line_element = div()
             .id(SharedString::from(format!("lyric-line-{index}")))
             .w_full()
@@ -346,7 +345,6 @@ fn stage_lyrics(
             .pr(px(12.0))
             .py(px(11.0))
             .mb(px(10.0))
-            .scale(scale)
             .opacity(alpha)
             .transition(lyric_focus_transition())
             .cursor_pointer()
@@ -400,7 +398,7 @@ fn stage_lyrics(
 fn lyric_focus_transition() -> Transition {
     Transition::new(Duration::from_millis(420))
         .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity, TransitionProperty::Scale])
+        .properties([TransitionProperty::Opacity])
 }
 
 fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
