@@ -37,13 +37,13 @@ impl SpatialPreset {
         match self {
             Self::Studio => SpatialSettings {
                 enabled: true,
-                width: 0.52,
-                depth: 0.18,
-                distance: 0.04,
-                mix: 0.38,
-                crossfeed: 0.06,
-                room_size: 0.10,
-                immersive_3d: 0.06,
+                width: 0.42,
+                depth: 0.12,
+                distance: 0.02,
+                mix: 0.24,
+                crossfeed: 0.05,
+                room_size: 0.08,
+                immersive_3d: 0.04,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.55,
@@ -52,13 +52,13 @@ impl SpatialPreset {
             },
             Self::Wide => SpatialSettings {
                 enabled: true,
-                width: 0.78,
-                depth: 0.30,
-                distance: 0.06,
-                mix: 0.58,
-                crossfeed: 0.04,
-                room_size: 0.18,
-                immersive_3d: 0.24,
+                width: 0.72,
+                depth: 0.18,
+                distance: 0.03,
+                mix: 0.40,
+                crossfeed: 0.03,
+                room_size: 0.12,
+                immersive_3d: 0.18,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.65,
@@ -67,13 +67,13 @@ impl SpatialPreset {
             },
             Self::Headphones => SpatialSettings {
                 enabled: true,
-                width: 0.62,
-                depth: 0.24,
-                distance: 0.10,
-                mix: 0.52,
-                crossfeed: 0.28,
-                room_size: 0.12,
-                immersive_3d: 0.32,
+                width: 0.56,
+                depth: 0.16,
+                distance: 0.04,
+                mix: 0.36,
+                crossfeed: 0.24,
+                room_size: 0.08,
+                immersive_3d: 0.24,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.62,
@@ -82,13 +82,13 @@ impl SpatialPreset {
             },
             Self::Cinema => SpatialSettings {
                 enabled: true,
-                width: 0.84,
-                depth: 0.58,
-                distance: 0.18,
-                mix: 0.72,
-                crossfeed: 0.08,
-                room_size: 0.60,
-                immersive_3d: 0.56,
+                width: 0.74,
+                depth: 0.46,
+                distance: 0.10,
+                mix: 0.50,
+                crossfeed: 0.06,
+                room_size: 0.46,
+                immersive_3d: 0.44,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.75,
@@ -97,13 +97,13 @@ impl SpatialPreset {
             },
             Self::Immersive3d => SpatialSettings {
                 enabled: true,
-                width: 0.92,
-                depth: 0.72,
-                distance: 0.20,
-                mix: 0.82,
-                crossfeed: 0.12,
-                room_size: 0.72,
-                immersive_3d: 0.88,
+                width: 0.82,
+                depth: 0.56,
+                distance: 0.08,
+                mix: 0.58,
+                crossfeed: 0.08,
+                room_size: 0.52,
+                immersive_3d: 0.76,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.80,
@@ -112,77 +112,77 @@ impl SpatialPreset {
             },
             Self::Orbit8d => SpatialSettings {
                 enabled: true,
-                width: 0.78,
-                depth: 0.58,
-                distance: 0.12,
-                mix: 0.78,
-                crossfeed: 0.08,
-                room_size: 0.34,
-                immersive_3d: 0.72,
+                width: 0.64,
+                depth: 0.34,
+                distance: 0.06,
+                mix: 0.58,
+                crossfeed: 0.06,
+                room_size: 0.20,
+                immersive_3d: 0.54,
                 motion_mode: SpatialMotionMode::Orbit8d,
                 motion_speed_hz: 0.075,
-                motion_radius: 0.92,
-                motion_intensity: 0.88,
+                motion_radius: 0.90,
+                motion_intensity: 0.72,
                 clockwise: true,
             },
             Self::Orbit360 => SpatialSettings {
                 enabled: true,
-                width: 0.72,
-                depth: 0.64,
-                distance: 0.18,
-                mix: 0.82,
-                crossfeed: 0.10,
-                room_size: 0.42,
-                immersive_3d: 0.84,
+                width: 0.62,
+                depth: 0.40,
+                distance: 0.08,
+                mix: 0.62,
+                crossfeed: 0.07,
+                room_size: 0.24,
+                immersive_3d: 0.64,
                 motion_mode: SpatialMotionMode::Orbit360,
                 motion_speed_hz: 0.055,
-                motion_radius: 0.96,
-                motion_intensity: 0.92,
+                motion_radius: 0.94,
+                motion_intensity: 0.78,
                 clockwise: true,
             },
             Self::Pendulum => SpatialSettings {
                 enabled: true,
-                width: 0.70,
-                depth: 0.34,
-                distance: 0.06,
-                mix: 0.68,
-                crossfeed: 0.08,
-                room_size: 0.20,
-                immersive_3d: 0.54,
+                width: 0.60,
+                depth: 0.24,
+                distance: 0.03,
+                mix: 0.50,
+                crossfeed: 0.06,
+                room_size: 0.14,
+                immersive_3d: 0.40,
                 motion_mode: SpatialMotionMode::Pendulum,
                 motion_speed_hz: 0.12,
-                motion_radius: 0.90,
-                motion_intensity: 0.82,
+                motion_radius: 0.86,
+                motion_intensity: 0.68,
                 clockwise: true,
             },
             Self::Planetary => SpatialSettings {
                 enabled: true,
-                width: 0.86,
-                depth: 0.72,
-                distance: 0.22,
-                mix: 0.84,
-                crossfeed: 0.10,
-                room_size: 0.56,
-                immersive_3d: 0.90,
+                width: 0.72,
+                depth: 0.46,
+                distance: 0.10,
+                mix: 0.64,
+                crossfeed: 0.07,
+                room_size: 0.30,
+                immersive_3d: 0.68,
                 motion_mode: SpatialMotionMode::Planetary,
                 motion_speed_hz: 0.038,
-                motion_radius: 1.0,
-                motion_intensity: 0.94,
+                motion_radius: 0.96,
+                motion_intensity: 0.80,
                 clockwise: true,
             },
             Self::NearEar => SpatialSettings {
                 enabled: true,
-                width: 0.66,
-                depth: 0.38,
-                distance: 0.02,
-                mix: 0.76,
-                crossfeed: 0.18,
-                room_size: 0.12,
-                immersive_3d: 0.62,
+                width: 0.56,
+                depth: 0.22,
+                distance: 0.01,
+                mix: 0.54,
+                crossfeed: 0.14,
+                room_size: 0.08,
+                immersive_3d: 0.46,
                 motion_mode: SpatialMotionMode::NearEar,
                 motion_speed_hz: 0.095,
-                motion_radius: 1.0,
-                motion_intensity: 0.90,
+                motion_radius: 0.94,
+                motion_intensity: 0.76,
                 clockwise: true,
             },
         }
@@ -272,28 +272,30 @@ impl Spatializer {
         let settings = self.settings.clone();
         let motion_enabled = settings.motion_mode != SpatialMotionMode::Static
             && settings.motion_intensity > 0.001;
-        let width_gain = 0.72 + settings.width * 1.38;
-        let crossfeed_gain = settings.crossfeed * 0.22;
-        let attenuation = 1.0 - settings.distance * 0.28;
-        let cutoff_hz = 19_000.0 - settings.distance * 13_000.0;
+
+        // Preserve the original stereo image. The old range (0.72..2.10) could more than double
+        // side energy, exaggerating phase differences and hollowing the centre. 0.92..1.42 keeps
+        // width audible without turning ordinary stereo material into a phase effect.
+        let width_gain = 0.92 + settings.width * 0.50;
+        let crossfeed_gain = settings.crossfeed * 0.18;
+        let attenuation = 1.0 - settings.distance * 0.12;
+        let cutoff_hz = 20_000.0 - settings.distance * 8_000.0;
         let lowpass_decay = (-2.0 * PI * cutoff_hz / self.sample_rate).exp();
         let lowpass_input = 1.0 - lowpass_decay;
-        let reflection_gain = (settings.depth * 0.11
-            + settings.room_size * 0.12
-            + settings.immersive_3d * 0.09)
-            .clamp(0.0, 0.28);
+        let reflection_gain = (settings.depth * 0.055
+            + settings.room_size * 0.065
+            + settings.immersive_3d * 0.045)
+            .clamp(0.0, 0.14);
 
         let reflection_len = self.reflection_left.len();
-        let base_delay_seconds = 0.0035 + settings.room_size * 0.016 + settings.depth * 0.006;
+        let base_delay_seconds = 0.0045 + settings.room_size * 0.014 + settings.depth * 0.004;
         let left_delay = ((base_delay_seconds * self.sample_rate).round() as usize)
             .clamp(1, reflection_len - 1);
-        let right_delay = (((base_delay_seconds + settings.immersive_3d * 0.0018)
+        let right_delay = (((base_delay_seconds + settings.immersive_3d * 0.0013)
             * self.sample_rate)
             .round() as usize)
             .clamp(1, reflection_len - 1);
 
-        // Only one sin/cos pair per audio buffer. Per-sample source motion uses a complex-rotation
-        // recurrence, avoiding expensive trigonometric calls at 48/96 kHz.
         let angular_step = if motion_enabled {
             let direction = if settings.clockwise { 1.0 } else { -1.0 };
             direction * 2.0 * PI * settings.motion_speed_hz / self.sample_rate
@@ -335,16 +337,19 @@ impl Spatializer {
                 (self.reflection_cursor + reflection_len - right_delay) % reflection_len;
             let reflected_left = self.reflection_right[right_read];
             let reflected_right = self.reflection_left[left_read];
-            self.reflection_left[self.reflection_cursor] = widened_left;
-            self.reflection_right[self.reflection_cursor] = widened_right;
+
+            // Feed predominantly side/ambient information into the reflection lines. Storing the
+            // full opposite channel here made centred vocals reappear delayed in the other ear,
+            // causing comb filtering and the "empty centre" character reported by listening tests.
+            self.reflection_left[self.reflection_cursor] = side * 0.72 + widened_left * 0.18;
+            self.reflection_right[self.reflection_cursor] = -side * 0.72 + widened_right * 0.18;
             self.reflection_cursor = (self.reflection_cursor + 1) % reflection_len;
 
+            let room_compensation = 1.0 - settings.room_size * 0.025;
             let static_left =
-                (widened_left * (1.0 - reflection_gain) + reflected_left * reflection_gain)
-                    * attenuation;
+                (widened_left + reflected_left * reflection_gain) * attenuation * room_compensation;
             let static_right =
-                (widened_right * (1.0 - reflection_gain) + reflected_right * reflection_gain)
-                    * attenuation;
+                (widened_right + reflected_right * reflection_gain) * attenuation * room_compensation;
 
             let (spatial_left, spatial_right) = if motion_enabled {
                 let (pan, front, radius_mod) = motion_position(
@@ -353,7 +358,11 @@ impl Spatializer {
                     self.oscillator_cos,
                 );
                 let radius = (settings.motion_radius * radius_mod).clamp(0.0, 1.0);
-                let moving_source = mid * 0.82 + (widened_left + widened_right) * 0.09;
+
+                // Motion is derived from the centre image, but a small opposite-polarity side
+                // component is retained so authored stereo ambience does not collapse to mono.
+                let moving_source = mid;
+                let side_cue = side * 0.16;
 
                 let motion_len = self.motion_delay.len();
                 self.motion_delay[self.motion_cursor] = moving_source;
@@ -366,26 +375,32 @@ impl Spatializer {
                 self.motion_cursor = (self.motion_cursor + 1) % motion_len;
 
                 let lateral = pan.abs() * radius;
-                let near_gain = 0.82 + 0.18 * radius;
-                let far_gain = (1.0 - 0.34 * lateral).clamp(0.58, 1.0);
+                let near_gain = 0.94 + 0.06 * radius;
+                let far_gain = (1.0 - 0.22 * lateral).clamp(0.72, 1.0);
                 let (mut moving_left, mut moving_right) = if pan >= 0.0 {
-                    (delayed_source * far_gain, moving_source * near_gain)
+                    (
+                        delayed_source * far_gain + side_cue,
+                        moving_source * near_gain - side_cue,
+                    )
                 } else {
-                    (moving_source * near_gain, delayed_source * far_gain)
+                    (
+                        moving_source * near_gain + side_cue,
+                        delayed_source * far_gain - side_cue,
+                    )
                 };
 
-                // Rear spectral damping provides a front/back cue without requiring a bundled
-                // individualized HRTF database. It is combined with ITD/ILD rather than replacing it.
                 let rear_amount = (-front).max(0.0) * radius;
-                let rear_alpha = 0.10 + (1.0 - rear_amount) * 0.24;
+                // The previous 0.10..0.34 one-pole coefficient darkened rear positions into a
+                // muffled low-pass. Keep enough HF content for localisation while retaining a cue.
+                let rear_alpha = 0.42 + (1.0 - rear_amount) * 0.28;
                 self.rear_lowpass_left += rear_alpha * (moving_left - self.rear_lowpass_left);
                 self.rear_lowpass_right += rear_alpha * (moving_right - self.rear_lowpass_right);
-                moving_left = moving_left * (1.0 - rear_amount * 0.66)
-                    + self.rear_lowpass_left * rear_amount * 0.66;
-                moving_right = moving_right * (1.0 - rear_amount * 0.66)
-                    + self.rear_lowpass_right * rear_amount * 0.66;
+                let rear_mix = rear_amount * 0.34;
+                moving_left = moving_left * (1.0 - rear_mix) + self.rear_lowpass_left * rear_mix;
+                moving_right =
+                    moving_right * (1.0 - rear_mix) + self.rear_lowpass_right * rear_mix;
 
-                let front_distance_gain = 0.74 + ((front + 1.0) * 0.5) * 0.26;
+                let front_distance_gain = 0.88 + ((front + 1.0) * 0.5) * 0.12;
                 moving_left *= front_distance_gain;
                 moving_right *= front_distance_gain;
 
@@ -394,11 +409,13 @@ impl Spatializer {
                 self.oscillator_sin = sin * step_cos + cos * step_sin;
                 self.oscillator_cos = cos * step_cos - sin * step_sin;
 
+                // Never fully replace the authored stereo field with the synthetic moving source.
+                // Motion intensity controls the positional cue while at least 45% static image is
+                // retained even at the extreme end of the UI range.
+                let motion_blend = (settings.motion_intensity * 0.55).clamp(0.0, 0.55);
                 (
-                    static_left * (1.0 - settings.motion_intensity)
-                        + moving_left * settings.motion_intensity,
-                    static_right * (1.0 - settings.motion_intensity)
-                        + moving_right * settings.motion_intensity,
+                    static_left * (1.0 - motion_blend) + moving_left * motion_blend,
+                    static_right * (1.0 - motion_blend) + moving_right * motion_blend,
                 )
             } else {
                 (static_left, static_right)
@@ -409,7 +426,6 @@ impl Spatializer {
         }
 
         if motion_enabled {
-            // Prevent very slow floating-point radius drift in the recurrence oscillator.
             let norm = (self.oscillator_sin * self.oscillator_sin
                 + self.oscillator_cos * self.oscillator_cos)
                 .sqrt();
@@ -506,6 +522,28 @@ mod tests {
         assert!(samples.as_chunks::<2>().0.iter().any(|frame| {
             (frame[0] - frame[1]).abs() > 0.02
         }));
+    }
+
+    #[test]
+    fn immersive_preset_keeps_direct_stereo_dominant() {
+        let settings = SpatialPreset::Immersive3d.settings();
+        assert!(settings.mix < 0.65);
+        let width_gain = 0.92 + settings.width * 0.50;
+        assert!(width_gain < 1.5);
+    }
+
+    #[test]
+    fn motion_presets_never_replace_the_entire_static_image() {
+        for preset in [
+            SpatialPreset::Orbit8d,
+            SpatialPreset::Orbit360,
+            SpatialPreset::Pendulum,
+            SpatialPreset::Planetary,
+            SpatialPreset::NearEar,
+        ] {
+            let settings = preset.settings();
+            assert!(settings.motion_intensity * 0.55 <= 0.55);
+        }
     }
 
     #[test]
