@@ -6,7 +6,9 @@ pub const EQ_FREQUENCIES: [f32; 10] = [
     31.0, 62.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
 ];
 
-const GRAPHIC_EQ_Q: f32 = std::f32::consts::SQRT_2;
+// A slightly wider graphic-EQ bell gives the ten fixed bands a smoother, more musical overlap.
+// The previous SQRT_2 Q made large neighbouring boosts pile up into obvious boxiness/harshness.
+const GRAPHIC_EQ_Q: f32 = 1.10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EqPreset {
@@ -27,16 +29,32 @@ impl EqPreset {
     ];
 
     pub fn settings(self) -> EqSettings {
-        let bands_db = match self {
-            Self::Flat => [0.0; 10],
-            Self::Pop => [1.0, 2.0, 3.0, 2.0, 0.0, -1.0, -1.0, 1.0, 2.0, 2.0],
-            Self::Rock => [4.0, 3.0, 2.0, 0.0, -1.0, 1.0, 2.0, 3.0, 4.0, 4.0],
-            Self::Vocal => [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, -1.0, -2.0],
-            Self::Classical => [3.0, 2.0, 1.0, 0.0, -1.0, -1.0, 0.0, 2.0, 3.0, 3.0],
+        // Keep presets broad and conservative. Large neighbouring boosts in the old presets caused
+        // the downstream limiter to become part of the sound, masking transients and collapsing
+        // stereo depth. Vocal in particular used to add +2/+4/+4 dB at 250/500/1 kHz while
+        // cutting the top octave, which strongly emphasised chest/box resonance and sounded dull.
+        let (preamp_db, bands_db) = match self {
+            Self::Flat => (0.0, [0.0; 10]),
+            Self::Pop => (
+                -1.5,
+                [0.5, 1.0, 1.2, 0.4, -0.4, 0.2, 1.0, 1.4, 1.0, 0.4],
+            ),
+            Self::Rock => (
+                -2.0,
+                [1.8, 1.4, 0.6, -0.4, -0.8, 0.4, 1.4, 1.9, 1.4, 0.5],
+            ),
+            Self::Vocal => (
+                -2.0,
+                [-2.0, -1.5, -1.0, -1.8, -1.0, 0.8, 2.4, 2.0, 1.2, 0.5],
+            ),
+            Self::Classical => (
+                -1.0,
+                [0.4, 0.5, 0.2, -0.4, -0.5, 0.0, 0.5, 1.0, 0.9, 0.4],
+            ),
         };
         EqSettings {
             enabled: true,
-            preamp_db: 0.0,
+            preamp_db,
             bands_db,
         }
     }
@@ -192,6 +210,27 @@ mod tests {
         let flat = EqPreset::Flat.settings();
         assert!(flat.enabled);
         assert_eq!(flat.bands_db, [0.0; 10]);
+        assert_eq!(flat.preamp_db, 0.0);
+    }
+
+    #[test]
+    fn vocal_reduces_boxiness_and_restores_presence() {
+        let vocal = EqPreset::Vocal.settings();
+        assert!(vocal.bands_db[3] < 0.0); // 250 Hz
+        assert!(vocal.bands_db[4] < 0.0); // 500 Hz
+        assert!(vocal.bands_db[6] > 0.0); // 2 kHz presence
+        assert!(vocal.bands_db[7] > 0.0); // 4 kHz clarity
+        assert!(vocal.bands_db[8] > 0.0); // 8 kHz air
+        assert!(vocal.preamp_db < 0.0);
+    }
+
+    #[test]
+    fn boosted_presets_reserve_headroom() {
+        for preset in [EqPreset::Pop, EqPreset::Rock, EqPreset::Vocal, EqPreset::Classical] {
+            let settings = preset.settings();
+            assert!(settings.preamp_db <= 0.0);
+            assert!(settings.bands_db.iter().any(|gain| *gain > 0.0));
+        }
     }
 
     #[test]
