@@ -62,7 +62,7 @@ pub(super) fn read_track(path: &Path) -> Result<Track> {
     let has_artwork = tagged.tags().iter().any(|tag| {
         tag.pictures()
             .iter()
-            .any(|picture| !picture.data().is_empty())
+            .any(|picture| is_recognized_artwork(picture.data()))
     });
     let artwork_key = has_artwork.then(|| {
         let modified = fs::metadata(path)
@@ -90,6 +90,11 @@ pub(super) fn read_track(path: &Path) -> Result<Track> {
         channels: properties.channels().unwrap_or_default() as u16,
         artwork_key,
     })
+}
+
+#[inline]
+fn is_recognized_artwork(data: &[u8]) -> bool {
+    !data.is_empty() && image::guess_format(data).is_ok()
 }
 
 struct FilenameMetadata {
@@ -153,5 +158,13 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("老人と海"));
         assert!(metadata.artist.is_none());
         assert!(metadata.album.is_none());
+    }
+
+    #[test]
+    fn artwork_probe_rejects_non_image_payloads() {
+        assert!(!is_recognized_artwork(b"not-an-image"));
+        assert!(!is_recognized_artwork(&[]));
+        assert!(is_recognized_artwork(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(is_recognized_artwork(b"\xff\xd8\xff\xe0rest"));
     }
 }
