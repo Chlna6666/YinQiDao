@@ -58,7 +58,9 @@ pub fn probe_av3a_bytes(bytes: &[u8]) -> Option<Av3aSampleEntry> {
             continue;
         }
 
-        let box_end = valid_audio_sample_entry_end(bytes, type_pos)?;
+        let Some(box_end) = valid_audio_sample_entry_end(bytes, type_pos) else {
+            continue;
+        };
         if type_pos + AUDIO_SAMPLE_ENTRY_FIXED_BYTES_AFTER_TYPE > box_end {
             continue;
         }
@@ -179,6 +181,24 @@ mod tests {
         let mut bytes = vec![0xAA_u8; 96];
         bytes[40..44].copy_from_slice(b"av3a");
         assert_eq!(probe_av3a_bytes(&bytes), None);
+    }
+
+    #[test]
+    fn skips_false_signature_before_real_sample_entry() {
+        let mut bytes = vec![0xAA_u8; 128];
+        bytes[8..12].copy_from_slice(b"av3a");
+
+        let start = 64;
+        bytes[start..start + 4].copy_from_slice(&(64_u32).to_be_bytes());
+        bytes[start + 4..start + 8].copy_from_slice(b"av3a");
+        bytes[start + 14..start + 16].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[start + 24..start + 26].copy_from_slice(&2_u16.to_be_bytes());
+        bytes[start + 26..start + 28].copy_from_slice(&24_u16.to_be_bytes());
+        bytes[start + 32..start + 36].copy_from_slice(&(48_000_u32 << 16).to_be_bytes());
+
+        let entry = probe_av3a_bytes(&bytes).expect("real av3a after false signature");
+        assert_eq!(entry.channels, 2);
+        assert_eq!(entry.sample_rate, 48_000);
     }
 
     #[test]
