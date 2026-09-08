@@ -1,4 +1,5 @@
 mod prepost;
+mod stereo;
 
 use yinqidao_codec_core::CodecError;
 
@@ -7,6 +8,10 @@ use crate::{LOSSLESS_RICE_MAX_PREFIX, bitreader::BitReader};
 pub use prepost::{
     LOSSLESS_PREPROCESS_MAX_SAMPLES, lossless_ra_shift, lossless_ra_shift12,
     lossless_residual_shift_plan,
+};
+pub use stereo::{
+    LosslessStereoDecorrelationMode, restore_lossless_anti_phase,
+    restore_lossless_stereo_in_place, restore_lossless_stereo_pair,
 };
 
 /// Decode one ordinary MSB-first Golomb-Rice codeword at an arbitrary bit position.
