@@ -1,4 +1,5 @@
 mod eq;
+mod limiter;
 mod spatial;
 mod trajectory_spatial;
 
@@ -18,6 +19,7 @@ use super::debug::{
 };
 use super::spatial_debug::{clear_spatial_debug_snapshot, publish_spatial_debug_snapshot};
 use eq::EqProcessor;
+use limiter::StereoPeakLimiter;
 use spatial::Spatializer;
 use trajectory_spatial::{StereoSpatializer, spatial_environment_settings};
 
@@ -156,6 +158,7 @@ pub struct AudioProcessor {
     pub(crate) eq: EqProcessor,
     pub(crate) spatial: Spatializer,
     volume: f32,
+    limiter: StereoPeakLimiter,
     stereo_scratch: Vec<f32>,
     stereo_spatial: Option<StereoSpatializer>,
     native_spatial_scratch: Vec<f32>,
@@ -176,6 +179,7 @@ impl AudioProcessor {
             eq: EqProcessor::new(sample_rate, eq),
             spatial: Spatializer::new(sample_rate, spatial),
             volume: volume.clamp(0.0, 1.0),
+            limiter: StereoPeakLimiter::new(sample_rate),
             stereo_scratch: Vec::new(),
             stereo_spatial: StereoSpatializer::new(sample_rate),
             native_spatial_scratch: Vec::new(),
@@ -193,6 +197,7 @@ impl AudioProcessor {
     pub(crate) fn reset_transport(&mut self) {
         self.eq.reset_state();
         self.spatial.reset_transport();
+        self.limiter.reset();
         if let Some(engine) = self.stereo_spatial.as_mut() {
             engine.reset();
         }
@@ -321,7 +326,10 @@ impl AudioProcessor {
         }
 
         let gain = perceptual_volume_gain(self.volume);
-        yinqidao_audio_simd::gain_clamp_in_place(output, gain);
+        self.limiter.process_interleaved_stereo(output, gain);
+        // The limiter ceiling sits below full scale. Keep the SIMD clamp only as a final invariant
+        // guard for unexpected arithmetic faults; normal finite audio should never reach it.
+        yinqidao_audio_simd::gain_clamp_in_place(output, 1.0);
     }
 
     fn publish_spatial_debug_if_due(&mut self, snapshot: Option<SpatialDebugSnapshot>) {
