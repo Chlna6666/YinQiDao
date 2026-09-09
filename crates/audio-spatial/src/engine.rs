@@ -1,6 +1,7 @@
 use crate::{
-    ChannelLayout, EnvironmentSettings, ListenerPose, SourcePose, SpatialDebugSnapshot, SpatialError,
-    SpeakerLayout, Trajectory, late_field::LateDiffuseField, renderer::CpuRenderer,
+    ChannelLayout, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
+    SpatialDebugSnapshot, SpatialError, SpeakerLayout, Trajectory, analyze_interleaved_activity,
+    late_field::LateDiffuseField, renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -39,6 +40,7 @@ pub struct SpatialEngine {
     listener: ListenerPose,
     debug_enabled: bool,
     debug_snapshot: SpatialDebugSnapshot,
+    debug_activity: [SourceActivity; MAX_DEBUG_SOURCES],
 }
 
 impl SpatialEngine {
@@ -67,6 +69,7 @@ impl SpatialEngine {
             listener: ListenerPose::identity(),
             debug_enabled: false,
             debug_snapshot: SpatialDebugSnapshot::new(config.sample_rate),
+            debug_activity: [SourceActivity::default(); MAX_DEBUG_SOURCES],
             config,
         })
     }
@@ -96,6 +99,7 @@ impl SpatialEngine {
             return;
         }
         self.debug_enabled = enabled;
+        self.debug_activity.fill(SourceActivity::default());
         if enabled {
             self.debug_snapshot
                 .reset_timeline(self.listener, self.config.environment);
@@ -112,9 +116,16 @@ impl SpatialEngine {
         self.debug_enabled.then_some(self.debug_snapshot)
     }
 
+    /// Return the activity measured from the authored input channels for the latest debug render.
+    /// Production rendering never computes these values because the scan is gated by `debug_enabled`.
+    pub fn debug_source_activity(&self) -> Option<[SourceActivity; MAX_DEBUG_SOURCES]> {
+        self.debug_enabled.then_some(self.debug_activity)
+    }
+
     pub fn reset(&mut self) {
         self.renderer.reset();
         self.late_field.reset();
+        self.debug_activity.fill(SourceActivity::default());
         if self.debug_enabled {
             self.debug_snapshot
                 .reset_timeline(self.listener, self.config.environment);
@@ -147,6 +158,7 @@ impl SpatialEngine {
         }
 
         if self.debug_enabled {
+            analyze_interleaved_activity(input, channels, &mut self.debug_activity);
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
             for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
@@ -298,6 +310,7 @@ impl SpatialEngine {
             frame_offset += block_frames;
         }
         if self.debug_enabled {
+            analyze_interleaved_activity(input, 2, &mut self.debug_activity);
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
             self.debug_snapshot
@@ -354,6 +367,7 @@ impl SpatialEngine {
             frame_offset += block_frames;
         }
         if self.debug_enabled && let Some(pose) = latest_pose {
+            analyze_interleaved_activity(input, 1, &mut self.debug_activity);
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
             self.debug_snapshot
@@ -436,6 +450,7 @@ mod tests {
         config.environment.mix = 0.12;
         let mut engine = SpatialEngine::new(config).unwrap();
         assert!(engine.debug_snapshot().is_none());
+        assert!(engine.debug_source_activity().is_none());
         engine.set_debug_enabled(true);
 
         let frames = 64;
@@ -446,6 +461,9 @@ mod tests {
             .unwrap();
 
         let snapshot = engine.debug_snapshot().expect("enabled snapshot");
+        let activity = engine
+            .debug_source_activity()
+            .expect("enabled source activity");
         assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, frames as u64);
         assert_eq!(snapshot.sequence, 1);
@@ -453,5 +471,9 @@ mod tests {
         assert!(snapshot.sources[..snapshot.source_count]
             .iter()
             .all(|source| source.active));
+        assert!(activity[..12]
+            .iter()
+            .all(|value| (value.peak - 0.1).abs() < 1.0e-6 && (value.rms - 0.1).abs() < 1.0e-6));
+        assert!(activity[12..].iter().all(|value| *value == SourceActivity::default()));
     }
 }
