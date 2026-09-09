@@ -90,6 +90,7 @@ pub(crate) struct Av3aRustBackend {
     first_frame: Option<AudioFrame>,
     sample_rate: u32,
     channels: u16,
+    channel_configuration: Option<ChannelConfiguration>,
     sample_count: usize,
     duration: Duration,
 }
@@ -125,7 +126,9 @@ impl Av3aRustBackend {
         // command/result pair exists.
         let (command_tx, command_rx) = mpsc::sync_channel::<CodecCommand>(1);
         let (decode_tx, decode_rx) = mpsc::sync_channel::<Result<DecodeOutcome, Av3aRustError>>(1);
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<Option<AudioFrame>, Av3aRustError>>(1);
+        let (init_tx, init_rx) = mpsc::sync_channel::<
+            Result<Option<(AudioFrame, Option<ChannelConfiguration>)>, Av3aRustError>,
+        >(1);
 
         let worker = thread::Builder::new()
             .name("yinqidao-avs3-codec".into())
@@ -143,6 +146,10 @@ impl Av3aRustBackend {
                         Err(CodecError::Unsupported(_)) => return Ok(None),
                         Err(error) => return Err(error.into()),
                     };
+                    let channel_configuration = match parse_dca3(&runtime_entry.decoder_config)? {
+                        Avs3SpecificConfig::GeneralFullRate(config) => config.channel_configuration,
+                        Avs3SpecificConfig::Lossless(_) => None,
+                    };
                     let mut decoder = match Avs3Decoder::new(&runtime_entry) {
                         Ok(decoder) => Box::new(decoder),
                         Err(CodecError::Unsupported(_)) => return Ok(None),
@@ -156,10 +163,10 @@ impl Av3aRustBackend {
                         }
                     }
                     validate_frame_geometry(&frame)?;
-                    Ok(Some((decoder, packet, frame)))
+                    Ok(Some((decoder, packet, frame, channel_configuration)))
                 })();
 
-                let (mut decoder, mut packet, first_frame) = match initial {
+                let (mut decoder, mut packet, first_frame, channel_configuration) = match initial {
                     Ok(Some(initial)) => initial,
                     Ok(None) => {
                         let _ = init_tx.send(Ok(None));
@@ -171,7 +178,10 @@ impl Av3aRustBackend {
                     }
                 };
 
-                if init_tx.send(Ok(Some(first_frame))).is_err() {
+                if init_tx
+                    .send(Ok(Some((first_frame, channel_configuration))))
+                    .is_err()
+                {
                     return;
                 }
 
@@ -199,8 +209,8 @@ impl Av3aRustBackend {
                 }
             })?;
 
-        let first_frame = match init_rx.recv() {
-            Ok(Ok(Some(frame))) => frame,
+        let (first_frame, channel_configuration) = match init_rx.recv() {
+            Ok(Ok(Some(initial))) => initial,
             Ok(Ok(None)) => {
                 let _ = worker.join();
                 return Ok(None);
@@ -224,6 +234,7 @@ impl Av3aRustBackend {
             first_frame: Some(first_frame),
             sample_rate,
             channels,
+            channel_configuration,
             sample_count,
             duration,
         }))
@@ -235,6 +246,10 @@ impl Av3aRustBackend {
 
     pub(crate) fn channels(&self) -> u16 {
         self.channels
+    }
+
+    pub(crate) fn channel_configuration(&self) -> Option<ChannelConfiguration> {
+        self.channel_configuration
     }
 
     pub(crate) fn sample_count(&self) -> usize {
@@ -520,6 +535,7 @@ mod tests {
             first_frame: None,
             sample_rate: 48_000,
             channels: 2,
+            channel_configuration: Some(ChannelConfiguration::Stereo),
             sample_count: 0,
             duration: Duration::ZERO,
         }
