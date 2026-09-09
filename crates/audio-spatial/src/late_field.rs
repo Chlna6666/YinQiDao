@@ -6,10 +6,12 @@ const FDN_LINES: usize = 8;
 const LATE_FIELD_EPSILON: f32 = 1.0e-5;
 const MAX_DELAY_SECONDS: f32 = 0.105;
 const HADAMARD_NORMALIZATION: f32 = 0.353_553_38;
+const STEREO_INJECTION_NORMALIZATION: f32 = 0.25;
 const DELAY_SECONDS: [f32; FDN_LINES] = [
     0.031_1, 0.037_7, 0.041_9, 0.047_3, 0.053_9, 0.061_1, 0.067_9, 0.073_7,
 ];
-const INPUT_SIGNS: [f32; FDN_LINES] = [1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0];
+const LEFT_INPUT_SIGNS: [f32; FDN_LINES] = [1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0];
+const RIGHT_INPUT_SIGNS: [f32; FDN_LINES] = [1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0, 1.0];
 const LEFT_SIGNS: [f32; FDN_LINES] = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0];
 const RIGHT_SIGNS: [f32; FDN_LINES] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
 
@@ -124,7 +126,6 @@ impl LateDiffuseField {
         for frame in 0..frames {
             let dry_left = finite_or_zero(left[frame]);
             let dry_right = finite_or_zero(right[frame]);
-            let mono_input = (dry_left + dry_right) * 0.5;
 
             let mut delayed = [0.0_f32; FDN_LINES];
             for line in 0..FDN_LINES {
@@ -137,13 +138,15 @@ impl LateDiffuseField {
             let mut feedback = delayed;
             hadamard8(&mut feedback);
             for line in 0..FDN_LINES {
-                let injection = mono_input * INPUT_SIGNS[line] * HADAMARD_NORMALIZATION;
+                let injection = (dry_left * LEFT_INPUT_SIGNS[line]
+                    + dry_right * RIGHT_INPUT_SIGNS[line])
+                    * STEREO_INJECTION_NORMALIZATION;
                 self.lines[line]
                     .write_advance(injection + feedback[line] * self.feedback_gain);
             }
 
-            let late_left = signed_sum(delayed, LEFT_SIGNS) * HADAMARD_NORMALIZATION;
-            let late_right = signed_sum(delayed, RIGHT_SIGNS) * HADAMARD_NORMALIZATION;
+            let late_left = signed_sum(&delayed, &LEFT_SIGNS) * HADAMARD_NORMALIZATION;
+            let late_right = signed_sum(&delayed, &RIGHT_SIGNS) * HADAMARD_NORMALIZATION;
             left[frame] = dry_left + late_left * self.wet_gain;
             right[frame] = dry_right + late_right * self.wet_gain;
         }
@@ -187,7 +190,7 @@ fn hadamard8(values: &mut [f32; FDN_LINES]) {
 }
 
 #[inline]
-fn signed_sum(values: [f32; FDN_LINES], signs: [f32; FDN_LINES]) -> f32 {
+fn signed_sum(values: &[f32; FDN_LINES], signs: &[f32; FDN_LINES]) -> f32 {
     values[0] * signs[0]
         + values[1] * signs[1]
         + values[2] * signs[2]
@@ -253,6 +256,35 @@ mod tests {
         assert!(right[800..].iter().any(|sample| sample.abs() > 1.0e-6));
         assert!(left.iter().all(|sample| sample.is_finite()));
         assert!(right.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn anti_phase_stereo_still_excites_late_field() {
+        let mut field = LateDiffuseField::new(
+            48_000,
+            EnvironmentSettings {
+                mix: 0.18,
+                room_size: 0.45,
+                damping: 0.40,
+            },
+        );
+        let mut left = vec![0.0_f32; 4_096];
+        let mut right = vec![0.0_f32; 4_096];
+        left[0] = 1.0;
+        right[0] = -1.0;
+        field.process_planar(&mut left, &mut right);
+        assert!(left[800..].iter().any(|sample| sample.abs() > 1.0e-6));
+        assert!(right[800..].iter().any(|sample| sample.abs() > 1.0e-6));
+    }
+
+    #[test]
+    fn stereo_injection_vectors_are_orthogonal() {
+        let dot: f32 = LEFT_INPUT_SIGNS
+            .iter()
+            .zip(RIGHT_INPUT_SIGNS)
+            .map(|(left, right)| left * right)
+            .sum();
+        assert_eq!(dot, 0.0);
     }
 
     #[test]
