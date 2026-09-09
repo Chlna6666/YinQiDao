@@ -1,5 +1,19 @@
 use std::f32::consts::PI;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PinnaCueTelemetry {
+    pub center_hz: f32,
+    pub q: f32,
+    pub depth_db: f32,
+    pub ear_lateral: f32,
+    pub left_center_hz: f32,
+    pub right_center_hz: f32,
+    pub left_depth_db: f32,
+    pub right_depth_db: f32,
+    /// 0..1 normalized strength of the generic spectral cue. This is not a perceptual score.
+    pub cue_strength: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BiquadCoefficients {
     b0: f32,
@@ -170,6 +184,20 @@ struct PinnaCueShape {
     ear_lateral: f32,
 }
 
+/// Public read-only projection of the exact generic pinna cue used by the realtime direct path.
+/// Angles are expressed in degrees to match SpatialDebugSource telemetry.
+pub fn pinna_cue_telemetry(
+    azimuth_degrees: f32,
+    elevation_degrees: f32,
+    spread: f32,
+) -> PinnaCueTelemetry {
+    telemetry_from_shape(cue_shape(
+        finite_or_zero(azimuth_degrees).to_radians(),
+        finite_or_zero(elevation_degrees).to_radians(),
+        spread,
+    ))
+}
+
 /// Build a conservative generic pinna notch from listener-local direction.
 ///
 /// `azimuth_radians > 0` means source-right. Rear sources move the notch downward and deepen it;
@@ -181,17 +209,35 @@ pub(crate) fn coefficients_for_direction(
     elevation_radians: f32,
     spread: f32,
 ) -> StereoPinnaCoefficients {
-    let shape = cue_shape(azimuth_radians, elevation_radians, spread);
-    let lateral = shape.ear_lateral;
-
-    let left_center = shape.center_hz * (1.0 - lateral * 0.018);
-    let right_center = shape.center_hz * (1.0 + lateral * 0.018);
-    let left_depth = shape.depth_db * (1.0 + lateral * 0.08);
-    let right_depth = shape.depth_db * (1.0 - lateral * 0.08);
+    let cue = telemetry_from_shape(cue_shape(
+        azimuth_radians,
+        elevation_radians,
+        spread,
+    ));
 
     StereoPinnaCoefficients {
-        left: peaking_coefficients(sample_rate, left_center, shape.q, -left_depth),
-        right: peaking_coefficients(sample_rate, right_center, shape.q, -right_depth),
+        left: peaking_coefficients(sample_rate, cue.left_center_hz, cue.q, -cue.left_depth_db),
+        right: peaking_coefficients(sample_rate, cue.right_center_hz, cue.q, -cue.right_depth_db),
+    }
+}
+
+#[inline]
+fn telemetry_from_shape(shape: PinnaCueShape) -> PinnaCueTelemetry {
+    let lateral = shape.ear_lateral;
+    let left_center_hz = shape.center_hz * (1.0 - lateral * 0.018);
+    let right_center_hz = shape.center_hz * (1.0 + lateral * 0.018);
+    let left_depth_db = shape.depth_db * (1.0 + lateral * 0.08);
+    let right_depth_db = shape.depth_db * (1.0 - lateral * 0.08);
+    PinnaCueTelemetry {
+        center_hz: shape.center_hz,
+        q: shape.q,
+        depth_db: shape.depth_db,
+        ear_lateral: shape.ear_lateral,
+        left_center_hz,
+        right_center_hz,
+        left_depth_db,
+        right_depth_db,
+        cue_strength: (shape.depth_db / 4.8).clamp(0.0, 1.0),
     }
 }
 
@@ -315,6 +361,15 @@ mod tests {
     fn lateral_source_gets_per_ear_spectral_asymmetry() {
         let coefficients = coefficients_for_direction(48_000.0, PI * 0.5, 0.0, 0.0);
         assert_ne!(coefficients.left, coefficients.right);
+    }
+
+    #[test]
+    fn public_telemetry_matches_runtime_shape() {
+        let telemetry = pinna_cue_telemetry(180.0, 0.0, 0.0);
+        let rear = cue_shape(PI, 0.0, 0.0);
+        assert!((telemetry.center_hz - rear.center_hz).abs() < f32::EPSILON);
+        assert!((telemetry.depth_db - rear.depth_db).abs() < f32::EPSILON);
+        assert!(telemetry.cue_strength > 0.6);
     }
 
     #[test]
