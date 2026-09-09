@@ -14,6 +14,7 @@ const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 12.0;
 const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 38.0;
 const MIN_STEREO_DISTANCE_METERS: f32 = 0.80;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.20;
+const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
 const STEREO_SOURCE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -38,9 +39,14 @@ impl TrajectorySignature {
             SpatialMotionMode::Planetary => TrajectoryKind::Planetary,
             SpatialMotionMode::NearEar => TrajectoryKind::NearEar,
         };
+        let speed_hz = if settings.motion_speed_hz.is_finite() {
+            settings.motion_speed_hz.clamp(0.005, 2.0)
+        } else {
+            0.10
+        };
         Some(Self {
             kind,
-            speed_hz: settings.motion_speed_hz,
+            speed_hz,
             radius_meters: MIN_TRAJECTORY_RADIUS_METERS
                 + settings.motion_radius.clamp(0.0, 1.0) * TRAJECTORY_RADIUS_RANGE_METERS,
             clockwise: settings.clockwise,
@@ -188,6 +194,11 @@ impl StereoSpatializer {
         self.ensure_environment(settings);
         let trajectory_signature = TrajectorySignature::from_settings(settings);
         self.ensure_trajectory(trajectory_signature);
+        let segment_frames = trajectory_segment_frames(
+            self.sample_rate,
+            self.block_frames,
+            trajectory_signature,
+        );
 
         let wet_mix = match trajectory_signature {
             Some(_) => settings.mix.clamp(0.0, 1.0) * settings.motion_intensity.clamp(0.0, 1.0),
@@ -201,7 +212,7 @@ impl StereoSpatializer {
         let mut frame_offset = 0usize;
 
         while frame_offset < total_frames {
-            let frames = (total_frames - frame_offset).min(self.block_frames);
+            let frames = (total_frames - frame_offset).min(segment_frames);
             let sample_start = frame_offset * 2;
             let sample_end = sample_start + frames * 2;
             let (center_start, center_end) = if let Some(trajectory) = self.trajectory.as_mut() {
@@ -278,19 +289,43 @@ impl StereoSpatializer {
 }
 
 #[inline]
+fn trajectory_segment_frames(
+    sample_rate: u32,
+    block_frames: usize,
+    signature: Option<TrajectorySignature>,
+) -> usize {
+    let block_frames = block_frames.max(1);
+    let Some(signature) = signature else {
+        return block_frames;
+    };
+    let speed_hz = if signature.speed_hz.is_finite() {
+        signature.speed_hz.abs().clamp(0.005, 2.0)
+    } else {
+        0.10
+    };
+    let frames_for_limit =
+        (sample_rate.max(1) as f32 * MAX_TRAJECTORY_SEGMENT_DEGREES / (speed_hz * 360.0))
+            .floor()
+            .max(1.0) as usize;
+    block_frames.min(frames_for_limit.max(1))
+}
+
+#[inline]
 fn stereo_pair(center: SourcePose, field: StereoField) -> (SourcePose, SourcePose) {
     let left_position = rotate_y(center.position, -field.half_angle_sin, field.half_angle_cos);
     let right_position = rotate_y(center.position, field.half_angle_sin, field.half_angle_cos);
+    let left_velocity = rotate_y(center.velocity, -field.half_angle_sin, field.half_angle_cos);
+    let right_velocity = rotate_y(center.velocity, field.half_angle_sin, field.half_angle_cos);
     (
         SourcePose {
             position: left_position,
-            velocity: center.velocity,
+            velocity: left_velocity,
             gain: field.gain,
             spread: field.spread,
         },
         SourcePose {
             position: right_position,
-            velocity: center.velocity,
+            velocity: right_velocity,
             gain: field.gain,
             spread: field.spread,
         },
@@ -326,6 +361,47 @@ mod tests {
         assert!(left.position.x < 0.0);
         assert!(right.position.x > 0.0);
         assert!((left.position.length() - right.position.length()).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn stereo_pair_rotates_velocity_with_each_virtual_source() {
+        let field = StereoField::from_settings(&SpatialPreset::Immersive3d.settings());
+        let center = SourcePose {
+            position: Vec3::FORWARD,
+            velocity: Vec3::RIGHT,
+            gain: 1.0,
+            spread: 0.0,
+        };
+        let (left, right) = stereo_pair(center, field);
+        assert!(left.velocity.z > 0.0);
+        assert!(right.velocity.z < 0.0);
+        assert!((left.velocity.length() - 1.0).abs() < 1.0e-5);
+        assert!((right.velocity.length() - 1.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn high_speed_motion_is_segmented_to_about_one_degree() {
+        let signature = TrajectorySignature {
+            kind: TrajectoryKind::Orbit360,
+            speed_hz: 2.0,
+            radius_meters: 1.0,
+            clockwise: true,
+        };
+        let frames = trajectory_segment_frames(44_100, 64, Some(signature));
+        let degrees = frames as f32 * signature.speed_hz * 360.0 / 44_100.0;
+        assert!(frames < 64);
+        assert!(degrees <= MAX_TRAJECTORY_SEGMENT_DEGREES + 1.0e-5);
+    }
+
+    #[test]
+    fn normal_motion_keeps_default_block_size() {
+        let signature = TrajectorySignature {
+            kind: TrajectoryKind::Orbit360,
+            speed_hz: 0.5,
+            radius_meters: 1.0,
+            clockwise: true,
+        };
+        assert_eq!(trajectory_segment_frames(48_000, 64, Some(signature)), 64);
     }
 
     #[test]
