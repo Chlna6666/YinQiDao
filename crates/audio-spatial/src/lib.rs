@@ -33,5 +33,5 @@ pub use error::SpatialError;
 pub use late_field::{LateFieldTelemetry, late_field_telemetry};
 pub use layout::{ChannelLayout, ChannelRole, SourceKind, Speaker, SpeakerLayout};
 pub use pinna::{PinnaCueTelemetry, pinna_cue_telemetry};
-pub use pose::{DEFAULT_HEAD_RADIUS_M, ListenerPose, SourcePose, Vec3};
+pub use pose::{DEFAULT_HEAD_RADIUS_M, ListenerPose, RoomPose, SourcePose, Vec3};
 pub use trajectory::{Trajectory, TrajectoryKind};
