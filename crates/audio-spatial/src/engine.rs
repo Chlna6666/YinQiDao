@@ -1,6 +1,6 @@
 use crate::{
     ChannelLayout, EnvironmentSettings, ListenerPose, SourcePose, SpatialDebugSnapshot, SpatialError,
-    SpeakerLayout, Trajectory, renderer::CpuRenderer,
+    SpeakerLayout, Trajectory, late_field::LateDiffuseField, renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -33,6 +33,7 @@ impl EngineConfig {
 pub struct SpatialEngine {
     config: EngineConfig,
     renderer: CpuRenderer,
+    late_field: LateDiffuseField,
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
     listener: ListenerPose,
@@ -57,8 +58,10 @@ impl SpatialEngine {
             config.max_sources,
         )?;
         renderer.set_environment(config.environment);
+        let late_field = LateDiffuseField::new(config.sample_rate, config.environment);
         Ok(Self {
             renderer,
+            late_field,
             mix_left: vec![0.0; config.block_frames],
             mix_right: vec![0.0; config.block_frames],
             listener: ListenerPose::identity(),
@@ -83,6 +86,7 @@ impl SpatialEngine {
     pub fn set_environment(&mut self, settings: EnvironmentSettings) {
         self.config.environment = settings;
         self.renderer.set_environment(settings);
+        self.late_field.set_environment(settings);
     }
 
     /// Enable the fixed-size spatial scene snapshot. Disabled is the default production path.
@@ -110,6 +114,7 @@ impl SpatialEngine {
 
     pub fn reset(&mut self) {
         self.renderer.reset();
+        self.late_field.reset();
         if self.debug_enabled {
             self.debug_snapshot
                 .reset_timeline(self.listener, self.config.environment);
@@ -156,6 +161,7 @@ impl SpatialEngine {
             }
         }
 
+        let normalization = layout.normalization();
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
@@ -185,11 +191,18 @@ impl SpatialEngine {
                     &mut self.mix_right,
                 )?;
             }
-            let normalization = layout.normalization();
+            for frame in 0..block_frames {
+                self.mix_left[frame] *= normalization;
+                self.mix_right[frame] *= normalization;
+            }
+            self.late_field.process_planar(
+                &mut self.mix_left[..block_frames],
+                &mut self.mix_right[..block_frames],
+            );
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
-                output[output_index] = self.mix_left[frame] * normalization;
-                output[output_index + 1] = self.mix_right[frame] * normalization;
+                output[output_index] = self.mix_left[frame];
+                output[output_index + 1] = self.mix_right[frame];
             }
             frame_offset += block_frames;
         }
@@ -273,6 +286,10 @@ impl SpatialEngine {
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
+            self.late_field.process_planar(
+                &mut self.mix_left[..block_frames],
+                &mut self.mix_right[..block_frames],
+            );
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
                 output[output_index] = self.mix_left[frame];
@@ -325,6 +342,10 @@ impl SpatialEngine {
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
+            self.late_field.process_planar(
+                &mut self.mix_left[..block_frames],
+                &mut self.mix_right[..block_frames],
+            );
             for frame in 0..block_frames {
                 let output_index = (frame_offset + frame) * 2;
                 output[output_index] = self.mix_left[frame];
