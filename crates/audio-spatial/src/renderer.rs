@@ -3,9 +3,12 @@ use std::f32::consts::PI;
 use crate::{
     EnvironmentSettings, ListenerPose, SourceKind, SourcePose, SpatialError, Vec3,
     delay::CubicDelayLine,
-    environment::EARLY_REFLECTION_TAP_COUNT,
+    environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall},
     image_source::{MAX_REFLECTION_DELAY_SECONDS, source_reflection_descriptors},
-    pinna::{StereoPinnaCoefficients, StereoPinnaState, coefficients_for_direction},
+    pinna::{
+        StereoPinnaCoefficientStep, StereoPinnaCoefficients, StereoPinnaState,
+        coefficients_for_direction, reflection_coefficients_for_direction,
+    },
 };
 
 const SPEED_OF_SOUND_M_S: f32 = 343.0;
@@ -67,6 +70,37 @@ struct RenderParameterStep {
     right_filter_alpha: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ReflectionRenderParameters {
+    path: RenderParameters,
+    pinna: StereoPinnaCoefficients,
+    pinna_enabled: bool,
+}
+
+impl ReflectionRenderParameters {
+    #[inline]
+    fn step_to(self, end: Self, frames: usize) -> ReflectionRenderParameterStep {
+        ReflectionRenderParameterStep {
+            path: self.path.step_to(end.path, frames),
+            pinna: self.pinna.step_to(end.pinna, frames),
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, step: ReflectionRenderParameterStep) {
+        self.path.advance(step.path);
+        if self.pinna_enabled {
+            self.pinna.advance_primary(step.pinna);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReflectionRenderParameterStep {
+    path: RenderParameterStep,
+    pinna: StereoPinnaCoefficientStep,
+}
+
 #[derive(Clone, Debug)]
 struct SourceState {
     delay: CubicDelayLine,
@@ -75,6 +109,7 @@ struct SourceState {
     pinna: StereoPinnaState,
     reflection_filter_left: [f32; EARLY_REFLECTION_TAP_COUNT],
     reflection_filter_right: [f32; EARLY_REFLECTION_TAP_COUNT],
+    reflection_pinna: [StereoPinnaState; EARLY_REFLECTION_TAP_COUNT],
     lfe_state: f32,
     scratch_left: Vec<f32>,
     scratch_right: Vec<f32>,
@@ -87,7 +122,7 @@ struct SourceState {
     cached_reflection_pose: Option<SourcePose>,
     cached_reflection_listener: Option<ListenerPose>,
     cached_reflection_environment: Option<EnvironmentSettings>,
-    cached_reflection_parameters: [RenderParameters; EARLY_REFLECTION_TAP_COUNT],
+    cached_reflection_parameters: [ReflectionRenderParameters; EARLY_REFLECTION_TAP_COUNT],
 }
 
 impl SourceState {
@@ -99,6 +134,7 @@ impl SourceState {
             pinna: StereoPinnaState::default(),
             reflection_filter_left: [0.0; EARLY_REFLECTION_TAP_COUNT],
             reflection_filter_right: [0.0; EARLY_REFLECTION_TAP_COUNT],
+            reflection_pinna: [StereoPinnaState::default(); EARLY_REFLECTION_TAP_COUNT],
             lfe_state: 0.0,
             scratch_left: vec![0.0; block_frames],
             scratch_right: vec![0.0; block_frames],
@@ -111,7 +147,10 @@ impl SourceState {
             cached_reflection_pose: None,
             cached_reflection_listener: None,
             cached_reflection_environment: None,
-            cached_reflection_parameters: [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT],
+            cached_reflection_parameters: [
+                ReflectionRenderParameters::default();
+                EARLY_REFLECTION_TAP_COUNT
+            ],
         }
     }
 
@@ -143,20 +182,7 @@ impl SourceState {
             return self.cached_pinna_coefficients;
         }
 
-        let raw_relative = pose.position - listener.position;
-        let relative = Vec3::new(
-            finite_or_zero(raw_relative.x),
-            finite_or_zero(raw_relative.y),
-            finite_or_zero(raw_relative.z),
-        );
-        let direction = relative.normalized_or(Vec3::FORWARD);
-        let (right, up, forward) = listener.basis();
-        let local_right = direction.dot(right);
-        let local_up = direction.dot(up);
-        let local_forward = direction.dot(forward);
-        let azimuth = local_right.atan2(local_forward);
-        let horizontal = (local_right * local_right + local_forward * local_forward).sqrt();
-        let elevation = local_up.atan2(horizontal);
+        let (azimuth, elevation) = listener_direction_angles(pose.position, listener);
         let coefficients = coefficients_for_direction(
             sample_rate,
             azimuth,
@@ -177,9 +203,9 @@ impl SourceState {
         pose: SourcePose,
         listener: ListenerPose,
         environment: EnvironmentSettings,
-    ) -> [RenderParameters; EARLY_REFLECTION_TAP_COUNT] {
+    ) -> [ReflectionRenderParameters; EARLY_REFLECTION_TAP_COUNT] {
         if environment.mix <= REFLECTION_EPSILON {
-            return [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
+            return [ReflectionRenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
         }
         if self.cached_reflection_pose == Some(pose)
             && self.cached_reflection_listener == Some(listener)
@@ -199,16 +225,44 @@ impl SourceState {
                     * reflection.wall_reflectance,
                 spread: finite_or_zero(pose.spread).clamp(0.0, 1.0),
             };
-            let mut parameters = parameters_for_pose(sample_rate, reflected_pose, listener);
+            let mut path = parameters_for_pose(sample_rate, reflected_pose, listener);
             // Direct rendering intentionally omits absolute propagation latency. The image-source
             // solver therefore contributes only the excess path delay, while the virtual image
             // position still drives binaural direction, distance attenuation and air absorption.
-            parameters.left_delay += reflection.excess_delay_samples;
-            parameters.right_delay += reflection.excess_delay_samples;
+            path.left_delay += reflection.excess_delay_samples;
+            path.right_delay += reflection.excess_delay_samples;
             let wall_alpha = one_pole_alpha(sample_rate, reflection.damping_cutoff_hz);
-            parameters.left_filter_alpha = parameters.left_filter_alpha.min(wall_alpha);
-            parameters.right_filter_alpha = parameters.right_filter_alpha.min(wall_alpha);
-            parameters
+            path.left_filter_alpha = path.left_filter_alpha.min(wall_alpha);
+            path.right_filter_alpha = path.right_filter_alpha.min(wall_alpha);
+
+            // Lateral wall reflections already have strong ITD/ILD. Spend the extra biquad only on
+            // front/rear/floor/ceiling image sources, where preserving sagittal spectral identity
+            // materially improves depth/elevation without multiplying the full room-path cost.
+            let pinna_enabled = matches!(
+                reflection.wall,
+                ReflectionWall::Front
+                    | ReflectionWall::Rear
+                    | ReflectionWall::Floor
+                    | ReflectionWall::Ceiling
+            );
+            let pinna = if pinna_enabled {
+                let (azimuth, elevation) =
+                    listener_direction_angles(reflected_pose.position, listener);
+                reflection_coefficients_for_direction(
+                    sample_rate,
+                    azimuth,
+                    elevation,
+                    reflected_pose.spread,
+                )
+            } else {
+                StereoPinnaCoefficients::IDENTITY
+            };
+
+            ReflectionRenderParameters {
+                path,
+                pinna,
+                pinna_enabled,
+            }
         });
 
         self.cached_reflection_pose = Some(pose);
@@ -221,11 +275,16 @@ impl SourceState {
     fn invalidate_environment(&mut self) {
         self.reflection_filter_left.fill(0.0);
         self.reflection_filter_right.fill(0.0);
+        for pinna in &mut self.reflection_pinna {
+            pinna.reset();
+        }
         self.cached_reflection_pose = None;
         self.cached_reflection_listener = None;
         self.cached_reflection_environment = None;
-        self.cached_reflection_parameters =
-            [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
+        self.cached_reflection_parameters = [
+            ReflectionRenderParameters::default();
+            EARLY_REFLECTION_TAP_COUNT
+        ];
     }
 
     fn reset(&mut self) {
@@ -357,7 +416,7 @@ impl CpuRenderer {
                 let reflection_start = if reflections_enabled {
                     state.reflection_parameters_for(sample_rate, start_pose, listener, environment)
                 } else {
-                    [RenderParameters::default(); EARLY_REFLECTION_TAP_COUNT]
+                    [ReflectionRenderParameters::default(); EARLY_REFLECTION_TAP_COUNT]
                 };
                 let reflection_end = if !reflections_enabled || start_pose == end_pose {
                     reflection_start
@@ -365,10 +424,12 @@ impl CpuRenderer {
                     state.reflection_parameters_for(sample_rate, end_pose, listener, environment)
                 };
                 let mut reflection_parameters = reflection_start;
-                let reflection_steps: [RenderParameterStep; EARLY_REFLECTION_TAP_COUNT] =
-                    std::array::from_fn(|index| {
-                        reflection_start[index].step_to(reflection_end[index], frames)
-                    });
+                let reflection_steps: [
+                    ReflectionRenderParameterStep;
+                    EARLY_REFLECTION_TAP_COUNT
+                ] = std::array::from_fn(|index| {
+                    reflection_start[index].step_to(reflection_end[index], frames)
+                });
 
                 let mut input_index = input_channel;
                 for frame in 0..frames {
@@ -391,17 +452,27 @@ impl CpuRenderer {
                     if reflections_enabled {
                         for tap in 0..EARLY_REFLECTION_TAP_COUNT {
                             let reflection = reflection_parameters[tap];
-                            let (reflected_left, reflected_right) = state
-                                .delay
-                                .read_pair(reflection.left_delay, reflection.right_delay);
-                            state.reflection_filter_left[tap] += reflection.left_filter_alpha
+                            let path = reflection.path;
+                            let (reflected_left, reflected_right) =
+                                state.delay.read_pair(path.left_delay, path.right_delay);
+                            state.reflection_filter_left[tap] += path.left_filter_alpha
                                 * (reflected_left - state.reflection_filter_left[tap]);
-                            state.reflection_filter_right[tap] += reflection.right_filter_alpha
+                            state.reflection_filter_right[tap] += path.right_filter_alpha
                                 * (reflected_right - state.reflection_filter_right[tap]);
-                            output_left +=
-                                state.reflection_filter_left[tap] * reflection.left_gain;
-                            output_right +=
-                                state.reflection_filter_right[tap] * reflection.right_gain;
+                            let mut reflected_left =
+                                state.reflection_filter_left[tap] * path.left_gain;
+                            let mut reflected_right =
+                                state.reflection_filter_right[tap] * path.right_gain;
+                            if reflection.pinna_enabled {
+                                (reflected_left, reflected_right) = state.reflection_pinna[tap]
+                                    .process_primary(
+                                        reflected_left,
+                                        reflected_right,
+                                        reflection.pinna,
+                                    );
+                            }
+                            output_left += reflected_left;
+                            output_right += reflected_right;
                             reflection_parameters[tap].advance(reflection_steps[tap]);
                         }
                     }
@@ -456,6 +527,24 @@ impl CpuRenderer {
             state.reset();
         }
     }
+}
+
+#[inline]
+fn listener_direction_angles(position: Vec3, listener: ListenerPose) -> (f32, f32) {
+    let raw_relative = position - listener.position;
+    let relative = Vec3::new(
+        finite_or_zero(raw_relative.x),
+        finite_or_zero(raw_relative.y),
+        finite_or_zero(raw_relative.z),
+    );
+    let direction = relative.normalized_or(Vec3::FORWARD);
+    let (right, up, forward) = listener.basis();
+    let local_right = direction.dot(right);
+    let local_up = direction.dot(up);
+    let local_forward = direction.dot(forward);
+    let azimuth = local_right.atan2(local_forward);
+    let horizontal = (local_right * local_right + local_forward * local_forward).sqrt();
+    (azimuth, local_up.atan2(horizontal))
 }
 
 #[inline]
@@ -646,7 +735,11 @@ mod tests {
         assert!((parameters.left_gain - parameters.right_gain).abs() < 1.0e-6);
 
         let mut state = SourceState::new(4_096, 64);
-        let pinna = state.pinna_for(48_000.0, SourcePose::new(Vec3::FORWARD), ListenerPose::identity());
+        let pinna = state.pinna_for(
+            48_000.0,
+            SourcePose::new(Vec3::FORWARD),
+            ListenerPose::identity(),
+        );
         assert_eq!(pinna.left, pinna.right);
     }
 
@@ -732,7 +825,7 @@ mod tests {
                 ..EnvironmentSettings::default()
             },
         );
-        assert!(dry.iter().all(|parameters| parameters.left_gain == 0.0));
+        assert!(dry.iter().all(|reflection| reflection.path.left_gain == 0.0));
         let wet = state.reflection_parameters_for(
             48_000.0,
             pose,
@@ -743,8 +836,34 @@ mod tests {
             },
         );
         let direct = parameters_for_pose(48_000.0, pose, listener);
-        assert!(wet.iter().all(|parameters| parameters.left_delay >= direct.left_delay));
-        assert!(wet.iter().any(|parameters| parameters.left_gain > 0.0));
+        assert!(
+            wet.iter()
+                .all(|reflection| reflection.path.left_delay >= direct.left_delay)
+        );
+        assert!(wet.iter().any(|reflection| reflection.path.left_gain > 0.0));
+    }
+
+    #[test]
+    fn only_sagittal_room_reflections_pay_for_pinna_filtering() {
+        let mut state = SourceState::new(4_096, 64);
+        let reflections = state.reflection_parameters_for(
+            48_000.0,
+            SourcePose::new(Vec3::new(0.4, 0.2, 1.0)),
+            ListenerPose::identity(),
+            EnvironmentSettings {
+                mix: 0.18,
+                ..EnvironmentSettings::default()
+            },
+        );
+        assert!(!reflections[0].pinna_enabled);
+        assert!(!reflections[1].pinna_enabled);
+        assert!(reflections[2..].iter().all(|reflection| reflection.pinna_enabled));
+        assert_eq!(reflections[0].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_eq!(reflections[1].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_ne!(reflections[2].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_ne!(reflections[3].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_ne!(reflections[4].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_ne!(reflections[5].pinna, StereoPinnaCoefficients::IDENTITY);
     }
 
     #[test]
@@ -766,7 +885,10 @@ mod tests {
             damping: 0.7,
         });
         assert_eq!(renderer.sources[0].cached_pose, Some(pose));
-        assert!((renderer.sources[0].cached_parameters.left_gain - direct.left_gain).abs() < f32::EPSILON);
+        assert!(
+            (renderer.sources[0].cached_parameters.left_gain - direct.left_gain).abs()
+                < f32::EPSILON
+        );
         assert_eq!(renderer.sources[0].cached_pinna_coefficients, pinna);
         assert!(renderer.sources[0].cached_reflection_pose.is_none());
     }
