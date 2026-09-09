@@ -6,15 +6,15 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
-    SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind, late_field_telemetry,
-    pinna_cue_telemetry,
+    ChannelLayout, SpeakerLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot,
+    SpatialDebugSourceKind, late_field_telemetry, pinna_cue_telemetry,
 };
 
 use crate::audio::{
     AudioDebugMonitorMode, AudioDebugSnapshot, AudioDebugStage, audio_debug_latest_snapshot,
     set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
-use crate::audio_spatial_debug_3d::{SpatialDebug3dCamera, SpatialDebug3dScene};
+use super::audio_spatial_debug_3d::{SpatialDebug3dCamera, SpatialDebug3dScene};
 
 const DEBUG_UI_TICK: Duration = Duration::from_millis(33);
 const SOURCE_ROWS: usize = 12;
@@ -552,15 +552,17 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
 }
 
 fn channel_name(source_count: usize, index: usize) -> &'static str {
-    const STEREO: [&str; 2] = ["L", "R"];
-    const SURROUND_5_1_4: [&str; 10] = ["FL", "FR", "C", "LFE", "SL", "SR", "TFL", "TFR", "TRL", "TRR"];
-    const SURROUND_7_1_4: [&str; 12] = ["FL", "FR", "C", "LFE", "RL", "RR", "SL", "SR", "TFL", "TFR", "TRL", "TRR"];
-    match source_count {
-        2 => STEREO.get(index).copied().unwrap_or("SRC"),
-        10 => SURROUND_5_1_4.get(index).copied().unwrap_or("SRC"),
-        12 => SURROUND_7_1_4.get(index).copied().unwrap_or("SRC"),
-        _ => "SRC",
-    }
+    let layout = match source_count {
+        2 => ChannelLayout::Stereo,
+        6 => ChannelLayout::Surround5_1,
+        8 => ChannelLayout::Surround7_1,
+        10 => ChannelLayout::Surround5_1_4,
+        12 => ChannelLayout::Surround7_1_4,
+        _ => return "SRC",
+    };
+    SpeakerLayout::for_layout(layout)
+        .role(index)
+        .map_or("SRC", |role| role.short_name())
 }
 
 fn wall_label(wall: SpatialDebugReflectionWall) -> &'static str {
