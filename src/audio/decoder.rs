@@ -16,7 +16,10 @@ use symphonia::core::{
     meta::MetadataOptions,
 };
 use thiserror::Error;
-use yinqidao_codec_avs3::{Av3aIsoBmffDemuxer, Avs3SpecificConfig, parse_dca3, probe_av3a_path};
+use yinqidao_audio_spatial::ChannelLayout;
+use yinqidao_codec_avs3::{
+    Av3aIsoBmffDemuxer, Avs3SpecificConfig, ChannelConfiguration, parse_dca3, probe_av3a_path,
+};
 
 use super::{avs3_backend::Av3aRustBackend, dsp::request_transport_reset};
 
@@ -207,6 +210,7 @@ pub struct DecoderStream {
     path: PathBuf,
     backend: DecoderBackend,
     info: AudioFormatInfo,
+    spatial_layout_hint: Option<ChannelLayout>,
     decoded_frames: u64,
 }
 
@@ -217,6 +221,8 @@ impl DecoderStream {
             source,
         })?;
         if let Some(entry) = av3a {
+            let spatial_layout_hint = avs3_spatial_layout_hint(&entry.decoder_config);
+
             // Lossless is a deliberate codec capability gate, not an alternate-backend probe miss.
             // Keep the Chapter 8 path explicit so an unsupported Lossless M4A never launches an
             // external decoder after the pure-Rust preflight has already classified the stream.
@@ -243,7 +249,8 @@ impl DecoderStream {
                             sample_rate,
                             channels,
                             sample_count,
-                            "AV3A / Audio Vivid 已启用 pure-Rust Basic mono 解码"
+                            ?spatial_layout_hint,
+                            "AV3A / Audio Vivid 已启用 pure-Rust 解码"
                         );
                         return Ok(Self {
                             path: path.to_path_buf(),
@@ -254,6 +261,7 @@ impl DecoderStream {
                                 container_duration: Some(duration),
                                 channels,
                             },
+                            spatial_layout_hint,
                             decoded_frames: 0,
                         });
                     }
@@ -295,6 +303,7 @@ impl DecoderStream {
                 path = %path.display(),
                 sample_rate,
                 channels,
+                ?spatial_layout_hint,
                 dca3_bytes = entry.decoder_config.len(),
                 "AV3A / Audio Vivid 当前 profile/layout 使用 FFmpeg fallback"
             );
@@ -307,6 +316,7 @@ impl DecoderStream {
                     container_duration: None,
                     channels,
                 },
+                spatial_layout_hint,
                 decoded_frames: 0,
             });
         }
@@ -383,6 +393,7 @@ impl DecoderStream {
                 track_id,
             }),
             info,
+            spatial_layout_hint: None,
             decoded_frames: 0,
         })
     }
@@ -390,6 +401,15 @@ impl DecoderStream {
     #[cfg(test)]
     pub fn info(&self) -> &AudioFormatInfo {
         &self.info
+    }
+
+    /// Explicit codec/container layout metadata suitable for the native spatial renderer.
+    ///
+    /// This deliberately returns `None` for channel counts that are ambiguous without metadata
+    /// (notably 10ch, which AVS3 can encode as either 5.1.4 or 7.1.2). Callers must never infer a
+    /// height layout from the bare channel count when this hint is absent.
+    pub fn spatial_layout_hint(&self) -> Option<ChannelLayout> {
+        self.spatial_layout_hint
     }
 
     pub fn duration(&self) -> Option<Duration> {
@@ -534,6 +554,27 @@ impl DecoderStream {
     }
 }
 
+fn avs3_spatial_layout_hint(decoder_config: &[u8]) -> Option<ChannelLayout> {
+    let Avs3SpecificConfig::GeneralFullRate(config) = parse_dca3(decoder_config).ok()? else {
+        return None;
+    };
+    channel_configuration_to_spatial_layout(config.channel_configuration)
+}
+
+#[inline]
+fn channel_configuration_to_spatial_layout(
+    configuration: Option<ChannelConfiguration>,
+) -> Option<ChannelLayout> {
+    match configuration? {
+        ChannelConfiguration::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
+        ChannelConfiguration::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
+        // 7.1.2 is also 10 channels. It must remain explicit unsupported here rather than being
+        // silently reinterpreted as 5.1.4 by channel count.
+        ChannelConfiguration::Surround7_1_2 => None,
+        _ => None,
+    }
+}
+
 fn resolve_av3a_decoder() -> Option<OsString> {
     if let Some(path) = std::env::var_os("YINQIDAO_AVS3_DECODER")
         && !path.is_empty()
@@ -671,6 +712,7 @@ mod tests {
         assert_eq!(info.total_frames, Some(4));
         let decoder = DecoderStream::open(&path).expect("decoder");
         assert_eq!(decoder.duration(), Some(Duration::from_micros(500)));
+        assert_eq!(decoder.spatial_layout_hint(), None);
         let decoded = decode_to_pcm(&path).expect("decode");
         assert_eq!(decoded.samples.len(), 4);
         assert!(decoded.samples.iter().any(|sample| sample.abs() > 0.1));
@@ -687,6 +729,23 @@ mod tests {
         bytes[36..40].copy_from_slice(&(44_100_u32 << 16).to_be_bytes());
         let entry = probe_av3a_bytes(&bytes).expect("av3a");
         assert_eq!((entry.sample_rate, entry.channels), (44_100, 12));
+    }
+
+    #[test]
+    fn avs3_channel_configuration_maps_only_unambiguous_native_height_beds() {
+        assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround5_1_4)),
+            Some(ChannelLayout::Surround5_1_4)
+        );
+        assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_4)),
+            Some(ChannelLayout::Surround7_1_4)
+        );
+        assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_2)),
+            None
+        );
+        assert_eq!(channel_configuration_to_spatial_layout(None), None);
     }
 
     #[test]
