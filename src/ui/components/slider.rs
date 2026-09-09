@@ -45,12 +45,12 @@ impl Default for SliderStyle {
 impl SliderStyle {
     pub fn mini_progress() -> Self {
         Self {
-            // Idle state is intentionally a hairline on the player boundary. The larger hit strip
-            // and thumb are interaction affordances only and must not lift the player content.
+            // Idle remains a 2 px player-edge hairline. Hover grows only inside the existing
+            // overlay hit strip, so interaction is easier without lifting the player layout.
             track_height: px(2.0),
-            hover_track_height: px(4.0),
+            hover_track_height: px(6.0),
             thumb_size: px(10.0),
-            hover_thumb_scale: 1.15,
+            hover_thumb_scale: 1.20,
             track_bg: rgb(0xe1_e4_e9).into(),
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
