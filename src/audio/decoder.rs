@@ -579,11 +579,10 @@ fn channel_configuration_to_spatial_layout(
     match configuration? {
         ChannelConfiguration::Surround5_1 => Some(ChannelLayout::Surround5_1),
         ChannelConfiguration::Surround7_1 => Some(ChannelLayout::Surround7_1),
+        ChannelConfiguration::Surround5_1_2 => Some(ChannelLayout::Surround5_1_2),
         ChannelConfiguration::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
+        ChannelConfiguration::Surround7_1_2 => Some(ChannelLayout::Surround7_1_2),
         ChannelConfiguration::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
-        // 7.1.2 is also 10 channels. It must remain explicit unsupported here rather than being
-        // silently reinterpreted as 5.1.4 by channel count.
-        ChannelConfiguration::Surround7_1_2 => None,
         _ => None,
     }
 }
@@ -604,17 +603,20 @@ fn symphonia_spatial_layout_hint(channels: Option<&Channels>) -> Option<ChannelL
         | Position::LFE1;
     let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
     let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
-    let height = Position::TOP_FRONT_LEFT
-        | Position::TOP_FRONT_RIGHT
-        | Position::TOP_REAR_LEFT
-        | Position::TOP_REAR_RIGHT;
+    let top_front = Position::TOP_FRONT_LEFT | Position::TOP_FRONT_RIGHT;
+    let top_rear = Position::TOP_REAR_LEFT | Position::TOP_REAR_RIGHT;
+    let height = top_front | top_rear;
 
     if *positions == front | rear || *positions == front | side {
         Some(ChannelLayout::Surround5_1)
     } else if *positions == front | rear | side {
         Some(ChannelLayout::Surround7_1)
+    } else if *positions == front | rear | top_front || *positions == front | side | top_front {
+        Some(ChannelLayout::Surround5_1_2)
     } else if *positions == front | rear | height || *positions == front | side | height {
         Some(ChannelLayout::Surround5_1_4)
+    } else if *positions == front | rear | side | top_front {
+        Some(ChannelLayout::Surround7_1_2)
     } else if *positions == front | rear | side | height {
         Some(ChannelLayout::Surround7_1_4)
     } else {
@@ -789,16 +791,20 @@ mod tests {
             Some(ChannelLayout::Surround7_1)
         );
         assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround5_1_2)),
+            Some(ChannelLayout::Surround5_1_2)
+        );
+        assert_eq!(
             channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround5_1_4)),
             Some(ChannelLayout::Surround5_1_4)
         );
         assert_eq!(
-            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_4)),
-            Some(ChannelLayout::Surround7_1_4)
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_2)),
+            Some(ChannelLayout::Surround7_1_2)
         );
         assert_eq!(
-            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_2)),
-            None
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1_4)),
+            Some(ChannelLayout::Surround7_1_4)
         );
         assert_eq!(channel_configuration_to_spatial_layout(None), None);
     }
@@ -811,10 +817,9 @@ mod tests {
             | Position::LFE1;
         let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
         let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
-        let height = Position::TOP_FRONT_LEFT
-            | Position::TOP_FRONT_RIGHT
-            | Position::TOP_REAR_LEFT
-            | Position::TOP_REAR_RIGHT;
+        let top_front = Position::TOP_FRONT_LEFT | Position::TOP_FRONT_RIGHT;
+        let top_rear = Position::TOP_REAR_LEFT | Position::TOP_REAR_RIGHT;
+        let height = top_front | top_rear;
 
         for positions in [front | rear, front | side] {
             let channels = Channels::Positioned(positions);
@@ -830,6 +835,14 @@ mod tests {
             Some(ChannelLayout::Surround7_1)
         );
 
+        for positions in [front | rear | top_front, front | side | top_front] {
+            let channels = Channels::Positioned(positions);
+            assert_eq!(
+                symphonia_spatial_layout_hint(Some(&channels)),
+                Some(ChannelLayout::Surround5_1_2)
+            );
+        }
+
         for positions in [front | rear | height, front | side | height] {
             let channels = Channels::Positioned(positions);
             assert_eq!(
@@ -837,6 +850,12 @@ mod tests {
                 Some(ChannelLayout::Surround5_1_4)
             );
         }
+
+        let channels = Channels::Positioned(front | rear | side | top_front);
+        assert_eq!(
+            symphonia_spatial_layout_hint(Some(&channels)),
+            Some(ChannelLayout::Surround7_1_2)
+        );
 
         let channels = Channels::Positioned(front | rear | side | height);
         assert_eq!(
@@ -853,19 +872,16 @@ mod tests {
         assert_eq!(symphonia_spatial_layout_hint(Some(&ambisonic)), None);
         assert_eq!(symphonia_spatial_layout_hint(None), None);
 
-        let seven_one_two = Channels::Positioned(
+        let partial_height = Channels::Positioned(
             Position::FRONT_LEFT
                 | Position::FRONT_RIGHT
                 | Position::FRONT_CENTER
                 | Position::LFE1
                 | Position::REAR_LEFT
                 | Position::REAR_RIGHT
-                | Position::SIDE_LEFT
-                | Position::SIDE_RIGHT
-                | Position::TOP_FRONT_LEFT
-                | Position::TOP_FRONT_RIGHT,
+                | Position::TOP_FRONT_LEFT,
         );
-        assert_eq!(symphonia_spatial_layout_hint(Some(&seven_one_two)), None);
+        assert_eq!(symphonia_spatial_layout_hint(Some(&partial_height)), None);
     }
 
     #[test]
