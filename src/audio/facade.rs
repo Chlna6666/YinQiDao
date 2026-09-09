@@ -1,4 +1,5 @@
 use std::{
+    f32::consts::FRAC_PI_2,
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
@@ -20,6 +21,7 @@ const REQUEST_QUEUE_CAPACITY: usize = 128;
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
 const STRUCTURAL_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(800);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 
 /// UI-facing audio facade.
@@ -144,6 +146,116 @@ impl SnapshotCache {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FadeCompletion {
+    Pause,
+    Stop,
+}
+
+/// Bridge-thread-only transport envelope. The blocking engine already applies a perceptual
+/// `volume^2` master gain, so the temporary control value uses `sqrt(envelope)` to keep the
+/// transport fade itself linear in amplitude. The sin² interpolation gives zero slope at both
+/// endpoints and can be reversed mid-fade without a discontinuity.
+struct TransportFade {
+    master_volume: f32,
+    current_gain: f32,
+    start_gain: f32,
+    target_gain: f32,
+    started_at: Instant,
+    active: bool,
+    completion: Option<FadeCompletion>,
+    last_sent_control: f32,
+}
+
+impl TransportFade {
+    fn new(master_volume: f32) -> Self {
+        let master_volume = master_volume.clamp(0.0, 1.0);
+        Self {
+            master_volume,
+            current_gain: 0.0,
+            start_gain: 0.0,
+            target_gain: 0.0,
+            started_at: Instant::now(),
+            active: false,
+            completion: None,
+            last_sent_control: master_volume,
+        }
+    }
+
+    fn curve(progress: f32) -> f32 {
+        let phase = progress.clamp(0.0, 1.0) * FRAC_PI_2;
+        let value = phase.sin();
+        value * value
+    }
+
+    fn control_volume(&self) -> f32 {
+        (self.master_volume * self.current_gain.clamp(0.0, 1.0).sqrt()).clamp(0.0, 1.0)
+    }
+
+    fn send_current(&mut self, engine: &BlockingAudioEngine, force: bool) {
+        let control = self.control_volume();
+        if force || (control - self.last_sent_control).abs() >= 1.0e-4 {
+            let _ = engine.try_send(PlayerCommand::SetVolume(control));
+            self.last_sent_control = control;
+        }
+    }
+
+    fn set_master_volume(&mut self, volume: f32, engine: &BlockingAudioEngine) {
+        self.master_volume = volume.clamp(0.0, 1.0);
+        self.send_current(engine, true);
+    }
+
+    fn force_gain(&mut self, gain: f32, engine: &BlockingAudioEngine) {
+        let gain = gain.clamp(0.0, 1.0);
+        self.current_gain = gain;
+        self.start_gain = gain;
+        self.target_gain = gain;
+        self.active = false;
+        self.completion = None;
+        self.send_current(engine, true);
+    }
+
+    fn fade_to(&mut self, target_gain: f32, completion: Option<FadeCompletion>) {
+        self.start_gain = self.current_gain;
+        self.target_gain = target_gain.clamp(0.0, 1.0);
+        self.started_at = Instant::now();
+        self.active = (self.start_gain - self.target_gain).abs() > 1.0e-5;
+        self.completion = completion;
+    }
+
+    fn tick(&mut self, engine: &BlockingAudioEngine) -> bool {
+        if self.active {
+            let progress = (self.started_at.elapsed().as_secs_f32()
+                / TRANSPORT_FADE_DURATION.as_secs_f32())
+                .clamp(0.0, 1.0);
+            let shaped = Self::curve(progress);
+            self.current_gain =
+                self.start_gain + (self.target_gain - self.start_gain) * shaped;
+            self.send_current(engine, false);
+            if progress >= 1.0 {
+                self.current_gain = self.target_gain;
+                self.active = false;
+                self.send_current(engine, true);
+            }
+        }
+
+        if !self.active {
+            if let Some(completion) = self.completion.take() {
+                match completion {
+                    FadeCompletion::Pause => {
+                        let _ = engine.try_send(PlayerCommand::Pause);
+                    }
+                    FadeCompletion::Stop => {
+                        let _ = engine.try_send(PlayerCommand::Stop);
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+}
+
 impl AudioEngine {
     pub fn new(volume: f32, eq: EqSettings, spatial: SpatialSettings) -> Result<Self> {
         Self::new_with_device(None, volume, eq, spatial)
@@ -193,6 +305,7 @@ impl AudioEngine {
                     event_tx,
                     worker_snapshot,
                     worker_running,
+                    volume,
                 );
             })
             .context("创建音频 UI 桥接线程失败")?;
@@ -266,16 +379,18 @@ fn run_bridge(
     event_tx: Sender<PlayerEvent>,
     snapshot: Arc<SnapshotCache>,
     running: Arc<AtomicBool>,
+    initial_volume: f32,
 ) {
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
     let mut last_snapshot = Instant::now() - STRUCTURAL_SNAPSHOT_INTERVAL;
+    let mut transport_fade = TransportFade::new(initial_volume);
 
     while running.load(Ordering::Acquire) {
         let mut refresh_snapshot = false;
         match request_rx.recv_timeout(Duration::from_millis(4)) {
             Ok(request) => {
                 refresh_snapshot |= request_refreshes_snapshot(&request);
-                if !apply_request(&engine, request) {
+                if !apply_request(&engine, request, &mut transport_fade) {
                     break;
                 }
             }
@@ -289,11 +404,13 @@ fn run_bridge(
                 break;
             };
             refresh_snapshot |= request_refreshes_snapshot(&request);
-            if !apply_request(&engine, request) {
+            if !apply_request(&engine, request, &mut transport_fade) {
                 running.store(false, Ordering::Release);
                 break;
             }
         }
+
+        refresh_snapshot |= transport_fade.tick(&engine);
 
         for event in engine.drain_events() {
             if !matches!(event, PlayerEvent::PositionChanged(_)) {
@@ -309,7 +426,11 @@ fn run_bridge(
         }
 
         if refresh_snapshot || last_snapshot.elapsed() >= STRUCTURAL_SNAPSHOT_INTERVAL {
-            snapshot.store(engine.snapshot());
+            let mut current = engine.snapshot();
+            // The blocking engine sees the temporary transport control volume while fading. Keep
+            // the UI-facing structural snapshot pinned to the user's real master-volume setting.
+            current.volume = transport_fade.master_volume;
+            snapshot.store(current);
             last_snapshot = Instant::now();
         }
     }
@@ -326,10 +447,78 @@ fn request_refreshes_snapshot(request: &EngineRequest) -> bool {
     }
 }
 
-fn apply_request(engine: &BlockingAudioEngine, request: EngineRequest) -> bool {
+fn apply_request(
+    engine: &BlockingAudioEngine,
+    request: EngineRequest,
+    transport_fade: &mut TransportFade,
+) -> bool {
     match request {
         EngineRequest::Command(command) => {
-            let _ = engine.try_send(command);
+            match command {
+                PlayerCommand::SetVolume(volume) => {
+                    transport_fade.set_master_volume(volume, engine);
+                }
+                PlayerCommand::Pause => {
+                    if engine.progress().0 == PlaybackState::Playing {
+                        transport_fade.fade_to(0.0, Some(FadeCompletion::Pause));
+                    } else {
+                        transport_fade.force_gain(0.0, engine);
+                        let _ = engine.try_send(PlayerCommand::Pause);
+                    }
+                }
+                PlayerCommand::Stop => {
+                    if engine.progress().0 == PlaybackState::Playing {
+                        transport_fade.fade_to(0.0, Some(FadeCompletion::Stop));
+                    } else {
+                        transport_fade.force_gain(0.0, engine);
+                        let _ = engine.try_send(PlayerCommand::Stop);
+                    }
+                }
+                PlayerCommand::Play => {
+                    let actual_state = engine.progress().0;
+                    if transport_fade.completion.is_none()
+                        && actual_state != PlaybackState::Playing
+                    {
+                        transport_fade.force_gain(0.0, engine);
+                    }
+                    transport_fade.completion = None;
+                    let _ = engine.try_send(PlayerCommand::Play);
+                    transport_fade.fade_to(1.0, None);
+                }
+                PlayerCommand::PlayTrack(track_id) => {
+                    transport_fade.force_gain(0.0, engine);
+                    let _ = engine.try_send(PlayerCommand::PlayTrack(track_id));
+                    transport_fade.fade_to(1.0, None);
+                }
+                PlayerCommand::Next => {
+                    transport_fade.force_gain(0.0, engine);
+                    let _ = engine.try_send(PlayerCommand::Next);
+                    transport_fade.fade_to(1.0, None);
+                }
+                PlayerCommand::Previous => {
+                    transport_fade.force_gain(0.0, engine);
+                    let _ = engine.try_send(PlayerCommand::Previous);
+                    transport_fade.fade_to(1.0, None);
+                }
+                PlayerCommand::RestoreTrack {
+                    track_id,
+                    position,
+                    play,
+                } => {
+                    transport_fade.force_gain(0.0, engine);
+                    let _ = engine.try_send(PlayerCommand::RestoreTrack {
+                        track_id,
+                        position,
+                        play,
+                    });
+                    if play {
+                        transport_fade.fade_to(1.0, None);
+                    }
+                }
+                other => {
+                    let _ = engine.try_send(other);
+                }
+            }
             true
         }
         EngineRequest::RegisterTracks(tracks) => {
@@ -411,5 +600,20 @@ mod tests {
         cache.store(source);
         let loaded = cache.snapshot();
         assert!(Arc::ptr_eq(&loaded.queue, &queue));
+    }
+
+    #[test]
+    fn transport_curve_is_smooth_at_both_endpoints() {
+        assert_eq!(TransportFade::curve(0.0), 0.0);
+        assert!((TransportFade::curve(1.0) - 1.0).abs() < 1.0e-6);
+        let midpoint = TransportFade::curve(0.5);
+        assert!((midpoint - 0.5).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn transport_gain_compensates_engine_perceptual_volume_curve() {
+        let mut fade = TransportFade::new(0.4);
+        fade.current_gain = 0.25;
+        assert!((fade.control_volume() - 0.2).abs() < 1.0e-6);
     }
 }
