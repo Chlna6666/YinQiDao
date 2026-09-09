@@ -8,6 +8,7 @@ pub struct Vec3 {
 impl Vec3 {
     pub const ZERO: Self = Self::new(0.0, 0.0, 0.0);
     pub const FORWARD: Self = Self::new(0.0, 0.0, 1.0);
+    pub const BACK: Self = Self::new(0.0, 0.0, -1.0);
     pub const UP: Self = Self::new(0.0, 1.0, 0.0);
     pub const RIGHT: Self = Self::new(1.0, 0.0, 0.0);
     pub const LEFT: Self = Self::new(-1.0, 0.0, 0.0);
@@ -180,5 +181,6 @@ mod tests {
         let value = Vec3::RIGHT + Vec3::FORWARD * 2.0;
         assert_eq!(value, Vec3::new(1.0, 0.0, 2.0));
         assert_eq!(0.5 * value, Vec3::new(0.5, 0.0, 1.0));
+        assert_eq!(Vec3::BACK, Vec3::new(0.0, 0.0, -1.0));
     }
 }
