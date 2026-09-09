@@ -46,6 +46,8 @@
 - [x] 正常 10/12ch 路径旁路旧 `binaural_downmix_into()`。
 - [x] native multichannel 禁止再次进入 stereo spatial。
 - [x] native engine 按 input sample-rate 缓存。
+- [x] stereo/native 共用单一 `SpatialSettings → EnvironmentSettings` 映射；关闭 Spatial 时 native 仍保留必要 binaural/pinna，但 synthetic Early/FDN `mix=0`。
+- [x] native engine 缓存最后一次 environment，只有参数变化才更新六面反射/FDN 参数，不在每个 decode chunk 重算。
 - [x] seek / reopen / processing discontinuity reset EQ、resampler、native/stereo spatial、pinna 与 late-field state。
 - [x] transport generation 使用 audio-worker thread-local。
 - [x] Static / Immersive3d 使用 stereo L/R front-arc virtual source。
@@ -104,6 +106,7 @@
 - [x] FDN 只在所有 source 汇合后的最终 stereo block 运行一次；native layout 先 normalization 再激励尾场。
 - [x] FDN 使用独立 L/R 正交 injection vectors，保留纯 Side/反相 stereo 的 late-field 激励，不先 collapse 为 mono。
 - [x] `environment.mix=0` 为 late-field bit-exact bypass；room-size 改变/reset 清理旧 tail history。
+- [x] native 5.1.4/7.1.4 在 Spatial 启用时使用同一六面 Early + FDN room，保持 authored speaker geometry，不启动 stereo motion。
 - [ ] absolute room transform / listener-room position；当前仍为 listener-centered room。
 - [ ] Audio Vivid object metadata 接入。
 - [ ] HOA 参数化 binaural path。
@@ -124,8 +127,10 @@
 - [x] Floor/Ceiling 使用与 DSP 相同的 room height 与真实 bounce path，可在 3D 中直接观察上下反射。
 - [x] mesh id 稳定，以 generation 刷新 GPU cache；UI 约 30 Hz 更新。
 - [x] 3D Camera yaw/pitch/zoom/reset。
+- [x] Pinna telemetry 复用 realtime cue generator：center/Q/depth/cue strength/L-R notch。
+- [x] FDN telemetry 复用 realtime parameter derivation：wet/feedback/damping cutoff/delay range。
+- [x] GPU 3D 明确区分 Early/Late：离散彩色折线路径代表六面 image-source Early，监听者周围半透明多层 volume 代表 FDN Late。
 - [ ] object ID / Audio Vivid metadata 可视化。
-- [ ] pinna notch center/depth、late-field wet/feedback/damping/energy telemetry。
 
 ## Phase 6 — 音频 GPU Compute（暂缓）
 
@@ -144,13 +149,19 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 现有源码 case：32 / 64 / 128 frames 的 stereo static、Orbit360、FigureEight/Orbit8d、5.1.4、7.1.4。
 
-下一批必须增加：
+已加入用于当前决策的 64-frame 对照：
 
-- environment mix=0/0.10/0.30；
-- 4-wall baseline vs 6-wall early-reflection cost；
-- pinna off/on 的 stereo static / trajectory / 5.1.4 / 7.1.4 cost；
-- FDN off/on 与 `mix=0` bypass cost；
-- Debug off/on；
+- dry baseline：stereo / Orbit360 / 5.1.4 / 7.1.4；
+- `environment.mix=0.10`：stereo / Orbit360 / 7.1.4；
+- `environment.mix=0.30`：stereo / 7.1.4；
+- Debug off/on：stereo 与 7.1.4；
+- 每个 case 输出 avg/p50/p95/p99/worst 与 audio deadline budget；
+- direct pinna 始终属于 FullRange baseline，room case 增加六面 Early + 全局 FDN。
+
+仍需后续增加：
+
+- 可切 pinna off/on 的精确边际成本（当前 pinna 属于 baseline）；
+- reflection-pinna prototype cost；
 - 16/32/64 future objects；
 - AVS3 7.1.4 end-to-end。
 
@@ -175,8 +186,9 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一步
 
-1. 实际 `cargo check/test`，优先修复 pinna / FDN / GPUI 3D V2 的 type/API 问题。
-2. Audio Laboratory 增加 pinna notch center/depth、FDN wet/feedback/damping/late-energy telemetry，并在 GPU 3D 场景区分 early/late field。
-3. 增加 pinna + 6-wall + FDN 的 serial benchmark；依据数据决定 reflection-pinna、tap audibility budget 与 realtime worker pool。
-4. 完成 channel-order conformance + headroom/limiter 标定后删除 legacy stereo renderer。
-5. 再推进 absolute room transform、listener runtime orientation 与 Audio Vivid object metadata。
+1. 实际 `cargo check/test`，优先修复 pinna / FDN / GPUI 3D V2 / native-room 的 type/API 问题。
+2. 完成 channel-order conformance vectors，确保 AVS3 5.1.4/7.1.4 authored slot 与 `SpeakerLayout` 一致。
+3. 做 headroom / limiter 标定：避免六面 Early + FDN 后仅靠最终 hard clamp 产生瞬态削顶。
+4. 实际跑 serial benchmark；依据数据决定 reflection-pinna、tap audibility budget 与 realtime worker pool。
+5. 验证稳定后删除 legacy stereo renderer/fallback。
+6. 再推进 absolute room transform、listener runtime orientation 与 Audio Vivid object metadata。
