@@ -106,6 +106,11 @@ struct BiquadState {
 impl BiquadState {
     #[inline]
     fn process(&mut self, input: f32, coefficients: BiquadCoefficients) -> f32 {
+        if !input.is_finite() {
+            self.reset();
+            return 0.0;
+        }
+
         let output = coefficients.b0.mul_add(input, self.z1);
         let z1 = coefficients
             .b1
@@ -118,7 +123,7 @@ impl BiquadState {
             output
         } else {
             self.reset();
-            input
+            0.0
         }
     }
 
@@ -327,13 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn filter_state_recovers_from_non_finite_input() {
+    fn filter_state_isolates_non_finite_input() {
         let mut state = StereoPinnaState::default();
         let coefficients = coefficients_for_direction(48_000.0, PI, 0.0, 0.0);
         let (left, right) = state.process(f32::NAN, f32::INFINITY, coefficients);
-        assert!(left.is_nan());
-        assert!(right.is_infinite());
-        state.reset();
+        assert_eq!(left, 0.0);
+        assert_eq!(right, 0.0);
         let (left, right) = state.process(0.25, -0.25, coefficients);
         assert!(left.is_finite());
         assert!(right.is_finite());
