@@ -148,8 +148,13 @@ impl ListenerPose {
         }
     }
 
+    /// Return an orthonormal listener-local `(right, up, forward)` basis.
+    ///
+    /// This is public because application-side spatial diagnostics and GPU debug visualization need
+    /// to project exactly the same listener frame as the realtime renderer instead of duplicating the
+    /// basis construction formula outside the spatial crate.
     #[inline]
-    pub(crate) fn basis(self) -> (Vec3, Vec3, Vec3) {
+    pub fn basis(self) -> (Vec3, Vec3, Vec3) {
         let forward = self.forward.normalized_or(Vec3::FORWARD);
         let up_hint = self.up.normalized_or(Vec3::UP);
         let right = up_hint.cross(forward).normalized_or(Vec3::RIGHT);
