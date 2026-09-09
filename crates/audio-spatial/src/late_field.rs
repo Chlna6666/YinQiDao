@@ -15,6 +15,28 @@ const RIGHT_INPUT_SIGNS: [f32; FDN_LINES] = [1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1
 const LEFT_SIGNS: [f32; FDN_LINES] = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0];
 const RIGHT_SIGNS: [f32; FDN_LINES] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LateFieldTelemetry {
+    pub active: bool,
+    pub wet_gain: f32,
+    pub feedback_gain: f32,
+    pub damping_cutoff_hz: f32,
+    pub damping_alpha: f32,
+    pub minimum_delay_ms: f32,
+    pub maximum_delay_ms: f32,
+    pub room_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LateFieldParameters {
+    settings: EnvironmentSettings,
+    room_scale: f32,
+    damping_cutoff_hz: f32,
+    damping_alpha: f32,
+    feedback_gain: f32,
+    wet_gain: f32,
+}
+
 #[derive(Clone, Debug)]
 struct LateDelayLine {
     buffer: Vec<f32>,
@@ -88,26 +110,22 @@ impl LateDiffuseField {
     }
 
     pub(crate) fn set_environment(&mut self, settings: EnvironmentSettings) {
-        let settings = sanitize_settings(settings);
-        let room_changed = (settings.room_size - self.settings.room_size).abs() > 1.0e-4;
-        let disabled = settings.mix <= LATE_FIELD_EPSILON;
-        self.settings = settings;
+        let parameters = derive_parameters(self.sample_rate, settings);
+        let room_changed =
+            (parameters.settings.room_size - self.settings.room_size).abs() > 1.0e-4;
+        let disabled = parameters.settings.mix <= LATE_FIELD_EPSILON;
+        self.settings = parameters.settings;
 
-        let room_scale = 0.72 + settings.room_size * 0.45;
         let capacity = self.lines[0].buffer.len();
         for (index, delay_seconds) in DELAY_SECONDS.into_iter().enumerate() {
-            self.delay_samples[index] = ((delay_seconds * room_scale * self.sample_rate).round()
-                as usize)
+            self.delay_samples[index] = ((delay_seconds * parameters.room_scale * self.sample_rate)
+                .round() as usize)
                 .clamp(8, capacity.saturating_sub(1).max(8));
         }
 
-        let max_cutoff_hz = (self.sample_rate * 0.45).max(120.0);
-        let min_cutoff_hz = 3_800.0_f32.min(max_cutoff_hz * 0.80);
-        let cutoff_hz = (13_500.0 - settings.damping * 9_000.0)
-            .clamp(min_cutoff_hz, max_cutoff_hz);
-        self.damping_alpha = 1.0 - (-2.0 * PI * cutoff_hz / self.sample_rate).exp();
-        self.feedback_gain = (0.56 + settings.room_size * 0.23).clamp(0.50, 0.82);
-        self.wet_gain = settings.mix * 0.38;
+        self.damping_alpha = parameters.damping_alpha;
+        self.feedback_gain = parameters.feedback_gain;
+        self.wet_gain = parameters.wet_gain;
 
         // Changing active delay lengths reads a different part of the fixed history. Resetting on
         // room-size edits avoids turning that control change into a discontinuous old-tail splice.
@@ -156,6 +174,49 @@ impl LateDiffuseField {
         for line in &mut self.lines {
             line.reset();
         }
+    }
+}
+
+/// Read-only projection of the exact environment-derived parameters used by LateDiffuseField.
+pub fn late_field_telemetry(
+    sample_rate: u32,
+    settings: EnvironmentSettings,
+) -> LateFieldTelemetry {
+    let sample_rate = sample_rate.max(1) as f32;
+    let parameters = derive_parameters(sample_rate, settings);
+    let minimum_delay_ms = DELAY_SECONDS[0] * parameters.room_scale * 1_000.0;
+    let maximum_delay_ms = DELAY_SECONDS[FDN_LINES - 1] * parameters.room_scale * 1_000.0;
+    LateFieldTelemetry {
+        active: parameters.wet_gain > LATE_FIELD_EPSILON,
+        wet_gain: parameters.wet_gain,
+        feedback_gain: parameters.feedback_gain,
+        damping_cutoff_hz: parameters.damping_cutoff_hz,
+        damping_alpha: parameters.damping_alpha,
+        minimum_delay_ms,
+        maximum_delay_ms,
+        room_scale: parameters.room_scale,
+    }
+}
+
+#[inline]
+fn derive_parameters(sample_rate: f32, settings: EnvironmentSettings) -> LateFieldParameters {
+    let sample_rate = finite_or_zero(sample_rate).max(1.0);
+    let settings = sanitize_settings(settings);
+    let room_scale = 0.72 + settings.room_size * 0.45;
+    let max_cutoff_hz = (sample_rate * 0.45).max(120.0);
+    let min_cutoff_hz = 3_800.0_f32.min(max_cutoff_hz * 0.80);
+    let damping_cutoff_hz = (13_500.0 - settings.damping * 9_000.0)
+        .clamp(min_cutoff_hz, max_cutoff_hz);
+    let damping_alpha = 1.0 - (-2.0 * PI * damping_cutoff_hz / sample_rate).exp();
+    let feedback_gain = (0.56 + settings.room_size * 0.23).clamp(0.50, 0.82);
+    let wet_gain = settings.mix * 0.38;
+    LateFieldParameters {
+        settings,
+        room_scale,
+        damping_cutoff_hz,
+        damping_alpha,
+        feedback_gain,
+        wet_gain,
     }
 }
 
@@ -285,6 +346,21 @@ mod tests {
             .map(|(left, right)| left * right)
             .sum();
         assert_eq!(dot, 0.0);
+    }
+
+    #[test]
+    fn public_telemetry_uses_same_derived_parameters() {
+        let settings = EnvironmentSettings {
+            mix: 0.20,
+            room_size: 0.60,
+            damping: 0.35,
+        };
+        let telemetry = late_field_telemetry(48_000, settings);
+        let parameters = derive_parameters(48_000.0, settings);
+        assert_eq!(telemetry.wet_gain, parameters.wet_gain);
+        assert_eq!(telemetry.feedback_gain, parameters.feedback_gain);
+        assert_eq!(telemetry.damping_cutoff_hz, parameters.damping_cutoff_hz);
+        assert!(telemetry.maximum_delay_ms > telemetry.minimum_delay_ms);
     }
 
     #[test]
