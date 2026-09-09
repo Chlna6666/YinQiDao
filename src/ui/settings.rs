@@ -17,29 +17,134 @@ use super::{
     },
 };
 
+#[derive(Default)]
+struct SettingsNavigationState {
+    scroll: gpui::ScrollHandle,
+}
+
+impl gpui::Global for SettingsNavigationState {}
+
+fn settings_scroll_handle(cx: &mut Context<MusicApp>) -> gpui::ScrollHandle {
+    if !cx.has_global::<SettingsNavigationState>() {
+        cx.set_global(SettingsNavigationState::default());
+    }
+    cx.try_global::<SettingsNavigationState>()
+        .map(|state| state.scroll.clone())
+        .unwrap_or_default()
+}
+
 pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
+    let scroll = settings_scroll_handle(cx);
+
     div()
-        .id("settings-scroll")
+        .id("settings-page")
         .size_full()
-        .overflow_y_scroll()
+        .min_h(px(0.0))
         .flex()
         .flex_col()
-        .p_8()
-        .gap_8()
-        .child(header(app))
-        .child(audio_device_group(app, cx))
-        .child(smart_audio_group(app, cx))
-        .child(eq_group(app, cx))
-        .child(spatial_group(app, cx))
-        .child(audio_laboratory_group(app, cx))
-        .child(track_transition_group(app, cx))
-        .child(desktop_lyrics_group(app, cx))
-        .child(global_shortcuts_group(app, cx))
-        .child(directories_group(app, cx))
-        .child(online_group(app, cx))
-        .child(appearance_group(app, cx))
-        .child(log_group(app, cx))
+        .child(
+            div()
+                .flex_none()
+                .px_8()
+                .pt_6()
+                .pb_3()
+                .bg(rgb(0xfa_fb_fc))
+                .border_b_1()
+                .border_color(BORDER_HAIRLINE)
+                .child(header(app))
+                .child(div().mt_4().child(settings_tabs(&scroll, cx))),
+        )
+        .child(
+            div()
+                .id("settings-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                // Keep the ordinary page scrollbar on the right. It is both a position indicator
+                // and a direct drag target; the tab strip therefore does not need a second progress
+                // rail competing for vertical space.
+                .scrollbar_width(px(9.0))
+                .track_scroll(&scroll)
+                .flex()
+                .flex_col()
+                .px_8()
+                .pt_5()
+                .pb_8()
+                .gap_8()
+                .on_scroll_wheel(cx.listener(|_this, _, _, cx| cx.notify()))
+                .child(audio_device_group(app, cx))
+                .child(smart_audio_group(app, cx))
+                .child(eq_group(app, cx))
+                .child(spatial_group(app, cx))
+                .child(audio_laboratory_group(app, cx))
+                .child(track_transition_group(app, cx))
+                .child(desktop_lyrics_group(app, cx))
+                .child(global_shortcuts_group(app, cx))
+                .child(directories_group(app, cx))
+                .child(online_group(app, cx))
+                .child(appearance_group(app, cx))
+                .child(log_group(app, cx)),
+        )
         .into_any_element()
+}
+
+fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> impl IntoElement {
+    let active = match scroll.top_item() {
+        0 | 1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        6 => 5,
+        7..=9 => 6,
+        _ => 7,
+    };
+    let tabs = [
+        ("音频", 0usize),
+        ("EQ", 2),
+        ("空间", 3),
+        ("实验室", 4),
+        ("播放", 5),
+        ("歌词", 6),
+        ("系统", 7),
+        ("外观 / 诊断", 10),
+    ];
+
+    let mut row = div().flex().flex_wrap().items_center().gap_2();
+    for (index, (label, target)) in tabs.into_iter().enumerate() {
+        let selected = index == active;
+        let handle = scroll.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("settings-tab-{index}")))
+                .px_3()
+                .py_1p5()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(if selected {
+                    ACCENT_RED.into()
+                } else {
+                    theme::bg_hover()
+                })
+                .border_1()
+                .border_color(if selected { ACCENT_RED } else { BORDER_CARD })
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if selected { TEXT_WHITE } else { TEXT_PRIMARY })
+                .hover(|style| style.opacity(0.88))
+                .transition(press_transition())
+                .active(|style| style.scale(0.96))
+                .child(label)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |_this, _, _, cx| {
+                        handle.scroll_to_top_of_item(target);
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
+    row
 }
 
 fn header(app: &MusicApp) -> impl IntoElement {
