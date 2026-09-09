@@ -1,3 +1,4 @@
+use std::f32::consts::PI;
 use std::f64::consts::TAU;
 
 use crate::{SourcePose, Vec3};
@@ -89,12 +90,21 @@ impl Trajectory {
         let sin2 = 2.0 * sin * cos;
         let (x, y, z, distance_scale) = match self.kind {
             TrajectoryKind::Orbit360 => (sin, self.elevation, cos, 1.0),
-            TrajectoryKind::FigureEight => (
-                sin,
-                self.elevation + sin2 * 0.18,
-                cos * sin,
-                0.82 + 0.18 * cos.abs(),
-            ),
+            // Use an angular lemniscate instead of normalizing (sin, sin*cos). The previous
+            // formulation collapsed toward the origin at the crossover and normalization then
+            // turned that near-zero vector into an abrupt direction jump. Sweeping azimuth across
+            // almost the complete rear hemisphere keeps source distance finite while retaining the
+            // characteristic two-lobe 8D path and a modest vertical component.
+            TrajectoryKind::FigureEight => {
+                let azimuth = sin * (PI * 0.94);
+                let (azimuth_sin, azimuth_cos) = azimuth.sin_cos();
+                (
+                    azimuth_sin,
+                    self.elevation + sin2 * 0.24,
+                    azimuth_cos,
+                    0.76 + 0.24 * cos.abs(),
+                )
+            }
             TrajectoryKind::Pendulum => (sin, self.elevation, 0.72, 0.86 + 0.14 * cos.abs()),
             TrajectoryKind::FrontBack => (sin * 0.14, self.elevation, cos, 0.90 + 0.10 * sin.abs()),
             TrajectoryKind::Planetary => (
@@ -170,6 +180,18 @@ mod tests {
         let expected = std::f32::consts::TAU * 0.5;
         assert!((speed - expected).abs() < 0.01);
         assert!(pose.position.dot(pose.velocity).abs() < 0.001);
+    }
+
+    #[test]
+    fn figure_eight_keeps_finite_radius_and_reaches_the_rear_hemisphere() {
+        let trajectory = Trajectory::new(TrajectoryKind::FigureEight, 48_000, 0.5, 1.0, 0.0);
+        let front = trajectory.pose_at(0);
+        let rear_lobe = trajectory.pose_at(24_000);
+        let crossover = trajectory.pose_at(48_000);
+        assert!(front.position.length() > 0.70);
+        assert!(rear_lobe.position.length() > 0.70);
+        assert!(crossover.position.length() > 0.70);
+        assert!(rear_lobe.position.z < -0.70);
     }
 
     #[test]

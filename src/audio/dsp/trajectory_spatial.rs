@@ -10,10 +10,10 @@ use yinqidao_audio_spatial::{
 
 const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
 const TRAJECTORY_RADIUS_RANGE_METERS: f32 = 0.85;
-const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 12.0;
-const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 38.0;
-const MIN_STEREO_DISTANCE_METERS: f32 = 0.80;
-const STEREO_DISTANCE_RANGE_METERS: f32 = 2.20;
+const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 16.0;
+const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 44.0;
+const MIN_STEREO_DISTANCE_METERS: f32 = 0.72;
+const STEREO_DISTANCE_RANGE_METERS: f32 = 2.00;
 const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
 const STEREO_SOURCE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
@@ -87,17 +87,19 @@ struct StereoField {
 impl StereoField {
     fn from_settings(settings: &SpatialSettings) -> Self {
         let effective_width =
-            settings.width.clamp(0.0, 1.0) * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.30);
+            settings.width.clamp(0.0, 1.0) * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
         let half_angle_degrees =
             MIN_STEREO_HALF_ANGLE_DEGREES + effective_width * STEREO_HALF_ANGLE_RANGE_DEGREES;
         let (half_angle_sin, half_angle_cos) = half_angle_degrees.to_radians().sin_cos();
         let distance_meters = MIN_STEREO_DISTANCE_METERS
             + settings.distance.clamp(0.0, 1.0) * STEREO_DISTANCE_RANGE_METERS
-            + settings.depth.clamp(0.0, 1.0) * 0.30;
-        let spread = (0.06
-            + settings.immersive_3d.clamp(0.0, 1.0) * 0.24
-            + settings.crossfeed.clamp(0.0, 1.0) * 0.12)
-            .clamp(0.0, 0.45);
+            + settings.depth.clamp(0.0, 1.0) * 0.24;
+        // `spread` intentionally stays conservative. Large spread values weaken the directional
+        // pinna cue, which made the previous strong presets paradoxically sound less localized.
+        let spread = (0.035
+            + settings.immersive_3d.clamp(0.0, 1.0) * 0.14
+            + settings.crossfeed.clamp(0.0, 1.0) * 0.07)
+            .clamp(0.0, 0.25);
         Self {
             half_angle_sin,
             half_angle_cos,
@@ -206,10 +208,7 @@ impl StereoSpatializer {
             trajectory_signature,
         );
 
-        let wet_mix = match trajectory_signature {
-            Some(_) => settings.mix.clamp(0.0, 1.0) * settings.motion_intensity.clamp(0.0, 1.0),
-            None => settings.mix.clamp(0.0, 1.0),
-        };
+        let wet_mix = stereo_wet_mix(settings, trajectory_signature.is_some());
         if wet_mix <= 1.0e-5 {
             return true;
         }
@@ -295,6 +294,18 @@ impl StereoSpatializer {
 }
 
 #[inline]
+fn stereo_wet_mix(settings: &SpatialSettings, dynamic: bool) -> f32 {
+    let mix = settings.mix.clamp(0.0, 1.0);
+    if !dynamic {
+        return mix;
+    }
+    // Motion intensity should shape the trajectory contribution, not multiply the complete spatial
+    // path nearly out of existence. Keep a strong direct binaural bed and let intensity provide the
+    // final 18% of dynamic wet strength.
+    mix * (0.82 + settings.motion_intensity.clamp(0.0, 1.0) * 0.18)
+}
+
+#[inline]
 fn trajectory_segment_frames(
     sample_rate: u32,
     block_frames: usize,
@@ -357,6 +368,14 @@ mod tests {
         let settings = SpatialPreset::Orbit8d.settings();
         let signature = TrajectorySignature::from_settings(&settings).expect("dynamic");
         assert_eq!(signature.kind, TrajectoryKind::FigureEight);
+    }
+
+    #[test]
+    fn dynamic_mix_no_longer_collapses_the_binaural_bed() {
+        let settings = SpatialPreset::Orbit8d.settings();
+        let wet = stereo_wet_mix(&settings, true);
+        assert!(wet > settings.mix * settings.motion_intensity);
+        assert!(wet <= settings.mix);
     }
 
     #[test]
