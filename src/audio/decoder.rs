@@ -566,6 +566,8 @@ fn channel_configuration_to_spatial_layout(
     configuration: Option<ChannelConfiguration>,
 ) -> Option<ChannelLayout> {
     match configuration? {
+        ChannelConfiguration::Surround5_1 => Some(ChannelLayout::Surround5_1),
+        ChannelConfiguration::Surround7_1 => Some(ChannelLayout::Surround7_1),
         ChannelConfiguration::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
         ChannelConfiguration::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
         // 7.1.2 is also 10 channels. It must remain explicit unsupported here rather than being
@@ -732,7 +734,15 @@ mod tests {
     }
 
     #[test]
-    fn avs3_channel_configuration_maps_only_unambiguous_native_height_beds() {
+    fn avs3_channel_configuration_preserves_supported_native_beds() {
+        assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround5_1)),
+            Some(ChannelLayout::Surround5_1)
+        );
+        assert_eq!(
+            channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround7_1)),
+            Some(ChannelLayout::Surround7_1)
+        );
         assert_eq!(
             channel_configuration_to_spatial_layout(Some(ChannelConfiguration::Surround5_1_4)),
             Some(ChannelLayout::Surround5_1_4)
