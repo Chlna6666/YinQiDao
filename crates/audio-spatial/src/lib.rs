@@ -12,6 +12,7 @@ mod engine;
 mod environment;
 mod error;
 mod image_source;
+mod late_field;
 mod layout;
 mod pinna;
 mod pose;
