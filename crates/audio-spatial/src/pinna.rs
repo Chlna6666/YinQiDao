@@ -17,6 +17,13 @@ pub struct PinnaCueTelemetry {
     pub right_shoulder_center_hz: f32,
     pub left_shoulder_gain_db: f32,
     pub right_shoulder_gain_db: f32,
+    pub ridge_center_hz: f32,
+    pub ridge_q: f32,
+    pub ridge_gain_db: f32,
+    pub left_ridge_center_hz: f32,
+    pub right_ridge_center_hz: f32,
+    pub left_ridge_gain_db: f32,
+    pub right_ridge_gain_db: f32,
     /// 0..1 normalized strength of the generic spectral cue. This is not a perceptual score.
     pub cue_strength: f32,
 }
@@ -85,10 +92,13 @@ pub(crate) struct StereoPinnaCoefficients {
     /// cache tests continue to describe the dominant pinna cue.
     pub(crate) left: BiquadCoefficients,
     pub(crate) right: BiquadCoefficients,
-    /// Secondary broad spectral shoulder. This adds a second independent sagittal cue without
-    /// pretending to be a measured HRTF filter bank.
+    /// Secondary broad spectral shoulder.
     pub(crate) left_shoulder: BiquadCoefficients,
     pub(crate) right_shoulder: BiquadCoefficients,
+    /// Third lower-frequency sagittal landmark. A signed gain distinguishes above/front from
+    /// below/rear without relying on another high-frequency notch.
+    pub(crate) left_ridge: BiquadCoefficients,
+    pub(crate) right_ridge: BiquadCoefficients,
 }
 
 impl StereoPinnaCoefficients {
@@ -97,6 +107,8 @@ impl StereoPinnaCoefficients {
         right: BiquadCoefficients::IDENTITY,
         left_shoulder: BiquadCoefficients::IDENTITY,
         right_shoulder: BiquadCoefficients::IDENTITY,
+        left_ridge: BiquadCoefficients::IDENTITY,
+        right_ridge: BiquadCoefficients::IDENTITY,
     };
 
     #[inline]
@@ -106,6 +118,8 @@ impl StereoPinnaCoefficients {
             right: self.right.step_to(end.right, frames),
             left_shoulder: self.left_shoulder.step_to(end.left_shoulder, frames),
             right_shoulder: self.right_shoulder.step_to(end.right_shoulder, frames),
+            left_ridge: self.left_ridge.step_to(end.left_ridge, frames),
+            right_ridge: self.right_ridge.step_to(end.right_ridge, frames),
         }
     }
 
@@ -115,6 +129,8 @@ impl StereoPinnaCoefficients {
         self.right.advance(step.right);
         self.left_shoulder.advance(step.left_shoulder);
         self.right_shoulder.advance(step.right_shoulder);
+        self.left_ridge.advance(step.left_ridge);
+        self.right_ridge.advance(step.right_ridge);
     }
 }
 
@@ -130,6 +146,8 @@ pub(crate) struct StereoPinnaCoefficientStep {
     right: BiquadCoefficientStep,
     left_shoulder: BiquadCoefficientStep,
     right_shoulder: BiquadCoefficientStep,
+    left_ridge: BiquadCoefficientStep,
+    right_ridge: BiquadCoefficientStep,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -169,14 +187,17 @@ impl BiquadState {
     }
 }
 
-/// Fixed-state direct-path pinna layer. The two cascaded biquads are deliberately generic and
-/// parametric; this is not a measured HRTF and does not depend on SOFA/KEMAR data.
+/// Fixed-state direct-path pinna layer. Three cascaded generic biquads provide a primary notch,
+/// broad shoulder and lower-frequency sagittal ridge. This is not a measured HRTF and does not
+/// depend on SOFA/KEMAR data.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct StereoPinnaState {
     left_notch: BiquadState,
     right_notch: BiquadState,
     left_shoulder: BiquadState,
     right_shoulder: BiquadState,
+    left_ridge: BiquadState,
+    right_ridge: BiquadState,
 }
 
 impl StereoPinnaState {
@@ -189,9 +210,11 @@ impl StereoPinnaState {
     ) -> (f32, f32) {
         let left = self.left_notch.process(left, coefficients.left);
         let right = self.right_notch.process(right, coefficients.right);
+        let left = self.left_shoulder.process(left, coefficients.left_shoulder);
+        let right = self.right_shoulder.process(right, coefficients.right_shoulder);
         (
-            self.left_shoulder.process(left, coefficients.left_shoulder),
-            self.right_shoulder.process(right, coefficients.right_shoulder),
+            self.left_ridge.process(left, coefficients.left_ridge),
+            self.right_ridge.process(right, coefficients.right_ridge),
         )
     }
 
@@ -200,6 +223,8 @@ impl StereoPinnaState {
         self.right_notch.reset();
         self.left_shoulder.reset();
         self.right_shoulder.reset();
+        self.left_ridge.reset();
+        self.right_ridge.reset();
     }
 }
 
@@ -211,6 +236,9 @@ struct PinnaCueShape {
     shoulder_center_hz: f32,
     shoulder_q: f32,
     shoulder_gain_db: f32,
+    ridge_center_hz: f32,
+    ridge_q: f32,
+    ridge_gain_db: f32,
     ear_lateral: f32,
 }
 
@@ -228,12 +256,11 @@ pub fn pinna_cue_telemetry(
     ))
 }
 
-/// Build generic pinna notch + shoulder cues from listener-local direction.
+/// Build generic pinna notch + shoulder + ridge cues from listener-local direction.
 ///
-/// `azimuth_radians > 0` means source-right. Rear sources move/deepen the primary notch while the
-/// broad shoulder adds an independent low-HF sagittal cue. Elevation shifts both structures across
-/// a deliberately wider frequency span than lateral ITD/ILD. This keeps front/rear and up/down
-/// localization audible on ordinary headphones without claiming a measured personal HRTF.
+/// `azimuth_radians > 0` means source-right. The high-frequency notch and broad shoulder retain
+/// strong rear/elevation separation, while the lower ridge gives the sagittal plane a third
+/// independent landmark. This remains a generic parametric approximation, not a personal HRTF.
 pub(crate) fn coefficients_for_direction(
     sample_rate: f32,
     azimuth_radians: f32,
@@ -261,6 +288,18 @@ pub(crate) fn coefficients_for_direction(
             cue.shoulder_q,
             cue.right_shoulder_gain_db,
         ),
+        left_ridge: peaking_coefficients(
+            sample_rate,
+            cue.left_ridge_center_hz,
+            cue.ridge_q,
+            cue.left_ridge_gain_db,
+        ),
+        right_ridge: peaking_coefficients(
+            sample_rate,
+            cue.right_ridge_center_hz,
+            cue.ridge_q,
+            cue.right_ridge_gain_db,
+        ),
     }
 }
 
@@ -275,6 +314,10 @@ fn telemetry_from_shape(shape: PinnaCueShape) -> PinnaCueTelemetry {
     let right_shoulder_center_hz = shape.shoulder_center_hz * (1.0 + lateral * 0.012);
     let left_shoulder_gain_db = shape.shoulder_gain_db * (1.0 - lateral * 0.05);
     let right_shoulder_gain_db = shape.shoulder_gain_db * (1.0 + lateral * 0.05);
+    let left_ridge_center_hz = shape.ridge_center_hz * (1.0 - lateral * 0.010);
+    let right_ridge_center_hz = shape.ridge_center_hz * (1.0 + lateral * 0.010);
+    let left_ridge_gain_db = shape.ridge_gain_db * (1.0 - lateral * 0.04);
+    let right_ridge_gain_db = shape.ridge_gain_db * (1.0 + lateral * 0.04);
     PinnaCueTelemetry {
         center_hz: shape.center_hz,
         q: shape.q,
@@ -291,7 +334,16 @@ fn telemetry_from_shape(shape: PinnaCueShape) -> PinnaCueTelemetry {
         right_shoulder_center_hz,
         left_shoulder_gain_db,
         right_shoulder_gain_db,
-        cue_strength: ((shape.depth_db / 6.0) * 0.72 + (shape.shoulder_gain_db / 2.8) * 0.28)
+        ridge_center_hz: shape.ridge_center_hz,
+        ridge_q: shape.ridge_q,
+        ridge_gain_db: shape.ridge_gain_db,
+        left_ridge_center_hz,
+        right_ridge_center_hz,
+        left_ridge_gain_db,
+        right_ridge_gain_db,
+        cue_strength: ((shape.depth_db / 6.0) * 0.62
+            + (shape.shoulder_gain_db / 2.8) * 0.23
+            + (shape.ridge_gain_db.abs() / 2.0) * 0.15)
             .clamp(0.0, 1.0),
     }
 }
@@ -327,8 +379,7 @@ fn cue_shape(azimuth_radians: f32, elevation_radians: f32, spread: f32) -> Pinna
             * sagittal_weight
             * spread_weight)
             .clamp(0.0, 6.0),
-        // The broad shoulder moves in the same sagittal direction but over a lower band, giving the
-        // ear two independent spectral landmarks instead of relying on one high-frequency notch.
+        // The broad shoulder occupies a lower band and moves with elevation/rear amount.
         shoulder_center_hz: (5_000.0 + elevation_sin * 1_600.0 - rear * 900.0)
             .clamp(2_800.0, 7_400.0),
         shoulder_q: (0.70 + rear * 0.20 + elevation_sin.abs() * 0.25).clamp(0.62, 1.30),
@@ -339,6 +390,16 @@ fn cue_shape(azimuth_radians: f32, elevation_radians: f32, spread: f32) -> Pinna
             * sagittal_weight
             * spread_weight)
             .clamp(0.0, 2.8),
+        // A third, substantially lower landmark intentionally uses signed gain. Above-front tends
+        // toward a gentle presence lift; below and rear directions become a shallow dip. The cue is
+        // kept below 2 dB so it reinforces localization instead of becoming an obvious tone control.
+        ridge_center_hz: (2_650.0 + elevation_sin * 850.0 - rear * 450.0)
+            .clamp(1_450.0, 3_900.0),
+        ridge_q: (0.62 + rear * 0.18 + elevation_sin.abs() * 0.20).clamp(0.55, 1.15),
+        ridge_gain_db: ((elevation_up * 1.65 - elevation_down * 1.10 - rear * 1.25)
+            * sagittal_weight
+            * spread_weight)
+            .clamp(-2.0, 1.8),
         ear_lateral: lateral_signed * (1.0 - spread * 0.70),
     }
 }
@@ -417,32 +478,38 @@ mod tests {
         assert!(rear.depth_db > front.depth_db + 3.0);
         assert!(rear.center_hz < front.center_hz - 2_000.0);
         assert!(rear.shoulder_gain_db > front.shoulder_gain_db + 0.7);
+        assert!(rear.ridge_center_hz < front.ridge_center_hz - 300.0);
+        assert!(rear.ridge_gain_db < front.ridge_gain_db - 1.0);
     }
 
     #[test]
-    fn elevation_moves_both_sagittal_features() {
+    fn elevation_moves_all_three_sagittal_features() {
         let above = cue_shape(0.0, PI * 0.35, 0.0);
         let below = cue_shape(0.0, -PI * 0.35, 0.0);
         assert!(above.center_hz > below.center_hz + 3_000.0);
         assert!(above.shoulder_center_hz > below.shoulder_center_hz + 2_000.0);
         assert!(above.shoulder_gain_db > below.shoulder_gain_db + 0.8);
+        assert!(above.ridge_center_hz > below.ridge_center_hz + 1_000.0);
+        assert!(above.ridge_gain_db > below.ridge_gain_db + 2.0);
         assert!(above.depth_db > 1.0);
         assert!(below.depth_db > 1.0);
     }
 
     #[test]
-    fn spread_reduces_both_pinna_cues() {
-        let focused = cue_shape(PI, 0.0, 0.0);
-        let diffuse = cue_shape(PI, 0.0, 1.0);
+    fn spread_reduces_all_pinna_cues() {
+        let focused = cue_shape(PI, PI * 0.20, 0.0);
+        let diffuse = cue_shape(PI, PI * 0.20, 1.0);
         assert!(diffuse.depth_db < focused.depth_db);
         assert!(diffuse.shoulder_gain_db < focused.shoulder_gain_db);
+        assert!(diffuse.ridge_gain_db.abs() < focused.ridge_gain_db.abs());
     }
 
     #[test]
     fn lateral_source_gets_per_ear_spectral_asymmetry() {
-        let coefficients = coefficients_for_direction(48_000.0, PI * 0.5, 0.0, 0.0);
+        let coefficients = coefficients_for_direction(48_000.0, PI * 0.5, PI * 0.15, 0.0);
         assert_ne!(coefficients.left, coefficients.right);
         assert_ne!(coefficients.left_shoulder, coefficients.right_shoulder);
+        assert_ne!(coefficients.left_ridge, coefficients.right_ridge);
     }
 
     #[test]
@@ -453,13 +520,15 @@ mod tests {
         assert!((telemetry.depth_db - rear.depth_db).abs() < f32::EPSILON);
         assert!((telemetry.shoulder_center_hz - rear.shoulder_center_hz).abs() < f32::EPSILON);
         assert!((telemetry.shoulder_gain_db - rear.shoulder_gain_db).abs() < f32::EPSILON);
-        assert!(telemetry.cue_strength > 0.5);
+        assert!((telemetry.ridge_center_hz - rear.ridge_center_hz).abs() < f32::EPSILON);
+        assert!((telemetry.ridge_gain_db - rear.ridge_gain_db).abs() < f32::EPSILON);
+        assert!(telemetry.cue_strength > 0.4);
     }
 
     #[test]
     fn coefficient_ramp_reaches_next_block_boundary() {
         let start = coefficients_for_direction(48_000.0, 0.0, 0.0, 0.0);
-        let end = coefficients_for_direction(48_000.0, PI, 0.0, 0.0);
+        let end = coefficients_for_direction(48_000.0, PI, PI * 0.25, 0.0);
         let step = start.step_to(end, 64);
         let mut current = start;
         for _ in 0..64 {
@@ -470,12 +539,14 @@ mod tests {
         assert!((current.right.b1 - end.right.b1).abs() < 1.0e-5);
         assert!((current.left_shoulder.b0 - end.left_shoulder.b0).abs() < 1.0e-5);
         assert!((current.right_shoulder.a2 - end.right_shoulder.a2).abs() < 1.0e-5);
+        assert!((current.left_ridge.b0 - end.left_ridge.b0).abs() < 1.0e-5);
+        assert!((current.right_ridge.a2 - end.right_ridge.a2).abs() < 1.0e-5);
     }
 
     #[test]
-    fn filter_state_isolates_non_finite_input_across_both_stages() {
+    fn filter_state_isolates_non_finite_input_across_three_stages() {
         let mut state = StereoPinnaState::default();
-        let coefficients = coefficients_for_direction(48_000.0, PI, 0.0, 0.0);
+        let coefficients = coefficients_for_direction(48_000.0, PI, PI * 0.2, 0.0);
         let (left, right) = state.process(f32::NAN, f32::INFINITY, coefficients);
         assert_eq!(left, 0.0);
         assert_eq!(right, 0.0);
@@ -485,11 +556,13 @@ mod tests {
     }
 
     #[test]
-    fn low_sample_rate_keeps_both_biquad_stages_finite() {
+    fn low_sample_rate_keeps_all_biquad_stages_finite() {
         let coefficients = coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
         assert!(coefficients_finite(coefficients.left));
         assert!(coefficients_finite(coefficients.right));
         assert!(coefficients_finite(coefficients.left_shoulder));
         assert!(coefficients_finite(coefficients.right_shoulder));
+        assert!(coefficients_finite(coefficients.left_ridge));
+        assert!(coefficients_finite(coefficients.right_ridge));
     }
 }
