@@ -18,11 +18,14 @@ impl SourceActivity {
     }
 }
 
+const MAX_ACTIVITY_CHANNELS: usize = 32;
+
 /// Analyze an interleaved PCM block into caller-owned per-channel activity slots.
 ///
 /// This helper is intended for opt-in debug capture. It performs no allocation, locking or I/O and
 /// treats non-finite samples as silence so malformed debug input cannot poison persistent telemetry.
-/// The returned count is the number of channel slots actually populated.
+/// The returned count is the number of channel slots actually populated, capped to the engine's
+/// fixed debug-source capacity.
 pub fn analyze_interleaved_activity(
     input: &[f32],
     channels: usize,
@@ -33,7 +36,7 @@ pub fn analyze_interleaved_activity(
         return 0;
     }
 
-    let measured_channels = channels.min(output.len());
+    let measured_channels = channels.min(output.len()).min(MAX_ACTIVITY_CHANNELS);
     output.fill(SourceActivity::default());
     if measured_channels == 0 {
         return 0;
@@ -46,8 +49,7 @@ pub fn analyze_interleaved_activity(
 
     // RMS sums deliberately use f64. This code is debug-only and the wider accumulator avoids
     // visible RMS drift on long decoder chunks without changing the realtime render state.
-    let mut sums = [0.0_f64; 32];
-    debug_assert!(measured_channels <= sums.len());
+    let mut sums = [0.0_f64; MAX_ACTIVITY_CHANNELS];
 
     for frame in input.chunks_exact(channels) {
         for channel in 0..measured_channels {
@@ -114,6 +116,24 @@ mod tests {
         let mut activity = [SourceActivity { peak: 1.0, rms: 1.0 }; 2];
         assert_eq!(analyze_interleaved_activity(&[0.0; 3], 2, &mut activity), 0);
         assert_eq!(activity, [SourceActivity::default(); 2]);
+    }
+
+    #[test]
+    fn oversized_layout_is_truncated_to_fixed_capacity() {
+        let channels = 64;
+        let frames = 2;
+        let input = vec![0.25_f32; channels * frames];
+        let mut activity = [SourceActivity::default(); 64];
+        assert_eq!(
+            analyze_interleaved_activity(&input, channels, &mut activity),
+            MAX_ACTIVITY_CHANNELS
+        );
+        assert!(activity[..MAX_ACTIVITY_CHANNELS]
+            .iter()
+            .all(|value| (value.peak - 0.25).abs() < f32::EPSILON));
+        assert!(activity[MAX_ACTIVITY_CHANNELS..]
+            .iter()
+            .all(|value| *value == SourceActivity::default()));
     }
 
     #[test]
