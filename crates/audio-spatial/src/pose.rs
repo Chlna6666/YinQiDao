@@ -1,3 +1,5 @@
+pub const DEFAULT_HEAD_RADIUS_M: f32 = 0.0875;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
     pub x: f32,
@@ -161,6 +163,30 @@ impl ListenerPose {
         let up = forward.cross(right).normalized_or(Vec3::UP);
         (right, up, forward)
     }
+
+    /// Return the physical left/right ear reference positions used by the parametric binaural model.
+    ///
+    /// Ear geometry is intentionally symmetric around the head center; per-ear spectral response is
+    /// allowed to be asymmetric in the pinna model. Keeping this geometry centralized guarantees the
+    /// realtime renderer and GPU diagnostics visualize the same interaural baseline.
+    #[inline]
+    pub fn ear_positions(self) -> (Vec3, Vec3) {
+        self.ear_positions_with_radius(DEFAULT_HEAD_RADIUS_M)
+    }
+
+    #[inline]
+    pub fn ear_positions_with_radius(self, radius_m: f32) -> (Vec3, Vec3) {
+        let (right, _, _) = self.basis();
+        let radius_m = if radius_m.is_finite() {
+            radius_m.max(0.0)
+        } else {
+            DEFAULT_HEAD_RADIUS_M
+        };
+        (
+            self.position - right * radius_m,
+            self.position + right * radius_m,
+        )
+    }
 }
 
 impl Default for ListenerPose {
@@ -179,6 +205,15 @@ mod tests {
         assert!((right.x - 1.0).abs() < 1.0e-6);
         assert!((up.y - 1.0).abs() < 1.0e-6);
         assert!((forward.z - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn default_ear_positions_share_the_renderer_head_radius() {
+        let listener = ListenerPose::identity();
+        let (left, right) = listener.ear_positions();
+        assert!((left.x + DEFAULT_HEAD_RADIUS_M).abs() < 1.0e-6);
+        assert!((right.x - DEFAULT_HEAD_RADIUS_M).abs() < 1.0e-6);
+        assert!((right - left).length() - DEFAULT_HEAD_RADIUS_M * 2.0 < 1.0e-6);
     }
 
     #[test]
