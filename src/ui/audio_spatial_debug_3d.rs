@@ -18,8 +18,16 @@ use humanoid_generated::{HUMANOID_ASSET_READY, HUMANOID_INDICES, HUMANOID_VERTIC
 const SHADER_SOURCE: &str = include_str!("audio_spatial_debug_3d.wgsl");
 const MIN_SCENE_RADIUS: f32 = 1.8;
 const SOURCE_RADIUS: f32 = 0.075;
-const EAR_RADIUS: f32 = 0.040;
-const HEAD_RADIUS: f32 = DEFAULT_HEAD_RADIUS_M * 1.31;
+const LISTENER_HEAD_HALF_WIDTH: f32 = DEFAULT_HEAD_RADIUS_M * 0.94;
+const LISTENER_HEAD_HALF_HEIGHT: f32 = 0.108;
+const LISTENER_HEAD_HALF_DEPTH: f32 = 0.092;
+const LISTENER_HEAD_LONGITUDE_SEGMENTS: usize = 20;
+const LISTENER_HEAD_LATITUDE_SEGMENTS: usize = 13;
+const EAR_HALF_WIDTH: f32 = 0.019;
+const EAR_HALF_HEIGHT: f32 = 0.038;
+const EAR_HALF_DEPTH: f32 = 0.025;
+const EAR_LONGITUDE_SEGMENTS: usize = 12;
+const EAR_LATITUDE_SEGMENTS: usize = 8;
 const BOUNCE_RADIUS: f32 = 0.035;
 const ROOM_EDGE_WIDTH: f32 = 0.010;
 const LATE_FIELD_EDGE_WIDTH: f32 = 0.006;
@@ -28,7 +36,7 @@ const DIRECT_EAR_PATH_WIDTH: f32 = 0.0045;
 const VELOCITY_WIDTH: f32 = 0.010;
 const LEFT_EAR_COLOR: [f32; 4] = [0.22, 0.62, 1.0, 1.0];
 const RIGHT_EAR_COLOR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
-const HUMANOID_COLOR: [f32; 4] = [0.18, 0.54, 0.64, 1.0];
+const LISTENER_HEAD_COLOR: [f32; 4] = [0.18, 0.54, 0.64, 1.0];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SpatialDebug3dCamera {
@@ -120,15 +128,31 @@ impl SpatialDebug3dScene {
         self.error.clone()
     }
 
+    pub(crate) fn fit_radius(&self) -> f32 {
+        self.fit_radius.max(MIN_SCENE_RADIUS)
+    }
+
     pub(crate) fn draw_parameters(
         &self,
         aspect: f32,
         camera: SpatialDebug3dCamera,
     ) -> GpuMesh3dDrawParameters {
+        Self::draw_parameters_for(self.fit_radius(), aspect, camera)
+    }
+
+    pub(crate) fn draw_parameters_for(
+        fit_radius: f32,
+        aspect: f32,
+        camera: SpatialDebug3dCamera,
+    ) -> GpuMesh3dDrawParameters {
         let aspect = aspect.max(0.1);
-        let radius = self.fit_radius.max(MIN_SCENE_RADIUS);
+        let radius = fit_radius.max(MIN_SCENE_RADIUS);
         let model = mat4_scale([1.0 / radius, 1.0 / radius, 1.0 / radius]);
-        let orbit_distance = (3.35 / camera.zoom.max(0.1)).clamp(1.45, 7.0);
+
+        // Keep camera distance fixed and perform zoom by changing field-of-view. The old dolly zoom
+        // moved the camera from 7.0 to 1.45 scene radii, which changed perspective distortion while
+        // scrolling and made the head/speaker geometry look as if it was being deformed.
+        let orbit_distance = 3.35;
         let horizontal = camera.pitch.cos();
         let eye = [
             camera.yaw.sin() * horizontal * orbit_distance,
@@ -136,7 +160,8 @@ impl SpatialDebug3dScene {
             camera.yaw.cos() * horizontal * orbit_distance,
         ];
         let view = mat4_look_at(eye, [0.0, -0.08, 0.0], [0.0, 1.0, 0.0]);
-        let projection = mat4_perspective(aspect, 52.0_f32.to_radians(), 0.04, 64.0);
+        let vertical_fov = (52.0 / camera.zoom.max(0.1)).clamp(24.0, 78.0);
+        let projection = mat4_perspective(aspect, vertical_fov.to_radians(), 0.04, 64.0);
         GpuMesh3dDrawParameters {
             view_projection_model: mat4_mul(projection, mat4_mul(view, model)),
         }
@@ -166,7 +191,7 @@ fn build_scene_mesh(
     previous: Option<&Arc<GpuMesh3d>>,
 ) -> Result<(Arc<GpuMesh3d>, f32), String> {
     let shader = spatial_debug_shader()?;
-    let mut builder = MeshBuilder::default();
+    let mut builder = MeshBuilder::with_capacity();
     let listener = snapshot.listener;
     let (right, up, forward) = listener.basis();
     let to_local = |position: Vec3| {
@@ -183,7 +208,7 @@ fn build_scene_mesh(
     let half_depth = 2.10 + room * 4.10;
     let fit_radius = half_width.max(half_depth).max(half_height).max(MIN_SCENE_RADIUS);
 
-    builder.push_humanoid_listener(left_ear, right_ear);
+    builder.push_listener_head(left_ear, right_ear);
 
     let source_count = snapshot.source_count.min(snapshot.sources.len());
     for source in snapshot.sources[..source_count].iter().copied() {
@@ -471,6 +496,13 @@ struct MeshBuilder {
 }
 
 impl MeshBuilder {
+    fn with_capacity() -> Self {
+        Self {
+            vertices: Vec::with_capacity(4_096),
+            indices: Vec::with_capacity(12_288),
+        }
+    }
+
     fn push_vertex(&mut self, position: [f32; 3], color: [f32; 4]) -> u32 {
         let index = self.vertices.len().min(u32::MAX as usize) as u32;
         self.vertices.push(GpuMesh3dVertex { position, color });
@@ -494,46 +526,126 @@ impl MeshBuilder {
         }
     }
 
-    fn push_humanoid_listener(&mut self, left_ear: [f32; 3], right_ear: [f32; 3]) {
+    fn push_listener_head(&mut self, left_ear: [f32; 3], right_ear: [f32; 3]) {
         if HUMANOID_ASSET_READY && !HUMANOID_VERTICES.is_empty() && !HUMANOID_INDICES.is_empty() {
-            self.push_static_mesh(HUMANOID_VERTICES, HUMANOID_INDICES, HUMANOID_COLOR);
-            self.push_octahedron(left_ear, EAR_RADIUS, LEFT_EAR_COLOR);
-            self.push_octahedron(right_ear, EAR_RADIUS, RIGHT_EAR_COLOR);
-            return;
+            self.push_static_mesh(HUMANOID_VERTICES, HUMANOID_INDICES, LISTENER_HEAD_COLOR);
+        } else {
+            // The checked-in fallback deliberately stays close to the source asset's ~250-vertex
+            // low-poly character: curved/faceted, not an octahedron. It is head-only so the listener
+            // visual does not waste geometry on a torso that has no acoustic meaning.
+            self.push_ellipsoid(
+                [0.0, 0.0, 0.0],
+                [
+                    LISTENER_HEAD_HALF_WIDTH,
+                    LISTENER_HEAD_HALF_HEIGHT,
+                    LISTENER_HEAD_HALF_DEPTH,
+                ],
+                LISTENER_HEAD_LONGITUDE_SEGMENTS,
+                LISTENER_HEAD_LATITUDE_SEGMENTS,
+                LISTENER_HEAD_COLOR,
+            );
+            self.push_ellipsoid(
+                [0.0, -0.004, LISTENER_HEAD_HALF_DEPTH * 0.93],
+                [0.016, 0.024, 0.027],
+                10,
+                6,
+                [0.28, 0.68, 0.76, 1.0],
+            );
         }
 
-        self.push_octahedron([0.0, 0.0, 0.0], HEAD_RADIUS, [0.22, 0.72, 0.82, 1.0]);
-        self.push_segment(
-            [0.0, -0.10, -0.015],
-            [0.0, -0.24, -0.025],
-            0.052,
-            [0.20, 0.52, 0.62, 1.0],
+        // Ear marker centres come from ListenerPose::ear_positions(): visual geometry never moves
+        // the DSP ears. Distinct colors make left/right binaural paths immediately readable.
+        self.push_ellipsoid(
+            left_ear,
+            [EAR_HALF_WIDTH, EAR_HALF_HEIGHT, EAR_HALF_DEPTH],
+            EAR_LONGITUDE_SEGMENTS,
+            EAR_LATITUDE_SEGMENTS,
+            LEFT_EAR_COLOR,
         );
-        self.push_segment(
-            [0.0, -0.22, -0.03],
-            [0.0, -0.58, -0.055],
-            0.155,
-            [0.17, 0.42, 0.52, 1.0],
+        self.push_ellipsoid(
+            right_ear,
+            [EAR_HALF_WIDTH, EAR_HALF_HEIGHT, EAR_HALF_DEPTH],
+            EAR_LONGITUDE_SEGMENTS,
+            EAR_LATITUDE_SEGMENTS,
+            RIGHT_EAR_COLOR,
         );
-        self.push_segment(
-            [-0.13, -0.25, -0.02],
-            [-0.30, -0.49, -0.04],
-            0.044,
-            [0.16, 0.38, 0.48, 1.0],
+    }
+
+    fn push_ellipsoid(
+        &mut self,
+        center: [f32; 3],
+        radii: [f32; 3],
+        longitude_segments: usize,
+        latitude_segments: usize,
+        color: [f32; 4],
+    ) {
+        let longitude_segments = longitude_segments.max(3);
+        let latitude_segments = latitude_segments.max(2);
+        let top = self.push_vertex(
+            [center[0], center[1] + radii[1], center[2]],
+            color,
         );
-        self.push_segment(
-            [0.13, -0.25, -0.02],
-            [0.30, -0.49, -0.04],
-            0.044,
-            [0.16, 0.38, 0.48, 1.0],
+        let first_ring = self.vertices.len().min(u32::MAX as usize) as u32;
+
+        for latitude in 1..latitude_segments {
+            let theta = PI * latitude as f32 / latitude_segments as f32;
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
+            for longitude in 0..longitude_segments {
+                let phi = PI * 2.0 * longitude as f32 / longitude_segments as f32;
+                let (sin_phi, cos_phi) = phi.sin_cos();
+                self.push_vertex(
+                    [
+                        center[0] + radii[0] * sin_theta * cos_phi,
+                        center[1] + radii[1] * cos_theta,
+                        center[2] + radii[2] * sin_theta * sin_phi,
+                    ],
+                    color,
+                );
+            }
+        }
+
+        let bottom = self.push_vertex(
+            [center[0], center[1] - radii[1], center[2]],
+            color,
         );
-        self.push_octahedron(left_ear, EAR_RADIUS, LEFT_EAR_COLOR);
-        self.push_octahedron(right_ear, EAR_RADIUS, RIGHT_EAR_COLOR);
-        self.push_octahedron(
-            [0.0, -0.005, HEAD_RADIUS * 0.92],
-            0.026,
-            [0.44, 0.86, 0.92, 1.0],
-        );
+        let longitude_u32 = longitude_segments.min(u32::MAX as usize) as u32;
+        for longitude in 0..longitude_segments {
+            let current = longitude.min(u32::MAX as usize) as u32;
+            let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
+            self.indices.extend([
+                top,
+                first_ring + current,
+                first_ring + next,
+            ]);
+        }
+
+        let ring_count = latitude_segments - 1;
+        for ring in 0..ring_count.saturating_sub(1) {
+            let current_ring = first_ring + ring.min(u32::MAX as usize) as u32 * longitude_u32;
+            let next_ring = current_ring + longitude_u32;
+            for longitude in 0..longitude_segments {
+                let current = longitude.min(u32::MAX as usize) as u32;
+                let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
+                let a = current_ring + current;
+                let b = current_ring + next;
+                let c = next_ring + current;
+                let d = next_ring + next;
+                self.indices.extend([a, c, b, b, c, d]);
+            }
+        }
+
+        let last_ring = first_ring
+            + ring_count.saturating_sub(1).min(u32::MAX as usize) as u32 * longitude_u32;
+        for longitude in 0..longitude_segments {
+            let current = longitude.min(u32::MAX as usize) as u32;
+            let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
+            self.indices.extend([
+                last_ring + next,
+                last_ring + current,
+                bottom,
+            ]);
+        }
     }
 
     fn push_virtual_speaker(
