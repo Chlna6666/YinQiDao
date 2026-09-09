@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext, BorrowAppContext, Bounds, Context, Global, Hsla, IntoElement, Render, Timer,
-    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb, size,
+    App, AppContext, BorrowAppContext, Bounds, Context, Global, IntoElement, MouseButton, Render,
+    Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb,
+    size,
 };
 use yinqidao_audio_spatial::{
     ChannelLayout, SpeakerLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot,
@@ -11,14 +12,19 @@ use yinqidao_audio_spatial::{
 };
 
 use crate::audio::{
-    AudioDebugMonitorMode, AudioDebugSnapshot, AudioDebugStage, audio_debug_latest_snapshot,
-    set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
+    AudioDebugMonitorMode, AudioDebugSnapshot, audio_debug_latest_snapshot, set_audio_debug_enabled,
+    set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
-use super::audio_spatial_debug_3d::{SpatialDebug3dCamera, SpatialDebug3dScene};
+
+use super::{
+    audio_debug_analysis::{analysis_sections, stage_card as analysis_stage_card},
+    audio_spatial_debug_3d::{SpatialDebug3dCamera, SpatialDebug3dScene},
+};
 
 const DEBUG_UI_TICK: Duration = Duration::from_millis(33);
 const SOURCE_ROWS: usize = 12;
 const REFLECTION_ROWS: usize = 24;
+const CAMERA_ORBIT_RADIANS_PER_PIXEL: f32 = 0.0075;
 
 #[derive(Default)]
 struct AudioDebugWindowState {
@@ -140,6 +146,7 @@ pub(crate) struct AudioDebugView {
     spatial_snapshot: Option<SpatialDebugSnapshot>,
     gpu_scene: SpatialDebug3dScene,
     camera: SpatialDebug3dCamera,
+    drag_anchor: Option<(f32, f32)>,
     frozen: bool,
 }
 
@@ -150,6 +157,7 @@ impl Default for AudioDebugView {
             spatial_snapshot: None,
             gpu_scene: SpatialDebug3dScene::default(),
             camera: SpatialDebug3dCamera::default(),
+            drag_anchor: None,
             frozen: false,
         }
     }
@@ -189,13 +197,19 @@ impl Render for AudioDebugView {
                                 div()
                                     .text_xl()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("Audio Laboratory · Spatial Engine GPU Debug"),
+                                    .child("Audio Laboratory · SOURCE / EQ / SPATIAL / GPU 3D"),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(rgb(0x85909d))
-                                    .child("实时信号参考 + Pinna + 六面 Early Reflection + 8-line FDN Late Field"),
+                                    .child(format!(
+                                        "实时 DSP 探针 · {} Hz · frame #{} · 监听 {} · scene {}",
+                                        snapshot.sample_rate,
+                                        snapshot.sequence,
+                                        snapshot.monitor_mode.label(),
+                                        spatial.map_or(0, |scene| scene.sequence),
+                                    )),
                             ),
                     )
                     .child(
@@ -209,7 +223,7 @@ impl Render for AudioDebugView {
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostEq))))
                             .child(monitor_button("C SPATIAL", snapshot.monitor_mode == AudioDebugMonitorMode::PostSpatial)
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostSpatial))))
-                            .child(action_button(if frozen { "继续" } else { "冻结" }).on_click(
+                            .child(action_button(if frozen { "继续采样" } else { "冻结分析" }).on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.frozen = !this.frozen;
                                     cx.notify();
@@ -221,9 +235,24 @@ impl Render for AudioDebugView {
                 div()
                     .flex()
                     .gap_3()
-                    .child(stage_card("A · ORIGINAL", "decoder/source reference", &snapshot.source, rgb(0x8fa3ba).into()))
-                    .child(stage_card("B · POST-EQ", "PEQ + preamp", &snapshot.eq, rgb(0xffa63d).into()))
-                    .child(stage_card("C · POST-SPATIAL", "virtual source + pinna + early/late room", &snapshot.spatial, rgb(0x56d38f).into())),
+                    .child(analysis_stage_card(
+                        "SOURCE",
+                        "解码 / 多声道双耳化 / 重采样",
+                        &snapshot.source,
+                        rgb(0x8fa3ba).into(),
+                    ))
+                    .child(analysis_stage_card(
+                        "POST-EQ",
+                        "十段 PEQ + Preamp",
+                        &snapshot.eq,
+                        rgb(0xffa63d).into(),
+                    ))
+                    .child(analysis_stage_card(
+                        "POST-SPATIAL",
+                        "虚拟声源 / Pinna / 六面 Early / FDN Late",
+                        &snapshot.spatial,
+                        rgb(0x56d38f).into(),
+                    )),
             )
             .child(
                 div()
@@ -236,7 +265,7 @@ impl Render for AudioDebugView {
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} source · {} early reflection · {} Hz · seq {}",
+                                    "{} source · {} early reflection · {} Hz · seq {} · 左键拖拽旋转 / 滚轮缩放 / 双击复位",
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -244,6 +273,7 @@ impl Render for AudioDebugView {
                                 ),
                             )),
                             div()
+                                .id("spatial-room-3d-interaction")
                                 .relative()
                                 .w_full()
                                 .h(px(540.0))
@@ -277,39 +307,79 @@ impl Render for AudioDebugView {
                                 .child(
                                     div()
                                         .absolute()
-                                        .top_2()
+                                        .bottom_2()
                                         .left_2()
-                                        .flex()
-                                        .gap_1()
-                                        .child(action_button("↶").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.orbit(-0.12, 0.0);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("↷").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.orbit(0.12, 0.0);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("↑").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.orbit(0.0, -0.09);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("↓").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.orbit(0.0, 0.09);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("+").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.zoom_by(1.12);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("−").on_click(cx.listener(|this, _, _, cx| {
-                                            this.camera.zoom_by(0.89);
-                                            cx.notify();
-                                        })))
-                                        .child(action_button("Reset").on_click(cx.listener(|this, _, _, cx| {
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(0x10151c))
+                                        .text_xs()
+                                        .text_color(rgb(0x8d98a5))
+                                        .child("拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        if event.click_count >= 2 {
                                             this.camera.reset();
+                                            this.drag_anchor = None;
                                             cx.notify();
-                                        }))),
-                                ),
+                                            return;
+                                        }
+                                        this.drag_anchor = Some((
+                                            f32::from(event.position.x),
+                                            f32::from(event.position.y),
+                                        ));
+                                    }),
+                                )
+                                .on_mouse_move(cx.listener(
+                                    |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                                        if !event.dragging() {
+                                            return;
+                                        }
+                                        let current = (
+                                            f32::from(event.position.x),
+                                            f32::from(event.position.y),
+                                        );
+                                        let Some(previous) = this.drag_anchor else {
+                                            this.drag_anchor = Some(current);
+                                            return;
+                                        };
+                                        let dx = current.0 - previous.0;
+                                        let dy = current.1 - previous.1;
+                                        if dx.abs() > f32::EPSILON || dy.abs() > f32::EPSILON {
+                                            this.camera.orbit(
+                                                -dx * CAMERA_ORBIT_RADIANS_PER_PIXEL,
+                                                dy * CAMERA_ORBIT_RADIANS_PER_PIXEL,
+                                            );
+                                            this.drag_anchor = Some(current);
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, _| this.drag_anchor = None),
+                                )
+                                .on_mouse_up_out(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, _| this.drag_anchor = None),
+                                )
+                                .on_scroll_wheel(cx.listener(
+                                    |this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        let delta = event.delta.pixel_delta(px(48.0)).y;
+                                        if delta < px(0.0) {
+                                            this.camera.zoom_by(1.10);
+                                        } else if delta > px(0.0) {
+                                            this.camera.zoom_by(0.91);
+                                        } else {
+                                            return;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
                         )
                         .flex_1()
                         .min_w(px(0.0)),
@@ -323,18 +393,17 @@ impl Render for AudioDebugView {
                         .w(px(455.0)),
                     ),
             )
-            .child(
-                panel(
-                    "Image-source Early Reflection Matrix",
-                    Some("source → floor/ceiling/wall bounce → listener · excess delay / binaural arrival".into()),
-                    reflection_telemetry(spatial),
-                ),
-            )
+            .child(panel(
+                "Image-source Early Reflection Matrix",
+                Some("source → floor/ceiling/wall bounce → listener · excess delay / binaural arrival".into()),
+                reflection_telemetry(spatial),
+            ))
+            .child(analysis_sections(snapshot.clone()))
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(0x727d89))
-                    .child("3D 彩色折线路径 = 六面一阶 Early Reflection；监听者周围蓝紫色多层框 = 全局 8-line FDN Late Diffuse Field。Pinna/FDN 数值直接复用实时 DSP 参数生成逻辑；仍属于自研参数化双耳路径，不宣称 measured HRTF。"),
+                    .child("完整实验室分析已恢复：A/B/C 频谱、Transfer ΔdB、M/S、相位相关历史、Crest/动态历史、Spectrogram、Waveform、Vectorscope、True Peak/LUFS；GPU 3D 只替换空间主视图，不再删除原有工程分析能力。"),
             )
     }
 }
@@ -389,34 +458,6 @@ fn panel(title: &'static str, subtitle: Option<String>, content: impl IntoElemen
         .child(content)
 }
 
-fn stage_card(title: &'static str, subtitle: &'static str, stage: &AudioDebugStage, accent: Hsla) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w(px(0.0))
-        .p_3()
-        .rounded_xl()
-        .border_1()
-        .border_color(rgb(0x252b33))
-        .bg(rgb(0x101319))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).text_color(accent).child(title))
-        .child(div().text_xs().text_color(rgb(0x75808c)).child(subtitle))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .flex_wrap()
-                .child(metric("Peak", format!("{:.1} dBFS", stage.peak_dbfs)))
-                .child(metric("RMS", format!("{:.1} dBFS", stage.rms_dbfs)))
-                .child(metric("LUFS-I", format!("{:.1}", stage.lufs_integrated)))
-                .child(metric("Corr", format!("{:+.3}", stage.stereo_correlation)))
-                .child(metric("S/M", format!("{:+.1} dB", stage.side_mid_db)))
-                .child(metric("DR", format!("{:.1} dB", stage.dynamic_range_db))),
-        )
-}
-
 fn metric(label: &'static str, value: String) -> gpui::Div {
     div()
         .px_2()
@@ -433,7 +474,8 @@ fn metric(label: &'static str, value: String) -> gpui::Div {
 fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement {
     let mut body = div().flex().flex_col().gap_2();
     let Some(snapshot) = snapshot else {
-        return body.child(div().text_sm().text_color(rgb(0x77828f)).child("等待 scene"))
+        return body
+            .child(div().text_sm().text_color(rgb(0x77828f)).child("等待 scene"))
             .into_any_element();
     };
     let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
@@ -462,7 +504,11 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
             continue;
         }
         let channel = channel_name(snapshot.source_count, index);
-        let kind = if matches!(source.kind, SpatialDebugSourceKind::Lfe) { "LFE" } else { "FULL" };
+        let kind = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
+            "LFE"
+        } else {
+            "FULL"
+        };
         let mut row = div()
             .py_1()
             .border_b_1()
@@ -475,11 +521,45 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                     .flex()
                     .justify_between()
                     .gap_2()
-                    .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).child(format!("#{:02} {channel} · {kind}", source.source_index)))
-                    .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!("az {:+.1}° / el {:+.1}° / {:.2}m", source.azimuth_degrees, source.elevation_degrees, source.distance_meters))),
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(format!("#{:02} {channel} · {kind}", source.source_index)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x9aa4af))
+                            .child(format!(
+                                "az {:+.1}° / el {:+.1}° / {:.2}m",
+                                source.azimuth_degrees,
+                                source.elevation_degrees,
+                                source.distance_meters
+                            )),
+                    ),
             )
-            .child(div().text_xs().text_color(rgb(0x77828f)).child(format!("ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}", source.itd_samples, source.ild_db, source.left_gain, source.right_gain)))
-            .child(div().text_xs().text_color(rgb(0x68737f)).child(format!("near {:.0}% · shadow {:.0}% · air {:.0}%", source.near_field_amount * 100.0, source.head_shadow_amount * 100.0, source.air_absorption_amount * 100.0)));
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x77828f))
+                    .child(format!(
+                        "ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}",
+                        source.itd_samples, source.ild_db, source.left_gain, source.right_gain
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x68737f))
+                    .child(format!(
+                        "near {:.0}% · shadow {:.0}% · air {:.0}% · direct {:.3}",
+                        source.near_field_amount * 100.0,
+                        source.head_shadow_amount * 100.0,
+                        source.air_absorption_amount * 100.0,
+                        source.direct_contribution,
+                    )),
+            );
         if matches!(source.kind, SpatialDebugSourceKind::FullRange) {
             let pinna = pinna_cue_telemetry(
                 source.azimuth_degrees,
@@ -509,7 +589,8 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
 fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement {
     let mut body = div().flex().flex_col().gap_1();
     let Some(snapshot) = snapshot else {
-        return body.child(div().text_sm().text_color(rgb(0x77828f)).child("等待 reflection matrix"))
+        return body
+            .child(div().text_sm().text_color(rgb(0x77828f)).child("等待 reflection matrix"))
             .into_any_element();
     };
     let mut shown = 0usize;
@@ -538,11 +619,50 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
                     div()
                         .flex()
                         .justify_between()
-                        .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xffc857)).child(format!("{channel} · {} · tap {}", wall_label(reflection.wall), reflection.tap_index)))
-                        .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!("{:.2} ms", reflection.delay_milliseconds))),
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(0xffc857))
+                                .child(format!(
+                                    "{channel} · {} · tap {}",
+                                    wall_label(reflection.wall),
+                                    reflection.tap_index
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x9aa4af))
+                                .child(format!("{:.2} ms", reflection.delay_milliseconds)),
+                        ),
                 )
-                .child(div().text_xs().text_color(rgb(0x77828f)).child(format!("path {:.2}m (+{:.2}m) · wet {:.3} · reflect {:.3}", reflection.path_length_meters, reflection.excess_path_meters, reflection.wet_contribution, reflection.wall_reflectance)))
-                .child(div().text_xs().text_color(rgb(0x68737f)).child(format!("arrival az {:+.1}° / el {:+.1}° · L/R delay {:.2}/{:.2} · gain {:.3}/{:.3}", reflection.arrival_azimuth_degrees, reflection.arrival_elevation_degrees, reflection.left_delay_samples, reflection.right_delay_samples, reflection.left_gain, reflection.right_gain))),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x77828f))
+                        .child(format!(
+                            "path {:.2}m (+{:.2}m) · wet {:.3} · reflect {:.3}",
+                            reflection.path_length_meters,
+                            reflection.excess_path_meters,
+                            reflection.wet_contribution,
+                            reflection.wall_reflectance
+                        )),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x68737f))
+                        .child(format!(
+                            "arrival az {:+.1}° / el {:+.1}° · L/R delay {:.2}/{:.2} · gain {:.3}/{:.3}",
+                            reflection.arrival_azimuth_degrees,
+                            reflection.arrival_elevation_degrees,
+                            reflection.left_delay_samples,
+                            reflection.right_delay_samples,
+                            reflection.left_gain,
+                            reflection.right_gain
+                        )),
+                ),
         );
     }
     if shown == 0 {
