@@ -36,7 +36,7 @@
 - [x] Orbit360 / FigureEight / Pendulum / FrontBack / Planetary / NearEar / Helix audio-clock trajectory。
 - [x] clockwise / counter-clockwise。
 - [x] source accumulation 复用 `yinqidao-audio-simd::mix_accumulate`。
-- [x] NaN/Inf 在进入 delay/IIR persistent state 前隔离。
+- [x] NaN/Inf 在进入 delay/IIR/pinna persistent state 前隔离。
 
 ## Phase 1 — 播放器正式接入
 
@@ -46,7 +46,7 @@
 - [x] 正常 10/12ch 路径旁路旧 `binaural_downmix_into()`。
 - [x] native multichannel 禁止再次进入 stereo spatial。
 - [x] native engine 按 input sample-rate 缓存。
-- [x] seek / reopen / processing discontinuity reset EQ、resampler、native/stereo spatial state。
+- [x] seek / reopen / processing discontinuity reset EQ、resampler、native/stereo spatial、pinna 与 late-field state。
 - [x] transport generation 使用 audio-worker thread-local。
 - [x] Static / Immersive3d 使用 stereo L/R front-arc virtual source。
 - [x] Orbit8d / Orbit360 / Pendulum / FrontBack / Planetary / NearEar 进入自研 `Trajectory`。
@@ -65,12 +65,16 @@
 - [x] FullRange source 同一 delay ring 同时服务 direct ITD 与 first-order reflection arrivals。
 - [x] delay history 约 80 ms reflection budget + ITD margin；初始化后固定容量。
 - [x] reflection filter/parameter/cache 均为每 source 固定数组。
-- [x] environment `mix=0` 完全跳过 reflection geometry/read/filter 热循环。
-- [x] environment 改变只 invalidates reflection cache/filter，不清 direct ITD/history。
+- [x] environment `mix=0` 完全跳过 reflection geometry/read/filter 与 late-field 热循环。
+- [x] environment 改变只 invalidates reflection cache/filter；direct ITD 与 pinna pose cache 独立保留。
+- [x] direct path 参数化 pinna externalization：front/rear/elevation notch + 轻微 per-ear spectral asymmetry。
+- [x] pinna 系数按 block 端点求值并 sample-ramp；静态 speaker pose 命中 cache，sample loop 不做三角函数/`powf`。
+- [x] pinna TDF2 biquad 固定状态、0 allocation；异常样本清状态并输出 0，denormal 主动归零。
+- [ ] reflection arrival 是否加入 pinna spectral cue：先以 benchmark/听感证明收益，避免 `6 taps × N sources` 无依据增负载。
 - [ ] 更多 hot kernel 下沉 `audio-simd`。
 - [ ] Lagrange vs Thiran fractional delay 质量/成本对比。
-- [ ] 专业外化：参数化 pinna front/back/elevation notch bank。
-- [ ] parameter smoothing/crossfade 自动化测试。
+- [ ] 更完整的多段 pinna notch/peak bank 与听感标定。
+- [ ] 通用 parameter smoothing/crossfade 自动化测试。
 - [ ] channel-order conformance vectors。
 - [ ] headroom / limiter 重新标定。
 
@@ -95,9 +99,12 @@
 - [x] 极端越界 source 只在 reflection solver 内夹到房间边界内；direct source pose 不修改。
 - [x] LFE 不做伪方向化 image-source reflection。
 - [x] 已删除退出正式链的旧全局 `EarlyReflectionNetwork` API/实现。
+- [x] direct path 参数化 pinna / externalization spectral layer；当前明确为 generic parametric cue，不宣称 measured HRTF。
+- [x] 全局 8-line FDN late diffuse field：8 条预分配 delay、正交 Hadamard feedback、per-line damping、固定容量。
+- [x] FDN 只在所有 source 汇合后的最终 stereo block 运行一次；native layout 先 normalization 再激励尾场。
+- [x] FDN 使用独立 L/R 正交 injection vectors，保留纯 Side/反相 stereo 的 late-field 激励，不先 collapse 为 mono。
+- [x] `environment.mix=0` 为 late-field bit-exact bypass；room-size 改变/reset 清理旧 tail history。
 - [ ] absolute room transform / listener-room position；当前仍为 listener-centered room。
-- [ ] diffuse late field / 低成本 8-line FDN room。
-- [ ] 参数化 pinna / externalization spectral layer。
 - [ ] Audio Vivid object metadata 接入。
 - [ ] HOA 参数化 binaural path。
 - [ ] object source culling / audibility budget。
@@ -118,7 +125,7 @@
 - [x] mesh id 稳定，以 generation 刷新 GPU cache；UI 约 30 Hz 更新。
 - [x] 3D Camera yaw/pitch/zoom/reset。
 - [ ] object ID / Audio Vivid metadata 可视化。
-- [ ] externalization / late-field / pinna cue telemetry。
+- [ ] pinna notch center/depth、late-field wet/feedback/damping/energy telemetry。
 
 ## Phase 6 — 音频 GPU Compute（暂缓）
 
@@ -137,7 +144,15 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 现有源码 case：32 / 64 / 128 frames 的 stereo static、Orbit360、FigureEight/Orbit8d、5.1.4、7.1.4。
 
-下一批必须增加：environment mix=0/0.10/0.30、4-wall vs 6-wall cost、Debug off/on、16/32/64 objects、AVS3 7.1.4 end-to-end。
+下一批必须增加：
+
+- environment mix=0/0.10/0.30；
+- 4-wall baseline vs 6-wall early-reflection cost；
+- pinna off/on 的 stereo static / trajectory / 5.1.4 / 7.1.4 cost；
+- FDN off/on 与 `mix=0` bypass cost；
+- Debug off/on；
+- 16/32/64 future objects；
+- AVS3 7.1.4 end-to-end。
 
 ## 当前验证状态
 
@@ -160,9 +175,8 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一步
 
-1. 实际 `cargo check/test`，优先修复 GPUI 3D V2 / renderer type/API 问题。
-2. 实现参数化 pinna externalization notch bank，重点解决前后/上下与头外定位不足。
-3. 实现低成本固定容量 FDN late diffuse field，补充包围与房间空气感而不做糊化型普通混响。
-4. Debug 3D 增加 pinna/externalization/late-field telemetry。
-5. 完成 channel-order conformance + headroom/limiter 标定后删除 legacy stereo renderer。
-6. 只有 serial baseline 数据证明收益后才实现 realtime worker pool；音频 GPU compute 继续暂缓。
+1. 实际 `cargo check/test`，优先修复 pinna / FDN / GPUI 3D V2 的 type/API 问题。
+2. Audio Laboratory 增加 pinna notch center/depth、FDN wet/feedback/damping/late-energy telemetry，并在 GPU 3D 场景区分 early/late field。
+3. 增加 pinna + 6-wall + FDN 的 serial benchmark；依据数据决定 reflection-pinna、tap audibility budget 与 realtime worker pool。
+4. 完成 channel-order conformance + headroom/limiter 标定后删除 legacy stereo renderer。
+5. 再推进 absolute room transform、listener runtime orientation 与 Audio Vivid object metadata。
