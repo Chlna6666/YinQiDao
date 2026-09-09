@@ -6,7 +6,7 @@ use yinqidao_audio_spatial::{
     SpatialDebugSourceKind, Vec3,
 };
 
-const SOURCE_WORDS: usize = 24;
+const SOURCE_WORDS: usize = 26;
 const REFLECTION_WORDS: usize = 22;
 const LISTENER_WORDS: usize = 9;
 const ENVIRONMENT_WORDS: usize = 4;
@@ -180,6 +180,8 @@ fn store_source(index: usize, source: SpatialDebugSource) {
         source.head_shadow_amount,
         source.air_absorption_amount,
         source.direct_contribution,
+        source.input_peak,
+        source.input_rms,
     ]
     .into_iter()
     .enumerate()
@@ -216,6 +218,8 @@ fn load_source(index: usize) -> SpatialDebugSource {
         head_shadow_amount: value(21),
         air_absorption_amount: value(22),
         direct_contribution: value(23),
+        input_peak: value(24),
+        input_rms: value(25),
     }
 }
 
@@ -320,12 +324,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atomic_publication_round_trips_vertical_reflection_entry() {
-        let mut source = SpatialDebugSource::default();
-        source.active = true;
-        source.source_index = 1;
-        source.kind = SpatialDebugSourceKind::FullRange;
-        source.position = Vec3::RIGHT;
+    fn atomic_publication_round_trips_source_activity_and_vertical_reflection() {
+        let source = SpatialDebugSource {
+            active: true,
+            source_index: 1,
+            kind: SpatialDebugSourceKind::FullRange,
+            position: Vec3::RIGHT,
+            input_peak: 0.75,
+            input_rms: 0.25,
+            ..SpatialDebugSource::default()
+        };
 
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.sequence = 7;
@@ -360,6 +368,8 @@ mod tests {
         publish_spatial_debug_snapshot(snapshot);
 
         let read = spatial_debug_latest_snapshot().expect("published snapshot");
+        assert!((read.sources[1].input_peak - 0.75).abs() < f32::EPSILON);
+        assert!((read.sources[1].input_rms - 0.25).abs() < f32::EPSILON);
         assert_eq!(read.reflection_count, 12);
         assert_eq!(read.reflections[11].wall, SpatialDebugReflectionWall::Ceiling);
         assert_eq!(read.reflections[11].bounce_position, Vec3::new(0.25, 1.5, 0.5));

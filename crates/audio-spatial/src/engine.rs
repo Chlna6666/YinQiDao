@@ -110,14 +110,14 @@ impl SpatialEngine {
         self.debug_enabled
     }
 
-    /// Return a by-value fixed-size snapshot. There is no lock, heap allocation or borrowed renderer
-    /// state involved; callers can publish this at a much lower UI/debug cadence than audio blocks.
+    /// Return a by-value fixed-size snapshot. Source activity is already bound to each source slot,
+    /// so geometry and Peak/RMS are published atomically by downstream scene publishers.
     pub fn debug_snapshot(&self) -> Option<SpatialDebugSnapshot> {
         self.debug_enabled.then_some(self.debug_snapshot)
     }
 
-    /// Return the activity measured from the authored input channels for the latest debug render.
-    /// Production rendering never computes these values because the scan is gated by `debug_enabled`.
+    /// Transitional diagnostic accessor retained for benchmark/tests while UI consumes activity
+    /// directly from `SpatialDebugSource`.
     pub fn debug_source_activity(&self) -> Option<[SourceActivity; MAX_DEBUG_SOURCES]> {
         self.debug_enabled.then_some(self.debug_activity)
     }
@@ -170,6 +170,8 @@ impl SpatialEngine {
                 };
                 self.debug_snapshot
                     .record_source(source_index, speaker.kind, pose);
+                self.debug_snapshot
+                    .set_source_activity(source_index, self.debug_activity[source_index]);
             }
         }
 
@@ -225,11 +227,7 @@ impl SpatialEngine {
     }
 
     /// Render the authored left/right channels as two independent virtual full-range sources.
-    ///
-    /// This is the preferred stereo virtualization primitive: it preserves the source programme's
-    /// left/right information instead of collapsing it to mono before applying ITD/ILD/head-shadow.
     /// Start/end poses use end-exclusive sample-clock semantics: `end` is the state at n + frames.
-    /// Internally the renderer still works in the configured fixed block size without allocations.
     #[allow(clippy::too_many_arguments)]
     pub fn render_interleaved_stereo_pair(
         &mut self,
@@ -315,8 +313,10 @@ impl SpatialEngine {
                 .begin_capture(self.listener, self.config.environment);
             self.debug_snapshot
                 .record_source(0, crate::SourceKind::FullRange, left_end);
+            self.debug_snapshot.set_source_activity(0, self.debug_activity[0]);
             self.debug_snapshot
                 .record_source(1, crate::SourceKind::FullRange, right_end);
+            self.debug_snapshot.set_source_activity(1, self.debug_activity[1]);
             self.debug_snapshot.finish_capture(frames);
         }
         Ok(frames)
@@ -372,6 +372,7 @@ impl SpatialEngine {
                 .begin_capture(self.listener, self.config.environment);
             self.debug_snapshot
                 .record_source(0, crate::SourceKind::FullRange, pose);
+            self.debug_snapshot.set_source_activity(0, self.debug_activity[0]);
             self.debug_snapshot.finish_capture(frames);
         }
         Ok(frames)
@@ -445,12 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn debug_snapshot_is_fixed_size_and_opt_in() {
+    fn debug_snapshot_binds_authored_activity_to_sources() {
         let mut config = EngineConfig::new(48_000);
         config.environment.mix = 0.12;
         let mut engine = SpatialEngine::new(config).unwrap();
         assert!(engine.debug_snapshot().is_none());
-        assert!(engine.debug_source_activity().is_none());
         engine.set_debug_enabled(true);
 
         let frames = 64;
@@ -461,19 +461,14 @@ mod tests {
             .unwrap();
 
         let snapshot = engine.debug_snapshot().expect("enabled snapshot");
-        let activity = engine
-            .debug_source_activity()
-            .expect("enabled source activity");
         assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, frames as u64);
         assert_eq!(snapshot.sequence, 1);
         assert!((snapshot.environment_contribution - 0.12).abs() < 1.0e-6);
-        assert!(snapshot.sources[..snapshot.source_count]
-            .iter()
-            .all(|source| source.active));
-        assert!(activity[..12]
-            .iter()
-            .all(|value| (value.peak - 0.1).abs() < 1.0e-6 && (value.rms - 0.1).abs() < 1.0e-6));
-        assert!(activity[12..].iter().all(|value| *value == SourceActivity::default()));
+        assert!(snapshot.sources[..snapshot.source_count].iter().all(|source| {
+            source.active
+                && (source.input_peak - 0.1).abs() < 1.0e-6
+                && (source.input_rms - 0.1).abs() < 1.0e-6
+        }));
     }
 }

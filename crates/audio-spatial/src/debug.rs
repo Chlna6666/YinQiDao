@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use crate::environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S};
 use crate::image_source::source_reflection_descriptors;
-use crate::{EnvironmentSettings, ListenerPose, SourceKind, SourcePose, Vec3};
+use crate::{EnvironmentSettings, ListenerPose, SourceActivity, SourceKind, SourcePose, Vec3};
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
 pub const MAX_DEBUG_REFLECTION_SOURCES: usize = 12;
@@ -52,6 +52,10 @@ pub struct SpatialDebugSource {
     pub head_shadow_amount: f32,
     pub air_absorption_amount: f32,
     pub direct_contribution: f32,
+    /// Peak of the authored input channel for the latest debug render, linear full scale.
+    pub input_peak: f32,
+    /// RMS of the authored input channel for the latest debug render, linear full scale.
+    pub input_rms: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,8 +98,7 @@ pub struct SpatialDebugReflection {
     pub right_delay_samples: f32,
     pub left_gain: f32,
     pub right_gain: f32,
-    // Transitional aliases retained only for the old uncompiled debug source file. The active V2
-    // UI consumes the real image/bounce/path fields above.
+    // Transitional aliases retained while the Debug UI is still being simplified.
     pub virtual_position: Vec3,
     pub delay_samples: u32,
     pub gain: f32,
@@ -151,6 +154,8 @@ impl SpatialDebugSnapshot {
                 head_shadow_amount: 0.0,
                 air_absorption_amount: 0.0,
                 direct_contribution: 0.0,
+                input_peak: 0.0,
+                input_rms: 0.0,
             }; MAX_DEBUG_SOURCES],
             reflection_count: 0,
             reflections: [SpatialDebugReflection {
@@ -221,6 +226,15 @@ impl SpatialDebugSnapshot {
                 self.capture_reflections_for_source(source_index, pose);
             }
         }
+    }
+
+    pub(crate) fn set_source_activity(&mut self, source_index: usize, activity: SourceActivity) {
+        if source_index >= self.source_count || source_index >= MAX_DEBUG_SOURCES {
+            return;
+        }
+        let source = &mut self.sources[source_index];
+        source.input_peak = finite_or_zero(activity.peak).max(0.0);
+        source.input_rms = finite_or_zero(activity.rms).max(0.0);
     }
 
     pub(crate) fn finish_capture(&mut self, frames: usize) {
@@ -357,6 +371,8 @@ fn analyze_source(
             head_shadow_amount: 0.0,
             air_absorption_amount: 0.0,
             direct_contribution: gain,
+            input_peak: 0.0,
+            input_rms: 0.0,
         };
     }
 
@@ -458,6 +474,8 @@ fn analyze_source(
         head_shadow_amount: (1.0 - far_ear_attenuation).clamp(0.0, 1.0),
         air_absorption_amount,
         direct_contribution: ((left_gain + right_gain) * 0.5).max(0.0),
+        input_peak: 0.0,
+        input_rms: 0.0,
     }
 }
 
@@ -482,6 +500,16 @@ mod tests {
         assert_eq!(snapshot.sources.len(), MAX_DEBUG_SOURCES);
         assert_eq!(snapshot.reflections.len(), 72);
         assert_eq!(snapshot.source_count, 0);
+    }
+
+    #[test]
+    fn source_activity_is_bound_to_scene_source_slot() {
+        let mut snapshot = SpatialDebugSnapshot::new(48_000);
+        snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
+        snapshot.record_source(0, SourceKind::FullRange, SourcePose::new(Vec3::FORWARD));
+        snapshot.set_source_activity(0, SourceActivity { peak: 0.75, rms: 0.25 });
+        assert!((snapshot.sources[0].input_peak - 0.75).abs() < f32::EPSILON);
+        assert!((snapshot.sources[0].input_rms - 0.25).abs() < f32::EPSILON);
     }
 
     #[test]
