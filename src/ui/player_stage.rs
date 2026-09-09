@@ -54,9 +54,6 @@ pub(super) fn render(
         .bg(rgb(0x0e0f16))
         .text_color(TEXT_WHITE)
         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
-            // Once clean/immersive mode has started, pointer motion must not wake the chrome.
-            // This also turns the automatic 20 s idle fade into click-to-wake instead of the old
-            // accidental wake caused by tiny mouse jitter or layout-generated move events.
             cx.stop_propagation();
             this.stage_last_mouse_pos = Some(event.position);
             if this.stage_suppress_wake_until.is_some()
@@ -69,8 +66,6 @@ pub(super) fn render(
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
-                // A real click is the explicit wake gesture. Normal clicks while the chrome is
-                // already visible simply count as application activity for the 20 s idle timer.
                 if this.stage_suppress_wake_until.is_some()
                     || this.stage_controls_visibility < 0.995
                 {
@@ -99,7 +94,13 @@ pub(super) fn render(
                         .gap_12()
                         .items_center()
                         .child(stage_cover(track, artwork))
-                        .child(stage_lyrics(app, lyrics, transport_position_ms, cx)),
+                        .child(stage_lyrics(
+                            app,
+                            lyrics,
+                            transport_position_ms,
+                            fluid_playing,
+                            cx,
+                        )),
                 )
                 .child(stage_controls(app, cx)),
         )
@@ -222,6 +223,7 @@ fn stage_lyrics(
     app: &MusicApp,
     lyrics: &[LyricLine],
     position_ms: u64,
+    playing: bool,
     cx: &mut Context<MusicApp>,
 ) -> impl IntoElement {
     if lyrics.is_empty() {
@@ -257,6 +259,9 @@ fn stage_lyrics(
         .iter()
         .rposition(|line| line.timestamp_ms <= position_ms)
         .unwrap_or(0);
+    let manual_reading = app
+        .lyrics_user_scrolling_until
+        .is_some_and(|until| until > Instant::now());
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -286,11 +291,25 @@ fn stage_lyrics(
 
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active);
-        let alpha = match distance {
-            0 => 1.0,
-            1 => 0.48,
-            2 => 0.28,
-            _ => 0.18,
+        let alpha = if manual_reading || !playing {
+            if index == active { 1.0 } else { 0.72 }
+        } else {
+            match distance {
+                0 => 1.0,
+                1 => 0.50,
+                2 => 0.30,
+                _ => 0.18,
+            }
+        };
+        let blur_radius = if playing && !manual_reading {
+            match distance {
+                0 => 0.0,
+                1 => 0.9,
+                2 => 1.8,
+                _ => 2.8,
+            }
+        } else {
+            0.0
         };
         let timestamp = line.timestamp_ms;
         let weight = if index == active {
@@ -308,14 +327,7 @@ fn stage_lyrics(
             .flex_col()
             .gap_1()
             .font_weight(weight)
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(28.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                    .child(line.text.clone()),
-            );
+            .child(stage_primary_lyric(line, position_ms, index == active));
 
         if let Some(translation) = line
             .translation
@@ -332,24 +344,42 @@ fn stage_lyrics(
             );
         }
 
-        // Do not keep glyphs under a permanent fractional transform. The old 0.955/0.925 scale
-        // rendered inactive lyric lines by resampling an already-rasterized text layer and was a
-        // direct source of blur on fractional-DPI displays. Weight + opacity preserve hierarchy
-        // while text remains at its native raster size.
+        let hover_group = format!("lyric-hover-{index}");
+        let hover_group_for_time = hover_group.clone();
         let line_element = div()
+            .group(hover_group)
             .id(SharedString::from(format!("lyric-line-{index}")))
+            .relative()
             .w_full()
             .min_w(px(0.0))
             .flex_none()
             .pl(px(16.0))
-            .pr(px(12.0))
+            .pr(px(78.0))
             .py(px(11.0))
             .mb(px(10.0))
             .opacity(alpha)
+            .blur(px(blur_radius))
             .transition(lyric_focus_transition())
             .cursor_pointer()
-            .hover(|style| style.opacity(1.0))
+            .hover(|style| style.opacity(1.0).blur(px(0.0)))
             .child(text)
+            .child(
+                div()
+                    .absolute()
+                    .right(px(10.0))
+                    .top(px(13.0))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_full()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.82))
+                    .opacity(0.0)
+                    .group_hover(hover_group_for_time, |style| style.opacity(1.0))
+                    .transition(lyric_focus_transition())
+                    .child(format_time(timestamp)),
+            )
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -395,10 +425,55 @@ fn stage_lyrics(
     viewport.into_any_element()
 }
 
+fn stage_primary_lyric(line: &LyricLine, position_ms: u64, active: bool) -> gpui::AnyElement {
+    if !active || line.words.is_empty() {
+        return div()
+            .w_full()
+            .min_w(px(0.0))
+            .text_size(px(28.0))
+            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+            .child(line.text.clone())
+            .into_any_element();
+    }
+
+    let current_word = line
+        .words
+        .iter()
+        .rposition(|word| word.timestamp_ms <= position_ms);
+    let mut row = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_wrap()
+        .items_baseline()
+        .text_size(px(28.0));
+
+    for (index, word) in line.words.iter().enumerate() {
+        let alpha = match current_word {
+            Some(current) if index < current => 0.86,
+            Some(current) if index == current => 1.0,
+            _ => 0.32,
+        };
+        row = row.child(
+            div()
+                .flex_none()
+                .font_weight(if current_word == Some(index) {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::SEMIBOLD
+                })
+                .text_color(hsla(0.0, 0.0, 1.0, alpha))
+                .child(word.text.clone()),
+        );
+    }
+
+    row.into_any_element()
+}
+
 fn lyric_focus_transition() -> Transition {
     Transition::new(Duration::from_millis(420))
         .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity])
+        .properties([TransitionProperty::Opacity, TransitionProperty::Blur])
 }
 
 fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
@@ -421,9 +496,6 @@ fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElemen
         .border_1()
         .border_color(hsla(0.0, 0.0, 1.0, 0.10))
         .on_hover(cx.listener(|this, hovered: &bool, _, _cx| {
-            // Hover is not an active operation. Keeping this flag true forever prevented the
-            // application's 20 s no-input policy from ever entering clean mode while the pointer
-            // happened to rest over the dock.
             this.stage_controls_hovered = false;
             if *hovered
                 && this.stage_suppress_wake_until.is_none()
