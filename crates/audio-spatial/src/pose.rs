@@ -99,6 +99,15 @@ impl std::ops::Mul<Vec3> for f32 {
     }
 }
 
+#[inline]
+fn orthonormal_basis(forward: Vec3, up: Vec3) -> (Vec3, Vec3, Vec3) {
+    let forward = forward.normalized_or(Vec3::FORWARD);
+    let up_hint = up.normalized_or(Vec3::UP);
+    let right = up_hint.cross(forward).normalized_or(Vec3::RIGHT);
+    let up = forward.cross(right).normalized_or(Vec3::UP);
+    (right, up, forward)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourcePose {
     pub position: Vec3,
@@ -151,24 +160,12 @@ impl ListenerPose {
     }
 
     /// Return an orthonormal listener-local `(right, up, forward)` basis.
-    ///
-    /// This is public because application-side spatial diagnostics and GPU debug visualization need
-    /// to project exactly the same listener frame as the realtime renderer instead of duplicating the
-    /// basis construction formula outside the spatial crate.
     #[inline]
     pub fn basis(self) -> (Vec3, Vec3, Vec3) {
-        let forward = self.forward.normalized_or(Vec3::FORWARD);
-        let up_hint = self.up.normalized_or(Vec3::UP);
-        let right = up_hint.cross(forward).normalized_or(Vec3::RIGHT);
-        let up = forward.cross(right).normalized_or(Vec3::UP);
-        (right, up, forward)
+        orthonormal_basis(self.forward, self.up)
     }
 
     /// Return the physical left/right ear reference positions used by the parametric binaural model.
-    ///
-    /// Ear geometry is intentionally symmetric around the head center; per-ear spectral response is
-    /// allowed to be asymmetric in the pinna model. Keeping this geometry centralized guarantees the
-    /// realtime renderer and GPU diagnostics visualize the same interaural baseline.
     #[inline]
     pub fn ear_positions(self) -> (Vec3, Vec3) {
         self.ear_positions_with_radius(DEFAULT_HEAD_RADIUS_M)
@@ -195,6 +192,65 @@ impl Default for ListenerPose {
     }
 }
 
+/// World-space transform of the rectangular acoustic room.
+///
+/// The room is deliberately independent from `ListenerPose`: turning or moving the listener must not
+/// rotate or translate the walls. This becomes the stable coordinate frame for image-source geometry,
+/// while direct binaural cues continue to use the listener's own head basis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoomPose {
+    pub position: Vec3,
+    pub forward: Vec3,
+    pub up: Vec3,
+}
+
+impl RoomPose {
+    pub const fn identity() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            forward: Vec3::FORWARD,
+            up: Vec3::UP,
+        }
+    }
+
+    /// Compatibility pose reproducing the previous listener-centered room exactly.
+    pub const fn from_listener(listener: ListenerPose) -> Self {
+        Self {
+            position: listener.position,
+            forward: listener.forward,
+            up: listener.up,
+        }
+    }
+
+    #[inline]
+    pub fn basis(self) -> (Vec3, Vec3, Vec3) {
+        orthonormal_basis(self.forward, self.up)
+    }
+
+    #[inline]
+    pub fn world_to_local(self, point: Vec3) -> Vec3 {
+        let relative = point - self.position;
+        let (right, up, forward) = self.basis();
+        Vec3::new(
+            relative.dot(right),
+            relative.dot(up),
+            relative.dot(forward),
+        )
+    }
+
+    #[inline]
+    pub fn local_to_world(self, point: Vec3) -> Vec3 {
+        let (right, up, forward) = self.basis();
+        self.position + right * point.x + up * point.y + forward * point.z
+    }
+}
+
+impl Default for RoomPose {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +269,35 @@ mod tests {
         let (left, right) = listener.ear_positions();
         assert!((left.x + DEFAULT_HEAD_RADIUS_M).abs() < 1.0e-6);
         assert!((right.x - DEFAULT_HEAD_RADIUS_M).abs() < 1.0e-6);
-        assert!((right - left).length() - DEFAULT_HEAD_RADIUS_M * 2.0 < 1.0e-6);
+        assert!(((right - left).length() - DEFAULT_HEAD_RADIUS_M * 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn room_pose_round_trips_world_coordinates() {
+        let room = RoomPose {
+            position: Vec3::new(2.0, 0.5, -1.0),
+            forward: Vec3::RIGHT,
+            up: Vec3::UP,
+        };
+        let world = Vec3::new(4.0, 1.25, 3.0);
+        let local = room.world_to_local(world);
+        let restored = room.local_to_world(local);
+        assert!((restored.x - world.x).abs() < 1.0e-5);
+        assert!((restored.y - world.y).abs() < 1.0e-5);
+        assert!((restored.z - world.z).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn listener_rotation_does_not_change_identity_room_basis() {
+        let listener = ListenerPose {
+            position: Vec3::ZERO,
+            forward: Vec3::RIGHT,
+            up: Vec3::UP,
+        };
+        let (_, _, listener_forward) = listener.basis();
+        let (_, _, room_forward) = RoomPose::identity().basis();
+        assert_eq!(listener_forward, Vec3::RIGHT);
+        assert_eq!(room_forward, Vec3::FORWARD);
     }
 
     #[test]
