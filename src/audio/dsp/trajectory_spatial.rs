@@ -12,6 +12,12 @@ const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
 const TRAJECTORY_RADIUS_RANGE_METERS: f32 = 0.85;
 const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 16.0;
 const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 44.0;
+const STEREO_DEPTH_AZIMUTH_RANGE_DEGREES: f32 = 16.0;
+const STEREO_IMMERSIVE_AZIMUTH_RANGE_DEGREES: f32 = 30.0;
+const MAX_STEREO_HALF_ANGLE_DEGREES: f32 = 102.0;
+const STEREO_DEPTH_ELEVATION_RANGE_DEGREES: f32 = 8.0;
+const STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES: f32 = 20.0;
+const MAX_STEREO_ELEVATION_DEGREES: f32 = 28.0;
 const MIN_STEREO_DISTANCE_METERS: f32 = 0.72;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.00;
 const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
@@ -79,6 +85,8 @@ impl FieldSignature {
 struct StereoField {
     half_angle_sin: f32,
     half_angle_cos: f32,
+    elevation_sin: f32,
+    elevation_cos: f32,
     distance_meters: f32,
     gain: f32,
     spread: f32,
@@ -86,23 +94,45 @@ struct StereoField {
 
 impl StereoField {
     fn from_settings(settings: &SpatialSettings) -> Self {
+        let width = settings.width.clamp(0.0, 1.0);
+        let depth = settings.depth.clamp(0.0, 1.0);
+        let immersive = settings.immersive_3d.clamp(0.0, 1.0);
         let effective_width =
-            settings.width.clamp(0.0, 1.0) * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
-        let half_angle_degrees =
-            MIN_STEREO_HALF_ANGLE_DEGREES + effective_width * STEREO_HALF_ANGLE_RANGE_DEGREES;
+            width * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
+
+        // The authored stereo pair lives on a listener-centric spherical shell rather than a
+        // horizontal ring. Width still controls the ordinary left/right aperture, while Depth and
+        // 3D immersion are allowed to move the wet field continuously around the lateral plane and
+        // slightly into the rear hemisphere. The dry programme remains the frontal anchor.
+        let half_angle_degrees = (MIN_STEREO_HALF_ANGLE_DEGREES
+            + effective_width * STEREO_HALF_ANGLE_RANGE_DEGREES
+            + depth * STEREO_DEPTH_AZIMUTH_RANGE_DEGREES
+            + immersive * STEREO_IMMERSIVE_AZIMUTH_RANGE_DEGREES)
+            .clamp(MIN_STEREO_HALF_ANGLE_DEGREES, MAX_STEREO_HALF_ANGLE_DEGREES);
         let (half_angle_sin, half_angle_cos) = half_angle_degrees.to_radians().sin_cos();
+
+        // Give the two authored channels opposite elevations so the stereo centroid stays near the
+        // listener's horizon while the wet field has genuine above/below geometry. This produces
+        // signed pinna/elevation cues without inventing extra delayed copies of the programme.
+        let elevation_degrees = (depth * STEREO_DEPTH_ELEVATION_RANGE_DEGREES
+            + immersive * STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES)
+            .clamp(0.0, MAX_STEREO_ELEVATION_DEGREES);
+        let (elevation_sin, elevation_cos) = elevation_degrees.to_radians().sin_cos();
+
         let distance_meters = MIN_STEREO_DISTANCE_METERS
             + settings.distance.clamp(0.0, 1.0) * STEREO_DISTANCE_RANGE_METERS
-            + settings.depth.clamp(0.0, 1.0) * 0.24;
+            + depth * 0.24;
         // `spread` intentionally stays conservative. Large spread values weaken the directional
         // pinna cue, which made the previous strong presets paradoxically sound less localized.
         let spread = (0.035
-            + settings.immersive_3d.clamp(0.0, 1.0) * 0.14
+            + immersive * 0.14
             + settings.crossfeed.clamp(0.0, 1.0) * 0.07)
             .clamp(0.0, 0.25);
         Self {
             half_angle_sin,
             half_angle_cos,
+            elevation_sin,
+            elevation_cos,
             distance_meters,
             gain: STEREO_SOURCE_GAIN,
             spread,
@@ -156,6 +186,8 @@ impl StereoSpatializer {
             field: StereoField {
                 half_angle_sin: 0.5,
                 half_angle_cos: 0.866_025_4,
+                elevation_sin: 0.0,
+                elevation_cos: 1.0,
                 distance_meters: 1.0,
                 gain: STEREO_SOURCE_GAIN,
                 spread: 0.1,
@@ -329,10 +361,27 @@ fn trajectory_segment_frames(
 
 #[inline]
 fn stereo_pair(center: SourcePose, field: StereoField) -> (SourcePose, SourcePose) {
-    let left_position = rotate_y(center.position, -field.half_angle_sin, field.half_angle_cos);
-    let right_position = rotate_y(center.position, field.half_angle_sin, field.half_angle_cos);
-    let left_velocity = rotate_y(center.velocity, -field.half_angle_sin, field.half_angle_cos);
-    let right_velocity = rotate_y(center.velocity, field.half_angle_sin, field.half_angle_cos);
+    let left_azimuth = rotate_y(center.position, -field.half_angle_sin, field.half_angle_cos);
+    let right_azimuth = rotate_y(center.position, field.half_angle_sin, field.half_angle_cos);
+    let left_velocity_azimuth =
+        rotate_y(center.velocity, -field.half_angle_sin, field.half_angle_cos);
+    let right_velocity_azimuth =
+        rotate_y(center.velocity, field.half_angle_sin, field.half_angle_cos);
+
+    // Opposite signed elevations preserve a centred stereo image while giving both hemispheres real
+    // source geometry. The positions remain on exactly the same radius as the authored centre.
+    let left_position = rotate_x(left_azimuth, field.elevation_sin, field.elevation_cos);
+    let right_position = rotate_x(right_azimuth, -field.elevation_sin, field.elevation_cos);
+    let left_velocity = rotate_x(
+        left_velocity_azimuth,
+        field.elevation_sin,
+        field.elevation_cos,
+    );
+    let right_velocity = rotate_x(
+        right_velocity_azimuth,
+        -field.elevation_sin,
+        field.elevation_cos,
+    );
     (
         SourcePose {
             position: left_position,
@@ -355,6 +404,15 @@ fn rotate_y(position: Vec3, sin: f32, cos: f32) -> Vec3 {
         position.x * cos + position.z * sin,
         position.y,
         -position.x * sin + position.z * cos,
+    )
+}
+
+#[inline]
+fn rotate_x(position: Vec3, sin: f32, cos: f32) -> Vec3 {
+    Vec3::new(
+        position.x,
+        position.y * cos + position.z * sin,
+        -position.y * sin + position.z * cos,
     )
 }
 
@@ -385,7 +443,19 @@ mod tests {
         let (left, right) = stereo_pair(center, field);
         assert!(left.position.x < 0.0);
         assert!(right.position.x > 0.0);
+        assert!(left.position.y > 0.0);
+        assert!(right.position.y < 0.0);
         assert!((left.position.length() - right.position.length()).abs() < 1.0e-5);
+        assert!((left.position.length() - field.distance_meters).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn immersive_static_field_reaches_the_rear_hemisphere() {
+        let field = StereoField::from_settings(&SpatialPreset::Immersive3d.settings());
+        let center = SourcePose::new(Vec3::new(0.0, 0.0, field.distance_meters));
+        let (left, right) = stereo_pair(center, field);
+        assert!(left.position.z < 0.0);
+        assert!(right.position.z < 0.0);
     }
 
     #[test]
