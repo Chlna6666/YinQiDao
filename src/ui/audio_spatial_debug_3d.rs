@@ -6,18 +6,23 @@ use gpui::{
     GpuMesh3dVertex, WgslShaderSource,
 };
 use yinqidao_audio_spatial::{
-    SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3, late_field_telemetry,
+    DEFAULT_HEAD_RADIUS_M, SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3,
+    late_field_telemetry,
 };
 
 const SHADER_SOURCE: &str = include_str!("audio_spatial_debug_3d.wgsl");
 const MIN_SCENE_RADIUS: f32 = 1.8;
 const SOURCE_RADIUS: f32 = 0.075;
-const LISTENER_RADIUS: f32 = 0.095;
+const EAR_RADIUS: f32 = 0.040;
+const HEAD_RADIUS: f32 = 0.115;
 const BOUNCE_RADIUS: f32 = 0.035;
 const ROOM_EDGE_WIDTH: f32 = 0.010;
 const LATE_FIELD_EDGE_WIDTH: f32 = 0.006;
 const PATH_WIDTH: f32 = 0.008;
+const DIRECT_EAR_PATH_WIDTH: f32 = 0.0045;
 const VELOCITY_WIDTH: f32 = 0.010;
+const LEFT_EAR_COLOR: [f32; 4] = [0.22, 0.62, 1.0, 1.0];
+const RIGHT_EAR_COLOR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SpatialDebug3dCamera {
@@ -124,7 +129,7 @@ impl SpatialDebug3dScene {
             -camera.pitch.sin() * orbit_distance,
             camera.yaw.cos() * horizontal * orbit_distance,
         ];
-        let view = mat4_look_at(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let view = mat4_look_at(eye, [0.0, -0.08, 0.0], [0.0, 1.0, 0.0]);
         let projection = mat4_perspective(aspect, 52.0_f32.to_radians(), 0.04, 64.0);
         GpuMesh3dDrawParameters {
             view_projection_model: mat4_mul(projection, mat4_mul(view, model)),
@@ -137,7 +142,7 @@ fn spatial_debug_shader() -> Result<Arc<GpuMesh3dShader>, String> {
     SHADER
         .get_or_init(|| {
             let source = WgslShaderSource::from_source(
-                "src/audio_spatial_debug_3d.wgsl",
+                "src/ui/audio_spatial_debug_3d.wgsl",
                 SHADER_SOURCE,
             )
             .map_err(|error| error.to_string())?;
@@ -162,6 +167,9 @@ fn build_scene_mesh(
         let relative = position - listener.position;
         [relative.dot(right), relative.dot(up), relative.dot(forward)]
     };
+    let (left_ear_world, right_ear_world) = listener.ear_positions();
+    let left_ear = to_local(left_ear_world);
+    let right_ear = to_local(right_ear_world);
 
     // Must match the audio-spatial image-source room geometry. The room is intentionally independent
     // of individual source positions so every authored channel shares one acoustic enclosure.
@@ -171,11 +179,11 @@ fn build_scene_mesh(
     let half_depth = 2.10 + room * 4.10;
     let fit_radius = half_width.max(half_depth).max(half_height).max(MIN_SCENE_RADIUS);
 
-    builder.push_octahedron(
-        [0.0, 0.0, 0.0],
-        LISTENER_RADIUS,
-        [0.25, 0.88, 1.0, 1.0],
-    );
+    // Listener visual shell. The acoustic ear markers below are not derived from this shell; they
+    // use ListenerPose::ear_positions(), the exact same ±head-radius geometry as the DSP model.
+    // The shell is intentionally low-poly so it can later be replaced by the selected CC0 humanoid
+    // mesh without changing any binaural geometry or debug path semantics.
+    builder.push_humanoid_listener(left_ear, right_ear);
 
     let source_count = snapshot.source_count.min(snapshot.sources.len());
     for source in snapshot.sources[..source_count].iter().copied() {
@@ -184,21 +192,49 @@ fn build_scene_mesh(
         }
         let position = to_local(source.position);
         let color = source_color(source.kind, source.elevation_degrees, source.source_index);
-        let radius = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
-            SOURCE_RADIUS * 1.16
+        let scale = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
+            1.18
         } else {
-            SOURCE_RADIUS * (0.88 + source.near_field_amount.clamp(0.0, 1.0) * 0.34)
+            0.92 + source.near_field_amount.clamp(0.0, 1.0) * 0.28
         };
-        builder.push_octahedron(position, radius, color);
+        builder.push_virtual_speaker(position, scale, color, matches!(source.kind, SpatialDebugSourceKind::Lfe));
     }
     let opaque_count = builder.indices.len() as u32;
 
+    // Head orientation axes: forward is cyan, interaural axis is deliberately split blue/red.
     builder.push_segment(
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.55],
-        0.018,
-        [0.30, 0.92, 1.0, 0.76],
+        0.013,
+        [0.30, 0.92, 1.0, 0.70],
     );
+    builder.push_segment(left_ear, right_ear, 0.008, [0.58, 0.68, 0.80, 0.36]);
+
+    // Each virtual source feeds two different acoustic endpoints. Visualizing both paths is crucial:
+    // the geometry is symmetric around the head, while delay/gain/pinna processing is not generally
+    // equal for a non-frontal source.
+    for source in snapshot.sources[..source_count].iter().copied() {
+        if !source.active {
+            continue;
+        }
+        let source_position = to_local(source.position);
+        let (left_alpha, right_alpha) = binaural_path_alpha(source.left_gain, source.right_gain);
+        let left_width = DIRECT_EAR_PATH_WIDTH * (0.75 + left_alpha * 0.70);
+        let right_width = DIRECT_EAR_PATH_WIDTH * (0.75 + right_alpha * 0.70);
+        builder.push_segment(
+            source_position,
+            left_ear,
+            left_width,
+            [LEFT_EAR_COLOR[0], LEFT_EAR_COLOR[1], LEFT_EAR_COLOR[2], left_alpha],
+        );
+        builder.push_segment(
+            source_position,
+            right_ear,
+            right_width,
+            [RIGHT_EAR_COLOR[0], RIGHT_EAR_COLOR[1], RIGHT_EAR_COLOR[2], right_alpha],
+        );
+    }
+
     builder.push_room_box(half_width, half_height, half_depth);
     builder.push_floor_grid(half_width, -half_height, half_depth);
     builder.push_ceiling_grid(half_width, half_height, half_depth);
@@ -259,7 +295,22 @@ fn build_scene_mesh(
         let alpha = (0.10 + energy.sqrt() * 0.74).clamp(0.10, 0.82);
         let path_color = wall_color(reflection.wall, alpha);
         builder.push_segment(source_position, bounce, PATH_WIDTH, path_color);
-        builder.push_segment(bounce, [0.0, 0.0, 0.0], PATH_WIDTH, path_color);
+
+        // The reflection's image direction also arrives independently at both ears. Keep these much
+        // fainter than the direct paths so a 7.1.4 bed remains readable even with 72 reflection taps.
+        let (left_alpha, right_alpha) = binaural_path_alpha(reflection.left_gain, reflection.right_gain);
+        builder.push_segment(
+            bounce,
+            left_ear,
+            PATH_WIDTH * 0.72,
+            [path_color[0] * 0.72, path_color[1] * 0.82, 1.0, alpha * left_alpha * 0.55],
+        );
+        builder.push_segment(
+            bounce,
+            right_ear,
+            PATH_WIDTH * 0.72,
+            [1.0, path_color[1] * 0.76, path_color[2] * 0.72, alpha * right_alpha * 0.55],
+        );
         builder.push_octahedron(
             bounce,
             BOUNCE_RADIUS,
@@ -308,6 +359,16 @@ fn build_scene_mesh(
     Ok((mesh, fit_radius))
 }
 
+fn binaural_path_alpha(left_gain: f32, right_gain: f32) -> (f32, f32) {
+    let left = if left_gain.is_finite() { left_gain.max(0.0) } else { 0.0 };
+    let right = if right_gain.is_finite() { right_gain.max(0.0) } else { 0.0 };
+    let maximum = left.max(right).max(1.0e-5);
+    (
+        (0.16 + 0.68 * (left / maximum).sqrt()).clamp(0.16, 0.84),
+        (0.16 + 0.68 * (right / maximum).sqrt()).clamp(0.16, 0.84),
+    )
+}
+
 fn source_color(kind: SpatialDebugSourceKind, elevation_degrees: f32, index: u16) -> [f32; 4] {
     if matches!(kind, SpatialDebugSourceKind::Lfe) {
         return [0.92, 0.36, 0.32, 1.0];
@@ -353,6 +414,59 @@ impl MeshBuilder {
         let index = self.vertices.len().min(u32::MAX as usize) as u32;
         self.vertices.push(GpuMesh3dVertex { position, color });
         index
+    }
+
+    fn push_humanoid_listener(&mut self, left_ear: [f32; 3], right_ear: [f32; 3]) {
+        // Lightweight fallback topology used until the selected CC0 Blender mesh is converted into
+        // static GpuMesh3d vertices. Its proportions deliberately keep the head center at the
+        // acoustic listener origin, so swapping the visual shell cannot move either ear.
+        self.push_octahedron([0.0, 0.0, 0.0], HEAD_RADIUS, [0.22, 0.72, 0.82, 1.0]);
+        self.push_segment(
+            [0.0, -0.10, -0.015],
+            [0.0, -0.24, -0.025],
+            0.052,
+            [0.20, 0.52, 0.62, 1.0],
+        );
+        self.push_segment(
+            [0.0, -0.22, -0.03],
+            [0.0, -0.58, -0.055],
+            0.155,
+            [0.17, 0.42, 0.52, 1.0],
+        );
+        self.push_segment(
+            [-0.13, -0.25, -0.02],
+            [-0.30, -0.49, -0.04],
+            0.044,
+            [0.16, 0.38, 0.48, 1.0],
+        );
+        self.push_segment(
+            [0.13, -0.25, -0.02],
+            [0.30, -0.49, -0.04],
+            0.044,
+            [0.16, 0.38, 0.48, 1.0],
+        );
+        self.push_octahedron(left_ear, EAR_RADIUS, LEFT_EAR_COLOR);
+        self.push_octahedron(right_ear, EAR_RADIUS, RIGHT_EAR_COLOR);
+        // Nose/face direction marker: the CC0 visual shell will align to the same +Z forward axis.
+        self.push_octahedron([0.0, -0.005, HEAD_RADIUS * 0.92], 0.026, [0.44, 0.86, 0.92, 1.0]);
+    }
+
+    fn push_virtual_speaker(
+        &mut self,
+        position: [f32; 3],
+        scale: f32,
+        color: [f32; 4],
+        lfe: bool,
+    ) {
+        let radius = SOURCE_RADIUS * scale;
+        self.push_octahedron(position, radius, color);
+        let toward_listener = normalize3(mul3(position, -1.0));
+        let nose = add3(position, mul3(toward_listener, radius * if lfe { 0.65 } else { 1.20 }));
+        self.push_segment(position, nose, radius * 0.24, [color[0], color[1], color[2], 0.92]);
+        if !lfe {
+            let halo = add3(position, mul3(toward_listener, -radius * 0.48));
+            self.push_octahedron(halo, radius * 0.42, [color[0], color[1], color[2], 0.72]);
+        }
     }
 
     fn push_octahedron(&mut self, center: [f32; 3], radius: f32, color: [f32; 4]) {
