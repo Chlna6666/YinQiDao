@@ -5,6 +5,7 @@ use crate::{
     delay::CubicDelayLine,
     environment::EARLY_REFLECTION_TAP_COUNT,
     image_source::{MAX_REFLECTION_DELAY_SECONDS, source_reflection_descriptors},
+    pinna::{StereoPinnaCoefficients, StereoPinnaState, coefficients_for_direction},
 };
 
 const SPEED_OF_SOUND_M_S: f32 = 343.0;
@@ -71,6 +72,7 @@ struct SourceState {
     delay: CubicDelayLine,
     filter_left: f32,
     filter_right: f32,
+    pinna: StereoPinnaState,
     reflection_filter_left: [f32; EARLY_REFLECTION_TAP_COUNT],
     reflection_filter_right: [f32; EARLY_REFLECTION_TAP_COUNT],
     lfe_state: f32,
@@ -79,6 +81,9 @@ struct SourceState {
     cached_pose: Option<SourcePose>,
     cached_listener: Option<ListenerPose>,
     cached_parameters: RenderParameters,
+    cached_pinna_pose: Option<SourcePose>,
+    cached_pinna_listener: Option<ListenerPose>,
+    cached_pinna_coefficients: StereoPinnaCoefficients,
     cached_reflection_pose: Option<SourcePose>,
     cached_reflection_listener: Option<ListenerPose>,
     cached_reflection_environment: Option<EnvironmentSettings>,
@@ -91,6 +96,7 @@ impl SourceState {
             delay: CubicDelayLine::new(delay_capacity),
             filter_left: 0.0,
             filter_right: 0.0,
+            pinna: StereoPinnaState::default(),
             reflection_filter_left: [0.0; EARLY_REFLECTION_TAP_COUNT],
             reflection_filter_right: [0.0; EARLY_REFLECTION_TAP_COUNT],
             lfe_state: 0.0,
@@ -99,6 +105,9 @@ impl SourceState {
             cached_pose: None,
             cached_listener: None,
             cached_parameters: RenderParameters::default(),
+            cached_pinna_pose: None,
+            cached_pinna_listener: None,
+            cached_pinna_coefficients: StereoPinnaCoefficients::IDENTITY,
             cached_reflection_pose: None,
             cached_reflection_listener: None,
             cached_reflection_environment: None,
@@ -121,6 +130,44 @@ impl SourceState {
         self.cached_listener = Some(listener);
         self.cached_parameters = parameters;
         parameters
+    }
+
+    #[inline]
+    fn pinna_for(
+        &mut self,
+        sample_rate: f32,
+        pose: SourcePose,
+        listener: ListenerPose,
+    ) -> StereoPinnaCoefficients {
+        if self.cached_pinna_pose == Some(pose) && self.cached_pinna_listener == Some(listener) {
+            return self.cached_pinna_coefficients;
+        }
+
+        let raw_relative = pose.position - listener.position;
+        let relative = Vec3::new(
+            finite_or_zero(raw_relative.x),
+            finite_or_zero(raw_relative.y),
+            finite_or_zero(raw_relative.z),
+        );
+        let direction = relative.normalized_or(Vec3::FORWARD);
+        let (right, up, forward) = listener.basis();
+        let local_right = direction.dot(right);
+        let local_up = direction.dot(up);
+        let local_forward = direction.dot(forward);
+        let azimuth = local_right.atan2(local_forward);
+        let horizontal = (local_right * local_right + local_forward * local_forward).sqrt();
+        let elevation = local_up.atan2(horizontal);
+        let coefficients = coefficients_for_direction(
+            sample_rate,
+            azimuth,
+            elevation,
+            finite_or_zero(pose.spread).clamp(0.0, 1.0),
+        );
+
+        self.cached_pinna_pose = Some(pose);
+        self.cached_pinna_listener = Some(listener);
+        self.cached_pinna_coefficients = coefficients;
+        coefficients
     }
 
     #[inline]
@@ -185,12 +232,16 @@ impl SourceState {
         self.delay.reset();
         self.filter_left = 0.0;
         self.filter_right = 0.0;
+        self.pinna.reset();
         self.lfe_state = 0.0;
         self.scratch_left.fill(0.0);
         self.scratch_right.fill(0.0);
         self.cached_pose = None;
         self.cached_listener = None;
         self.cached_parameters = RenderParameters::default();
+        self.cached_pinna_pose = None;
+        self.cached_pinna_listener = None;
+        self.cached_pinna_coefficients = StereoPinnaCoefficients::IDENTITY;
         self.invalidate_environment();
     }
 }
@@ -294,6 +345,15 @@ impl CpuRenderer {
                 let mut parameters = start;
                 let parameter_step = start.step_to(end, frames);
 
+                let pinna_start = state.pinna_for(sample_rate, start_pose, listener);
+                let pinna_end = if start_pose == end_pose {
+                    pinna_start
+                } else {
+                    state.pinna_for(sample_rate, end_pose, listener)
+                };
+                let mut pinna_coefficients = pinna_start;
+                let pinna_step = pinna_start.step_to(pinna_end, frames);
+
                 let reflection_start = if reflections_enabled {
                     state.reflection_parameters_for(sample_rate, start_pose, listener, environment)
                 } else {
@@ -322,8 +382,10 @@ impl CpuRenderer {
                         parameters.left_filter_alpha * (delayed_left - state.filter_left);
                     state.filter_right +=
                         parameters.right_filter_alpha * (delayed_right - state.filter_right);
-                    let mut output_left = state.filter_left * parameters.left_gain;
-                    let mut output_right = state.filter_right * parameters.right_gain;
+                    let direct_left = state.filter_left * parameters.left_gain;
+                    let direct_right = state.filter_right * parameters.right_gain;
+                    let (mut output_left, mut output_right) =
+                        state.pinna.process(direct_left, direct_right, pinna_coefficients);
 
                     if reflections_enabled {
                         for tap in 0..EARLY_REFLECTION_TAP_COUNT {
@@ -346,6 +408,7 @@ impl CpuRenderer {
                     state.scratch_left[frame] = output_left;
                     state.scratch_right[frame] = output_right;
                     parameters.advance(parameter_step);
+                    pinna_coefficients.advance(pinna_step);
                 }
             }
             SourceKind::Lfe => {
@@ -580,6 +643,10 @@ mod tests {
         );
         assert!((parameters.left_delay - parameters.right_delay).abs() < 1.0e-6);
         assert!((parameters.left_gain - parameters.right_gain).abs() < 1.0e-6);
+
+        let mut state = SourceState::new(4_096, 64);
+        let pinna = state.pinna_for(48_000.0, SourcePose::new(Vec3::FORWARD), ListenerPose::identity());
+        assert_eq!(pinna.left, pinna.right);
     }
 
     #[test]
@@ -634,6 +701,23 @@ mod tests {
     }
 
     #[test]
+    fn pinna_parameter_cache_tracks_pose_and_listener() {
+        let mut state = SourceState::new(4_096, 64);
+        let listener = ListenerPose::identity();
+        let pose = SourcePose::new(Vec3::RIGHT);
+        let first = state.pinna_for(48_000.0, pose, listener);
+        let second = state.pinna_for(48_000.0, pose, listener);
+        assert_eq!(first, second);
+        assert_eq!(state.cached_pinna_pose, Some(pose));
+        assert_eq!(state.cached_pinna_listener, Some(listener));
+
+        let moved = SourcePose::new(Vec3::BACK);
+        let third = state.pinna_for(48_000.0, moved, listener);
+        assert_ne!(third, first);
+        assert_eq!(state.cached_pinna_pose, Some(moved));
+    }
+
+    #[test]
     fn image_source_reflections_add_excess_delay_and_respect_environment_mix() {
         let mut state = SourceState::new(4_096, 64);
         let listener = ListenerPose::identity();
@@ -668,6 +752,7 @@ mod tests {
         let pose = SourcePose::new(Vec3::FORWARD);
         let listener = ListenerPose::identity();
         let direct = renderer.sources[0].parameters_for(48_000.0, pose, listener);
+        let pinna = renderer.sources[0].pinna_for(48_000.0, pose, listener);
         renderer.sources[0].reflection_parameters_for(
             48_000.0,
             pose,
@@ -681,6 +766,7 @@ mod tests {
         });
         assert_eq!(renderer.sources[0].cached_pose, Some(pose));
         assert!((renderer.sources[0].cached_parameters.left_gain - direct.left_gain).abs() < f32::EPSILON);
+        assert_eq!(renderer.sources[0].cached_pinna_coefficients, pinna);
         assert!(renderer.sources[0].cached_reflection_pose.is_none());
     }
 
