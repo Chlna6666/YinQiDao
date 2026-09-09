@@ -4,8 +4,8 @@ pub(crate) use spatial_environment::spatial_environment_settings;
 
 use crate::model::{SpatialMotionMode, SpatialSettings};
 use yinqidao_audio_spatial::{
-    EngineConfig, EnvironmentSettings, SourcePose, SpatialDebugSnapshot, SpatialEngine, Trajectory,
-    TrajectoryKind, Vec3,
+    EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
+    SpatialDebugSnapshot, SpatialEngine, Trajectory, TrajectoryKind, Vec3,
 };
 
 const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
@@ -176,6 +176,12 @@ impl StereoSpatializer {
 
     pub(crate) fn debug_snapshot(&self) -> Option<SpatialDebugSnapshot> {
         self.engine.debug_snapshot()
+    }
+
+    pub(crate) fn debug_source_activity(
+        &self,
+    ) -> Option<[SourceActivity; MAX_DEBUG_SOURCES]> {
+        self.engine.debug_source_activity()
     }
 
     pub(crate) fn process_in_place(
@@ -433,8 +439,13 @@ mod tests {
         let mut samples = vec![0.10_f32; 64 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
         let snapshot = spatializer.debug_snapshot().expect("debug snapshot");
+        let activity = spatializer
+            .debug_source_activity()
+            .expect("debug source activity");
         assert_eq!(snapshot.source_count, 2);
         assert_eq!(snapshot.rendered_frames, 64);
+        assert!((activity[0].peak - 0.10).abs() < 1.0e-6);
+        assert!((activity[1].rms - 0.10).abs() < 1.0e-6);
     }
 
     #[test]
