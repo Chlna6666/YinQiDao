@@ -32,11 +32,10 @@ pub(crate) struct SourceReflectionDescriptor {
     pub damping_cutoff_hz: f32,
 }
 
-/// Compatibility wrapper for the historical listener-centered room.
+/// Solve reflections in the engine's default world-space room.
 ///
-/// Keeping this wrapper lets the renderer migrate independently. New code should use
-/// `source_reflection_descriptors_in_room` with an explicit `RoomPose` so head motion does not move
-/// or rotate the walls.
+/// The room no longer follows listener position/orientation. Direct binaural cues still use the
+/// listener's head basis, while wall geometry remains stable in world space.
 pub(crate) fn source_reflection_descriptors(
     sample_rate: f32,
     source: SourcePose,
@@ -47,7 +46,7 @@ pub(crate) fn source_reflection_descriptors(
         sample_rate,
         source,
         listener,
-        RoomPose::from_listener(listener),
+        RoomPose::identity(),
         settings,
     )
 }
@@ -200,7 +199,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_wrapper_preserves_listener_centered_room() {
+    fn default_wrapper_uses_fixed_world_room() {
         let listener = ListenerPose {
             position: Vec3::new(0.6, 0.2, -0.3),
             forward: Vec3::RIGHT,
@@ -214,7 +213,7 @@ mod tests {
                 48_000.0,
                 source,
                 listener,
-                RoomPose::from_listener(listener),
+                RoomPose::identity(),
                 settings,
             )
         );
@@ -257,11 +256,10 @@ mod tests {
             forward: Vec3::RIGHT,
             up: Vec3::UP,
         };
-        let reflections = source_reflection_descriptors_in_room(
+        let reflections = source_reflection_descriptors(
             48_000.0,
             SourcePose::new(Vec3::FORWARD),
             listener,
-            RoomPose::identity(),
             settings,
         );
         assert!((reflections[0].bounce_position.x + room.width).abs() < 1.0e-4);
@@ -281,11 +279,10 @@ mod tests {
             position: Vec3::new(0.45, 0.10, -0.35),
             ..ListenerPose::identity()
         };
-        let reflections = source_reflection_descriptors_in_room(
+        let reflections = source_reflection_descriptors(
             48_000.0,
             SourcePose::new(Vec3::new(-0.2, 0.0, 1.0)),
             listener,
-            RoomPose::identity(),
             settings,
         );
         assert!((reflections[0].bounce_position.x + room.width).abs() < 1.0e-4);
@@ -323,11 +320,10 @@ mod tests {
         let listener = ListenerPose::identity();
         let source = SourcePose::new(Vec3::new(0.45, 0.15, 1.0));
         let direct = (source.position - listener.position).length();
-        let reflections = source_reflection_descriptors_in_room(
+        let reflections = source_reflection_descriptors(
             48_000.0,
             source,
             listener,
-            RoomPose::identity(),
             EnvironmentSettings::default(),
         );
         assert_eq!(reflections.len(), 6);
@@ -340,11 +336,10 @@ mod tests {
 
     #[test]
     fn reflection_delay_is_bounded_by_realtime_history_budget() {
-        let reflections = source_reflection_descriptors_in_room(
+        let reflections = source_reflection_descriptors(
             48_000.0,
             SourcePose::new(Vec3::new(12.0, 8.0, 8.0)),
             ListenerPose::identity(),
-            RoomPose::identity(),
             EnvironmentSettings {
                 room_size: 1.0,
                 ..EnvironmentSettings::default()
@@ -361,21 +356,19 @@ mod tests {
     #[test]
     fn more_damping_reduces_reflectance_and_cutoff() {
         let source = SourcePose::new(Vec3::FORWARD);
-        let dry = source_reflection_descriptors_in_room(
+        let dry = source_reflection_descriptors(
             48_000.0,
             source,
             ListenerPose::identity(),
-            RoomPose::identity(),
             EnvironmentSettings {
                 damping: 0.0,
                 ..EnvironmentSettings::default()
             },
         );
-        let damped = source_reflection_descriptors_in_room(
+        let damped = source_reflection_descriptors(
             48_000.0,
             source,
             ListenerPose::identity(),
-            RoomPose::identity(),
             EnvironmentSettings {
                 damping: 1.0,
                 ..EnvironmentSettings::default()
