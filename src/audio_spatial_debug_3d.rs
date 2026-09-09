@@ -5,7 +5,9 @@ use gpui::{
     GpuMesh3d, GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader,
     GpuMesh3dVertex, WgslShaderSource,
 };
-use yinqidao_audio_spatial::{SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3};
+use yinqidao_audio_spatial::{
+    SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3, late_field_telemetry,
+};
 
 const SHADER_SOURCE: &str = include_str!("audio_spatial_debug_3d.wgsl");
 const MIN_SCENE_RADIUS: f32 = 1.8;
@@ -13,6 +15,7 @@ const SOURCE_RADIUS: f32 = 0.075;
 const LISTENER_RADIUS: f32 = 0.095;
 const BOUNCE_RADIUS: f32 = 0.035;
 const ROOM_EDGE_WIDTH: f32 = 0.010;
+const LATE_FIELD_EDGE_WIDTH: f32 = 0.006;
 const PATH_WIDTH: f32 = 0.008;
 const VELOCITY_WIDTH: f32 = 0.010;
 
@@ -199,6 +202,20 @@ fn build_scene_mesh(
     builder.push_room_box(half_width, half_height, half_depth);
     builder.push_floor_grid(half_width, -half_height, half_depth);
     builder.push_ceiling_grid(half_width, half_height, half_depth);
+
+    // Late diffuse energy has no discrete image-source position. Render it as concentric transparent
+    // volumes around the listener rather than inventing extra bounce rays. The opacity comes from the
+    // exact FDN wet parameter used by the realtime engine.
+    let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
+    if late.active {
+        builder.push_late_field_volume(
+            half_width,
+            half_height,
+            half_depth,
+            late.wet_gain,
+            late.feedback_gain,
+        );
+    }
 
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active || matches!(source.kind, SpatialDebugSourceKind::Lfe) {
@@ -409,7 +426,49 @@ impl MeshBuilder {
     }
 
     fn push_room_box(&mut self, half_width: f32, half_height: f32, half_depth: f32) {
-        let c = [0.33, 0.43, 0.56, 0.28];
+        self.push_wire_box(
+            half_width,
+            half_height,
+            half_depth,
+            ROOM_EDGE_WIDTH,
+            [0.33, 0.43, 0.56, 0.28],
+        );
+    }
+
+    fn push_late_field_volume(
+        &mut self,
+        half_width: f32,
+        half_height: f32,
+        half_depth: f32,
+        wet_gain: f32,
+        feedback_gain: f32,
+    ) {
+        let base_alpha = (0.055 + wet_gain.clamp(0.0, 0.25) * 1.65).clamp(0.055, 0.26);
+        let feedback_tint = ((feedback_gain - 0.50) / 0.32).clamp(0.0, 1.0);
+        for (scale, alpha_scale) in [(0.38, 0.50), (0.60, 0.72), (0.82, 1.0)] {
+            self.push_wire_box(
+                half_width * scale,
+                half_height * scale,
+                half_depth * scale,
+                LATE_FIELD_EDGE_WIDTH,
+                [
+                    0.30 + feedback_tint * 0.16,
+                    0.42 + feedback_tint * 0.08,
+                    0.96,
+                    base_alpha * alpha_scale,
+                ],
+            );
+        }
+    }
+
+    fn push_wire_box(
+        &mut self,
+        half_width: f32,
+        half_height: f32,
+        half_depth: f32,
+        edge_width: f32,
+        color: [f32; 4],
+    ) {
         let p = [
             [-half_width, -half_height, -half_depth],
             [half_width, -half_height, -half_depth],
@@ -425,7 +484,7 @@ impl MeshBuilder {
             (4, 5), (5, 6), (6, 7), (7, 4),
             (0, 4), (1, 5), (2, 6), (3, 7),
         ] {
-            self.push_segment(p[a], p[b], ROOM_EDGE_WIDTH, c);
+            self.push_segment(p[a], p[b], edge_width, color);
         }
     }
 
