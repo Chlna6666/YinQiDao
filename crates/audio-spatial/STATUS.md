@@ -23,6 +23,7 @@
 - [x] 默认 64-frame 固定内部 block，可配置。
 - [x] `SpatialEngine` / source workspace 初始化时预分配。
 - [x] `Vec3` / `SourcePose` / `ListenerPose` 无分配几何 primitive。
+- [x] `ListenerPose::basis()` 作为公开只读几何 API，DSP 与应用侧 GPU Debug 共用同一 listener-local basis。
 - [x] Stereo / 5.1 / 7.1 / 5.1.4 / 7.1.4 speaker scene。
 - [x] 7.1.4 顺序与当前 AVS3 PCM 约定对齐，LFE index 3。
 - [x] interleaved N-channel stride 直读，无 per-channel Vec。
@@ -35,6 +36,9 @@
 - [x] end-exclusive `[n, n + frames)` 参数 ramp。
 - [x] Orbit360 / FigureEight / Pendulum / FrontBack / Planetary / NearEar / Helix audio-clock trajectory。
 - [x] clockwise / counter-clockwise。
+- [x] 动态 trajectory 生成真实 m/s velocity，不再固定 `Vec3::ZERO`。
+- [x] 高速 trajectory 按角速度自适应细分，单 segment 角位移约限制在 `<= 1°`；常规 48 kHz / 0.5 Hz 仍保持 64-frame block。
+- [x] rigid stereo pair 的 L/R position 与 velocity 使用相同 Y 旋转，保持运动学一致。
 - [x] source accumulation 复用 `yinqidao-audio-simd::mix_accumulate`。
 - [x] NaN/Inf 在进入 delay/IIR/pinna persistent state 前隔离。
 
@@ -48,7 +52,7 @@
 - [x] native engine 按 input sample-rate 缓存。
 - [x] stereo/native 共用单一 `SpatialSettings → EnvironmentSettings` 映射；关闭 Spatial 时 native 仍保留必要 binaural/pinna，但 synthetic Early/FDN `mix=0`。
 - [x] native engine 缓存最后一次 environment，只有参数变化才更新六面反射/FDN 参数，不在每个 decode chunk 重算。
-- [x] seek / reopen / processing discontinuity reset EQ、resampler、native/stereo spatial、pinna 与 late-field state。
+- [x] seek / reopen / processing discontinuity reset EQ、resampler、native/stereo spatial、pinna、late-field 与 peak-limiter envelope。
 - [x] transport generation 使用 audio-worker thread-local。
 - [x] Static / Immersive3d 使用 stereo L/R front-arc virtual source。
 - [x] Orbit8d / Orbit360 / Pendulum / FrontBack / Planetary / NearEar 进入自研 `Trajectory`。
@@ -59,6 +63,7 @@
 ## Phase 2 — CPU kernel / 声学质量
 
 - [x] block 起点一次生成参数 step，sample loop 只做加法推进。
+- [x] reflection step 显式固定为 `[RenderParameterStep; EARLY_REFLECTION_TAP_COUNT]`，避免 `std::array::from_fn` const generic 推断歧义。
 - [x] source pose/listener 参数 cache；固定 5.1.4/7.1.4 避免重复 pose solve。
 - [x] LFE 跳过方向性 pose solve。
 - [x] `CubicDelayLine::read_pair` 共用 ring cursor；整数 delay direct-read fast path。
@@ -69,16 +74,18 @@
 - [x] reflection filter/parameter/cache 均为每 source 固定数组。
 - [x] environment `mix=0` 完全跳过 reflection geometry/read/filter 与 late-field 热循环。
 - [x] environment 改变只 invalidates reflection cache/filter；direct ITD 与 pinna pose cache 独立保留。
-- [x] direct path 参数化 pinna externalization：front/rear/elevation notch + 轻微 per-ear spectral asymmetry。
-- [x] pinna 系数按 block 端点求值并 sample-ramp；静态 speaker pose 命中 cache，sample loop 不做三角函数/`powf`。
-- [x] pinna TDF2 biquad 固定状态、0 allocation；异常样本清状态并输出 0，denormal 主动归零。
+- [x] direct path 双级参数化 pinna externalization：方向 notch + broad spectral shoulder/peak，并保留轻微 per-ear spectral asymmetry。
+- [x] notch/shoulder 系数按 block 端点求值并 sample-ramp；静态 speaker pose 命中 cache，sample loop 不做三角函数/`powf`。
+- [x] 每耳两级 TDF2 biquad 固定状态、0 allocation；异常样本清状态并输出 0，denormal 主动归零。
+- [x] linked-stereo zero-lookahead peak safety limiter：L/R 共用 gain envelope、instantaneous attack、约 90 ms release、默认 ceiling `-0.30 dBFS`、0 added latency / 0 allocation。
+- [x] 用户音量 gain 直接进入 limiter detector/application；最终 SIMD hard clamp 仅保留为异常 invariant guard，不再承担正常 limiter 职责。
 - [ ] reflection arrival 是否加入 pinna spectral cue：先以 benchmark/听感证明收益，避免 `6 taps × N sources` 无依据增负载。
 - [ ] 更多 hot kernel 下沉 `audio-simd`。
 - [ ] Lagrange vs Thiran fractional delay 质量/成本对比。
-- [ ] 更完整的多段 pinna notch/peak bank 与听感标定。
+- [ ] 更完整的多段 pinna bank / 参数标定；当前已完成双级 notch + shoulder，但仍需听感与测量校准。
 - [ ] 通用 parameter smoothing/crossfade 自动化测试。
 - [ ] channel-order conformance vectors。
-- [ ] headroom / limiter 重新标定。
+- [ ] limiter ceiling/release/headroom 的实际节目素材标定与 true-peak 校验。
 
 ## Phase 3 — 自适应 CPU 多线程
 
@@ -122,12 +129,15 @@
 - [x] 根播放器原子槽 + odd/even seqlock 发布，无 Mutex/channel/heap publication。
 - [x] scene publish 约 30 Hz。
 - [x] A/B/C：Original / Post-EQ / Post-Spatial 工程指标。
-- [x] GPU 3D Debug V2 使用 BMCBL GPUI `GpuMesh3d` / WGSL / depth；不修改 GPUI core。
+- [x] GPU 3D Debug 使用 BMCBL GPUI `GpuMesh3d` / WGSL / depth；不修改 GPUI core。
+- [x] Debug UI 已从根 `src/` 收拢到 `src/ui/audio_debug_window.rs`、`src/ui/audio_spatial_debug_3d.rs`、`src/ui/audio_spatial_debug_3d.wgsl`；删除旧 `audio_debug_window.rs` / `audio_debug_window_v2.rs` 与根级 3D 文件，不再保留 V2 过渡命名。
+- [x] GPUI stage accent 的 `Rgba → Hsla` 显式转换已修复。
+- [x] GPU Debug 直接调用公开 `ListenerPose::basis()`，不复制 listener basis 公式。
 - [x] GPU 3D scene：listener、heading、authored sources、velocity、真实 6-wall room wireframe/grid、source→bounce→listener paths。
 - [x] Floor/Ceiling 使用与 DSP 相同的 room height 与真实 bounce path，可在 3D 中直接观察上下反射。
 - [x] mesh id 稳定，以 generation 刷新 GPU cache；UI 约 30 Hz 更新。
 - [x] 3D Camera yaw/pitch/zoom/reset。
-- [x] Pinna telemetry 复用 realtime cue generator：center/Q/depth/cue strength/L-R notch。
+- [x] Pinna telemetry 复用 realtime cue generator：notch center/Q/depth/cue strength/L-R notch；运行时现已扩展到双级 notch + shoulder。
 - [x] FDN telemetry 复用 realtime parameter derivation：wet/feedback/damping cutoff/delay range。
 - [x] GPU 3D 明确区分 Early/Late：离散彩色折线路径代表六面 image-source Early，监听者周围半透明多层 volume 代表 FDN Late。
 - [ ] object ID / Audio Vivid metadata 可视化。
@@ -156,24 +166,39 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 - `environment.mix=0.30`：stereo / 7.1.4；
 - Debug off/on：stereo 与 7.1.4；
 - 每个 case 输出 avg/p50/p95/p99/worst 与 audio deadline budget；
-- direct pinna 始终属于 FullRange baseline，room case 增加六面 Early + 全局 FDN。
+- direct 双级 pinna 始终属于 FullRange baseline，room case 增加六面 Early + 全局 FDN。
 
 仍需后续增加：
 
 - 可切 pinna off/on 的精确边际成本（当前 pinna 属于 baseline）；
+- limiter off/on 边际成本与 gain-reduction 统计；
 - reflection-pinna prototype cost；
 - 16/32/64 future objects；
 - AVS3 7.1.4 end-to-end。
 
+## 2026-09-09 本地编译反馈与修复
+
+用户本地构建已实际暴露以下源码/API 问题；对应修复已提交，但**尚未收到修复后的完整 `cargo check` 成功结果**：
+
+1. `renderer.rs`：`std::array::from_fn` 无法推断 `reflection_steps` const generic 长度（E0284）
+   - 已显式标注 `[RenderParameterStep; EARLY_REFLECTION_TAP_COUNT]`。
+2. `audio_debug_window_v2.rs`：`stage_card` 需要 `Hsla`，`rgb(...)` 返回 `Rgba`（E0308）
+   - 已在新 `src/ui/audio_debug_window.rs` 三处 accent 调用显式 `.into()`。
+3. `audio_spatial_debug_3d.rs`：应用 crate 无法调用 `pub(crate) ListenerPose::basis()`（E0624）
+   - 已把 `basis()` 提升为公开只读几何 API，并保持算法实现唯一来源。
+4. Debug 文件结构
+   - 已删除根 `src/` 的旧窗口/V2/3D 文件，统一收拢到 `src/ui/`。
+
 ## 当前验证状态
 
-- **尚未执行 `cargo check`**；
-- **尚未执行 `cargo test`**；
+- **本助手环境尚未执行 `cargo check`**；
+- **本助手环境尚未执行 `cargo test`**；
 - **尚未执行 `cpu_bench`**；
+- 用户本地编译已推进到并反馈上述编译错误，但修复后是否完整通过仍待下一次本地构建确认；
 - **尚未得到 serial/parallel break-even**；
-- `Cargo.lock` 尚未通过 Cargo 重新生成/校验。
+- `Cargo.lock` 尚未通过当前环境中的 Cargo 重新生成/校验。
 
-不得把以上项目描述为已经通过。
+不得把以上未确认项目描述为已经通过。
 
 具备 toolchain 后优先：
 
@@ -186,9 +211,10 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一步
 
-1. 实际 `cargo check/test`，优先修复 pinna / FDN / GPUI 3D V2 / native-room 的 type/API 问题。
+1. 用户本地重新执行 `cargo check`，继续消除剩余 GPUI 3D / pinna / limiter / native-room type/API 问题，直到根包完整通过。
 2. 完成 channel-order conformance vectors，确保 AVS3 5.1.4/7.1.4 authored slot 与 `SpeakerLayout` 一致。
-3. 做 headroom / limiter 标定：避免六面 Early + FDN 后仅靠最终 hard clamp 产生瞬态削顶。
-4. 实际跑 serial benchmark；依据数据决定 reflection-pinna、tap audibility budget 与 realtime worker pool。
-5. 验证稳定后删除 legacy stereo renderer/fallback。
-6. 再推进 absolute room transform、listener runtime orientation 与 Audio Vivid object metadata。
+3. 实际跑 serial benchmark，分别测 dry / 双级 pinna / 六面 Early / FDN / limiter / Debug 的边际成本。
+4. 用真实音乐与峰值测试素材标定 limiter ceiling/release、post-spatial headroom 与 true-peak 风险；不依赖 hard clamp 塑形。
+5. 只有 benchmark + 听感同时证明收益时才尝试 reflection-pinna / tap audibility budget / realtime worker pool。
+6. 编译与性能稳定后删除 legacy `src/audio/dsp/spatial.rs` renderer/fallback。
+7. 再推进 absolute room transform、listener runtime orientation、source directivity 与 Audio Vivid object metadata。
