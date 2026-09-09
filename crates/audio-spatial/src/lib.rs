@@ -13,6 +13,7 @@ mod environment;
 mod error;
 mod image_source;
 mod layout;
+mod pinna;
 mod pose;
 mod renderer;
 mod trajectory;
