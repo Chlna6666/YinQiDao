@@ -7,6 +7,7 @@
 #![allow(clippy::manual_is_multiple_of)]
 
 mod debug;
+mod debug_activity;
 mod delay;
 mod engine;
 mod environment;
@@ -23,6 +24,7 @@ pub use debug::{
     MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES, SpatialDebugReflection,
     SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
 };
+pub use debug_activity::{SourceActivity, analyze_interleaved_activity};
 pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine};
 pub use environment::EnvironmentSettings;
 pub use error::SpatialError;
