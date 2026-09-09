@@ -6,6 +6,46 @@ pub enum SourceKind {
     Lfe,
 }
 
+/// Semantic channel role for one authored interleaved PCM slot.
+///
+/// The role array is deliberately kept beside `SpeakerLayout` so renderer geometry, Debug labels and
+/// AVS3/Audio Vivid channel-bed conformance can share one explicit ordering contract instead of
+/// inferring meaning from a bare channel index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelRole {
+    FrontLeft,
+    FrontRight,
+    Center,
+    Lfe,
+    SurroundLeft,
+    SurroundRight,
+    RearLeft,
+    RearRight,
+    TopFrontLeft,
+    TopFrontRight,
+    TopRearLeft,
+    TopRearRight,
+}
+
+impl ChannelRole {
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::FrontLeft => "FL",
+            Self::FrontRight => "FR",
+            Self::Center => "C",
+            Self::Lfe => "LFE",
+            Self::SurroundLeft => "SL",
+            Self::SurroundRight => "SR",
+            Self::RearLeft => "RL",
+            Self::RearRight => "RR",
+            Self::TopFrontLeft => "TFL",
+            Self::TopFrontRight => "TFR",
+            Self::TopRearLeft => "TRL",
+            Self::TopRearRight => "TRR",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Speaker {
     pub direction: Vec3,
@@ -43,12 +83,25 @@ pub enum ChannelLayout {
 #[derive(Clone, Copy, Debug)]
 pub struct SpeakerLayout {
     speakers: &'static [Speaker],
+    roles: &'static [ChannelRole],
     normalization: f32,
 }
 
 impl SpeakerLayout {
     pub const fn speakers(self) -> &'static [Speaker] {
         self.speakers
+    }
+
+    pub const fn roles(self) -> &'static [ChannelRole] {
+        self.roles
+    }
+
+    pub const fn role(self, channel_index: usize) -> Option<ChannelRole> {
+        if channel_index < self.roles.len() {
+            Some(self.roles[channel_index])
+        } else {
+            None
+        }
     }
 
     pub const fn channels(self) -> usize {
@@ -63,22 +116,27 @@ impl SpeakerLayout {
         match layout {
             ChannelLayout::Stereo => Self {
                 speakers: &STEREO,
+                roles: &STEREO_ROLES,
                 normalization: 0.92,
             },
             ChannelLayout::Surround5_1 => Self {
                 speakers: &SURROUND_5_1,
+                roles: &SURROUND_5_1_ROLES,
                 normalization: 0.62,
             },
             ChannelLayout::Surround7_1 => Self {
                 speakers: &SURROUND_7_1,
+                roles: &SURROUND_7_1_ROLES,
                 normalization: 0.54,
             },
             ChannelLayout::Surround5_1_4 => Self {
                 speakers: &SURROUND_5_1_4,
+                roles: &SURROUND_5_1_4_ROLES,
                 normalization: 0.46,
             },
             ChannelLayout::Surround7_1_4 => Self {
                 speakers: &SURROUND_7_1_4,
+                roles: &SURROUND_7_1_4_ROLES,
                 normalization: 0.42,
             },
         }
@@ -98,6 +156,54 @@ const TOP_FRONT_LEFT: Vec3 = Vec3::new(-0.405_579_8, 0.707_106_77, 0.579_228);
 const TOP_FRONT_RIGHT: Vec3 = Vec3::new(0.405_579_8, 0.707_106_77, 0.579_228);
 const TOP_REAR_LEFT: Vec3 = Vec3::new(-0.405_579_8, 0.707_106_77, -0.579_228);
 const TOP_REAR_RIGHT: Vec3 = Vec3::new(0.405_579_8, 0.707_106_77, -0.579_228);
+
+const STEREO_ROLES: [ChannelRole; 2] = [ChannelRole::FrontLeft, ChannelRole::FrontRight];
+const SURROUND_5_1_ROLES: [ChannelRole; 6] = [
+    ChannelRole::FrontLeft,
+    ChannelRole::FrontRight,
+    ChannelRole::Center,
+    ChannelRole::Lfe,
+    ChannelRole::SurroundLeft,
+    ChannelRole::SurroundRight,
+];
+const SURROUND_7_1_ROLES: [ChannelRole; 8] = [
+    ChannelRole::FrontLeft,
+    ChannelRole::FrontRight,
+    ChannelRole::Center,
+    ChannelRole::Lfe,
+    ChannelRole::RearLeft,
+    ChannelRole::RearRight,
+    ChannelRole::SurroundLeft,
+    ChannelRole::SurroundRight,
+];
+const SURROUND_5_1_4_ROLES: [ChannelRole; 10] = [
+    ChannelRole::FrontLeft,
+    ChannelRole::FrontRight,
+    ChannelRole::Center,
+    ChannelRole::Lfe,
+    ChannelRole::SurroundLeft,
+    ChannelRole::SurroundRight,
+    ChannelRole::TopFrontLeft,
+    ChannelRole::TopFrontRight,
+    ChannelRole::TopRearLeft,
+    ChannelRole::TopRearRight,
+];
+/// AVS3/Audio Vivid channel-bed contract used by the decoder→spatial handoff:
+/// FL, FR, C, LFE, rear-L/R, side-L/R, top-front-L/R, top-rear-L/R.
+const SURROUND_7_1_4_ROLES: [ChannelRole; 12] = [
+    ChannelRole::FrontLeft,
+    ChannelRole::FrontRight,
+    ChannelRole::Center,
+    ChannelRole::Lfe,
+    ChannelRole::RearLeft,
+    ChannelRole::RearRight,
+    ChannelRole::SurroundLeft,
+    ChannelRole::SurroundRight,
+    ChannelRole::TopFrontLeft,
+    ChannelRole::TopFrontRight,
+    ChannelRole::TopRearLeft,
+    ChannelRole::TopRearRight,
+];
 
 const STEREO: [Speaker; 2] = [
     Speaker::full_range(FRONT_LEFT, 1.0),
@@ -151,10 +257,76 @@ const SURROUND_7_1_4: [Speaker; 12] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn native_audio_vivid_layout_exposes_twelve_sources() {
+    fn every_layout_has_one_role_per_speaker() {
+        for layout in [
+            ChannelLayout::Stereo,
+            ChannelLayout::Surround5_1,
+            ChannelLayout::Surround7_1,
+            ChannelLayout::Surround5_1_4,
+            ChannelLayout::Surround7_1_4,
+        ] {
+            let layout = SpeakerLayout::for_layout(layout);
+            assert_eq!(layout.roles().len(), layout.speakers().len());
+        }
+    }
+
+    #[test]
+    fn avs3_five_one_four_channel_order_is_explicit() {
+        let layout = SpeakerLayout::for_layout(ChannelLayout::Surround5_1_4);
+        assert_eq!(
+            layout.roles(),
+            &[
+                ChannelRole::FrontLeft,
+                ChannelRole::FrontRight,
+                ChannelRole::Center,
+                ChannelRole::Lfe,
+                ChannelRole::SurroundLeft,
+                ChannelRole::SurroundRight,
+                ChannelRole::TopFrontLeft,
+                ChannelRole::TopFrontRight,
+                ChannelRole::TopRearLeft,
+                ChannelRole::TopRearRight,
+            ]
+        );
+        assert_eq!(layout.speakers()[3].kind, SourceKind::Lfe);
+    }
+
+    #[test]
+    fn avs3_seven_one_four_channel_order_is_explicit() {
         let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
+        assert_eq!(
+            layout.roles(),
+            &[
+                ChannelRole::FrontLeft,
+                ChannelRole::FrontRight,
+                ChannelRole::Center,
+                ChannelRole::Lfe,
+                ChannelRole::RearLeft,
+                ChannelRole::RearRight,
+                ChannelRole::SurroundLeft,
+                ChannelRole::SurroundRight,
+                ChannelRole::TopFrontLeft,
+                ChannelRole::TopFrontRight,
+                ChannelRole::TopRearLeft,
+                ChannelRole::TopRearRight,
+            ]
+        );
         assert_eq!(layout.channels(), 12);
         assert_eq!(layout.speakers()[3].kind, SourceKind::Lfe);
+        assert!(layout.speakers()[4].direction.z < 0.0);
+        assert!(layout.speakers()[5].direction.z < 0.0);
+        assert_eq!(layout.speakers()[6].direction.z, 0.0);
+        assert_eq!(layout.speakers()[7].direction.z, 0.0);
+        assert!(layout.speakers()[8..12].iter().all(|speaker| speaker.direction.y > 0.0));
+    }
+
+    #[test]
+    fn role_short_names_are_stable_for_debug_and_transport_contracts() {
+        assert_eq!(ChannelRole::Lfe.short_name(), "LFE");
+        assert_eq!(ChannelRole::RearLeft.short_name(), "RL");
+        assert_eq!(ChannelRole::SurroundRight.short_name(), "SR");
+        assert_eq!(ChannelRole::TopRearRight.short_name(), "TRR");
     }
 }
