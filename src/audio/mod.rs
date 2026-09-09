@@ -22,5 +22,4 @@ pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::AudioEngine;
 pub(crate) use fingerprint::fingerprint_file;
 pub use smart_profile::classify as classify_smart_audio;
-pub use spatial_activity::{SpatialSourceActivitySnapshot, spatial_source_activity_latest_snapshot};
 pub use spatial_debug::spatial_debug_latest_snapshot;

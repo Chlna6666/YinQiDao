@@ -33,7 +33,7 @@ mod preferences;
 pub mod runtime;
 mod settings;
 mod ui;
-pub(crate) use ui::{audio_debug_window, audio_spatial_debug_3d};
+pub(crate) use ui::audio_debug_window;
 mod window_platform;
 
 use anyhow::Result;
