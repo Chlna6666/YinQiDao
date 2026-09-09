@@ -272,7 +272,7 @@ impl Render for AudioDebugView {
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} virtual channel/source · {} early reflection · {} Hz · seq {} · 独立 L/R ear path · 拖拽旋转 / 滚轮缩放",
+                                    "{} virtual channel/source · {} early reflection · {} Hz · seq {} · speaker 亮度/大小=实时 RMS+Peak · 独立 L/R ear path",
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -322,7 +322,7 @@ impl Render for AudioDebugView {
                                         .bg(rgb(0x10151c))
                                         .text_xs()
                                         .text_color(rgb(0x8d98a5))
-                                        .child("蓝=左耳路径 · 红=右耳路径 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
+                                        .child("蓝=左耳路径 · 红=右耳路径 · speaker 强度=输入活动度 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -394,7 +394,7 @@ impl Render for AudioDebugView {
                     .child(
                         panel(
                             "Spatial Telemetry",
-                            Some("authored channel / ITD / ILD / pinna / late field".into()),
+                            Some("authored channel / Peak+RMS / ITD / ILD / pinna / late field".into()),
                             spatial_telemetry(spatial),
                         )
                         .w(px(455.0)),
@@ -549,6 +549,16 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
             .child(
                 div()
                     .text_xs()
+                    .text_color(rgb(0x76a8c8))
+                    .child(format!(
+                        "input Peak {:+.1} dBFS · RMS {:+.1} dBFS",
+                        linear_dbfs(source.input_peak),
+                        linear_dbfs(source.input_rms),
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
                     .text_color(rgb(0x77828f))
                     .child(format!(
                         "ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}",
@@ -676,6 +686,15 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
         body = body.child(div().text_sm().text_color(rgb(0x77828f)).child("当前没有 active reflection"));
     }
     body.into_any_element()
+}
+
+fn linear_dbfs(value: f32) -> f32 {
+    let value = if value.is_finite() { value.abs() } else { 0.0 };
+    if value <= 1.0e-9 {
+        -180.0
+    } else {
+        20.0 * value.log10()
+    }
 }
 
 fn channel_name(source_count: usize, index: usize) -> &'static str {

@@ -177,8 +177,6 @@ fn build_scene_mesh(
     let left_ear = to_local(left_ear_world);
     let right_ear = to_local(right_ear_world);
 
-    // Must match the audio-spatial image-source room geometry. The room is intentionally independent
-    // of individual source positions so every authored channel shares one acoustic enclosure.
     let room = snapshot.environment.room_size.clamp(0.0, 1.0);
     let half_width = 1.65 + room * 3.00;
     let half_height = 1.25 + room * 1.50;
@@ -193,22 +191,28 @@ fn build_scene_mesh(
             continue;
         }
         let position = to_local(source.position);
-        let color = source_color(source.kind, source.elevation_degrees, source.source_index);
-        let scale = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
+        let activity = source_activity_visual(source.input_peak, source.input_rms);
+        let color = source_color(
+            source.kind,
+            source.elevation_degrees,
+            source.source_index,
+            activity,
+        );
+        let geometry_scale = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
             1.18
         } else {
             0.92 + source.near_field_amount.clamp(0.0, 1.0) * 0.28
         };
+        let activity_scale = 0.62 + activity * 0.78;
         builder.push_virtual_speaker(
             position,
-            scale,
+            geometry_scale * activity_scale,
             color,
             matches!(source.kind, SpatialDebugSourceKind::Lfe),
         );
     }
     let opaque_count = builder.indices.len() as u32;
 
-    // Head orientation axes: forward is cyan, interaural axis is deliberately split blue/red.
     builder.push_segment(
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.55],
@@ -217,17 +221,18 @@ fn build_scene_mesh(
     );
     builder.push_segment(left_ear, right_ear, 0.008, [0.58, 0.68, 0.80, 0.36]);
 
-    // Each virtual source feeds two different acoustic endpoints. Visualizing both paths is crucial:
-    // the geometry is symmetric around the head, while delay/gain/pinna processing is not generally
-    // equal for a non-frontal source.
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active {
             continue;
         }
         let source_position = to_local(source.position);
+        let activity = source_activity_visual(source.input_peak, source.input_rms);
+        let activity_alpha = 0.16 + activity * 0.84;
         let (left_alpha, right_alpha) = binaural_path_alpha(source.left_gain, source.right_gain);
-        let left_width = DIRECT_EAR_PATH_WIDTH * (0.75 + left_alpha * 0.70);
-        let right_width = DIRECT_EAR_PATH_WIDTH * (0.75 + right_alpha * 0.70);
+        let left_alpha = left_alpha * activity_alpha;
+        let right_alpha = right_alpha * activity_alpha;
+        let left_width = DIRECT_EAR_PATH_WIDTH * (0.72 + activity * 0.52 + left_alpha * 0.38);
+        let right_width = DIRECT_EAR_PATH_WIDTH * (0.72 + activity * 0.52 + right_alpha * 0.38);
         builder.push_segment(
             source_position,
             left_ear,
@@ -251,9 +256,6 @@ fn build_scene_mesh(
     builder.push_floor_grid(half_width, -half_height, half_depth);
     builder.push_ceiling_grid(half_width, half_height, half_depth);
 
-    // Late diffuse energy has no discrete image-source position. Render it as concentric transparent
-    // volumes around the listener rather than inventing extra bounce rays. The opacity comes from the
-    // exact FDN wet parameter used by the realtime engine.
     let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
     if late.active {
         builder.push_late_field_volume(
@@ -278,11 +280,12 @@ fn build_scene_mesh(
         let speed = length3(velocity_local);
         if speed > 0.005 {
             let scale = (0.20 / speed.max(0.001)).min(0.85);
+            let activity = source_activity_visual(source.input_peak, source.input_rms);
             builder.push_segment(
                 start,
                 add3(start, mul3(velocity_local, scale)),
                 VELOCITY_WIDTH,
-                [0.96, 0.84, 0.32, 0.72],
+                [0.96, 0.84, 0.32, 0.28 + activity * 0.52],
             );
         }
     }
@@ -303,13 +306,12 @@ fn build_scene_mesh(
         };
         let source_position = to_local(source.position);
         let bounce = to_local(reflection.bounce_position);
-        let energy = reflection.wet_contribution.clamp(0.0, 1.0);
-        let alpha = (0.10 + energy.sqrt() * 0.74).clamp(0.10, 0.82);
+        let activity = source_activity_visual(source.input_peak, source.input_rms);
+        let energy = (reflection.wet_contribution.clamp(0.0, 1.0) * activity).clamp(0.0, 1.0);
+        let alpha = (0.035 + energy.sqrt() * 0.76).clamp(0.035, 0.82);
         let path_color = wall_color(reflection.wall, alpha);
         builder.push_segment(source_position, bounce, PATH_WIDTH, path_color);
 
-        // The reflection's image direction also arrives independently at both ears. Keep these much
-        // fainter than the direct paths so a 7.1.4 bed remains readable even with 72 reflection taps.
         let (left_alpha, right_alpha) =
             binaural_path_alpha(reflection.left_gain, reflection.right_gain);
         builder.push_segment(
@@ -336,7 +338,7 @@ fn build_scene_mesh(
         );
         builder.push_octahedron(
             bounce,
-            BOUNCE_RADIUS,
+            BOUNCE_RADIUS * (0.70 + activity * 0.45),
             wall_color(reflection.wall, (alpha + 0.12).min(0.92)),
         );
     }
@@ -382,6 +384,23 @@ fn build_scene_mesh(
     Ok((mesh, fit_radius))
 }
 
+fn source_activity_visual(peak: f32, rms: f32) -> f32 {
+    let peak = linear_dbfs(peak);
+    let rms = linear_dbfs(rms);
+    let peak_normalized = ((peak + 48.0) / 48.0).clamp(0.0, 1.0);
+    let rms_normalized = ((rms + 60.0) / 54.0).clamp(0.0, 1.0);
+    (rms_normalized * 0.72 + peak_normalized * 0.28).clamp(0.0, 1.0)
+}
+
+fn linear_dbfs(value: f32) -> f32 {
+    let value = if value.is_finite() { value.abs() } else { 0.0 };
+    if value <= 1.0e-9 {
+        -180.0
+    } else {
+        20.0 * value.log10()
+    }
+}
+
 fn binaural_path_alpha(left_gain: f32, right_gain: f32) -> (f32, f32) {
     let left = if left_gain.is_finite() {
         left_gain.max(0.0)
@@ -400,23 +419,34 @@ fn binaural_path_alpha(left_gain: f32, right_gain: f32) -> (f32, f32) {
     )
 }
 
-fn source_color(kind: SpatialDebugSourceKind, elevation_degrees: f32, index: u16) -> [f32; 4] {
-    if matches!(kind, SpatialDebugSourceKind::Lfe) {
-        return [0.92, 0.36, 0.32, 1.0];
-    }
-    if elevation_degrees > 18.0 {
-        return [0.68, 0.52, 1.0, 1.0];
-    }
-    const PALETTE: [[f32; 3]; 6] = [
-        [0.35, 0.86, 0.58],
-        [0.30, 0.72, 1.00],
-        [1.00, 0.68, 0.30],
-        [0.94, 0.48, 0.70],
-        [0.52, 0.78, 0.96],
-        [0.72, 0.88, 0.36],
-    ];
-    let rgb = PALETTE[usize::from(index) % PALETTE.len()];
-    [rgb[0], rgb[1], rgb[2], 1.0]
+fn source_color(
+    kind: SpatialDebugSourceKind,
+    elevation_degrees: f32,
+    index: u16,
+    activity: f32,
+) -> [f32; 4] {
+    let brightness = 0.34 + activity.clamp(0.0, 1.0) * 0.66;
+    let base = if matches!(kind, SpatialDebugSourceKind::Lfe) {
+        [0.92, 0.36, 0.32]
+    } else if elevation_degrees > 18.0 {
+        [0.68, 0.52, 1.0]
+    } else {
+        const PALETTE: [[f32; 3]; 6] = [
+            [0.35, 0.86, 0.58],
+            [0.30, 0.72, 1.00],
+            [1.00, 0.68, 0.30],
+            [0.94, 0.48, 0.70],
+            [0.52, 0.78, 0.96],
+            [0.72, 0.88, 0.36],
+        ];
+        PALETTE[usize::from(index) % PALETTE.len()]
+    };
+    [
+        base[0] * brightness,
+        base[1] * brightness,
+        base[2] * brightness,
+        1.0,
+    ]
 }
 
 fn wall_color(
@@ -472,9 +502,6 @@ impl MeshBuilder {
             return;
         }
 
-        // Build-safe fallback used until tools/audio_debug/export_humanoid_cc0.py has generated the
-        // selected Shingox CC0 mesh. The acoustic listener origin and ear markers already use the
-        // exact runtime geometry, so replacing only this visual shell cannot alter the audio result.
         self.push_octahedron([0.0, 0.0, 0.0], HEAD_RADIUS, [0.22, 0.72, 0.82, 1.0]);
         self.push_segment(
             [0.0, -0.10, -0.015],
