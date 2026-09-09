@@ -1,3 +1,7 @@
+#[path = "spatial_environment.rs"]
+mod spatial_environment;
+pub(crate) use spatial_environment::spatial_environment_settings;
+
 use crate::model::{SpatialMotionMode, SpatialSettings};
 use yinqidao_audio_spatial::{
     EngineConfig, EnvironmentSettings, SourcePose, SpatialDebugSnapshot, SpatialEngine, Trajectory,
@@ -10,7 +14,6 @@ const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 12.0;
 const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 38.0;
 const MIN_STEREO_DISTANCE_METERS: f32 = 0.80;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.20;
-const MAX_ENVIRONMENT_MIX: f32 = 0.20;
 const STEREO_SOURCE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,33 +104,18 @@ impl StereoField {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct EnvironmentSignature {
-    mix: f32,
-    room_size: f32,
-    damping: f32,
+    settings: EnvironmentSettings,
 }
 
 impl EnvironmentSignature {
     fn from_settings(settings: &SpatialSettings) -> Self {
-        let mix = (settings.depth.clamp(0.0, 1.0) * 0.09
-            + settings.room_size.clamp(0.0, 1.0) * 0.08
-            + settings.immersive_3d.clamp(0.0, 1.0) * 0.05)
-            .clamp(0.0, MAX_ENVIRONMENT_MIX);
         Self {
-            mix,
-            room_size: settings.room_size.clamp(0.0, 1.0),
-            damping: (0.34
-                + settings.room_size.clamp(0.0, 1.0) * 0.28
-                + settings.distance.clamp(0.0, 1.0) * 0.18)
-                .clamp(0.0, 1.0),
+            settings: spatial_environment_settings(settings),
         }
     }
 
     fn settings(self) -> EnvironmentSettings {
-        EnvironmentSettings {
-            mix: self.mix,
-            room_size: self.room_size,
-            damping: self.damping,
-        }
+        self.settings
     }
 }
 
