@@ -93,14 +93,15 @@ impl Trajectory {
             // Use an angular lemniscate instead of normalizing (sin, sin*cos). The previous
             // formulation collapsed toward the origin at the crossover and normalization then
             // turned that near-zero vector into an abrupt direction jump. Sweeping azimuth across
-            // almost the complete rear hemisphere keeps source distance finite while retaining the
-            // characteristic two-lobe 8D path and a modest vertical component.
+            // almost the complete rear hemisphere keeps source distance finite. The stronger
+            // vertical excursion is intentional: 8D must traverse a clearly audible sagittal arc
+            // instead of presenting as a mostly-horizontal 360 pan.
             TrajectoryKind::FigureEight => {
                 let azimuth = sin * (PI * 0.94);
                 let (azimuth_sin, azimuth_cos) = azimuth.sin_cos();
                 (
                     azimuth_sin,
-                    self.elevation + sin2 * 0.24,
+                    self.elevation + sin2 * 0.58,
                     azimuth_cos,
                     0.76 + 0.24 * cos.abs(),
                 )
@@ -109,19 +110,19 @@ impl Trajectory {
             TrajectoryKind::FrontBack => (sin * 0.14, self.elevation, cos, 0.90 + 0.10 * sin.abs()),
             TrajectoryKind::Planetary => (
                 sin,
-                self.elevation + sin2 * 0.24,
+                self.elevation + sin2 * 0.44,
                 cos,
                 0.62 + 0.38 * sin2.abs(),
             ),
             TrajectoryKind::NearEar => (
                 sin,
-                self.elevation + cos * 0.12,
+                self.elevation + cos * 0.30,
                 0.22 + cos * 0.42,
                 0.38 + 0.18 * sin2.abs(),
             ),
             TrajectoryKind::Helix => (
                 sin,
-                self.elevation + sin2 * 0.42,
+                self.elevation + sin2 * 0.62,
                 cos,
                 0.88 + 0.12 * cos.abs(),
             ),
@@ -192,6 +193,15 @@ mod tests {
         assert!(rear_lobe.position.length() > 0.70);
         assert!(crossover.position.length() > 0.70);
         assert!(rear_lobe.position.z < -0.70);
+    }
+
+    #[test]
+    fn figure_eight_has_distinct_above_and_below_lobes() {
+        let trajectory = Trajectory::new(TrajectoryKind::FigureEight, 48_000, 0.5, 1.0, 0.0);
+        let above = trajectory.pose_at(12_000);
+        let below = trajectory.pose_at(36_000);
+        assert!(above.position.y > 0.30);
+        assert!(below.position.y < -0.30);
     }
 
     #[test]

@@ -228,11 +228,12 @@ pub fn pinna_cue_telemetry(
     ))
 }
 
-/// Build conservative generic pinna notch + shoulder cues from listener-local direction.
+/// Build generic pinna notch + shoulder cues from listener-local direction.
 ///
 /// `azimuth_radians > 0` means source-right. Rear sources move/deepen the primary notch while the
-/// broad shoulder adds an independent low-HF sagittal cue. Elevation shifts both structures and
-/// spread continuously reduces their coloration. Small per-ear offsets preserve spectral asymmetry.
+/// broad shoulder adds an independent low-HF sagittal cue. Elevation shifts both structures across
+/// a deliberately wider frequency span than lateral ITD/ILD. This keeps front/rear and up/down
+/// localization audible on ordinary headphones without claiming a measured personal HRTF.
 pub(crate) fn coefficients_for_direction(
     sample_rate: f32,
     azimuth_radians: f32,
@@ -290,7 +291,7 @@ fn telemetry_from_shape(shape: PinnaCueShape) -> PinnaCueTelemetry {
         right_shoulder_center_hz,
         left_shoulder_gain_db,
         right_shoulder_gain_db,
-        cue_strength: ((shape.depth_db / 4.8) * 0.78 + (shape.shoulder_gain_db / 1.6) * 0.22)
+        cue_strength: ((shape.depth_db / 6.0) * 0.72 + (shape.shoulder_gain_db / 2.8) * 0.28)
             .clamp(0.0, 1.0),
     }
 }
@@ -307,24 +308,37 @@ fn cue_shape(azimuth_radians: f32, elevation_radians: f32, spread: f32) -> Pinna
     let elevation_sin = elevation.sin();
     let elevation_up = elevation_sin.max(0.0);
     let elevation_down = (-elevation_sin).max(0.0);
-    let sagittal_weight = (1.0 - lateral * 0.58).clamp(0.38, 1.0);
-    let spread_weight = 1.0 - spread * 0.60;
+    // Sagittal cues are naturally least useful at the extreme lateral poles, but attenuating them
+    // as aggressively as before made elevation disappear whenever a moving source passed the ears.
+    let sagittal_weight = (1.0 - lateral * 0.48).clamp(0.46, 1.0);
+    let spread_weight = 1.0 - spread * 0.72;
 
     PinnaCueShape {
-        center_hz: (9_200.0 + elevation_sin * 1_700.0 - rear * 1_800.0)
-            .clamp(5_400.0, 11_200.0),
-        q: (1.05 + rear * 0.55 + elevation_sin.abs() * 0.25).clamp(0.90, 1.90),
-        depth_db: ((0.65 + rear * 2.90 + elevation_sin.abs() * 1.25)
+        // Wider front/rear + elevation separation is the primary remedy for front/back confusion.
+        // Values remain inside a conservative generic pinna band and are clamped again against the
+        // actual sample-rate in peaking_coefficients().
+        center_hz: (9_800.0 + elevation_sin * 2_600.0 - rear * 2_700.0)
+            .clamp(5_000.0, 12_400.0),
+        q: (1.10 + rear * 0.65 + elevation_sin.abs() * 0.38).clamp(0.90, 2.20),
+        depth_db: ((0.55
+            + rear * 3.85
+            + elevation_sin.abs() * 2.10
+            + elevation_down * 0.35)
             * sagittal_weight
             * spread_weight)
-            .clamp(0.0, 4.8),
-        shoulder_center_hz: (5_150.0 + elevation_sin * 900.0 - rear * 420.0)
-            .clamp(3_800.0, 6_600.0),
-        shoulder_q: (0.72 + rear * 0.12 + elevation_sin.abs() * 0.18).clamp(0.65, 1.15),
-        shoulder_gain_db: ((0.30 + rear * 0.38 + elevation_up * 0.88 + elevation_down * 0.34)
+            .clamp(0.0, 6.0),
+        // The broad shoulder moves in the same sagittal direction but over a lower band, giving the
+        // ear two independent spectral landmarks instead of relying on one high-frequency notch.
+        shoulder_center_hz: (5_000.0 + elevation_sin * 1_600.0 - rear * 900.0)
+            .clamp(2_800.0, 7_400.0),
+        shoulder_q: (0.70 + rear * 0.20 + elevation_sin.abs() * 0.25).clamp(0.62, 1.30),
+        shoulder_gain_db: ((0.20
+            + rear * 0.90
+            + elevation_up * 1.80
+            + elevation_down * 0.62)
             * sagittal_weight
             * spread_weight)
-            .clamp(0.0, 1.6),
+            .clamp(0.0, 2.8),
         ear_lateral: lateral_signed * (1.0 - spread * 0.70),
     }
 }
@@ -400,18 +414,18 @@ mod tests {
     fn rear_cue_is_deeper_and_lower_than_front() {
         let front = cue_shape(0.0, 0.0, 0.0);
         let rear = cue_shape(PI, 0.0, 0.0);
-        assert!(rear.depth_db > front.depth_db + 2.0);
-        assert!(rear.center_hz < front.center_hz);
-        assert!(rear.shoulder_gain_db > front.shoulder_gain_db);
+        assert!(rear.depth_db > front.depth_db + 3.0);
+        assert!(rear.center_hz < front.center_hz - 2_000.0);
+        assert!(rear.shoulder_gain_db > front.shoulder_gain_db + 0.7);
     }
 
     #[test]
     fn elevation_moves_both_sagittal_features() {
         let above = cue_shape(0.0, PI * 0.35, 0.0);
         let below = cue_shape(0.0, -PI * 0.35, 0.0);
-        assert!(above.center_hz > below.center_hz);
-        assert!(above.shoulder_center_hz > below.shoulder_center_hz);
-        assert!(above.shoulder_gain_db > below.shoulder_gain_db);
+        assert!(above.center_hz > below.center_hz + 3_000.0);
+        assert!(above.shoulder_center_hz > below.shoulder_center_hz + 2_000.0);
+        assert!(above.shoulder_gain_db > below.shoulder_gain_db + 0.8);
         assert!(above.depth_db > 1.0);
         assert!(below.depth_db > 1.0);
     }
