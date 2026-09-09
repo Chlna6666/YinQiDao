@@ -20,6 +20,10 @@ pub struct SliderStyle {
     pub filled_color: Hsla,
     pub thumb_color: Hsla,
     pub thumb_border: Option<Hsla>,
+    /// Overlay the interaction strip across the leading layout edge without reserving vertical
+    /// space. Used by the mini-player so the progress rail is the player's top boundary rather
+    /// than a separate row above its controls.
+    pub edge_overlay: bool,
 }
 
 impl Default for SliderStyle {
@@ -33,6 +37,7 @@ impl Default for SliderStyle {
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.15)),
+            edge_overlay: false,
         }
     }
 }
@@ -40,14 +45,17 @@ impl Default for SliderStyle {
 impl SliderStyle {
     pub fn mini_progress() -> Self {
         Self {
-            track_height: px(3.5),
-            hover_track_height: px(5.5),
-            thumb_size: px(11.0),
-            hover_thumb_scale: 1.25,
-            track_bg: rgb(0xe8_ea_ee).into(),
+            // Idle state is intentionally a hairline on the player boundary. The larger hit strip
+            // and thumb are interaction affordances only and must not lift the player content.
+            track_height: px(2.0),
+            hover_track_height: px(4.0),
+            thumb_size: px(10.0),
+            hover_thumb_scale: 1.15,
+            track_bg: rgb(0xe1_e4_e9).into(),
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.15)),
+            edge_overlay: true,
         }
     }
 
@@ -61,6 +69,7 @@ impl SliderStyle {
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: None,
+            edge_overlay: false,
         }
     }
 
@@ -74,6 +83,7 @@ impl SliderStyle {
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: None,
+            edge_overlay: false,
         }
     }
 
@@ -87,6 +97,7 @@ impl SliderStyle {
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.12)),
+            edge_overlay: false,
         }
     }
 
@@ -100,6 +111,7 @@ impl SliderStyle {
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: Some(hsla(220.0, 0.08, 0.68, 0.55)),
+            edge_overlay: false,
         }
     }
 }
@@ -168,6 +180,9 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
         .max(f32::from(style.hover_track_height)));
+    let hover_group = format!("slider-hover-{id}");
+    let thumb_hover_group = hover_group.clone();
+    let track_hover_group = hover_group.clone();
 
     let mut thumb = div()
         .flex_none()
@@ -175,7 +190,12 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .rounded_full()
         .bg(style.thumb_color)
         .shadow_md()
-        .hover(move |s| s.scale(style.hover_thumb_scale))
+        // A slider position is already visible through its filled rail. Keep the knob out of the
+        // idle composition and reveal it only while this slider's interaction strip is hovered.
+        .opacity(0.0)
+        .group_hover(thumb_hover_group, move |s| {
+            s.opacity(1.0).scale(style.hover_thumb_scale)
+        })
         .transition(theme::hover_transition());
 
     if let Some(border) = style.thumb_border {
@@ -187,7 +207,7 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .h(style.track_height)
         .rounded_full()
         .bg(style.track_bg)
-        .hover(move |s| s.h(style.hover_track_height))
+        .group_hover(track_hover_group, move |s| s.h(style.hover_track_height))
         .transition(theme::hover_transition())
         .child(
             div()
@@ -197,7 +217,8 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
                 .bg(style.filled_color),
         );
 
-    div()
+    let root = div()
+        .group(hover_group)
         .id(id)
         .relative()
         .cursor_pointer()
@@ -216,7 +237,17 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
                 .items_center()
                 .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
                 .child(thumb),
-        )
+        );
+
+    if style.edge_overlay {
+        // Keep a real hover/scrub hit strip, but remove it from normal layout and center it across
+        // the player's top edge. This eliminates the old several-pixel progress row above the
+        // controls while preserving easy pointer acquisition.
+        let extent = f32::from(interaction_height);
+        root.top(px(-extent * 0.5)).mb(px(-extent))
+    } else {
+        root
+    }
 }
 
 fn vertical_slider_visual(
@@ -228,6 +259,8 @@ fn vertical_slider_visual(
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_width = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
         .max(f32::from(style.hover_track_height)));
+    let hover_group = format!("slider-hover-{id}");
+    let thumb_hover_group = hover_group.clone();
 
     let mut thumb = div()
         .flex_none()
@@ -235,7 +268,10 @@ fn vertical_slider_visual(
         .rounded_full()
         .bg(style.thumb_color)
         .shadow_md()
-        .hover(move |s| s.scale(style.hover_thumb_scale))
+        .opacity(0.0)
+        .group_hover(thumb_hover_group, move |s| {
+            s.opacity(1.0).scale(style.hover_thumb_scale)
+        })
         .transition(theme::hover_transition());
     if let Some(border) = style.thumb_border {
         thumb = thumb.border_1().border_color(border);
@@ -258,6 +294,7 @@ fn vertical_slider_visual(
         );
 
     div()
+        .group(hover_group)
         .id(id)
         .relative()
         .cursor_pointer()
