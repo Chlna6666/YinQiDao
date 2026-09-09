@@ -17,7 +17,7 @@ use super::{
     components::{SliderStyle, interactive_slider},
     shell::{DragTarget, MusicApp},
     theme::{
-        self, ACCENT_RED, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
+        self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
         elegant_gradient_for, press_transition, themed_icon,
     },
 };
@@ -242,8 +242,6 @@ pub(super) fn mini_player(
         .id("mini-player-container")
         .w_full()
         .bg(rgb(0xff_ff_ff))
-        .border_t_1()
-        .border_color(BORDER_HAIRLINE)
         .flex()
         .flex_col()
         .child(playback_progress)
