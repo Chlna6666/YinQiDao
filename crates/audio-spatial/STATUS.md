@@ -25,6 +25,7 @@
 - [x] `Vec3` / `SourcePose` / `ListenerPose` 无分配几何 primitive。
 - [x] `ListenerPose::basis()` 作为公开只读几何 API，DSP 与应用侧 GPU Debug 共用同一 listener-local basis。
 - [x] Stereo / 5.1 / 7.1 / 5.1.4 / 7.1.4 speaker scene。
+- [x] `ChannelRole` + `SpeakerLayout::roles()/role()` 显式描述 authored PCM 槽位语义，不再只依赖数组下标。
 - [x] 7.1.4 顺序与当前 AVS3 PCM 约定对齐，LFE index 3。
 - [x] interleaved N-channel stride 直读，无 per-channel Vec。
 - [x] stereo pair 独立虚拟 source primitive。
@@ -79,12 +80,12 @@
 - [x] 每耳两级 TDF2 biquad 固定状态、0 allocation；异常样本清状态并输出 0，denormal 主动归零。
 - [x] linked-stereo zero-lookahead peak safety limiter：L/R 共用 gain envelope、instantaneous attack、约 90 ms release、默认 ceiling `-0.30 dBFS`、0 added latency / 0 allocation。
 - [x] 用户音量 gain 直接进入 limiter detector/application；最终 SIMD hard clamp 仅保留为异常 invariant guard，不再承担正常 limiter 职责。
+- [x] channel-order conformance vectors：5.1.4 / 7.1.4 固化显式 `ChannelRole` 顺序、LFE index 3、rear/side/top 几何类别与稳定短名。
 - [ ] reflection arrival 是否加入 pinna spectral cue：先以 benchmark/听感证明收益，避免 `6 taps × N sources` 无依据增负载。
 - [ ] 更多 hot kernel 下沉 `audio-simd`。
 - [ ] Lagrange vs Thiran fractional delay 质量/成本对比。
 - [ ] 更完整的多段 pinna bank / 参数标定；当前已完成双级 notch + shoulder，但仍需听感与测量校准。
 - [ ] 通用 parameter smoothing/crossfade 自动化测试。
-- [ ] channel-order conformance vectors。
 - [ ] limiter ceiling/release/headroom 的实际节目素材标定与 true-peak 校验。
 
 ## Phase 3 — 自适应 CPU 多线程
@@ -140,6 +141,7 @@
 - [x] Pinna telemetry 复用 realtime cue generator：notch center/Q/depth/cue strength/L-R notch；运行时现已扩展到双级 notch + shoulder。
 - [x] FDN telemetry 复用 realtime parameter derivation：wet/feedback/damping cutoff/delay range。
 - [x] GPU 3D 明确区分 Early/Late：离散彩色折线路径代表六面 image-source Early，监听者周围半透明多层 volume 代表 FDN Late。
+- [ ] Debug channel label 直接改用公开 `ChannelRole`，移除 UI 自己维护的重复 5.1.4/7.1.4 名称数组。
 - [ ] object ID / Audio Vivid metadata 可视化。
 
 ## Phase 6 — 音频 GPU Compute（暂缓）
@@ -195,6 +197,7 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 - **本助手环境尚未执行 `cargo test`**；
 - **尚未执行 `cpu_bench`**；
 - 用户本地编译已推进到并反馈上述编译错误，但修复后是否完整通过仍待下一次本地构建确认；
+- 新增 channel-order conformance tests 已写入源码，但尚未执行；
 - **尚未得到 serial/parallel break-even**；
 - `Cargo.lock` 尚未通过当前环境中的 Cargo 重新生成/校验。
 
@@ -212,7 +215,7 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 ## 下一步
 
 1. 用户本地重新执行 `cargo check`，继续消除剩余 GPUI 3D / pinna / limiter / native-room type/API 问题，直到根包完整通过。
-2. 完成 channel-order conformance vectors，确保 AVS3 5.1.4/7.1.4 authored slot 与 `SpeakerLayout` 一致。
+2. 让 Audio Laboratory 的 channel label 改为读取公开 `ChannelRole`，并增加 codec→spatial handoff bridge test，避免 Debug 名称表和真实 layout 分叉。
 3. 实际跑 serial benchmark，分别测 dry / 双级 pinna / 六面 Early / FDN / limiter / Debug 的边际成本。
 4. 用真实音乐与峰值测试素材标定 limiter ceiling/release、post-spatial headroom 与 true-peak 风险；不依赖 hard clamp 塑形。
 5. 只有 benchmark + 听感同时证明收益时才尝试 reflection-pinna / tap audibility budget / realtime worker pool。
