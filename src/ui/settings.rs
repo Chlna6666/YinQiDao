@@ -45,14 +45,16 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         .child(
             div()
                 .flex_none()
+                .flex()
+                .flex_col()
                 .px_8()
-                .pt_6()
+                .pt_5()
                 .pb_3()
                 .bg(rgb(0xfa_fb_fc))
                 .border_b_1()
                 .border_color(BORDER_HAIRLINE)
-                .child(header(app))
-                .child(div().mt_4().child(settings_tabs(&scroll, cx))),
+                .child(header())
+                .child(div().mt_3().child(settings_tabs(&scroll, cx))),
         )
         .child(
             div()
@@ -110,7 +112,7 @@ fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> imp
         ("外观 / 诊断", 10),
     ];
 
-    let mut row = div().flex().flex_wrap().items_center().gap_2();
+    let mut row = div().w_full().flex().flex_wrap().items_center().gap_2();
     for (index, (label, target)) in tabs.into_iter().enumerate() {
         let selected = index == active;
         let handle = scroll.clone();
@@ -147,41 +149,12 @@ fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> imp
     row
 }
 
-fn header(app: &MusicApp) -> impl IntoElement {
+fn header() -> impl IntoElement {
     div()
-        .flex()
-        .items_end()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_2xl()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(TEXT_PRIMARY)
-                        .child("偏好设置"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(TEXT_SECONDARY)
-                        .child("专业音频、智能调音、桌面歌词与全局快捷键均持久化到 config.toml"),
-                ),
-        )
-        .child(
-            div()
-                .px_3()
-                .py_1()
-                .rounded_full()
-                .bg(theme::bg_pill())
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(TEXT_SECONDARY)
-                .child(format!("Config Schema v{}", app.config.schema_version)),
-        )
+        .text_2xl()
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(TEXT_PRIMARY)
+        .child("偏好设置")
 }
 
 fn audio_device_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
