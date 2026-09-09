@@ -27,7 +27,7 @@ pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, Spatia
 pub use environment::EnvironmentSettings;
 pub use error::SpatialError;
 pub use late_field::{LateFieldTelemetry, late_field_telemetry};
-pub use layout::{ChannelLayout, SourceKind, Speaker, SpeakerLayout};
+pub use layout::{ChannelLayout, ChannelRole, SourceKind, Speaker, SpeakerLayout};
 pub use pinna::{PinnaCueTelemetry, pinna_cue_telemetry};
 pub use pose::{ListenerPose, SourcePose, Vec3};
 pub use trajectory::{Trajectory, TrajectoryKind};
