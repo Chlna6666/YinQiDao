@@ -422,9 +422,11 @@ impl AudioProcessor {
         }
 
         let channels = match layout {
+            ChannelLayout::Surround5_1 => 6,
+            ChannelLayout::Surround7_1 => 8,
             ChannelLayout::Surround5_1_4 => 10,
             ChannelLayout::Surround7_1_4 => 12,
-            _ => return false,
+            ChannelLayout::Stereo => return false,
         };
         if input.len() % channels != 0 {
             return false;
@@ -450,7 +452,10 @@ fn validated_native_spatial_layout(
     let layout = hint?;
     if !matches!(
         layout,
-        ChannelLayout::Surround5_1_4 | ChannelLayout::Surround7_1_4
+        ChannelLayout::Surround5_1
+            | ChannelLayout::Surround7_1
+            | ChannelLayout::Surround5_1_4
+            | ChannelLayout::Surround7_1_4
     ) {
         return None;
     }
@@ -628,6 +633,14 @@ mod tests {
     #[test]
     fn native_layout_requires_explicit_matching_metadata() {
         assert_eq!(
+            validated_native_spatial_layout(6, Some(ChannelLayout::Surround5_1)),
+            Some(ChannelLayout::Surround5_1)
+        );
+        assert_eq!(
+            validated_native_spatial_layout(8, Some(ChannelLayout::Surround7_1)),
+            Some(ChannelLayout::Surround7_1)
+        );
+        assert_eq!(
             validated_native_spatial_layout(10, Some(ChannelLayout::Surround5_1_4)),
             Some(ChannelLayout::Surround5_1_4)
         );
@@ -635,7 +648,12 @@ mod tests {
             validated_native_spatial_layout(12, Some(ChannelLayout::Surround7_1_4)),
             Some(ChannelLayout::Surround7_1_4)
         );
+        assert_eq!(validated_native_spatial_layout(6, None), None);
         assert_eq!(validated_native_spatial_layout(10, None), None);
+        assert_eq!(
+            validated_native_spatial_layout(6, Some(ChannelLayout::Surround7_1)),
+            None
+        );
         assert_eq!(
             validated_native_spatial_layout(10, Some(ChannelLayout::Surround7_1_4)),
             None
@@ -658,6 +676,34 @@ mod tests {
         let output = processor.process(&input, 48_000, 10);
         assert_eq!(output.len(), 128);
         assert!(processor.native_spatial.is_none());
+    }
+
+    #[test]
+    fn avs3_five_one_uses_self_owned_native_renderer() {
+        let mut input = vec![0.0_f32; 6 * 64];
+        for frame in input.chunks_exact_mut(6) {
+            frame[0] = 0.30;
+            frame[1] = -0.15;
+            frame[2] = 0.18;
+            frame[4] = 0.22;
+            frame[5] = -0.12;
+        }
+        let mut processor = AudioProcessor::new(
+            48_000,
+            EqPreset::Flat.settings(),
+            SpatialSettings::default(),
+            1.0,
+        );
+        let output = processor.process_with_layout(
+            &input,
+            48_000,
+            6,
+            Some(ChannelLayout::Surround5_1),
+        );
+        assert_eq!(output.len(), 128);
+        assert_eq!(processor.native_spatial_rate, 48_000);
+        assert!(processor.native_spatial.is_some());
+        assert!(output.iter().any(|sample| sample.abs() > 0.001));
     }
 
     #[test]
