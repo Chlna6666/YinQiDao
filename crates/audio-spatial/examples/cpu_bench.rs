@@ -23,29 +23,137 @@ struct BenchCase {
     name: &'static str,
     workload: BenchWorkload,
     block_frames: usize,
+    environment_mix: f32,
+    debug_enabled: bool,
+}
+
+const fn dry(name: &'static str, workload: BenchWorkload, block_frames: usize) -> BenchCase {
+    BenchCase {
+        name,
+        workload,
+        block_frames,
+        environment_mix: 0.0,
+        debug_enabled: false,
+    }
+}
+
+const fn room(
+    name: &'static str,
+    workload: BenchWorkload,
+    block_frames: usize,
+    environment_mix: f32,
+    debug_enabled: bool,
+) -> BenchCase {
+    BenchCase {
+        name,
+        workload,
+        block_frames,
+        environment_mix,
+        debug_enabled,
+    }
 }
 
 const CASES: &[BenchCase] = &[
-    BenchCase { name: "stereo/32", workload: BenchWorkload::StereoStatic, block_frames: 32 },
-    BenchCase { name: "stereo/64", workload: BenchWorkload::StereoStatic, block_frames: 64 },
-    BenchCase { name: "stereo/128", workload: BenchWorkload::StereoStatic, block_frames: 128 },
-    BenchCase { name: "orbit360/32", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360), block_frames: 32 },
-    BenchCase { name: "orbit360/64", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360), block_frames: 64 },
-    BenchCase { name: "orbit360/128", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360), block_frames: 128 },
-    BenchCase { name: "figure8/32", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight), block_frames: 32 },
-    BenchCase { name: "figure8/64", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight), block_frames: 64 },
-    BenchCase { name: "figure8/128", workload: BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight), block_frames: 128 },
-    BenchCase { name: "5.1.4/32", workload: BenchWorkload::Layout(ChannelLayout::Surround5_1_4), block_frames: 32 },
-    BenchCase { name: "5.1.4/64", workload: BenchWorkload::Layout(ChannelLayout::Surround5_1_4), block_frames: 64 },
-    BenchCase { name: "5.1.4/128", workload: BenchWorkload::Layout(ChannelLayout::Surround5_1_4), block_frames: 128 },
-    BenchCase { name: "7.1.4/32", workload: BenchWorkload::Layout(ChannelLayout::Surround7_1_4), block_frames: 32 },
-    BenchCase { name: "7.1.4/64", workload: BenchWorkload::Layout(ChannelLayout::Surround7_1_4), block_frames: 64 },
-    BenchCase { name: "7.1.4/128", workload: BenchWorkload::Layout(ChannelLayout::Surround7_1_4), block_frames: 128 },
+    dry("stereo/32", BenchWorkload::StereoStatic, 32),
+    dry("stereo/64", BenchWorkload::StereoStatic, 64),
+    dry("stereo/128", BenchWorkload::StereoStatic, 128),
+    dry(
+        "orbit360/32",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360),
+        32,
+    ),
+    dry(
+        "orbit360/64",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360),
+        64,
+    ),
+    dry(
+        "orbit360/128",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360),
+        128,
+    ),
+    dry(
+        "figure8/32",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight),
+        32,
+    ),
+    dry(
+        "figure8/64",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight),
+        64,
+    ),
+    dry(
+        "figure8/128",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::FigureEight),
+        128,
+    ),
+    dry(
+        "5.1.4/32",
+        BenchWorkload::Layout(ChannelLayout::Surround5_1_4),
+        32,
+    ),
+    dry(
+        "5.1.4/64",
+        BenchWorkload::Layout(ChannelLayout::Surround5_1_4),
+        64,
+    ),
+    dry(
+        "5.1.4/128",
+        BenchWorkload::Layout(ChannelLayout::Surround5_1_4),
+        128,
+    ),
+    dry(
+        "7.1.4/32",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        32,
+    ),
+    dry(
+        "7.1.4/64",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        64,
+    ),
+    dry(
+        "7.1.4/128",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        128,
+    ),
+    room("stereo-room10/64", BenchWorkload::StereoStatic, 64, 0.10, false),
+    room("stereo-room30/64", BenchWorkload::StereoStatic, 64, 0.30, false),
+    room(
+        "orbit-room10/64",
+        BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360),
+        64,
+        0.10,
+        false,
+    ),
+    room(
+        "7.1.4-room10/64",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        64,
+        0.10,
+        false,
+    ),
+    room(
+        "7.1.4-room30/64",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        64,
+        0.30,
+        false,
+    ),
+    room("stereo-debug/64", BenchWorkload::StereoStatic, 64, 0.10, true),
+    room(
+        "7.1.4-debug/64",
+        BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
+        64,
+        0.10,
+        true,
+    ),
 ];
 
 fn main() {
     println!("YinQiDao CPU spatial serial baseline");
     println!("sample_rate={SAMPLE_RATE}Hz warmup={WARMUP_BLOCKS} measured={MEASURED_BLOCKS}");
+    println!("Direct-path pinna is part of every FullRange case. Room cases add six-wall reflections + global 8-line FDN.");
     println!("Run this example with --release and without other heavy workloads.\n");
 
     for case in CASES {
@@ -57,8 +165,11 @@ fn run_case(case: BenchCase) {
     let channels = workload_channels(case.workload);
     let mut config = EngineConfig::new(SAMPLE_RATE);
     config.block_frames = case.block_frames;
-    config.environment.mix = 0.0;
+    config.environment.mix = case.environment_mix;
+    config.environment.room_size = 0.50;
+    config.environment.damping = 0.45;
     let mut engine = SpatialEngine::new(config).expect("valid benchmark engine config");
+    engine.set_debug_enabled(case.debug_enabled);
     let mut trajectory = trajectory_for(case.workload);
 
     let mut input = vec![0.0_f32; case.block_frames * channels];
@@ -91,6 +202,9 @@ fn run_case(case: BenchCase) {
         );
         samples_ns.push(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
         black_box(output[0]);
+        if case.debug_enabled {
+            black_box(engine.debug_snapshot());
+        }
     }
 
     samples_ns.sort_unstable();
@@ -105,11 +219,13 @@ fn run_case(case: BenchCase) {
     let p99_budget_pct = p99 as f64 / deadline_ns * 100.0;
 
     println!(
-        "{:<13} backend={:?} sources={:<2} block={:<3} avg={:>8.1}ns p50={:>7}ns p95={:>7}ns p99={:>7}ns worst={:>8}ns budget(avg/p99)={:>5.2}%/{:>5.2}%",
+        "{:<19} backend={:?} sources={:<2} block={:<3} room={:.2} debug={} avg={:>8.1}ns p50={:>7}ns p95={:>7}ns p99={:>7}ns worst={:>8}ns budget(avg/p99)={:>5.2}%/{:>5.2}%",
         case.name,
         engine.simd_backend(),
         channels,
         case.block_frames,
+        case.environment_mix,
+        case.debug_enabled,
         average_ns,
         p50,
         p95,
