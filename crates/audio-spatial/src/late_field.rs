@@ -99,8 +99,10 @@ impl LateDiffuseField {
                 .clamp(8, capacity.saturating_sub(1).max(8));
         }
 
+        let max_cutoff_hz = (self.sample_rate * 0.45).max(120.0);
+        let min_cutoff_hz = 3_800.0_f32.min(max_cutoff_hz * 0.80);
         let cutoff_hz = (13_500.0 - settings.damping * 9_000.0)
-            .clamp(3_800.0, self.sample_rate * 0.45);
+            .clamp(min_cutoff_hz, max_cutoff_hz);
         self.damping_alpha = 1.0 - (-2.0 * PI * cutoff_hz / self.sample_rate).exp();
         self.feedback_gain = (0.56 + settings.room_size * 0.23).clamp(0.50, 0.82);
         self.wet_gain = settings.mix * 0.38;
@@ -281,5 +283,13 @@ mod tests {
         hadamard8(&mut values);
         let after: f32 = values.iter().map(|value| value * value).sum();
         assert!((before - after).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn low_sample_rate_keeps_damping_cutoff_valid() {
+        let field = LateDiffuseField::new(4_000, EnvironmentSettings::default());
+        assert!(field.damping_alpha.is_finite());
+        assert!(field.damping_alpha > 0.0);
+        assert!(field.damping_alpha <= 1.0);
     }
 }
