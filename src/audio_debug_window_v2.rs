@@ -6,7 +6,8 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
-    SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind,
+    SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind, late_field_telemetry,
+    pinna_cue_telemetry,
 };
 
 use crate::audio::{
@@ -194,7 +195,7 @@ impl Render for AudioDebugView {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(0x85909d))
-                                    .child("实时信号参考 + GPUI Custom Mesh 3D + 六面 image-source room"),
+                                    .child("实时信号参考 + Pinna + 六面 Early Reflection + 8-line FDN Late Field"),
                             ),
                     )
                     .child(
@@ -222,7 +223,7 @@ impl Render for AudioDebugView {
                     .gap_3()
                     .child(stage_card("A · ORIGINAL", "decoder/source reference", &snapshot.source, rgb(0x8fa3ba)))
                     .child(stage_card("B · POST-EQ", "PEQ + preamp", &snapshot.eq, rgb(0xffa63d)))
-                    .child(stage_card("C · POST-SPATIAL", "virtual source + six-wall room", &snapshot.spatial, rgb(0x56d38f))),
+                    .child(stage_card("C · POST-SPATIAL", "virtual source + pinna + early/late room", &snapshot.spatial, rgb(0x56d38f))),
             )
             .child(
                 div()
@@ -235,7 +236,7 @@ impl Render for AudioDebugView {
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} source · {} reflection · {} Hz · seq {}",
+                                    "{} source · {} early reflection · {} Hz · seq {}",
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -316,7 +317,7 @@ impl Render for AudioDebugView {
                     .child(
                         panel(
                             "Spatial Telemetry",
-                            Some("authored channel / ITD / ILD / height / distance".into()),
+                            Some("authored channel / ITD / ILD / pinna / late field".into()),
                             spatial_telemetry(spatial),
                         )
                         .w(px(455.0)),
@@ -324,7 +325,7 @@ impl Render for AudioDebugView {
             )
             .child(
                 panel(
-                    "Image-source Reflection Matrix",
+                    "Image-source Early Reflection Matrix",
                     Some("source → floor/ceiling/wall bounce → listener · excess delay / binaural arrival".into()),
                     reflection_telemetry(spatial),
                 ),
@@ -333,7 +334,7 @@ impl Render for AudioDebugView {
                 div()
                     .text_xs()
                     .text_color(rgb(0x727d89))
-                    .child("3D 场景使用 BMCBL GPUI GpuMesh3d/WGSL/depth 正式管线；音频仍是 YinQiDao 自研参数化双耳/空间外化路径，不宣称 measured HRTF。"),
+                    .child("3D 彩色折线路径 = 六面一阶 Early Reflection；监听者周围蓝紫色多层框 = 全局 8-line FDN Late Diffuse Field。Pinna/FDN 数值直接复用实时 DSP 参数生成逻辑；仍属于自研参数化双耳路径，不宣称 measured HRTF。"),
             )
     }
 }
@@ -435,14 +436,26 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
         return body.child(div().text_sm().text_color(rgb(0x77828f)).child("等待 scene"))
             .into_any_element();
     };
-    body = body.child(
-        div()
-            .flex()
-            .gap_2()
-            .child(metric("Room", format!("{:.0}%", snapshot.environment.room_size * 100.0)))
-            .child(metric("Wet", format!("{:.0}%", snapshot.environment.mix * 100.0)))
-            .child(metric("Damp", format!("{:.0}%", snapshot.environment.damping * 100.0))),
-    );
+    let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
+    body = body
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(metric("Room", format!("{:.0}%", snapshot.environment.room_size * 100.0)))
+                .child(metric("Early Wet", format!("{:.0}%", snapshot.environment.mix * 100.0)))
+                .child(metric("Damp", format!("{:.0}%", snapshot.environment.damping * 100.0))),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .flex_wrap()
+                .child(metric("FDN Wet", format!("{:.1}%", late.wet_gain * 100.0)))
+                .child(metric("Feedback", format!("{:.3}", late.feedback_gain)))
+                .child(metric("Cutoff", format!("{:.0} Hz", late.damping_cutoff_hz)))
+                .child(metric("Late Delay", format!("{:.1}–{:.1} ms", late.minimum_delay_ms, late.maximum_delay_ms))),
+        );
     let visible = snapshot.source_count.min(SOURCE_ROWS);
     for (index, source) in snapshot.sources[..visible].iter().copied().enumerate() {
         if !source.active {
@@ -450,25 +463,45 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
         }
         let channel = channel_name(snapshot.source_count, index);
         let kind = if matches!(source.kind, SpatialDebugSourceKind::Lfe) { "LFE" } else { "FULL" };
-        body = body.child(
-            div()
-                .py_1()
-                .border_b_1()
-                .border_color(rgb(0x20252c))
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .gap_2()
-                        .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).child(format!("#{:02} {channel} · {kind}", source.source_index)))
-                        .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!("az {:+.1}° / el {:+.1}° / {:.2}m", source.azimuth_degrees, source.elevation_degrees, source.distance_meters))),
-                )
-                .child(div().text_xs().text_color(rgb(0x77828f)).child(format!("ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}", source.itd_samples, source.ild_db, source.left_gain, source.right_gain)))
-                .child(div().text_xs().text_color(rgb(0x68737f)).child(format!("near {:.0}% · shadow {:.0}% · air {:.0}%", source.near_field_amount * 100.0, source.head_shadow_amount * 100.0, source.air_absorption_amount * 100.0))),
-        );
+        let mut row = div()
+            .py_1()
+            .border_b_1()
+            .border_color(rgb(0x20252c))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).child(format!("#{:02} {channel} · {kind}", source.source_index)))
+                    .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!("az {:+.1}° / el {:+.1}° / {:.2}m", source.azimuth_degrees, source.elevation_degrees, source.distance_meters))),
+            )
+            .child(div().text_xs().text_color(rgb(0x77828f)).child(format!("ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}", source.itd_samples, source.ild_db, source.left_gain, source.right_gain)))
+            .child(div().text_xs().text_color(rgb(0x68737f)).child(format!("near {:.0}% · shadow {:.0}% · air {:.0}%", source.near_field_amount * 100.0, source.head_shadow_amount * 100.0, source.air_absorption_amount * 100.0)));
+        if matches!(source.kind, SpatialDebugSourceKind::FullRange) {
+            let pinna = pinna_cue_telemetry(
+                source.azimuth_degrees,
+                source.elevation_degrees,
+                source.spread,
+            );
+            row = row.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x8f86c9))
+                    .child(format!(
+                        "pinna {:.0}Hz · Q {:.2} · depth {:.2}dB · cue {:.0}% · L/R notch {:.0}/{:.0}Hz",
+                        pinna.center_hz,
+                        pinna.q,
+                        pinna.depth_db,
+                        pinna.cue_strength * 100.0,
+                        pinna.left_center_hz,
+                        pinna.right_center_hz,
+                    )),
+            );
+        }
+        body = body.child(row);
     }
     body.into_any_element()
 }
