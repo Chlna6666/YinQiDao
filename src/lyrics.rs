@@ -12,10 +12,23 @@ pub struct LyricsDocument {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LyricWord {
+    /// Absolute transport timestamp for the beginning of this enhanced-LRC segment.
+    pub timestamp_ms: u64,
+    /// Segment text exactly as it appeared between two inline timestamps. Leading/trailing
+    /// whitespace is intentionally preserved so the UI can rebuild the authored line without
+    /// inserting synthetic gaps between CJK/Latin segments.
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LyricLine {
     pub timestamp_ms: u64,
     pub text: String,
     pub translation: Option<String>,
+    /// Enhanced-LRC inline timing (`<mm:ss.xx>word`) when the source provides it. A plain LRC line
+    /// leaves this empty; consumers must not invent word timing from character count.
+    pub words: Arc<[LyricWord]>,
 }
 
 impl LyricsDocument {
@@ -179,7 +192,7 @@ fn collapse_legacy_bilingual_lrc(input: &str) -> Vec<LyricLine> {
 /// 1. 支持 [offset:+/-ms] 偏移补偿
 /// 2. 兼容多种时间格式（mm:ss.xx, mm:ss:xx, mm:ss.xxx, mm:ss, hh:mm:ss.xx）
 /// 3. 支持一行多时间标签（含空格分隔）
-/// 4. 过滤卡拉OK行内字级别时间戳（如 `<00:12.34>`）
+/// 4. 保留 Enhanced LRC 行内逐词时间戳（如 `<00:12.34>你<00:12.60>好`）
 /// 5. 过滤常见元数据头
 pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
     let global_offset = parse_offset(input);
@@ -208,19 +221,27 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             continue;
         }
 
-        // 清理行内卡拉OK标签并提取纯文本
-        let text = clean_inline_tags(remaining);
+        let (enhanced_text, enhanced_words) = parse_inline_words(remaining, global_offset);
+        let text = if enhanced_words.is_empty() {
+            clean_inline_tags(remaining)
+        } else {
+            clean_inline_tags(&enhanced_text)
+        };
+        // Inline timestamps are absolute transport times. If an LRC line contains multiple outer
+        // timestamps, the same inline timeline cannot truthfully describe all repeated instances;
+        // retain the line text but deliberately drop ambiguous word timing for those copies.
+        let words: Arc<[LyricWord]> = if timestamps.len() == 1 {
+            enhanced_words.into()
+        } else {
+            Arc::from([])
+        };
 
         for raw_ts in timestamps {
-            let final_ts = if global_offset >= 0 {
-                raw_ts.saturating_add(global_offset as u64)
-            } else {
-                raw_ts.saturating_sub((-global_offset) as u64)
-            };
             lines.push(LyricLine {
-                timestamp_ms: final_ts,
+                timestamp_ms: apply_offset(raw_ts, global_offset),
                 text: text.clone(),
                 translation: None,
+                words: words.clone(),
             });
         }
     }
@@ -244,6 +265,57 @@ fn parse_offset(input: &str) -> i64 {
         }
     }
     0
+}
+
+#[inline]
+fn apply_offset(timestamp_ms: u64, offset_ms: i64) -> u64 {
+    if offset_ms >= 0 {
+        timestamp_ms.saturating_add(offset_ms as u64)
+    } else {
+        timestamp_ms.saturating_sub((-offset_ms) as u64)
+    }
+}
+
+fn parse_inline_words(input: &str, offset_ms: i64) -> (String, Vec<LyricWord>) {
+    let mut plain = String::with_capacity(input.len());
+    let mut words = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < input.len() {
+        let Some(relative_start) = input[cursor..].find('<') else {
+            plain.push_str(&input[cursor..]);
+            break;
+        };
+        let start = cursor + relative_start;
+        plain.push_str(&input[cursor..start]);
+        let Some(relative_end) = input[start + 1..].find('>') else {
+            plain.push_str(&input[start..]);
+            break;
+        };
+        let end = start + 1 + relative_end;
+        let stamp = &input[start + 1..end];
+        let Some(timestamp_ms) = parse_timestamp(stamp) else {
+            plain.push_str(&input[start..=end]);
+            cursor = end + 1;
+            continue;
+        };
+
+        let segment_start = end + 1;
+        let segment_end = input[segment_start..]
+            .find('<')
+            .map_or(input.len(), |relative| segment_start + relative);
+        let segment = &input[segment_start..segment_end];
+        plain.push_str(segment);
+        if !segment.is_empty() {
+            words.push(LyricWord {
+                timestamp_ms: apply_offset(timestamp_ms, offset_ms),
+                text: segment.to_owned(),
+            });
+        }
+        cursor = segment_end;
+    }
+
+    (plain.trim().to_owned(), words)
 }
 
 fn parse_timestamp(value: &str) -> Option<u64> {
@@ -341,11 +413,31 @@ mod tests {
     }
 
     #[test]
-    fn lrc_parser_cleans_karaoke_tags() {
+    fn lrc_parser_preserves_enhanced_word_timing() {
         let input = "[00:10.00]<00:10.00>你好 <00:10.50>世界";
         let lines = parse_lrc(input);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "你好 世界");
+        assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].words[0].timestamp_ms, 10_000);
+        assert_eq!(lines[0].words[0].text, "你好 ");
+        assert_eq!(lines[0].words[1].timestamp_ms, 10_500);
+        assert_eq!(lines[0].words[1].text, "世界");
+    }
+
+    #[test]
+    fn lrc_offset_applies_to_enhanced_word_timing() {
+        let lines = parse_lrc("[offset:-250]\n[00:10.00]<00:10.00>A<00:10.50>B");
+        assert_eq!(lines[0].timestamp_ms, 9_750);
+        assert_eq!(lines[0].words[0].timestamp_ms, 9_750);
+        assert_eq!(lines[0].words[1].timestamp_ms, 10_250);
+    }
+
+    #[test]
+    fn repeated_outer_timestamps_do_not_guess_word_timeline() {
+        let lines = parse_lrc("[00:10.00][00:20.00]<00:10.00>重复句");
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.words.is_empty()));
     }
 
     #[test]
