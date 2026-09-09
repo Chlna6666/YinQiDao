@@ -221,7 +221,7 @@ impl DecoderStream {
             source,
         })?;
         if let Some(entry) = av3a {
-            let spatial_layout_hint = avs3_spatial_layout_hint(&entry.decoder_config);
+            let mut spatial_layout_hint = avs3_spatial_layout_hint(&entry.decoder_config);
 
             // Lossless is a deliberate codec capability gate, not an alternate-backend probe miss.
             // Keep the Chapter 8 path explicit so an unsupported Lossless M4A never launches an
@@ -240,6 +240,11 @@ impl DecoderStream {
             match Av3aIsoBmffDemuxer::open(path) {
                 Ok(Some(demuxer)) => match Av3aRustBackend::from_demuxer(demuxer) {
                     Ok(Some(backend)) => {
+                        if spatial_layout_hint.is_none() {
+                            spatial_layout_hint = channel_configuration_to_spatial_layout(
+                                backend.channel_configuration(),
+                            );
+                        }
                         let sample_rate = backend.sample_rate();
                         let channels = backend.channels();
                         let sample_count = backend.sample_count();
