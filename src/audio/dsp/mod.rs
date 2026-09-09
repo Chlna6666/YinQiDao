@@ -9,7 +9,8 @@ use std::cell::Cell;
 
 use crate::model::{EqSettings, SpatialSettings};
 use yinqidao_audio_spatial::{
-    ChannelLayout, EngineConfig as NativeSpatialConfig, SpatialDebugSnapshot, SpatialEngine,
+    ChannelLayout, EngineConfig as NativeSpatialConfig, EnvironmentSettings, SpatialDebugSnapshot,
+    SpatialEngine,
 };
 
 use super::debug::{
@@ -18,7 +19,7 @@ use super::debug::{
 use super::spatial_debug::{clear_spatial_debug_snapshot, publish_spatial_debug_snapshot};
 use eq::EqProcessor;
 use spatial::Spatializer;
-use trajectory_spatial::StereoSpatializer;
+use trajectory_spatial::{StereoSpatializer, spatial_environment_settings};
 
 std::thread_local! {
     static TRANSPORT_RESET_GENERATION: Cell<u64> = const { Cell::new(1) };
@@ -160,6 +161,7 @@ pub struct AudioProcessor {
     native_spatial_scratch: Vec<f32>,
     native_spatial: Option<SpatialEngine>,
     native_spatial_rate: u32,
+    native_spatial_environment: Option<EnvironmentSettings>,
     source_debug_scratch: Vec<f32>,
     eq_debug_scratch: Vec<f32>,
     resampler: StreamingLinearResampler,
@@ -179,6 +181,7 @@ impl AudioProcessor {
             native_spatial_scratch: Vec::new(),
             native_spatial: None,
             native_spatial_rate: 0,
+            native_spatial_environment: None,
             source_debug_scratch: Vec::new(),
             eq_debug_scratch: Vec::new(),
             resampler: StreamingLinearResampler::new(sample_rate),
@@ -229,6 +232,7 @@ impl AudioProcessor {
         let output_rate = self.eq.sample_rate();
         let native_multichannel = input_channels > 2;
         let debug_enabled = audio_debug_enabled();
+        let spatial_settings = self.spatial.settings().clone();
         if let Some(renderer) = self.stereo_spatial.as_mut() {
             renderer.set_debug_enabled(debug_enabled);
         }
@@ -241,7 +245,13 @@ impl AudioProcessor {
         }
 
         if let Some(layout) = native_spatial_layout(input_channels) {
-            if self.render_native_spatial_into(input, input_rate, layout, debug_enabled) {
+            if self.render_native_spatial_into(
+                input,
+                input_rate,
+                layout,
+                debug_enabled,
+                &spatial_settings,
+            ) {
                 self.resampler.process_into(
                     &self.native_spatial_scratch,
                     input_rate,
@@ -269,11 +279,10 @@ impl AudioProcessor {
         }
 
         if !native_multichannel {
-            let settings = self.spatial.settings().clone();
             let handled = self
                 .stereo_spatial
                 .as_mut()
-                .is_some_and(|renderer| renderer.process_in_place(output, &settings));
+                .is_some_and(|renderer| renderer.process_in_place(output, &spatial_settings));
             if !handled {
                 self.spatial.process(output);
             }
@@ -340,23 +349,32 @@ impl AudioProcessor {
         input_rate: u32,
         layout: ChannelLayout,
         debug_enabled: bool,
+        spatial_settings: &SpatialSettings,
     ) -> bool {
         let input_rate = input_rate.max(1);
+        let environment = spatial_environment_settings(spatial_settings);
         if self.native_spatial_rate != input_rate || self.native_spatial.is_none() {
             let mut config = NativeSpatialConfig::new(input_rate);
-            config.environment.mix = 0.0;
+            config.environment = environment;
             match SpatialEngine::new(config) {
                 Ok(mut engine) => {
                     engine.set_debug_enabled(debug_enabled);
                     self.native_spatial = Some(engine);
                     self.native_spatial_rate = input_rate;
+                    self.native_spatial_environment = Some(environment);
                 }
                 Err(_) => {
                     self.native_spatial = None;
                     self.native_spatial_rate = input_rate;
+                    self.native_spatial_environment = None;
                     return false;
                 }
             }
+        } else if self.native_spatial_environment != Some(environment) {
+            if let Some(engine) = self.native_spatial.as_mut() {
+                engine.set_environment(environment);
+            }
+            self.native_spatial_environment = Some(environment);
         }
 
         let channels = match layout {
@@ -583,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn native_multichannel_is_not_spatialized_twice() {
+    fn native_multichannel_uses_shared_room_without_second_stereo_motion() {
         let mut input = vec![0.0_f32; 12 * 64];
         for frame in input.chunks_exact_mut(12) {
             frame[0] = 0.30;
@@ -594,21 +612,40 @@ mod tests {
         }
 
         let immersive = SpatialPreset::Immersive3d.settings();
-        let mut disabled = immersive.clone();
-        disabled.enabled = false;
-        let mut with_spatial =
+        let expected_environment = spatial_environment_settings(&immersive);
+        let mut enabled =
             AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
-        let mut without_spatial =
-            AudioProcessor::new(48_000, EqPreset::Flat.settings(), disabled, 1.0);
+        let _ = enabled.process(&input, 48_000, 12);
+        assert_eq!(enabled.native_spatial_environment, Some(expected_environment));
+        assert_eq!(
+            enabled
+                .native_spatial
+                .as_ref()
+                .expect("native engine")
+                .config()
+                .environment,
+            expected_environment
+        );
+        assert!(expected_environment.mix > 0.0);
+        assert_eq!(
+            enabled
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            None
+        );
 
-        let rendered = with_spatial.process(&input, 48_000, 12);
-        let reference = without_spatial.process(&input, 48_000, 12);
-        assert_eq!(rendered.len(), reference.len());
-        assert!(
-            rendered
-                .iter()
-                .zip(reference.iter())
-                .all(|(left, right)| (left - right).abs() < 1.0e-6)
+        let mut disabled_settings = SpatialPreset::Immersive3d.settings();
+        disabled_settings.enabled = false;
+        let mut disabled =
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), disabled_settings, 1.0);
+        let _ = disabled.process(&input, 48_000, 12);
+        assert_eq!(
+            disabled
+                .native_spatial_environment
+                .expect("native environment")
+                .mix,
+            0.0
         );
     }
 
