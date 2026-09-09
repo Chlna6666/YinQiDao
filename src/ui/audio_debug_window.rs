@@ -223,6 +223,13 @@ impl Render for AudioDebugView {
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostEq))))
                             .child(monitor_button("C SPATIAL", snapshot.monitor_mode == AudioDebugMonitorMode::PostSpatial)
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostSpatial))))
+                            .child(action_button("重置视角").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.camera.reset();
+                                    this.drag_anchor = None;
+                                    cx.notify();
+                                }),
+                            ))
                             .child(action_button(if frozen { "继续采样" } else { "冻结分析" }).on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.frozen = !this.frozen;
@@ -265,7 +272,7 @@ impl Render for AudioDebugView {
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} source · {} early reflection · {} Hz · seq {} · 左键拖拽旋转 / 滚轮缩放 / 双击复位",
+                                    "{} virtual channel/source · {} early reflection · {} Hz · seq {} · 独立 L/R ear path · 拖拽旋转 / 滚轮缩放",
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -315,7 +322,7 @@ impl Render for AudioDebugView {
                                         .bg(rgb(0x10151c))
                                         .text_xs()
                                         .text_color(rgb(0x8d98a5))
-                                        .child("拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
+                                        .child("蓝=左耳路径 · 红=右耳路径 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -395,7 +402,7 @@ impl Render for AudioDebugView {
             )
             .child(panel(
                 "Image-source Early Reflection Matrix",
-                Some("source → floor/ceiling/wall bounce → listener · excess delay / binaural arrival".into()),
+                Some("source → floor/ceiling/wall bounce → left/right ear · excess delay / binaural arrival".into()),
                 reflection_telemetry(spatial),
             ))
             .child(analysis_sections(snapshot.clone()))
