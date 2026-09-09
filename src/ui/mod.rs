@@ -1,3 +1,5 @@
+pub(crate) mod audio_debug_window;
+pub(crate) mod audio_spatial_debug_3d;
 pub mod components;
 mod enrichment;
 mod home;
