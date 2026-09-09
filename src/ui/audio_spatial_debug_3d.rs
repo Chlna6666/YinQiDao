@@ -10,11 +10,16 @@ use yinqidao_audio_spatial::{
     late_field_telemetry,
 };
 
+mod humanoid_generated {
+    include!("audio_debug_humanoid_generated.rs");
+}
+use humanoid_generated::{HUMANOID_ASSET_READY, HUMANOID_INDICES, HUMANOID_VERTICES};
+
 const SHADER_SOURCE: &str = include_str!("audio_spatial_debug_3d.wgsl");
 const MIN_SCENE_RADIUS: f32 = 1.8;
 const SOURCE_RADIUS: f32 = 0.075;
 const EAR_RADIUS: f32 = 0.040;
-const HEAD_RADIUS: f32 = 0.115;
+const HEAD_RADIUS: f32 = DEFAULT_HEAD_RADIUS_M * 1.31;
 const BOUNCE_RADIUS: f32 = 0.035;
 const ROOM_EDGE_WIDTH: f32 = 0.010;
 const LATE_FIELD_EDGE_WIDTH: f32 = 0.006;
@@ -23,6 +28,7 @@ const DIRECT_EAR_PATH_WIDTH: f32 = 0.0045;
 const VELOCITY_WIDTH: f32 = 0.010;
 const LEFT_EAR_COLOR: [f32; 4] = [0.22, 0.62, 1.0, 1.0];
 const RIGHT_EAR_COLOR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
+const HUMANOID_COLOR: [f32; 4] = [0.18, 0.54, 0.64, 1.0];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SpatialDebug3dCamera {
@@ -179,10 +185,6 @@ fn build_scene_mesh(
     let half_depth = 2.10 + room * 4.10;
     let fit_radius = half_width.max(half_depth).max(half_height).max(MIN_SCENE_RADIUS);
 
-    // Listener visual shell. The acoustic ear markers below are not derived from this shell; they
-    // use ListenerPose::ear_positions(), the exact same ±head-radius geometry as the DSP model.
-    // The shell is intentionally low-poly so it can later be replaced by the selected CC0 humanoid
-    // mesh without changing any binaural geometry or debug path semantics.
     builder.push_humanoid_listener(left_ear, right_ear);
 
     let source_count = snapshot.source_count.min(snapshot.sources.len());
@@ -197,7 +199,12 @@ fn build_scene_mesh(
         } else {
             0.92 + source.near_field_amount.clamp(0.0, 1.0) * 0.28
         };
-        builder.push_virtual_speaker(position, scale, color, matches!(source.kind, SpatialDebugSourceKind::Lfe));
+        builder.push_virtual_speaker(
+            position,
+            scale,
+            color,
+            matches!(source.kind, SpatialDebugSourceKind::Lfe),
+        );
     }
     let opaque_count = builder.indices.len() as u32;
 
@@ -231,7 +238,12 @@ fn build_scene_mesh(
             source_position,
             right_ear,
             right_width,
-            [RIGHT_EAR_COLOR[0], RIGHT_EAR_COLOR[1], RIGHT_EAR_COLOR[2], right_alpha],
+            [
+                RIGHT_EAR_COLOR[0],
+                RIGHT_EAR_COLOR[1],
+                RIGHT_EAR_COLOR[2],
+                right_alpha,
+            ],
         );
     }
 
@@ -298,18 +310,29 @@ fn build_scene_mesh(
 
         // The reflection's image direction also arrives independently at both ears. Keep these much
         // fainter than the direct paths so a 7.1.4 bed remains readable even with 72 reflection taps.
-        let (left_alpha, right_alpha) = binaural_path_alpha(reflection.left_gain, reflection.right_gain);
+        let (left_alpha, right_alpha) =
+            binaural_path_alpha(reflection.left_gain, reflection.right_gain);
         builder.push_segment(
             bounce,
             left_ear,
             PATH_WIDTH * 0.72,
-            [path_color[0] * 0.72, path_color[1] * 0.82, 1.0, alpha * left_alpha * 0.55],
+            [
+                path_color[0] * 0.72,
+                path_color[1] * 0.82,
+                1.0,
+                alpha * left_alpha * 0.55,
+            ],
         );
         builder.push_segment(
             bounce,
             right_ear,
             PATH_WIDTH * 0.72,
-            [1.0, path_color[1] * 0.76, path_color[2] * 0.72, alpha * right_alpha * 0.55],
+            [
+                1.0,
+                path_color[1] * 0.76,
+                path_color[2] * 0.72,
+                alpha * right_alpha * 0.55,
+            ],
         );
         builder.push_octahedron(
             bounce,
@@ -360,8 +383,16 @@ fn build_scene_mesh(
 }
 
 fn binaural_path_alpha(left_gain: f32, right_gain: f32) -> (f32, f32) {
-    let left = if left_gain.is_finite() { left_gain.max(0.0) } else { 0.0 };
-    let right = if right_gain.is_finite() { right_gain.max(0.0) } else { 0.0 };
+    let left = if left_gain.is_finite() {
+        left_gain.max(0.0)
+    } else {
+        0.0
+    };
+    let right = if right_gain.is_finite() {
+        right_gain.max(0.0)
+    } else {
+        0.0
+    };
     let maximum = left.max(right).max(1.0e-5);
     (
         (0.16 + 0.68 * (left / maximum).sqrt()).clamp(0.16, 0.84),
@@ -416,10 +447,34 @@ impl MeshBuilder {
         index
     }
 
+    fn push_static_mesh(&mut self, vertices: &[[f32; 3]], indices: &[u32], color: [f32; 4]) {
+        let base = self.vertices.len().min(u32::MAX as usize) as u32;
+        for position in vertices.iter().copied() {
+            self.push_vertex(position, color);
+        }
+        let vertex_count = vertices.len().min(u32::MAX as usize) as u32;
+        for triangle in indices.chunks_exact(3) {
+            if triangle.iter().all(|index| *index < vertex_count) {
+                self.indices.extend([
+                    base + triangle[0],
+                    base + triangle[1],
+                    base + triangle[2],
+                ]);
+            }
+        }
+    }
+
     fn push_humanoid_listener(&mut self, left_ear: [f32; 3], right_ear: [f32; 3]) {
-        // Lightweight fallback topology used until the selected CC0 Blender mesh is converted into
-        // static GpuMesh3d vertices. Its proportions deliberately keep the head center at the
-        // acoustic listener origin, so swapping the visual shell cannot move either ear.
+        if HUMANOID_ASSET_READY && !HUMANOID_VERTICES.is_empty() && !HUMANOID_INDICES.is_empty() {
+            self.push_static_mesh(HUMANOID_VERTICES, HUMANOID_INDICES, HUMANOID_COLOR);
+            self.push_octahedron(left_ear, EAR_RADIUS, LEFT_EAR_COLOR);
+            self.push_octahedron(right_ear, EAR_RADIUS, RIGHT_EAR_COLOR);
+            return;
+        }
+
+        // Build-safe fallback used until tools/audio_debug/export_humanoid_cc0.py has generated the
+        // selected Shingox CC0 mesh. The acoustic listener origin and ear markers already use the
+        // exact runtime geometry, so replacing only this visual shell cannot alter the audio result.
         self.push_octahedron([0.0, 0.0, 0.0], HEAD_RADIUS, [0.22, 0.72, 0.82, 1.0]);
         self.push_segment(
             [0.0, -0.10, -0.015],
@@ -447,8 +502,11 @@ impl MeshBuilder {
         );
         self.push_octahedron(left_ear, EAR_RADIUS, LEFT_EAR_COLOR);
         self.push_octahedron(right_ear, EAR_RADIUS, RIGHT_EAR_COLOR);
-        // Nose/face direction marker: the CC0 visual shell will align to the same +Z forward axis.
-        self.push_octahedron([0.0, -0.005, HEAD_RADIUS * 0.92], 0.026, [0.44, 0.86, 0.92, 1.0]);
+        self.push_octahedron(
+            [0.0, -0.005, HEAD_RADIUS * 0.92],
+            0.026,
+            [0.44, 0.86, 0.92, 1.0],
+        );
     }
 
     fn push_virtual_speaker(
@@ -461,11 +519,23 @@ impl MeshBuilder {
         let radius = SOURCE_RADIUS * scale;
         self.push_octahedron(position, radius, color);
         let toward_listener = normalize3(mul3(position, -1.0));
-        let nose = add3(position, mul3(toward_listener, radius * if lfe { 0.65 } else { 1.20 }));
-        self.push_segment(position, nose, radius * 0.24, [color[0], color[1], color[2], 0.92]);
+        let nose = add3(
+            position,
+            mul3(toward_listener, radius * if lfe { 0.65 } else { 1.20 }),
+        );
+        self.push_segment(
+            position,
+            nose,
+            radius * 0.24,
+            [color[0], color[1], color[2], 0.92],
+        );
         if !lfe {
             let halo = add3(position, mul3(toward_listener, -radius * 0.48));
-            self.push_octahedron(halo, radius * 0.42, [color[0], color[1], color[2], 0.72]);
+            self.push_octahedron(
+                halo,
+                radius * 0.42,
+                [color[0], color[1], color[2], 0.72],
+            );
         }
     }
 
@@ -483,8 +553,14 @@ impl MeshBuilder {
             self.push_vertex(point, color);
         }
         const FACES: [[u32; 3]; 8] = [
-            [2, 0, 4], [2, 4, 1], [2, 1, 5], [2, 5, 0],
-            [3, 4, 0], [3, 1, 4], [3, 5, 1], [3, 0, 5],
+            [2, 0, 4],
+            [2, 4, 1],
+            [2, 1, 5],
+            [2, 5, 0],
+            [3, 4, 0],
+            [3, 1, 4],
+            [3, 5, 1],
+            [3, 0, 5],
         ];
         for face in FACES {
             self.indices.extend(face.map(|index| base + index));
@@ -530,9 +606,18 @@ impl MeshBuilder {
             self.push_vertex(position, color);
         }
         const TRIANGLES: [[u32; 3]; 12] = [
-            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
-            [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
-            [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0],
         ];
         for triangle in TRIANGLES {
             self.indices.extend(triangle.map(|index| base + index));
@@ -594,9 +679,18 @@ impl MeshBuilder {
             [-half_width, half_height, half_depth],
         ];
         for (a, b) in [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ] {
             self.push_segment(p[a], p[b], edge_width, color);
         }
