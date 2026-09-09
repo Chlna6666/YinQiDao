@@ -365,9 +365,10 @@ impl CpuRenderer {
                     state.reflection_parameters_for(sample_rate, end_pose, listener, environment)
                 };
                 let mut reflection_parameters = reflection_start;
-                let reflection_steps = std::array::from_fn(|index| {
-                    reflection_start[index].step_to(reflection_end[index], frames)
-                });
+                let reflection_steps: [RenderParameterStep; EARLY_REFLECTION_TAP_COUNT] =
+                    std::array::from_fn(|index| {
+                        reflection_start[index].step_to(reflection_end[index], frames)
+                    });
 
                 let mut input_index = input_channel;
                 for frame in 0..frames {
