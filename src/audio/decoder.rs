@@ -8,7 +8,7 @@ use std::{
 };
 
 use symphonia::core::{
-    audio::GenericAudioBufferRef,
+    audio::{Channels, GenericAudioBufferRef, Position},
     codecs::audio::{AudioDecoder as Decoder, AudioDecoderOptions as DecoderOptions},
     errors::Error as SymphoniaError,
     formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType, probe::Hint},
@@ -389,6 +389,12 @@ impl DecoderStream {
                 path: path.to_path_buf(),
                 reason: error.to_string(),
             })?;
+        // Prefer the decoder's normalized channel map because codec-specific decoders (AAC/Vorbis
+        // in particular) may turn an encoded channel order into Symphonia's canonical positioned
+        // order during construction. Fall back to the demuxer's map when both describe the same
+        // stream but the decoder leaves its copy unset.
+        let spatial_layout_hint = symphonia_spatial_layout_hint(decoder.codec_params().channels.as_ref())
+            .or_else(|| symphonia_spatial_layout_hint(codec_params.channels.as_ref()));
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -398,7 +404,7 @@ impl DecoderStream {
                 track_id,
             }),
             info,
-            spatial_layout_hint: None,
+            spatial_layout_hint,
             decoded_frames: 0,
         })
     }
@@ -582,6 +588,40 @@ fn channel_configuration_to_spatial_layout(
     }
 }
 
+/// Convert only explicit Symphonia speaker-position metadata into layouts whose canonical PCM
+/// order is identical to `SpeakerLayout`. Discrete/custom/Ambisonic signals intentionally remain
+/// unknown: a bare channel count is not enough to decide whether e.g. ten channels are 5.1.4,
+/// 7.1.2, objects, or something application-specific.
+#[inline]
+fn symphonia_spatial_layout_hint(channels: Option<&Channels>) -> Option<ChannelLayout> {
+    let Channels::Positioned(positions) = channels? else {
+        return None;
+    };
+
+    let front = Position::FRONT_LEFT
+        | Position::FRONT_RIGHT
+        | Position::FRONT_CENTER
+        | Position::LFE1;
+    let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
+    let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
+    let height = Position::TOP_FRONT_LEFT
+        | Position::TOP_FRONT_RIGHT
+        | Position::TOP_REAR_LEFT
+        | Position::TOP_REAR_RIGHT;
+
+    if *positions == front | rear || *positions == front | side {
+        Some(ChannelLayout::Surround5_1)
+    } else if *positions == front | rear | side {
+        Some(ChannelLayout::Surround7_1)
+    } else if *positions == front | rear | height || *positions == front | side | height {
+        Some(ChannelLayout::Surround5_1_4)
+    } else if *positions == front | rear | side | height {
+        Some(ChannelLayout::Surround7_1_4)
+    } else {
+        None
+    }
+}
+
 fn resolve_av3a_decoder() -> Option<OsString> {
     if let Some(path) = std::env::var_os("YINQIDAO_AVS3_DECODER")
         && !path.is_empty()
@@ -761,6 +801,71 @@ mod tests {
             None
         );
         assert_eq!(channel_configuration_to_spatial_layout(None), None);
+    }
+
+    #[test]
+    fn symphonia_positioned_surround_layouts_are_preserved() {
+        let front = Position::FRONT_LEFT
+            | Position::FRONT_RIGHT
+            | Position::FRONT_CENTER
+            | Position::LFE1;
+        let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
+        let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
+        let height = Position::TOP_FRONT_LEFT
+            | Position::TOP_FRONT_RIGHT
+            | Position::TOP_REAR_LEFT
+            | Position::TOP_REAR_RIGHT;
+
+        for positions in [front | rear, front | side] {
+            let channels = Channels::Positioned(positions);
+            assert_eq!(
+                symphonia_spatial_layout_hint(Some(&channels)),
+                Some(ChannelLayout::Surround5_1)
+            );
+        }
+
+        let channels = Channels::Positioned(front | rear | side);
+        assert_eq!(
+            symphonia_spatial_layout_hint(Some(&channels)),
+            Some(ChannelLayout::Surround7_1)
+        );
+
+        for positions in [front | rear | height, front | side | height] {
+            let channels = Channels::Positioned(positions);
+            assert_eq!(
+                symphonia_spatial_layout_hint(Some(&channels)),
+                Some(ChannelLayout::Surround5_1_4)
+            );
+        }
+
+        let channels = Channels::Positioned(front | rear | side | height);
+        assert_eq!(
+            symphonia_spatial_layout_hint(Some(&channels)),
+            Some(ChannelLayout::Surround7_1_4)
+        );
+    }
+
+    #[test]
+    fn symphonia_ambiguous_or_non_positioned_channels_are_not_guessed() {
+        let discrete = Channels::Discrete(6);
+        let ambisonic = Channels::Ambisonic(2);
+        assert_eq!(symphonia_spatial_layout_hint(Some(&discrete)), None);
+        assert_eq!(symphonia_spatial_layout_hint(Some(&ambisonic)), None);
+        assert_eq!(symphonia_spatial_layout_hint(None), None);
+
+        let seven_one_two = Channels::Positioned(
+            Position::FRONT_LEFT
+                | Position::FRONT_RIGHT
+                | Position::FRONT_CENTER
+                | Position::LFE1
+                | Position::REAR_LEFT
+                | Position::REAR_RIGHT
+                | Position::SIDE_LEFT
+                | Position::SIDE_RIGHT
+                | Position::TOP_FRONT_LEFT
+                | Position::TOP_FRONT_RIGHT,
+        );
+        assert_eq!(symphonia_spatial_layout_hint(Some(&seven_one_two)), None);
     }
 
     #[test]
