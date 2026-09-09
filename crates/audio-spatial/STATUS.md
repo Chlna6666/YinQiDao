@@ -22,9 +22,10 @@
 - [x] 独立 crate：`crates/audio-spatial`。
 - [x] 默认 64-frame 固定内部 block，可配置。
 - [x] `SpatialEngine` / source workspace 初始化时预分配。
-- [x] `Vec3` / `SourcePose` / `ListenerPose` 无分配几何 primitive。
+- [x] `Vec3` / `SourcePose` / `ListenerPose` / `RoomPose` 无分配几何 primitive。
 - [x] `ListenerPose::basis()` 作为公开只读几何 API，DSP 与应用侧 GPU Debug 共用同一 listener-local basis。
 - [x] `DEFAULT_HEAD_RADIUS_M = 0.0875` + `ListenerPose::ear_positions()` 作为 DSP / Debug 共用的唯一默认双耳几何基准；耳位几何保持头中心左右对称，per-ear Pinna/增益/延迟允许不对称。
+- [x] `RoomPose` 提供独立 world-space 房间 position/forward/up 与 `world_to_local/local_to_world` 变换；房间坐标系不再必须绑定 Listener。
 - [x] Stereo / 5.1 / 7.1 / 5.1.4 / 7.1.4 speaker scene。
 - [x] `ChannelRole` + `SpeakerLayout::roles()/role()` 显式描述 authored PCM 槽位语义。
 - [x] 7.1.4 contract：`FL, FR, C, LFE, RL, RR, SL, SR, TFL, TFR, TRL, TRR`，LFE index 3。
@@ -108,12 +109,13 @@
 
 ## Phase 4 — 专业空间场 / 对象音频
 
-- [x] listener-local rectangular image-source room；所有 source 共享同一房间几何。
+- [x] world-fixed 默认 rectangular image-source room；所有 source 共享同一房间几何，Listener 转头/移动不再旋转或平移默认墙面。
+- [x] `RoomPose` + 显式 arbitrary-room image-source solver：source/listener 在 room-local 求解，image/bounce 再回到 world-space。
 - [x] 正式播放路径使用 per-source first-order image-source reflections。
 - [x] Left / Right / Front / Rear / Floor / Ceiling 六面一阶反射。
 - [x] 每条反射按 image arrival direction 进入同一套 binaural ITD/ILD/head-shadow/distance/air 模型。
 - [x] reflection 只增加 excess path delay，不给整个音乐节目加入绝对传播延迟。
-- [x] 极端越界 source 只在 reflection solver 内夹到房间边界内；direct source pose 不修改。
+- [x] 极端越界 source/listener 只在 reflection solver 内夹到房间边界内；direct source/listener pose 不修改。
 - [x] LFE 不做伪方向化 image-source reflection。
 - [x] 已删除退出正式链的旧全局 `EarlyReflectionNetwork` API/实现。
 - [x] direct path 参数化 pinna / externalization spectral layer；明确为 generic parametric cue，不宣称 measured HRTF。
@@ -122,11 +124,11 @@
 - [x] FDN 使用独立 L/R 正交 injection vectors，保留纯 Side/反相 stereo 的 late-field 激励。
 - [x] `environment.mix=0` 为 late-field bit-exact bypass；room-size 改变/reset 清理旧 tail history。
 - [x] verified native 5.1.4/7.1.4 在 Spatial 启用时使用同一六面 Early + FDN room，保持 authored speaker geometry，不启动 stereo motion。
-- [ ] absolute room transform / listener-room position；当前仍为 listener-centered room。
+- [ ] `SpatialEngine` runtime custom `RoomPose` setter + Debug room pose publication；当前正式默认 room 已 world-fixed，但任意运行时房间 transform 尚未贯通 renderer/cache/debug schema。
 - [ ] Audio Vivid object metadata 接入。
 - [ ] HOA 参数化 binaural path。
 - [ ] object source culling / audibility budget。
-- [ ] listener pose / head orientation runtime 接口。
+- [ ] listener pose / head orientation 从播放器命令/UI 到 `AudioProcessor → stereo/native SpatialEngine` 的 runtime 接口；底层 `SpatialEngine::set_listener` 已存在，但尚未向上贯通。
 - [ ] source directivity / spread 高级模型。
 
 ## Phase 5 — Spatial Debug / 发烧级可视化
@@ -138,6 +140,8 @@
 - [x] Debug 默认关闭；开启时复用固定数组。
 - [x] 根播放器原子槽 + odd/even seqlock 发布，无 Mutex/channel/heap publication。
 - [x] scene publish 约 30 Hz。
+- [x] 每 virtual/authored source 的实际 PCM Peak/RMS 仅在 Debug-enabled 路径计算；固定 `SourceActivity[32]` 复用，无 render-time Vec；结果直接绑定进 `SpatialDebugSource.input_peak/input_rms` 并随同一 scene seqlock 发布。
+- [x] GPU speaker glyph 大小/亮度、direct binaural path、reflection 可见度与 Spatial Telemetry 的 dBFS inspector 均消费实时 Peak/RMS；静音声道不再以固定强度伪装为活跃。
 - [x] 完整 Audio Laboratory 工程分析恢复并独立放在 `src/ui/audio_debug_analysis.rs`：SOURCE / POST-EQ / POST-SPATIAL、Peak/True Peak/RMS/Crest/DR/Clip、LUFS-M/S/I、Correlation、S/M。
 - [x] A/B/C Spectrum、Transfer ΔdB、M/S Spectrum、Phase History、Crest/Dynamic History、Spectrogram、Waveform Overlay、Stereo Vectorscope 全部保留。
 - [x] GPU 3D Debug 使用 BMCBL GPUI `GpuMesh3d` / WGSL / depth；不修改 GPUI core。
@@ -157,7 +161,7 @@
 - [x] Debug channel label 直接消费公开 `ChannelRole` / `SpeakerLayout::role()`，不维护重复 5.1.4/7.1.4 名称数组。
 - [x] 已建立指定 CC0 `Humanoid Low Poly Mesh (With Basic Face)` 的离线导入链：`tools/audio_debug/export_humanoid_cc0.py` 使用 Blender 将 `.blend` 一次性烘焙成 `src/ui/audio_debug_humanoid_generated.rs` 的静态 `GpuMesh3d` 顶点/索引；运行时无需 Blender、OBJ/GLTF parser 或文件 I/O。
 - [ ] 当前仓库的 `audio_debug_humanoid_generated.rs` 仍是 `HUMANOID_ASSET_READY=false` 的 build-safe placeholder；需要本地取得 `HumanoidBaseMesh_new.blend` 后运行 exporter，才能把**指定 CC0 真模型**烘焙进仓库。此项完成前不得宣称实际渲染的就是原始 CC0 mesh。
-- [ ] 给每个 virtual/authored source 增加仅 Debug-enabled 时计算的实际 PCM Peak/RMS 活动度，用于 speaker glyph 大小/亮度与声道活动 inspector；当前 source 几何/方向是真实的，但静音声道仍会显示固定 glyph。
+- [ ] GPU room wireframe / Floor / Ceiling grid 还需要从固定 world room 投影到 listener-view；DSP reflection 已 world-fixed，但在 runtime Listener orientation 向上层开放前必须先完成这项，避免声音墙面与 Debug 房间框语义不一致。
 - [ ] object ID / Audio Vivid metadata 可视化。
 
 ## Phase 6 — 音频 GPU Compute（暂缓）
@@ -213,7 +217,7 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 - **本助手环境尚未执行 `cargo test`**；
 - **尚未执行 `cpu_bench`**；
 - 用户本地编译已推进到并反馈上述编译错误，但最新主线是否完整通过仍待下一次本地构建确认；
-- 新增 channel-order / codec→spatial handoff / ear-position tests 已写入源码，但尚未执行；
+- 新增 channel-order / codec→spatial handoff / ear-position / source-activity / RoomPose / world-room image-source tests 已写入源码，但尚未执行；
 - **尚未得到 serial/parallel break-even**；
 - `Cargo.lock` 尚未通过当前环境中的 Cargo 重新生成/校验。
 
@@ -231,11 +235,12 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 ## 下一步
 
 1. 用户本地重新执行 `cargo check`，继续消除剩余 GPUI 3D / pinna / limiter / native-room / handoff type/API 问题，直到根包完整通过。
-2. 在 Debug-enabled 路径增加每 virtual/authored source 的真实 PCM Peak/RMS，并贯通固定 snapshot → seqlock → GPU speaker activity / inspector；正常播放关闭 Debug 时不得增加该统计成本。
-3. 本地获取 `HumanoidBaseMesh_new.blend` 后运行 `tools/audio_debug/export_humanoid_cc0.py`，把指定 CC0 真模型烘焙进 `audio_debug_humanoid_generated.rs`，并核对模型朝向/头中心与 DSP ear markers 对齐。
-4. 实际跑 serial benchmark，分别测 dry / 双级 pinna / 六面 Early / FDN / limiter / Debug 的边际成本。
-5. 用真实音乐与峰值测试素材标定 limiter ceiling/release、post-spatial headroom 与 true-peak 风险。
-6. 只有 benchmark + 听感同时证明收益时才尝试 reflection-pinna / tap audibility budget / realtime worker pool。
-7. 编译与性能稳定后删除 legacy `src/audio/dsp/spatial.rs` renderer/fallback。
-8. 再推进 absolute room transform、listener runtime orientation、source directivity 与 Audio Vivid object metadata。
-9. 仅在获得明确 authored slot order/geometry contract 后实现 7.1.2 native layout；在此之前保持保守 fallback。
+2. 让 GPU room wireframe / Floor / Ceiling grid 使用固定 world room → listener-view 投影；完成前不向播放器/UI 开放 runtime Listener orientation。
+3. 在 `AudioProcessor → StereoSpatializer/native SpatialEngine` 贯通 Listener pose，再接播放器命令/UI/head-tracking 输入；验证转头只改变 binaural cues，不旋转 world room。
+4. 本地获取 `HumanoidBaseMesh_new.blend` 后运行 `tools/audio_debug/export_humanoid_cc0.py`，把指定 CC0 真模型烘焙进 `audio_debug_humanoid_generated.rs`，并核对模型朝向/头中心与 DSP ear markers 对齐。
+5. 实际跑 serial benchmark，分别测 dry / 双级 pinna / 六面 Early / FDN / limiter / Debug 的边际成本。
+6. 用真实音乐与峰值测试素材标定 limiter ceiling/release、post-spatial headroom 与 true-peak 风险。
+7. 只有 benchmark + 听感同时证明收益时才尝试 reflection-pinna / tap audibility budget / realtime worker pool。
+8. 编译与性能稳定后删除 legacy `src/audio/dsp/spatial.rs` renderer/fallback。
+9. 再推进 runtime custom `RoomPose`、source directivity、Audio Vivid object metadata 与 object/HOA 路径。
+10. 仅在获得明确 authored slot order/geometry contract 后实现 7.1.2 native layout；在此之前保持保守 fallback。
