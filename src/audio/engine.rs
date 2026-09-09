@@ -449,6 +449,7 @@ impl CrossfadeState {
     fn ensure_samples(&mut self, needed_samples: usize) -> Result<(), DecodeError> {
         self.compact_buffer();
         while self.available_samples() < needed_samples {
+            let spatial_layout_hint = self.decoder.spatial_layout_hint();
             let (sample_rate, channels) = if let Some(chunk) = self.prefetched_chunk.take() {
                 self.decoded_samples = chunk.samples;
                 (chunk.sample_rate, chunk.channels)
@@ -460,10 +461,11 @@ impl CrossfadeState {
                 };
                 (sample_rate, channels)
             };
-            self.processor.process_into(
+            self.processor.process_into_with_layout(
                 &self.decoded_samples,
                 sample_rate,
                 channels,
+                spatial_layout_hint,
                 &mut self.chunk_processed,
             );
             self.buffered_samples
@@ -1426,10 +1428,15 @@ impl AudioWorker {
             return Ok(false);
         };
 
-        self.processor.process_into(
+        let spatial_layout_hint = self
+            .decoder
+            .as_ref()
+            .and_then(DecoderStream::spatial_layout_hint);
+        self.processor.process_into_with_layout(
             &self.decoded_samples,
             sample_rate,
             channels,
+            spatial_layout_hint,
             &mut self.processed_samples,
         );
         self.apply_pending_fade_in();
