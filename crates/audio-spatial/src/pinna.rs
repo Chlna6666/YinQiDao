@@ -132,6 +132,14 @@ impl StereoPinnaCoefficients {
         self.left_ridge.advance(step.left_ridge);
         self.right_ridge.advance(step.right_ridge);
     }
+
+    /// Advance only the primary notch. Early reflections use this reduced path so four sagittal
+    /// taps do not pay for the shoulder/ridge stages on every sample.
+    #[inline]
+    pub(crate) fn advance_primary(&mut self, step: StereoPinnaCoefficientStep) {
+        self.left.advance(step.left);
+        self.right.advance(step.right);
+    }
 }
 
 impl Default for StereoPinnaCoefficients {
@@ -218,6 +226,21 @@ impl StereoPinnaState {
         )
     }
 
+    /// Process only the primary direction-dependent notch. Used by selected early-reflection taps
+    /// to retain front/rear/elevation identity without multiplying the full direct-path filter cost.
+    #[inline]
+    pub(crate) fn process_primary(
+        &mut self,
+        left: f32,
+        right: f32,
+        coefficients: StereoPinnaCoefficients,
+    ) -> (f32, f32) {
+        (
+            self.left_notch.process(left, coefficients.left),
+            self.right_notch.process(right, coefficients.right),
+        )
+    }
+
     pub(crate) fn reset(&mut self) {
         self.left_notch.reset();
         self.right_notch.reset();
@@ -300,6 +323,38 @@ pub(crate) fn coefficients_for_direction(
             cue.ridge_q,
             cue.right_ridge_gain_db,
         ),
+    }
+}
+
+/// Lightweight spectral cue for first-order room reflections. Only the primary notch is populated,
+/// at roughly one third of the direct-path depth; the renderer applies it only to front/rear/floor/
+/// ceiling image sources, where ITD/ILD alone are weakest at preserving sagittal identity.
+pub(crate) fn reflection_coefficients_for_direction(
+    sample_rate: f32,
+    azimuth_radians: f32,
+    elevation_radians: f32,
+    spread: f32,
+) -> StereoPinnaCoefficients {
+    const REFLECTION_DEPTH_SCALE: f32 = 0.32;
+    let cue = telemetry_from_shape(cue_shape(
+        azimuth_radians,
+        elevation_radians,
+        spread,
+    ));
+    StereoPinnaCoefficients {
+        left: peaking_coefficients(
+            sample_rate,
+            cue.left_center_hz,
+            cue.q,
+            -cue.left_depth_db * REFLECTION_DEPTH_SCALE,
+        ),
+        right: peaking_coefficients(
+            sample_rate,
+            cue.right_center_hz,
+            cue.q,
+            -cue.right_depth_db * REFLECTION_DEPTH_SCALE,
+        ),
+        ..StereoPinnaCoefficients::IDENTITY
     }
 }
 
@@ -471,6 +526,14 @@ fn flush_denormal(value: f32) -> f32 {
 mod tests {
     use super::*;
 
+    fn coefficient_distance_from_identity(coefficients: BiquadCoefficients) -> f32 {
+        (coefficients.b0 - 1.0).abs()
+            + coefficients.b1.abs()
+            + coefficients.b2.abs()
+            + coefficients.a1.abs()
+            + coefficients.a2.abs()
+    }
+
     #[test]
     fn rear_cue_is_deeper_and_lower_than_front() {
         let front = cue_shape(0.0, 0.0, 0.0);
@@ -510,6 +573,26 @@ mod tests {
         assert_ne!(coefficients.left, coefficients.right);
         assert_ne!(coefficients.left_shoulder, coefficients.right_shoulder);
         assert_ne!(coefficients.left_ridge, coefficients.right_ridge);
+    }
+
+    #[test]
+    fn reflection_pinna_keeps_only_a_weaker_primary_notch() {
+        let direct = coefficients_for_direction(48_000.0, PI, PI * 0.20, 0.0);
+        let reflection = reflection_coefficients_for_direction(48_000.0, PI, PI * 0.20, 0.0);
+        assert_ne!(reflection.left, BiquadCoefficients::IDENTITY);
+        assert_ne!(reflection.right, BiquadCoefficients::IDENTITY);
+        assert_eq!(reflection.left_shoulder, BiquadCoefficients::IDENTITY);
+        assert_eq!(reflection.right_shoulder, BiquadCoefficients::IDENTITY);
+        assert_eq!(reflection.left_ridge, BiquadCoefficients::IDENTITY);
+        assert_eq!(reflection.right_ridge, BiquadCoefficients::IDENTITY);
+        assert!(
+            coefficient_distance_from_identity(reflection.left)
+                < coefficient_distance_from_identity(direct.left)
+        );
+        assert!(
+            coefficient_distance_from_identity(reflection.right)
+                < coefficient_distance_from_identity(direct.right)
+        );
     }
 
     #[test]
@@ -558,11 +641,15 @@ mod tests {
     #[test]
     fn low_sample_rate_keeps_all_biquad_stages_finite() {
         let coefficients = coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
+        let reflection =
+            reflection_coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
         assert!(coefficients_finite(coefficients.left));
         assert!(coefficients_finite(coefficients.right));
         assert!(coefficients_finite(coefficients.left_shoulder));
         assert!(coefficients_finite(coefficients.right_shoulder));
         assert!(coefficients_finite(coefficients.left_ridge));
         assert!(coefficients_finite(coefficients.right_ridge));
+        assert!(coefficients_finite(reflection.left));
+        assert!(coefficients_finite(reflection.right));
     }
 }
