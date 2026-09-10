@@ -86,6 +86,23 @@ pub enum VirtualBedMode {
     Surround7_1_4,
 }
 
+/// User-confirmed speaker layout for a decoded multichannel stream whose codec/container exposes
+/// no reliable speaker metadata. This is deliberately independent from `VirtualBedMode`: declaring
+/// what an existing N-channel source means is not the same operation as synthesizing a speaker bed
+/// from mono/stereo programme.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceLayoutOverride {
+    #[default]
+    None,
+    Surround5_1,
+    Surround7_1,
+    Surround5_1_2,
+    Surround5_1_4,
+    Surround7_1_2,
+    Surround7_1_4,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SpatialSettings {
@@ -104,11 +121,12 @@ pub struct SpatialSettings {
     pub room_size: f32,
     /// Static externalization/envelopment amount independent of trajectory motion.
     pub immersive_3d: f32,
-    /// Mono/stereo selects an internal virtual speaker bed. For metadata-less/discrete
-    /// multichannel, an explicit matching layout also acts as a user-confirmed Source Layout
-    /// Override so the original N-channel PCM can enter the native renderer without a stereo fold.
-    /// Reliable codec/container speaker metadata always has priority over this control.
+    /// Internal virtual speaker bed synthesized from mono/stereo programme only.
     pub virtual_bed: VirtualBedMode,
+    /// Explicit speaker semantics for metadata-less/discrete multichannel PCM. Reliable
+    /// codec/container metadata always wins; the selected layout is accepted only when its exact
+    /// speaker count matches the decoded PCM channel count.
+    pub source_layout_override: SourceLayoutOverride,
     /// Dynamic source trajectory used by moving spherical scenes, including lower-hemisphere Helix.
     pub motion_mode: SpatialMotionMode,
     /// Orbit cycles per second. Normal UI range is roughly 0.02..0.30 Hz.
@@ -133,6 +151,7 @@ impl Default for SpatialSettings {
             room_size: 0.15,
             immersive_3d: 0.10,
             virtual_bed: VirtualBedMode::Auto,
+            source_layout_override: SourceLayoutOverride::None,
             motion_mode: SpatialMotionMode::Static,
             motion_speed_hz: 0.08,
             motion_radius: 0.65,
