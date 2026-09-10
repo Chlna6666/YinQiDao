@@ -1,7 +1,7 @@
 use crate::model::SpatialSettings;
 use yinqidao_audio_spatial::EnvironmentSettings;
 
-const MAX_ENVIRONMENT_MIX: f32 = 0.14;
+const MAX_ENVIRONMENT_MIX: f32 = 0.16;
 
 /// Convert user-facing spatial controls into the acoustic environment shared by stereo virtualization
 /// and authored native multichannel rendering. The listener-centric spherical direct field is the
@@ -11,14 +11,18 @@ const MAX_ENVIRONMENT_MIX: f32 = 0.14;
 /// removes synthetic early/late room energy.
 pub(crate) fn spatial_environment_settings(settings: &SpatialSettings) -> EnvironmentSettings {
     let room_size = settings.room_size.clamp(0.0, 1.0);
-    let damping = (0.34
-        + room_size * 0.28
-        + settings.distance.clamp(0.0, 1.0) * 0.18)
+    // Large rooms used to drive the FDN and wall filters too dark: the 0.34 base plus a 0.28
+    // room-size slope pushed Concert/Immersive scenes toward an obviously closed-in top end.
+    // Room size should primarily control geometry/decay. Keep a smaller distance-dependent air
+    // loss while preserving enough upper-mid/high-frequency energy for binaural externalization.
+    let damping = (0.20
+        + room_size * 0.18
+        + settings.distance.clamp(0.0, 1.0) * 0.10)
         .clamp(0.0, 1.0);
     let mix = if settings.enabled {
-        (settings.depth.clamp(0.0, 1.0) * 0.08
-            + room_size * 0.07
-            + settings.immersive_3d.clamp(0.0, 1.0) * 0.02)
+        (settings.depth.clamp(0.0, 1.0) * 0.085
+            + room_size * 0.072
+            + settings.immersive_3d.clamp(0.0, 1.0) * 0.024)
             .clamp(0.0, MAX_ENVIRONMENT_MIX)
     } else {
         0.0
@@ -52,8 +56,16 @@ mod tests {
         let environment = spatial_environment_settings(&settings);
         assert!(environment.mix > 0.0);
         assert!(environment.mix <= MAX_ENVIRONMENT_MIX);
-        assert!(environment.mix < settings.mix * 0.25);
+        assert!(environment.mix < settings.mix * 0.30);
         assert!((0.0..=1.0).contains(&environment.room_size));
         assert!((0.0..=1.0).contains(&environment.damping));
+    }
+
+    #[test]
+    fn professional_rooms_keep_an_open_high_frequency_decay() {
+        let concert = spatial_environment_settings(&SpatialPreset::ConcertHall.settings());
+        let immersive = spatial_environment_settings(&SpatialPreset::Immersive3d.settings());
+        assert!(concert.damping < 0.40);
+        assert!(immersive.damping < 0.35);
     }
 }
