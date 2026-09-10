@@ -202,6 +202,7 @@ impl HeadTrackingProvider for OpenTrackUdpProvider {
 /// idle 2 ms poll interval is sufficient to drain bursts while still publishing only the newest pose.
 pub struct OpenTrackHeadTrackingService {
     stop: Arc<AtomicBool>,
+    recenter_requested: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -209,13 +210,22 @@ impl OpenTrackHeadTrackingService {
     pub fn start(config: OpenTrackUdpConfig) -> io::Result<Self> {
         let provider = OpenTrackUdpProvider::bind(config)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let recenter_requested = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let worker_recenter = Arc::clone(&recenter_requested);
         let worker = thread::Builder::new()
             .name("yinqidao-opentrack".to_string())
             .spawn(move || {
                 let mut bridge = HeadTrackingBridge::new(provider);
                 while !worker_stop.load(Ordering::Acquire) {
-                    if bridge.poll_and_publish().is_none() {
+                    let published = bridge.poll_and_publish().is_some();
+                    if worker_recenter.swap(false, Ordering::AcqRel)
+                        && !bridge.recenter_to_last_pose()
+                    {
+                        // Preserve the request until at least one valid tracker packet has arrived.
+                        worker_recenter.store(true, Ordering::Release);
+                    }
+                    if !published {
                         thread::sleep(OPENTRACK_POLL_IDLE);
                     }
                 }
@@ -223,6 +233,7 @@ impl OpenTrackHeadTrackingService {
             })?;
         Ok(Self {
             stop,
+            recenter_requested,
             worker: Some(worker),
         })
     }
@@ -231,6 +242,12 @@ impl OpenTrackHeadTrackingService {
         self.worker
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
+    }
+
+    /// Recenter on the latest valid OpenTrack pose without touching the audio callback or restarting
+    /// the UDP socket. If no packet has arrived yet, the request remains pending until the first one.
+    pub fn request_recenter(&self) {
+        self.recenter_requested.store(true, Ordering::Release);
     }
 
     pub fn stop(mut self) {
