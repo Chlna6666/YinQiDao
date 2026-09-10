@@ -241,10 +241,10 @@ pub(super) fn mini_player(
     div()
         .id("mini-player-container")
         .w_full()
+        .relative()
         .bg(rgb(0xff_ff_ff))
         .flex()
         .flex_col()
-        .child(playback_progress)
         .child(
             div()
                 .flex()
@@ -680,6 +680,9 @@ pub(super) fn mini_player(
                         ),
                 ),
         )
+        // Paint the edge progress last so its 12 px interaction strip owns pointer hit-testing over
+        // the player body. This is what makes the 6 px hover rail and hover-only thumb observable.
+        .child(playback_progress)
 }
 
 fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl IntoElement {
