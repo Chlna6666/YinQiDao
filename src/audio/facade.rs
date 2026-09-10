@@ -23,6 +23,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
 const STRUCTURAL_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(800);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
+const NO_POSITION_OVERRIDE: u64 = u64::MAX;
+const SEEK_ACK_TOLERANCE_MS: u64 = 50;
 
 /// UI-facing audio facade.
 ///
@@ -51,6 +53,7 @@ struct SnapshotCache {
     position_ms: AtomicU64,
     duration_ms: AtomicU64,
     state_override: AtomicU8,
+    position_override_ms: AtomicU64,
 }
 
 impl SnapshotCache {
@@ -62,6 +65,7 @@ impl SnapshotCache {
             position_ms: AtomicU64::new(initial.position_ms),
             duration_ms: AtomicU64::new(initial.duration_ms),
             state_override: AtomicU8::new(NO_STATE_OVERRIDE),
+            position_override_ms: AtomicU64::new(NO_POSITION_OVERRIDE),
         }
     }
 
@@ -89,6 +93,23 @@ impl SnapshotCache {
             self.state_override
                 .store(NO_STATE_OVERRIDE, Ordering::Release);
         }
+
+        // A seek is published optimistically as soon as it enters the non-blocking bridge queue.
+        // Ignore stale progress samples from before that request until the blocking engine reports
+        // the requested position. This prevents every progress view from snapping backwards while
+        // the bridge/decoder catches up, including rapid consecutive seeks where old acknowledgments
+        // must not replace the newest target.
+        let desired_position = self.position_override_ms.load(Ordering::Acquire);
+        if desired_position != NO_POSITION_OVERRIDE
+            && position_ms.abs_diff(desired_position) <= SEEK_ACK_TOLERANCE_MS
+        {
+            let _ = self.position_override_ms.compare_exchange(
+                desired_position,
+                NO_POSITION_OVERRIDE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
     }
 
     fn snapshot(&self) -> PlayerSnapshot {
@@ -101,7 +122,7 @@ impl SnapshotCache {
             .unwrap_or_default();
 
         snapshot.state = self.visible_state();
-        snapshot.position_ms = self.position_ms.load(Ordering::Acquire);
+        snapshot.position_ms = self.visible_position_ms();
         snapshot.duration_ms = self.duration_ms.load(Ordering::Acquire);
         snapshot
     }
@@ -109,7 +130,7 @@ impl SnapshotCache {
     fn progress(&self) -> (PlaybackState, u64, u64) {
         (
             self.visible_state(),
-            self.position_ms.load(Ordering::Acquire),
+            self.visible_position_ms(),
             self.duration_ms.load(Ordering::Acquire),
         )
     }
@@ -124,15 +145,36 @@ impl SnapshotCache {
         }
     }
 
+    fn optimistic_position_ms(command: &PlayerCommand) -> Option<u64> {
+        match command {
+            PlayerCommand::Seek(position) => Some(
+                position
+                    .as_millis()
+                    .min(u128::from(NO_POSITION_OVERRIDE - 1)) as u64,
+            ),
+            _ => None,
+        }
+    }
+
     fn set_optimistic_state(&self, state: PlaybackState) {
         self.state_override
             .store(encode_state(state), Ordering::Release);
+    }
+
+    fn set_optimistic_position_ms(&self, position_ms: u64) {
+        self.position_override_ms.store(
+            position_ms.min(NO_POSITION_OVERRIDE - 1),
+            Ordering::Release,
+        );
     }
 
     #[cfg(test)]
     fn optimistic_command(&self, command: &PlayerCommand) {
         if let Some(state) = Self::optimistic_state(command) {
             self.set_optimistic_state(state);
+        }
+        if let Some(position_ms) = Self::optimistic_position_ms(command) {
+            self.set_optimistic_position_ms(position_ms);
         }
     }
 
@@ -142,6 +184,15 @@ impl SnapshotCache {
             decode_state(overridden)
         } else {
             decode_state(self.state.load(Ordering::Acquire))
+        }
+    }
+
+    fn visible_position_ms(&self) -> u64 {
+        let overridden = self.position_override_ms.load(Ordering::Acquire);
+        if overridden != NO_POSITION_OVERRIDE {
+            overridden
+        } else {
+            self.position_ms.load(Ordering::Acquire)
         }
     }
 }
@@ -335,13 +386,18 @@ impl AudioEngine {
     }
 
     pub fn try_send(&self, command: PlayerCommand) -> bool {
-        // Extract only the tiny optimistic state before moving the command. PlayerCommand queue
-        // payloads are Arc-backed, so cloning/transporting queue state never deep-copies TrackIds.
+        // Extract only tiny optimistic transport values before moving the command. Seek position is
+        // published through atomics immediately after enqueue so every UI progress surface observes
+        // one monotonic target while the asynchronous bridge/decoder applies the request.
         let optimistic_state = SnapshotCache::optimistic_state(&command);
+        let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
         match self.request_tx.try_send(EngineRequest::Command(command)) {
             Ok(()) => {
                 if let Some(state) = optimistic_state {
                     self.snapshot.set_optimistic_state(state);
+                }
+                if let Some(position_ms) = optimistic_position_ms {
+                    self.snapshot.set_optimistic_position_ms(position_ms);
                 }
                 true
             }
@@ -568,6 +624,48 @@ mod tests {
         cache.store(confirmed);
         assert_eq!(cache.progress().0, PlaybackState::Playing);
         assert_eq!(cache.state_override.load(Ordering::Acquire), NO_STATE_OVERRIDE);
+    }
+
+    #[test]
+    fn optimistic_seek_position_survives_stale_progress_until_acknowledged() {
+        let cache = SnapshotCache::new(PlayerSnapshot {
+            state: PlaybackState::Playing,
+            position_ms: 1_000,
+            duration_ms: 10_000,
+            ..PlayerSnapshot::default()
+        });
+        cache.optimistic_command(&PlayerCommand::Seek(Duration::from_millis(7_500)));
+        assert_eq!(cache.progress().1, 7_500);
+
+        cache.store_progress(PlaybackState::Playing, 1_025, 10_000);
+        assert_eq!(cache.progress().1, 7_500);
+        assert_eq!(
+            cache.position_override_ms.load(Ordering::Acquire),
+            7_500
+        );
+
+        cache.store_progress(PlaybackState::Playing, 7_510, 10_000);
+        assert_eq!(cache.progress().1, 7_510);
+        assert_eq!(
+            cache.position_override_ms.load(Ordering::Acquire),
+            NO_POSITION_OVERRIDE
+        );
+    }
+
+    #[test]
+    fn newer_seek_is_not_cleared_by_an_older_seek_acknowledgment() {
+        let cache = SnapshotCache::new(PlayerSnapshot {
+            duration_ms: 10_000,
+            ..PlayerSnapshot::default()
+        });
+        cache.optimistic_command(&PlayerCommand::Seek(Duration::from_millis(2_000)));
+        cache.optimistic_command(&PlayerCommand::Seek(Duration::from_millis(8_000)));
+        cache.store_progress(PlaybackState::Playing, 2_000, 10_000);
+        assert_eq!(cache.progress().1, 8_000);
+        assert_eq!(
+            cache.position_override_ms.load(Ordering::Acquire),
+            8_000
+        );
     }
 
     #[test]
