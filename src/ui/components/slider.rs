@@ -198,6 +198,7 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     let hover_group = format!("slider-hover-{id}");
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
+    let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
 
     let mut thumb = div()
         .flex_none()
@@ -228,33 +229,49 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
             style,
         ))
     };
-    let hover_track_layer = {
-        let layer = div()
+    let hover_track_layer = if style.edge_overlay {
+        // The mini-player rail is its top boundary. Grow the hover thickness out of the player
+        // (negative Y) while keeping the idle 2 px edge anchored in place, so the expanded rail
+        // never consumes control-space inside the 72 px player body.
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(edge_hover_top)
+            .h(style.hover_track_height)
+            .flex()
+            .items_start()
+            .opacity(0.0)
+            .group_hover(rail_hover_group, |s| s.opacity(1.0))
+            .transition(theme::hover_transition())
+            .child(horizontal_track(
+                clamped_ratio,
+                style.hover_track_height,
+                style,
+            ))
+    } else {
+        div()
             .absolute()
             .inset_0()
             .flex()
+            .items_center()
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
-            .transition(theme::hover_transition());
-        let layer = if style.edge_overlay {
-            layer.items_start()
-        } else {
-            layer.items_center()
-        };
-        layer.child(horizontal_track(
-            clamped_ratio,
-            style.hover_track_height,
-            style,
-        ))
+            .transition(theme::hover_transition())
+            .child(horizontal_track(
+                clamped_ratio,
+                style.hover_track_height,
+                style,
+            ))
     };
 
     let thumb_layer = if style.edge_overlay {
-        // Centre the knob on the expanded edge rail, not in the middle of the larger pointer strip.
+        // Centre the knob on the expanded outward rail rather than pushing it into the player body.
         div()
             .absolute()
             .left(px(0.0))
             .right(style.thumb_size)
-            .top(px(0.0))
+            .top(edge_hover_top)
             .h(style.hover_track_height)
             .flex()
             .items_center()
@@ -284,8 +301,8 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .child(thumb_layer);
 
     if style.edge_overlay {
-        // The mini-player owns the containing stacking context. Keep the entire hit strip inside
-        // the player so the body cannot cover it; the visual rail itself starts at y=0 exactly.
+        // The mini-player owns the containing stacking context. Keep the hit strip inside the
+        // player; only the visual hover rail grows outward above the boundary.
         root.absolute()
             .left(px(0.0))
             .right(px(0.0))
@@ -412,9 +429,8 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
-    let click_for_down = on_click;
+    let click_for_up = on_click;
     let drag_for_move = on_drag;
-    let drag_end_for_move = on_drag_end.clone();
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
 
@@ -431,14 +447,13 @@ pub fn interactive_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(bounds) = *bounds_for_down.borrow() else {
+            if bounds_for_down.borrow().is_none() {
                 return;
-            };
+            }
+            // Do not seek/change on press. A direct click is committed on mouse-up, while a scrub
+            // only starts after crossing DRAG_THRESHOLD_PX. This keeps the two interaction paths
+            // disjoint and prevents a press + every drag sample from becoming separate seeks.
             begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
-            (click_for_down)(
-                horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
             if !event.dragging() {
@@ -457,7 +472,6 @@ pub fn interactive_slider(
             if let Some(bounds) = *bounds_for_move.borrow() {
                 let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
                 (drag_for_move)(ratio, cx);
-                (drag_end_for_move)(ratio, cx);
             }
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
@@ -465,16 +479,15 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
                 return;
             };
-            if !was_dragging {
-                return;
-            }
             let Some(bounds) = *bounds_for_up.borrow() else {
                 return;
             };
-            (drag_end_for_up)(
-                horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
+            let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
+            if was_dragging {
+                (drag_end_for_up)(ratio, cx);
+            } else {
+                (click_for_up)(ratio, cx);
+            }
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
@@ -627,5 +640,12 @@ mod tests {
     fn drag_threshold_keeps_click_and_scrub_disjoint() {
         assert!(2.9 < DRAG_THRESHOLD_PX);
         assert!(3.0 >= DRAG_THRESHOLD_PX);
+    }
+
+    #[test]
+    fn mini_progress_hover_expands_outward() {
+        let style = SliderStyle::mini_progress();
+        assert!(f32::from(style.hover_track_height) > f32::from(style.track_height));
+        assert!(f32::from(style.track_height) - f32::from(style.hover_track_height) < 0.0);
     }
 }

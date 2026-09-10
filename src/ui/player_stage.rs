@@ -42,7 +42,16 @@ pub(super) fn render(
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
         .map_or(&[][..], |document| document.timed_lines());
-    let (transport_state, transport_position_ms, _) = live_transport(app);
+    // Sample the engine transport exactly once for this stage frame. Lyrics, the elapsed/remaining
+    // clocks and the progress rail must derive from the same position; independently reading the
+    // live atomics in different children makes fast seeks visibly disagree for a frame.
+    let (transport_state, live_position_ms, duration_ms) = live_transport(app);
+    let (_, displayed_position_ms, _, progress_ratio) = displayed_transport_from_live(
+        app,
+        transport_state,
+        live_position_ms,
+        duration_ms,
+    );
     let fluid_playing = transport_state == PlaybackState::Playing;
     fluid_background.update(cx, |view, cx| view.set_playing(fluid_playing, cx));
 
@@ -97,12 +106,19 @@ pub(super) fn render(
                         .child(stage_lyrics(
                             app,
                             lyrics,
-                            transport_position_ms,
+                            displayed_position_ms,
                             fluid_playing,
                             cx,
                         )),
                 )
-                .child(stage_controls(app, cx)),
+                .child(stage_controls(
+                    app,
+                    cx,
+                    transport_state,
+                    displayed_position_ms,
+                    duration_ms,
+                    progress_ratio,
+                )),
         )
         .into_any_element()
 }
@@ -118,8 +134,12 @@ fn live_transport(app: &MusicApp) -> (PlaybackState, u64, u64) {
     )
 }
 
-fn displayed_transport(app: &MusicApp) -> (PlaybackState, u64, u64, f32) {
-    let (state, live_position_ms, duration_ms) = live_transport(app);
+fn displayed_transport_from_live(
+    app: &MusicApp,
+    state: PlaybackState,
+    live_position_ms: u64,
+    duration_ms: u64,
+) -> (PlaybackState, u64, u64, f32) {
     let override_ratio = app
         .drag_progress_ratio
         .or_else(|| app.pending_progress_ratio.map(|(_, ratio)| ratio));
@@ -350,7 +370,7 @@ fn stage_lyrics(
             .min_w(px(0.0))
             .flex_none()
             .pl(px(16.0))
-            .pr(px(78.0))
+            .pr(px(92.0))
             .py(px(11.0))
             .mb(px(10.0))
             .opacity(alpha)
@@ -373,7 +393,7 @@ fn stage_lyrics(
                     .opacity(0.0)
                     .group_hover(hover_group_for_time, |style| style.opacity(1.0))
                     .transition(lyric_focus_transition())
-                    .child(format_time(timestamp)),
+                    .child(format_lyric_time(timestamp)),
             )
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -425,7 +445,10 @@ fn stage_primary_lyric(
     position_ms: u64,
     karaoke_active: bool,
 ) -> gpui::AnyElement {
-    if !karaoke_active || line.words.is_empty() {
+    // Enhanced-LRC is only safe to render segment-by-segment when those segments reconstruct the
+    // complete primary line. Some providers leave an untimed prefix/suffix around inline stamps;
+    // rendering only `words` made that text disappear while the line was active.
+    if !karaoke_active || !enhanced_words_cover_primary_text(line) {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -472,14 +495,47 @@ fn stage_primary_lyric(
     row.into_any_element()
 }
 
+fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
+    if line.words.is_empty() || line.text.is_empty() {
+        return false;
+    }
+    let mut remaining = line.text.as_str();
+    for word in line.words.iter() {
+        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    remaining.is_empty()
+}
+
+fn format_lyric_time(ms: u64) -> String {
+    let total_secs = ms / 1_000;
+    let millis = ms % 1_000;
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+    } else {
+        format!("{minutes:02}:{seconds:02}.{millis:03}")
+    }
+}
+
 fn lyric_focus_transition() -> Transition {
     Transition::new(Duration::from_millis(180))
         .ease(Easing::OutCubic)
         .properties([TransitionProperty::Opacity])
 }
 
-fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
-    let (transport_state, position, duration_ms, progress_ratio) = displayed_transport(app);
+fn stage_controls(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    transport_state: PlaybackState,
+    position: u64,
+    duration_ms: u64,
+    progress_ratio: f32,
+) -> impl IntoElement {
     let volume = app.displayed_volume_ratio();
     let playing = transport_state == PlaybackState::Playing;
     let visibility = app.stage_controls_visibility;
@@ -742,4 +798,47 @@ fn ambient_background(fluid_background: gpui::Entity<AppleFluidView>) -> gpui::A
         .bg(rgb(0x0e0f16))
         .child(fluid_background)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lyrics::LyricWord;
+
+    #[test]
+    fn precise_lyric_time_keeps_subsecond_timing() {
+        assert_eq!(format_lyric_time(62_345), "01:02.345");
+        assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
+    }
+
+    #[test]
+    fn incomplete_enhanced_lrc_falls_back_to_full_line() {
+        let complete = LyricLine {
+            timestamp_ms: 1_000,
+            text: "你好 世界".into(),
+            translation: None,
+            words: Arc::from([
+                LyricWord {
+                    timestamp_ms: 1_000,
+                    text: "你好 ".into(),
+                },
+                LyricWord {
+                    timestamp_ms: 1_500,
+                    text: "世界".into(),
+                },
+            ]),
+        };
+        assert!(enhanced_words_cover_primary_text(&complete));
+
+        let incomplete = LyricLine {
+            timestamp_ms: 1_000,
+            text: "前缀你好".into(),
+            translation: None,
+            words: Arc::from([LyricWord {
+                timestamp_ms: 1_200,
+                text: "你好".into(),
+            }]),
+        };
+        assert!(!enhanced_words_cover_primary_text(&incomplete));
+    }
 }
