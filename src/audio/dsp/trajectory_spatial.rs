@@ -2,10 +2,14 @@
 mod spatial_environment;
 pub(crate) use spatial_environment::spatial_environment_settings;
 
+#[path = "stereo_virtual_bed.rs"]
+mod stereo_virtual_bed;
+
 use crate::model::{SpatialMotionMode, SpatialSettings};
+use stereo_virtual_bed::StereoVirtualBed;
 use yinqidao_audio_spatial::{
-    EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
-    SpatialDebugSnapshot, SpatialEngine, Trajectory, TrajectoryKind, Vec3,
+    ChannelLayout, EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
+    SpatialDebugSnapshot, SpatialEngine, SpeakerLayout, Trajectory, TrajectoryKind, Vec3,
 };
 
 const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
@@ -22,6 +26,7 @@ const MIN_STEREO_DISTANCE_METERS: f32 = 0.72;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.00;
 const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
 const STEREO_SOURCE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+const MAX_VIRTUAL_BED_CHANNELS: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrajectorySignature {
@@ -57,6 +62,26 @@ impl TrajectorySignature {
                 + settings.motion_radius.clamp(0.0, 1.0) * TRAJECTORY_RADIUS_RANGE_METERS,
             clockwise: settings.clockwise,
         })
+    }
+}
+
+/// Apply the user-facing trajectory to a native authored speaker bed. The spatial crate owns the
+/// sample clock once configured, so 5.1/7.1/.2/.4 beds and stereo-derived virtual beds use the same
+/// spherical scene-motion semantics without a second UI-clock oscillator.
+pub(crate) fn apply_scene_motion_settings(
+    engine: &mut SpatialEngine,
+    settings: &SpatialSettings,
+) {
+    if let Some(signature) = TrajectorySignature::from_settings(settings) {
+        engine.set_scene_motion(
+            Some(signature.kind),
+            signature.speed_hz,
+            signature.radius_meters,
+            settings.motion_intensity.clamp(0.0, 1.0),
+            signature.clockwise,
+        );
+    } else {
+        engine.set_scene_motion(None, 0.10, 1.0, 0.0, true);
     }
 }
 
@@ -167,6 +192,9 @@ pub(crate) struct StereoSpatializer {
     field_signature: Option<FieldSignature>,
     field: StereoField,
     environment_signature: Option<EnvironmentSignature>,
+    virtual_bed: StereoVirtualBed,
+    virtual_bed_layout: Option<ChannelLayout>,
+    virtual_bed_scratch: Vec<f32>,
     wet_scratch: Vec<f32>,
 }
 
@@ -193,12 +221,19 @@ impl StereoSpatializer {
                 spread: 0.1,
             },
             environment_signature: None,
+            virtual_bed: StereoVirtualBed::new(sample_rate),
+            virtual_bed_layout: None,
+            virtual_bed_scratch: vec![
+                0.0;
+                block_frames.saturating_mul(MAX_VIRTUAL_BED_CHANNELS)
+            ],
             wet_scratch: vec![0.0; block_frames.saturating_mul(2)],
         })
     }
 
     pub(crate) fn reset(&mut self) {
         self.engine.reset();
+        self.virtual_bed.reset();
         if let Some(trajectory) = self.trajectory.as_mut() {
             trajectory.reset();
         }
@@ -233,6 +268,27 @@ impl StereoSpatializer {
         self.ensure_field(settings);
         self.ensure_environment(settings);
         let trajectory_signature = TrajectorySignature::from_settings(settings);
+        let virtual_layout = virtual_bed_layout(settings, trajectory_signature.is_some());
+        let wet_mix = stereo_wet_mix(settings, trajectory_signature.is_some());
+        if wet_mix <= 1.0e-5 {
+            return true;
+        }
+
+        if self.virtual_bed_layout != virtual_layout {
+            self.virtual_bed.reset();
+            self.engine.reset();
+            self.virtual_bed_layout = virtual_layout;
+        }
+
+        if let Some(layout) = virtual_layout {
+            // The native engine owns motion for a speaker bed. Clear the legacy two-source
+            // trajectory so there is exactly one sample clock and exactly one spatialization pass.
+            self.ensure_trajectory(None);
+            apply_scene_motion_settings(&mut self.engine, settings);
+            return self.process_virtual_bed(samples, layout, wet_mix);
+        }
+
+        self.engine.set_scene_motion(None, 0.10, 1.0, 0.0, true);
         self.ensure_trajectory(trajectory_signature);
         let segment_frames = trajectory_segment_frames(
             self.sample_rate,
@@ -240,10 +296,6 @@ impl StereoSpatializer {
             trajectory_signature,
         );
 
-        let wet_mix = stereo_wet_mix(settings, trajectory_signature.is_some());
-        if wet_mix <= 1.0e-5 {
-            return true;
-        }
         let dry_mix = 1.0 - wet_mix;
         let total_frames = samples.len() / 2;
         let mut frame_offset = 0usize;
@@ -274,8 +326,59 @@ impl StereoSpatializer {
             }
             for index in 0..frames * 2 {
                 let output_index = sample_start + index;
-                samples[output_index] = samples[output_index] * dry_mix
-                    + self.wet_scratch[index] * wet_mix;
+                samples[output_index] =
+                    samples[output_index] * dry_mix + self.wet_scratch[index] * wet_mix;
+            }
+            frame_offset += frames;
+        }
+        true
+    }
+
+    fn process_virtual_bed(
+        &mut self,
+        samples: &mut [f32],
+        layout: ChannelLayout,
+        wet_mix: f32,
+    ) -> bool {
+        let channels = SpeakerLayout::for_layout(layout).channels();
+        if channels <= 2 || channels > MAX_VIRTUAL_BED_CHANNELS {
+            return false;
+        }
+        let dry_mix = 1.0 - wet_mix;
+        let total_frames = samples.len() / 2;
+        let mut frame_offset = 0usize;
+
+        while frame_offset < total_frames {
+            let frames = (total_frames - frame_offset).min(self.block_frames);
+            let sample_start = frame_offset * 2;
+            let sample_end = sample_start + frames * 2;
+            let virtual_samples = frames * channels;
+            if self
+                .virtual_bed
+                .render(
+                    &samples[sample_start..sample_end],
+                    layout,
+                    &mut self.virtual_bed_scratch[..virtual_samples],
+                )
+                .is_none()
+            {
+                return false;
+            }
+            if self
+                .engine
+                .render_interleaved_layout(
+                    &self.virtual_bed_scratch[..virtual_samples],
+                    layout,
+                    &mut self.wet_scratch[..frames * 2],
+                )
+                .is_err()
+            {
+                return false;
+            }
+            for index in 0..frames * 2 {
+                let output_index = sample_start + index;
+                samples[output_index] =
+                    samples[output_index] * dry_mix + self.wet_scratch[index] * wet_mix;
             }
             frame_offset += frames;
         }
@@ -321,7 +424,36 @@ impl StereoSpatializer {
 
     #[cfg(test)]
     pub(crate) fn sample_clock(&self) -> Option<u64> {
-        self.trajectory.as_ref().map(Trajectory::sample_clock)
+        self.engine
+            .scene_motion_sample_clock()
+            .or_else(|| self.trajectory.as_ref().map(Trajectory::sample_clock))
+    }
+
+    #[cfg(test)]
+    fn active_virtual_layout(&self) -> Option<ChannelLayout> {
+        self.virtual_bed_layout
+    }
+}
+
+#[inline]
+fn virtual_bed_layout(settings: &SpatialSettings, dynamic: bool) -> Option<ChannelLayout> {
+    if !settings.enabled {
+        return None;
+    }
+    let immersive = settings.immersive_3d.clamp(0.0, 1.0);
+    let depth = settings.depth.clamp(0.0, 1.0);
+    let width = settings.width.clamp(0.0, 1.0);
+
+    if dynamic || immersive >= 0.72 {
+        Some(ChannelLayout::Surround7_1_4)
+    } else if immersive >= 0.52 || depth >= 0.50 {
+        Some(ChannelLayout::Surround5_1_4)
+    } else if immersive >= 0.36 {
+        Some(ChannelLayout::Surround7_1_2)
+    } else if width >= 0.78 && depth >= 0.18 {
+        Some(ChannelLayout::Surround7_1)
+    } else {
+        None
     }
 }
 
@@ -437,6 +569,44 @@ mod tests {
     }
 
     #[test]
+    fn wide_stereo_promotes_to_virtual_seven_one_bed() {
+        let settings = SpatialPreset::Wide.settings();
+        assert_eq!(
+            virtual_bed_layout(&settings, false),
+            Some(ChannelLayout::Surround7_1)
+        );
+    }
+
+    #[test]
+    fn cinema_and_immersive_promote_to_height_beds() {
+        assert_eq!(
+            virtual_bed_layout(&SpatialPreset::Cinema.settings(), false),
+            Some(ChannelLayout::Surround5_1_4)
+        );
+        assert_eq!(
+            virtual_bed_layout(&SpatialPreset::Immersive3d.settings(), false),
+            Some(ChannelLayout::Surround7_1_4)
+        );
+    }
+
+    #[test]
+    fn every_dynamic_stereo_mode_uses_full_virtual_seven_one_four() {
+        for preset in [
+            SpatialPreset::Orbit8d,
+            SpatialPreset::Orbit360,
+            SpatialPreset::Pendulum,
+            SpatialPreset::Planetary,
+            SpatialPreset::NearEar,
+        ] {
+            let settings = preset.settings();
+            assert_eq!(
+                virtual_bed_layout(&settings, true),
+                Some(ChannelLayout::Surround7_1_4)
+            );
+        }
+    }
+
+    #[test]
     fn stereo_pair_keeps_left_and_right_as_distinct_sources() {
         let field = StereoField::from_settings(&SpatialPreset::Immersive3d.settings());
         let center = SourcePose::new(Vec3::new(0.0, 0.0, field.distance_meters));
@@ -500,28 +670,30 @@ mod tests {
     }
 
     #[test]
-    fn processing_advances_and_reset_rewinds_trajectory_clock() {
+    fn processing_advances_and_reset_rewinds_scene_clock() {
         let settings = SpatialPreset::Orbit360.settings();
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
         let mut samples = vec![0.25_f32; 128 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
+        assert_eq!(spatializer.active_virtual_layout(), Some(ChannelLayout::Surround7_1_4));
         assert_eq!(spatializer.sample_clock(), Some(128));
         spatializer.reset();
         assert_eq!(spatializer.sample_clock(), Some(0));
     }
 
     #[test]
-    fn static_settings_use_virtual_stereo_pair_without_trajectory() {
+    fn static_immersive_uses_virtual_seven_one_four_without_motion_clock() {
         let settings = SpatialPreset::Immersive3d.settings();
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
         let mut samples = vec![0.20_f32; 128 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
+        assert_eq!(spatializer.active_virtual_layout(), Some(ChannelLayout::Surround7_1_4));
         assert_eq!(spatializer.sample_clock(), None);
         assert!(samples.iter().all(|sample| sample.is_finite()));
     }
 
     #[test]
-    fn debug_snapshot_tracks_rendered_stereo_pair() {
+    fn debug_snapshot_tracks_virtual_bed_sources() {
         let settings = SpatialPreset::Orbit360.settings();
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
         spatializer.set_debug_enabled(true);
@@ -531,21 +703,25 @@ mod tests {
         let activity = spatializer
             .debug_source_activity()
             .expect("debug source activity");
-        assert_eq!(snapshot.source_count, 2);
+        assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, 64);
-        assert!((activity[0].peak - 0.10).abs() < 1.0e-6);
-        assert!((activity[1].rms - 0.10).abs() < 1.0e-6);
+        assert!((activity[0].peak - 0.096).abs() < 1.0e-5);
+        assert_eq!(activity[3].peak, 0.0);
     }
 
     #[test]
-    fn wet_workspace_is_fixed_at_construction() {
+    fn wet_and_virtual_workspaces_are_fixed_at_construction() {
         let settings = SpatialPreset::Orbit360.settings();
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
-        let ptr = spatializer.wet_scratch.as_ptr();
-        let capacity = spatializer.wet_scratch.capacity();
+        let wet_ptr = spatializer.wet_scratch.as_ptr();
+        let wet_capacity = spatializer.wet_scratch.capacity();
+        let virtual_ptr = spatializer.virtual_bed_scratch.as_ptr();
+        let virtual_capacity = spatializer.virtual_bed_scratch.capacity();
         let mut samples = vec![0.1_f32; 1024 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
-        assert_eq!(spatializer.wet_scratch.as_ptr(), ptr);
-        assert_eq!(spatializer.wet_scratch.capacity(), capacity);
+        assert_eq!(spatializer.wet_scratch.as_ptr(), wet_ptr);
+        assert_eq!(spatializer.wet_scratch.capacity(), wet_capacity);
+        assert_eq!(spatializer.virtual_bed_scratch.as_ptr(), virtual_ptr);
+        assert_eq!(spatializer.virtual_bed_scratch.capacity(), virtual_capacity);
     }
 }

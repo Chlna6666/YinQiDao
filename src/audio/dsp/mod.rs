@@ -21,7 +21,9 @@ use super::spatial_debug::{clear_spatial_debug_snapshot, publish_spatial_debug_s
 use eq::EqProcessor;
 use limiter::StereoPeakLimiter;
 use spatial::Spatializer;
-use trajectory_spatial::{StereoSpatializer, spatial_environment_settings};
+use trajectory_spatial::{
+    StereoSpatializer, apply_scene_motion_settings, spatial_environment_settings,
+};
 
 std::thread_local! {
     static TRANSPORT_RESET_GENERATION: Cell<u64> = const { Cell::new(1) };
@@ -440,6 +442,7 @@ impl AudioProcessor {
             return false;
         };
         engine.set_debug_enabled(debug_enabled);
+        apply_scene_motion_settings(engine, spatial_settings);
         engine
             .render_interleaved_layout(input, layout, &mut self.native_spatial_scratch)
             .is_ok()
@@ -781,6 +784,54 @@ mod tests {
         assert_eq!(processor.native_spatial_rate, 48_000);
         assert!(processor.native_spatial.is_some());
         assert!(output.iter().any(|sample| sample.abs() > 0.001));
+    }
+
+    #[test]
+    fn authored_seven_one_family_uses_audio_clock_scene_motion() {
+        let cases = [
+            (ChannelLayout::Surround7_1, 8_u16),
+            (ChannelLayout::Surround7_1_2, 10_u16),
+            (ChannelLayout::Surround7_1_4, 12_u16),
+        ];
+        for (layout, channels) in cases {
+            let settings = SpatialPreset::Orbit8d.settings();
+            let mut processor =
+                AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+            let input = vec![0.05_f32; usize::from(channels) * 128];
+            let output =
+                processor.process_with_layout(&input, 48_000, channels, Some(layout));
+            assert_eq!(output.len(), 256);
+            assert_eq!(
+                processor
+                    .native_spatial
+                    .as_ref()
+                    .and_then(SpatialEngine::scene_motion_sample_clock),
+                Some(128)
+            );
+        }
+    }
+
+    #[test]
+    fn authored_other_native_layouts_share_the_same_scene_motion_path() {
+        let cases = [
+            (ChannelLayout::Surround5_1, 6_u16),
+            (ChannelLayout::Surround5_1_2, 8_u16),
+            (ChannelLayout::Surround5_1_4, 10_u16),
+        ];
+        for (layout, channels) in cases {
+            let settings = SpatialPreset::Orbit360.settings();
+            let mut processor =
+                AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+            let input = vec![0.03_f32; usize::from(channels) * 96];
+            let _ = processor.process_with_layout(&input, 48_000, channels, Some(layout));
+            assert_eq!(
+                processor
+                    .native_spatial
+                    .as_ref()
+                    .and_then(SpatialEngine::scene_motion_sample_clock),
+                Some(96)
+            );
+        }
     }
 
     #[test]
