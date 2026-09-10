@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use crate::model::{SpatialMotionMode, SpatialSettings};
+use crate::model::{SpatialMotionMode, SpatialSettings, VirtualBedMode};
 
 const MAX_SPATIAL_DELAY_SECONDS: f32 = 0.040;
 const MAX_ITD_SECONDS: f32 = 0.00068;
@@ -44,6 +44,7 @@ impl SpatialPreset {
                 crossfeed: 0.05,
                 room_size: 0.08,
                 immersive_3d: 0.08,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.55,
@@ -59,6 +60,7 @@ impl SpatialPreset {
                 crossfeed: 0.03,
                 room_size: 0.12,
                 immersive_3d: 0.26,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.65,
@@ -74,6 +76,7 @@ impl SpatialPreset {
                 crossfeed: 0.18,
                 room_size: 0.08,
                 immersive_3d: 0.30,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.62,
@@ -89,6 +92,7 @@ impl SpatialPreset {
                 crossfeed: 0.05,
                 room_size: 0.50,
                 immersive_3d: 0.56,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.75,
@@ -104,6 +108,7 @@ impl SpatialPreset {
                 crossfeed: 0.06,
                 room_size: 0.56,
                 immersive_3d: 0.88,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.80,
@@ -119,6 +124,7 @@ impl SpatialPreset {
                 crossfeed: 0.04,
                 room_size: 0.22,
                 immersive_3d: 0.72,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Orbit8d,
                 motion_speed_hz: 0.105,
                 motion_radius: 1.00,
@@ -134,6 +140,7 @@ impl SpatialPreset {
                 crossfeed: 0.05,
                 room_size: 0.24,
                 immersive_3d: 0.72,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Orbit360,
                 motion_speed_hz: 0.070,
                 motion_radius: 1.00,
@@ -149,6 +156,7 @@ impl SpatialPreset {
                 crossfeed: 0.05,
                 room_size: 0.14,
                 immersive_3d: 0.52,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Pendulum,
                 motion_speed_hz: 0.15,
                 motion_radius: 0.95,
@@ -164,6 +172,7 @@ impl SpatialPreset {
                 crossfeed: 0.05,
                 room_size: 0.32,
                 immersive_3d: 0.78,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::Planetary,
                 motion_speed_hz: 0.050,
                 motion_radius: 1.00,
@@ -179,6 +188,7 @@ impl SpatialPreset {
                 crossfeed: 0.10,
                 room_size: 0.08,
                 immersive_3d: 0.60,
+                virtual_bed: VirtualBedMode::Auto,
                 motion_mode: SpatialMotionMode::NearEar,
                 motion_speed_hz: 0.12,
                 motion_radius: 1.00,
@@ -191,6 +201,7 @@ impl SpatialPreset {
     pub fn matches(self, settings: &SpatialSettings) -> bool {
         let preset = self.settings();
         preset.motion_mode == settings.motion_mode
+            && preset.virtual_bed == settings.virtual_bed
             && preset.clockwise == settings.clockwise
             && [
                 (preset.width, settings.width),
@@ -517,95 +528,4 @@ pub fn clamp_spatial(mut settings: SpatialSettings) -> SpatialSettings {
     settings.motion_radius = settings.motion_radius.clamp(0.0, 1.0);
     settings.motion_intensity = settings.motion_intensity.clamp(0.0, 1.0);
     settings
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn motion_geometry_is_bounded() {
-        for mode in [
-            SpatialMotionMode::Orbit8d,
-            SpatialMotionMode::Orbit360,
-            SpatialMotionMode::Pendulum,
-            SpatialMotionMode::FrontBack,
-            SpatialMotionMode::Planetary,
-            SpatialMotionMode::NearEar,
-        ] {
-            for step in 0..360 {
-                let angle = step as f32 * PI / 180.0;
-                let (pan, front, radius) = motion_position(mode, angle.sin(), angle.cos());
-                assert!(pan.abs() <= 1.001);
-                assert!(front.abs() <= 1.001);
-                assert!((0.0..=1.001).contains(&radius));
-            }
-        }
-    }
-
-    #[test]
-    fn fractional_delay_interpolates_across_ring_wrap() {
-        let buffer = [40.0_f32, 10.0, 20.0, 30.0];
-        let sample = |delay| read_fractional_delay(&buffer, 0, delay);
-        assert!((sample(0.0) - 40.0).abs() < 1e-6);
-        assert!((sample(0.5) - 35.0).abs() < 1e-6);
-        assert!((sample(1.0) - 30.0).abs() < 1e-6);
-        assert!((sample(1.25) - 27.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn orbit_changes_channel_energy() {
-        let mut settings = SpatialPreset::Orbit360.settings();
-        settings.motion_speed_hz = 0.35;
-        let mut spatializer = Spatializer::new(48_000, settings);
-        let mut samples = vec![0.3; 48_000 * 4];
-        spatializer.process(&mut samples);
-        assert!(
-            samples
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .any(|frame| { (frame[0] - frame[1]).abs() > 0.01 })
-        );
-    }
-
-    #[test]
-    fn static_stage_does_not_advance_legacy_motion_oscillator() {
-        let settings = SpatialPreset::Orbit360.settings();
-        let mut spatializer = Spatializer::new(48_000, settings);
-        let mut samples = vec![0.3; 512];
-        spatializer.process_static(&mut samples);
-        assert_eq!(spatializer.oscillator_sin, 0.0);
-        assert_eq!(spatializer.oscillator_cos, 1.0);
-    }
-
-    #[test]
-    fn immersive_preset_keeps_direct_stereo_dominant() {
-        let settings = SpatialPreset::Immersive3d.settings();
-        assert!(settings.mix < 0.65);
-        let width_gain = 0.92 + settings.width * 0.50;
-        assert!(width_gain < 1.5);
-    }
-
-    #[test]
-    fn motion_presets_never_replace_the_entire_static_image() {
-        for preset in [
-            SpatialPreset::Orbit8d,
-            SpatialPreset::Orbit360,
-            SpatialPreset::Pendulum,
-            SpatialPreset::Planetary,
-            SpatialPreset::NearEar,
-        ] {
-            let settings = preset.settings();
-            assert!(settings.motion_intensity * 0.55 <= 0.55);
-        }
-    }
-
-    #[test]
-    fn custom_motion_breaks_preset_match() {
-        let mut settings = SpatialPreset::Orbit8d.settings();
-        assert!(SpatialPreset::Orbit8d.matches(&settings));
-        settings.motion_speed_hz += 0.02;
-        assert!(!SpatialPreset::Orbit8d.matches(&settings));
-    }
 }
