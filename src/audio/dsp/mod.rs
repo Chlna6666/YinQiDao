@@ -8,7 +8,7 @@ pub use spatial::{SpatialPreset, clamp_spatial};
 
 use std::cell::Cell;
 
-use crate::model::{EqSettings, SpatialSettings};
+use crate::model::{EqSettings, SpatialSettings, VirtualBedMode};
 use yinqidao_audio_spatial::{
     ChannelLayout, EngineConfig as NativeSpatialConfig, EnvironmentSettings, SpeakerLayout,
     SpatialDebugSnapshot, SpatialEngine,
@@ -308,11 +308,16 @@ impl AudioProcessor {
             ) {
                 native_spatial_used = true;
             } else {
+                // A verified bed that could not initialize the native renderer must not be
+                // re-labelled as another height layout. Fall back to a layout-neutral fold.
                 to_stereo_into(input, input_channels, &mut self.stereo_scratch);
                 self.resampler
                     .process_into(&self.stereo_scratch, input_rate, output_rate, output);
             }
         } else {
+            // Missing/discrete/custom metadata is intentionally not guessed from 6/8/10/12 alone.
+            // A neutral Mid/Side fold preserves common programme plus inter-channel difference;
+            // an explicitly selected VirtualBedMode may then rebuild it into a spherical bed.
             to_stereo_into(input, input_channels, &mut self.stereo_scratch);
             self.resampler
                 .process_into(&self.stereo_scratch, input_rate, output_rate, output);
@@ -327,14 +332,21 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        // Authored multichannel that lacks a verified native layout is conservatively downmixed,
-        // but it must not be sent through a stereo motion preset afterwards. That would reinterpret
-        // an unknown channel bed as an authored stereo program and can destroy the remaining image.
-        if !authored_multichannel {
+        // Unknown/discrete multichannel stays conservative in Auto/Off. Enthusiast users can opt
+        // into a specific VirtualBedMode; in that case the layout-neutral stereo fold becomes a
+        // new virtual 5.1..7.1.4 source bed and uses the same spherical Scene Motion as authored
+        // stereo. Verified native multichannel never enters this path.
+        let allow_explicit_virtual_fallback = authored_multichannel
+            && !native_spatial_used
+            && explicit_virtual_bed_requested(&spatial_settings);
+        let allow_stereo_spatial = !authored_multichannel || allow_explicit_virtual_fallback;
+        let mut stereo_spatial_used = false;
+        if allow_stereo_spatial {
             let handled = self
                 .stereo_spatial
                 .as_mut()
                 .is_some_and(|renderer| renderer.process_in_place(output, &spatial_settings));
+            stereo_spatial_used = handled;
             if !handled {
                 self.spatial.process(output);
             }
@@ -345,7 +357,7 @@ impl AudioProcessor {
                 self.native_spatial
                     .as_ref()
                     .and_then(SpatialEngine::debug_snapshot)
-            } else if !authored_multichannel {
+            } else if stereo_spatial_used {
                 self.stereo_spatial
                     .as_ref()
                     .and_then(StereoSpatializer::debug_snapshot)
@@ -527,6 +539,20 @@ fn validated_native_spatial_layout(
 }
 
 #[inline]
+fn explicit_virtual_bed_requested(settings: &SpatialSettings) -> bool {
+    settings.enabled
+        && matches!(
+            settings.virtual_bed,
+            VirtualBedMode::Surround5_1
+                | VirtualBedMode::Surround7_1
+                | VirtualBedMode::Surround5_1_2
+                | VirtualBedMode::Surround5_1_4
+                | VirtualBedMode::Surround7_1_2
+                | VirtualBedMode::Surround7_1_4
+        )
+}
+
+#[inline]
 fn copy_reuse(source: &[f32], destination: &mut Vec<f32>) {
     destination.clear();
     destination.extend_from_slice(source);
@@ -551,113 +577,30 @@ fn to_stereo_into(input: &[f32], channels: u16, output: &mut Vec<f32>) {
             }
         }
         2 => output.extend_from_slice(&input[..frames.saturating_mul(2)]),
-        _ => binaural_downmix_into(input, channels, output),
+        _ => layout_neutral_multichannel_fold_into(input, channels, output),
     }
 }
 
-#[derive(Clone, Copy)]
-struct Speaker {
-    azimuth_deg: f32,
-    elevation_deg: f32,
-    gain: f32,
-    rear: bool,
-}
-
-const LAYOUT_7_1_4: [Speaker; 12] = [
-    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg: 30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
-    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
-    Speaker { azimuth_deg: 145.0, elevation_deg: 0.0, gain: 0.70, rear: true },
-    Speaker { azimuth_deg: -90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
-    Speaker { azimuth_deg: 90.0, elevation_deg: 0.0, gain: 0.76, rear: false },
-    Speaker { azimuth_deg: -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: 35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-    Speaker { azimuth_deg: 145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-];
-
-const LAYOUT_5_1_4: [Speaker; 10] = [
-    Speaker { azimuth_deg: -30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg: 30.0, elevation_deg: 0.0, gain: 1.00, rear: false },
-    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.82, rear: false },
-    Speaker { azimuth_deg: 0.0, elevation_deg: 0.0, gain: 0.34, rear: false },
-    Speaker { azimuth_deg: -125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
-    Speaker { azimuth_deg: 125.0, elevation_deg: 0.0, gain: 0.72, rear: true },
-    Speaker { azimuth_deg: -35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: 35.0, elevation_deg: 45.0, gain: 0.58, rear: false },
-    Speaker { azimuth_deg: -145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-    Speaker { azimuth_deg: 145.0, elevation_deg: 45.0, gain: 0.52, rear: true },
-];
-
-fn binaural_downmix_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
-    let frames = input.len() / channels;
-    for frame in input.chunks_exact(channels).take(frames) {
-        let mut left = 0.0_f32;
-        let mut right = 0.0_f32;
-        let mut energy = 0.0_f32;
-
+/// Fold an unknown/discrete multichannel stream without assigning speaker semantics that the
+/// decoder did not provide. The average is the layout-neutral common programme (Mid); a zero-sum
+/// alternating projection retains some inter-channel difference as Side. The explicit Virtual Bed
+/// stage can then distribute both components around the full sphere without pretending that 8ch is
+/// definitely 7.1 or that 10ch is definitely 5.1.4/7.1.2.
+fn layout_neutral_multichannel_fold_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
+    let scale = 1.0 / channels.max(1) as f32;
+    for frame in input.chunks_exact(channels) {
+        let mut common = 0.0_f32;
+        let mut difference = 0.0_f32;
         for (index, sample) in frame.iter().copied().enumerate() {
-            let speaker = speaker_for_channel(channels, index);
-            let (mut left_gain, mut right_gain) = equal_power_pan(speaker.azimuth_deg);
-
-            let elevation_amount = (speaker.elevation_deg.abs() / 90.0).clamp(0.0, 1.0);
-            let elevation_gain = 1.0 - elevation_amount * 0.08;
-            if elevation_amount > 0.0 {
-                let centre = (left_gain + right_gain) * 0.5;
-                left_gain =
-                    left_gain * (1.0 - elevation_amount * 0.12) + centre * elevation_amount * 0.12;
-                right_gain =
-                    right_gain * (1.0 - elevation_amount * 0.12) + centre * elevation_amount * 0.12;
-            }
-
-            if speaker.rear {
-                let crossfeed = 0.18;
-                let l = left_gain;
-                let r = right_gain;
-                left_gain = l * (1.0 - crossfeed) + r * crossfeed;
-                right_gain = r * (1.0 - crossfeed) + l * crossfeed;
-            }
-
-            let gain = speaker.gain * elevation_gain;
-            left += sample * left_gain * gain;
-            right += sample * right_gain * gain;
-            energy += gain * gain;
+            let sample = if sample.is_finite() { sample } else { 0.0 };
+            common += sample;
+            difference += if index & 1 == 0 { sample } else { -sample };
         }
-
-        let normalization = (2.0 / energy.max(2.0)).sqrt() * 0.90;
-        output.push((left * normalization).clamp(-1.35, 1.35));
-        output.push((right * normalization).clamp(-1.35, 1.35));
+        let mid = common * scale;
+        let side = difference * scale;
+        output.push((mid + side).clamp(-1.35, 1.35));
+        output.push((mid - side).clamp(-1.35, 1.35));
     }
-}
-
-fn speaker_for_channel(channels: usize, index: usize) -> Speaker {
-    match channels {
-        12 => LAYOUT_7_1_4[index.min(LAYOUT_7_1_4.len() - 1)],
-        10 => LAYOUT_5_1_4[index.min(LAYOUT_5_1_4.len() - 1)],
-        _ => {
-            let azimuth = -180.0 + (index as f32 + 0.5) * (360.0 / channels as f32);
-            Speaker {
-                azimuth_deg: azimuth,
-                elevation_deg: 0.0,
-                gain: 0.72,
-                rear: azimuth.abs() > 100.0,
-            }
-        }
-    }
-}
-
-fn equal_power_pan(azimuth_deg: f32) -> (f32, f32) {
-    let folded = if azimuth_deg > 90.0 {
-        180.0 - azimuth_deg
-    } else if azimuth_deg < -90.0 {
-        -180.0 - azimuth_deg
-    } else {
-        azimuth_deg
-    };
-    let pan = (folded / 90.0).clamp(-1.0, 1.0);
-    (((1.0 - pan) * 0.5).sqrt(), ((1.0 + pan) * 0.5).sqrt())
 }
 
 #[cfg(test)]
@@ -753,6 +696,89 @@ mod tests {
         let output = processor.process(&input, 48_000, 10);
         assert_eq!(output.len(), 128);
         assert!(processor.native_spatial.is_none());
+    }
+
+    #[test]
+    fn unknown_multichannel_auto_stays_conservative() {
+        let input = (0..128)
+            .flat_map(|frame| {
+                (0..10).map(move |channel| ((frame * 7 + channel * 13) as f32 * 0.013).sin() * 0.1)
+            })
+            .collect::<Vec<_>>();
+        let settings = SpatialPreset::Orbit360.settings();
+        assert_eq!(settings.virtual_bed, VirtualBedMode::Auto);
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process(&input, 48_000, 10);
+        assert_eq!(output.len(), 256);
+        assert!(processor.native_spatial.is_none());
+        assert_eq!(
+            processor
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_multichannel_explicit_virtual_bed_uses_spherical_fallback() {
+        let input = (0..128)
+            .flat_map(|frame| {
+                (0..10).map(move |channel| ((frame * 11 + channel * 5) as f32 * 0.017).sin() * 0.12)
+            })
+            .collect::<Vec<_>>();
+        let mut settings = SpatialPreset::Orbit360.settings();
+        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process(&input, 48_000, 10);
+        assert_eq!(output.len(), 256);
+        assert!(processor.native_spatial.is_none());
+        assert_eq!(
+            processor
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            Some(128)
+        );
+        assert!(output.iter().any(|sample| sample.abs() > 1.0e-4));
+    }
+
+    #[test]
+    fn verified_native_layout_never_uses_virtual_fallback_even_when_explicit() {
+        let mut settings = SpatialPreset::Orbit8d.settings();
+        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        let input = vec![0.04_f32; 12 * 128];
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process_with_layout(
+            &input,
+            48_000,
+            12,
+            Some(ChannelLayout::Surround7_1_4),
+        );
+        assert_eq!(output.len(), 256);
+        assert!(processor.native_spatial.is_some());
+        assert_eq!(
+            processor
+                .native_spatial
+                .as_ref()
+                .and_then(SpatialEngine::scene_motion_sample_clock),
+            Some(128)
+        );
+        assert_eq!(
+            processor
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            None
+        );
+    }
+
+    #[test]
+    fn layout_neutral_fold_keeps_common_programme_centered() {
+        let input = vec![0.25_f32; 10];
+        let mut output = Vec::new();
+        to_stereo_into(&input, 10, &mut output);
+        assert_eq!(output, vec![0.25, 0.25]);
     }
 
     #[test]
