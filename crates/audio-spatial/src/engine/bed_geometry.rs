@@ -1,5 +1,9 @@
 use super::*;
 
+const STATIC_VERTICAL_FOCUS_REFERENCE_DEGREES: f32 = 30.0;
+const STATIC_HEIGHT_ENERGY_BOOST: f32 = 0.46;
+const STATIC_LOWER_ENERGY_BOOST: f32 = 0.07;
+
 /// Optional elevation remap for a synthesized speaker bed.
 ///
 /// This transform is deliberately separate from `SpeakerLayout`: the standard/native 5.1/7.1/.2/.4
@@ -61,6 +65,38 @@ impl SpeakerBedGeometry {
     }
 
     #[inline]
+    fn vertical_focus(self) -> f32 {
+        let max_offset = self
+            .front_elevation_offset_degrees
+            .abs()
+            .max(self.surround_elevation_offset_degrees.abs())
+            .max(self.rear_elevation_offset_degrees.abs())
+            .max(self.top_elevation_offset_degrees.abs());
+        (max_offset / STATIC_VERTICAL_FOCUS_REFERENCE_DEGREES).clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn energy_scale_for_role(self, role: Option<ChannelRole>) -> f32 {
+        let focus = self.vertical_focus();
+        match role {
+            Some(
+                ChannelRole::TopFrontLeft
+                | ChannelRole::TopFrontRight
+                | ChannelRole::TopRearLeft
+                | ChannelRole::TopRearRight,
+            ) => 1.0 + STATIC_HEIGHT_ENERGY_BOOST * focus,
+            Some(
+                ChannelRole::SurroundLeft
+                | ChannelRole::SurroundRight
+                | ChannelRole::RearLeft
+                | ChannelRole::RearRight,
+            ) => 1.0 + STATIC_LOWER_ENERGY_BOOST * focus,
+            Some(ChannelRole::FrontLeft | ChannelRole::FrontRight | ChannelRole::Center | ChannelRole::Lfe)
+            | None => 1.0,
+        }
+    }
+
+    #[inline]
     fn remap_speaker(self, speaker: Speaker, role: Option<ChannelRole>) -> Speaker {
         if speaker.kind == crate::SourceKind::Lfe {
             return speaker;
@@ -96,7 +132,10 @@ impl SpeakerBedGeometry {
 ///
 /// `render_interleaved_layout()` remains the canonical native/authored API and calls the same core
 /// with identity geometry. This variant exists so stereo-derived virtual beds can occupy both
-/// hemispheres without mutating standard speaker-layout semantics.
+/// hemispheres without mutating standard speaker-layout semantics. When the static remap opens a
+/// large vertical aperture, height roles receive a modest energy preference and the auxiliary bed
+/// is power-normalized as a group. This makes the upper hemisphere audible without increasing the
+/// total nominal surround/rear/height source power or adding another EQ stage.
 impl SpatialEngine {
     pub fn render_interleaved_layout_with_geometry(
         &mut self,
@@ -141,11 +180,11 @@ impl SpatialEngine {
         let block_limit = self.scene_block_frames();
         let scene_intensity = self.scene_motion.map_or(0.0, |motion| motion.intensity);
         let mut base_speakers = [Speaker::full_range(Vec3::FORWARD, 0.0); MAX_DEBUG_SOURCES];
+        prepare_virtual_bed_speakers(layout, geometry, &mut base_speakers[..channels]);
         let mut latest_poses = [SourcePose::default(); MAX_DEBUG_SOURCES];
         let mut early_reflection_sources = [false; MAX_DEBUG_SOURCES];
-        for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
-            let transformed = geometry.remap_speaker(speaker, layout.role(source_index));
-            base_speakers[source_index] = transformed;
+        for source_index in 0..channels {
+            let transformed = base_speakers[source_index];
             latest_poses[source_index] = static_speaker_pose(transformed);
             early_reflection_sources[source_index] =
                 authored_role_uses_early_reflections(layout.role(source_index));
@@ -236,6 +275,64 @@ impl SpatialEngine {
 }
 
 #[inline]
+fn prepare_virtual_bed_speakers(
+    layout: SpeakerLayout,
+    geometry: SpeakerBedGeometry,
+    output: &mut [Speaker],
+) {
+    debug_assert!(output.len() >= layout.channels());
+    let focus = geometry.vertical_focus();
+    let mut original_auxiliary_power = 0.0_f32;
+    let mut weighted_auxiliary_power = 0.0_f32;
+
+    for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
+        let role = layout.role(source_index);
+        let mut transformed = geometry.remap_speaker(speaker, role);
+        if is_auxiliary_role(role) {
+            original_auxiliary_power += speaker.gain * speaker.gain;
+            let scale = geometry.energy_scale_for_role(role);
+            transformed.gain *= scale;
+            weighted_auxiliary_power += transformed.gain * transformed.gain;
+        }
+        output[source_index] = transformed;
+    }
+
+    if focus <= 1.0e-5
+        || original_auxiliary_power <= 1.0e-12
+        || weighted_auxiliary_power <= 1.0e-12
+    {
+        return;
+    }
+
+    // Re-distribute auxiliary energy instead of increasing it. Front L/R, centre and LFE are not
+    // part of this normalization, so the dry/front anchor and direction-independent bass contract
+    // remain untouched while height programme becomes less masked by the lower hemisphere.
+    let correction = (original_auxiliary_power / weighted_auxiliary_power).sqrt();
+    for (source_index, speaker) in output[..layout.channels()].iter_mut().enumerate() {
+        if is_auxiliary_role(layout.role(source_index)) {
+            speaker.gain *= correction;
+        }
+    }
+}
+
+#[inline]
+fn is_auxiliary_role(role: Option<ChannelRole>) -> bool {
+    matches!(
+        role,
+        Some(
+            ChannelRole::SurroundLeft
+                | ChannelRole::SurroundRight
+                | ChannelRole::RearLeft
+                | ChannelRole::RearRight
+                | ChannelRole::TopFrontLeft
+                | ChannelRole::TopFrontRight
+                | ChannelRole::TopRearLeft
+                | ChannelRole::TopRearRight
+        )
+    )
+}
+
+#[inline]
 fn sanitize_offset(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-45.0, 45.0)
@@ -260,15 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn identity_geometry_preserves_standard_layout_directions() {
+    fn identity_geometry_preserves_standard_layout_directions_and_gains() {
         let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
+        let mut prepared = [Speaker::full_range(Vec3::FORWARD, 0.0); 12];
+        prepare_virtual_bed_speakers(layout, SpeakerBedGeometry::IDENTITY, &mut prepared);
         for (index, speaker) in layout.speakers().iter().copied().enumerate() {
-            assert_eq!(
-                SpeakerBedGeometry::IDENTITY
-                    .remap_speaker(speaker, layout.role(index))
-                    .direction,
-                speaker.direction
-            );
+            assert_eq!(prepared[index], speaker);
         }
     }
 
@@ -286,6 +380,33 @@ mod tests {
         assert!(transformed[2].direction.y.abs() < 1.0e-6);
         assert_eq!(transformed[3].direction, Vec3::FORWARD);
         assert_eq!(transformed[3].kind, crate::SourceKind::Lfe);
+    }
+
+    #[test]
+    fn vertical_energy_balance_preserves_auxiliary_power_and_prioritizes_height() {
+        let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
+        let mut prepared = [Speaker::full_range(Vec3::FORWARD, 0.0); 12];
+        prepare_virtual_bed_speakers(layout, immersive_virtual_geometry(), &mut prepared);
+
+        let mut original_auxiliary_power = 0.0_f32;
+        let mut prepared_auxiliary_power = 0.0_f32;
+        for (index, original) in layout.speakers().iter().copied().enumerate() {
+            if is_auxiliary_role(layout.role(index)) {
+                original_auxiliary_power += original.gain * original.gain;
+                prepared_auxiliary_power += prepared[index].gain * prepared[index].gain;
+            }
+        }
+        assert!((original_auxiliary_power - prepared_auxiliary_power).abs() < 1.0e-5);
+
+        // Top-front is intentionally promoted relative to the standard bed while lower horizontal
+        // support remains present. Front/C/LFE must remain exact anchors.
+        assert!(prepared[8].gain > layout.speakers()[8].gain * 1.10);
+        assert!(prepared[10].gain > layout.speakers()[10].gain * 1.10);
+        assert!(prepared[4].gain > 0.0);
+        assert!(prepared[6].gain > 0.0);
+        assert_eq!(prepared[0].gain, layout.speakers()[0].gain);
+        assert_eq!(prepared[2].gain, layout.speakers()[2].gain);
+        assert_eq!(prepared[3].gain, layout.speakers()[3].gain);
     }
 
     #[test]
@@ -321,6 +442,7 @@ mod tests {
         assert!(snapshot.sources[2].position.y.abs() < 1.0e-6);
         assert_eq!(snapshot.sources[3].kind, crate::SpatialDebugSourceKind::Lfe);
         assert_eq!(snapshot.sources[3].position, Vec3::FORWARD);
+        assert!(snapshot.sources[8].gain > SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4).speakers()[8].gain);
     }
 
     #[test]
