@@ -86,18 +86,30 @@ impl StreamingLinearResampler {
         output_rate: u32,
         output: &mut Vec<f32>,
     ) {
+        output.clear();
+        self.process_append(input, input_rate, output_rate, output);
+    }
+
+    /// Append one contiguous stereo segment to an existing output buffer while preserving the
+    /// resampler timeline. Native multichannel rendering feeds fixed-size spatial blocks through
+    /// this path so decoder chunk size no longer dictates a second full-chunk stereo workspace.
+    fn process_append(
+        &mut self,
+        input: &[f32],
+        input_rate: u32,
+        output_rate: u32,
+        output: &mut Vec<f32>,
+    ) {
         let input_rate = input_rate.max(1);
         let output_rate = output_rate.max(1);
         if input_rate == output_rate {
             self.reset();
             self.output_rate = output_rate;
-            output.clear();
             output.extend_from_slice(input);
             return;
         }
 
         self.configure(input_rate, output_rate);
-        output.clear();
 
         let frames = input.len() / 2;
         if frames == 0 {
@@ -177,6 +189,9 @@ pub struct AudioProcessor {
 impl AudioProcessor {
     pub fn new(sample_rate: u32, eq: EqSettings, spatial: SpatialSettings, volume: f32) -> Self {
         let sample_rate = sample_rate.max(1);
+        let native_block_samples = NativeSpatialConfig::new(sample_rate)
+            .block_frames
+            .saturating_mul(2);
         Self {
             eq: EqProcessor::new(sample_rate, eq),
             spatial: Spatializer::new(sample_rate, spatial),
@@ -184,7 +199,7 @@ impl AudioProcessor {
             limiter: StereoPeakLimiter::new(sample_rate),
             stereo_scratch: Vec::new(),
             stereo_spatial: StereoSpatializer::new(sample_rate),
-            native_spatial_scratch: Vec::new(),
+            native_spatial_scratch: vec![0.0; native_block_samples],
             native_spatial: None,
             native_spatial_rate: 0,
             native_spatial_environment: None,
@@ -285,17 +300,13 @@ impl AudioProcessor {
             if self.render_native_spatial_into(
                 input,
                 input_rate,
+                output_rate,
                 layout,
                 debug_enabled,
                 &spatial_settings,
+                output,
             ) {
                 native_spatial_used = true;
-                self.resampler.process_into(
-                    &self.native_spatial_scratch,
-                    input_rate,
-                    output_rate,
-                    output,
-                );
             } else {
                 to_stereo_into(input, input_channels, &mut self.stereo_scratch);
                 self.resampler
@@ -393,11 +404,14 @@ impl AudioProcessor {
         &mut self,
         input: &[f32],
         input_rate: u32,
+        output_rate: u32,
         layout: ChannelLayout,
         debug_enabled: bool,
         spatial_settings: &SpatialSettings,
+        output: &mut Vec<f32>,
     ) -> bool {
         let input_rate = input_rate.max(1);
+        let output_rate = output_rate.max(1);
         let environment = spatial_environment_settings(spatial_settings);
         if self.native_spatial_rate != input_rate || self.native_spatial.is_none() {
             let mut config = NativeSpatialConfig::new(input_rate);
@@ -405,6 +419,12 @@ impl AudioProcessor {
             match SpatialEngine::new(config) {
                 Ok(mut engine) => {
                     engine.set_debug_enabled(debug_enabled);
+                    let required_samples = engine.config().block_frames.saturating_mul(2);
+                    if self.native_spatial_scratch.len() < required_samples {
+                        // Engine setup/reconfiguration is outside the steady-state render loop.
+                        // Decoder chunk size can no longer grow this workspace.
+                        self.native_spatial_scratch.resize(required_samples, 0.0);
+                    }
                     self.native_spatial = Some(engine);
                     self.native_spatial_rate = input_rate;
                     self.native_spatial_environment = Some(environment);
@@ -435,17 +455,54 @@ impl AudioProcessor {
         if input.len() % channels != 0 {
             return false;
         }
-        let frames = input.len() / channels;
-        self.native_spatial_scratch
-            .resize(frames.saturating_mul(2), 0.0);
+        let total_frames = input.len() / channels;
         let Some(engine) = self.native_spatial.as_mut() else {
             return false;
         };
+        let block_frames = engine.config().block_frames.max(1);
+        let required_samples = block_frames.saturating_mul(2);
+        if self.native_spatial_scratch.len() < required_samples {
+            return false;
+        }
+
         engine.set_debug_enabled(debug_enabled);
         apply_scene_motion_settings(engine, spatial_settings);
-        engine
-            .render_interleaved_layout(input, layout, &mut self.native_spatial_scratch)
-            .is_ok()
+        output.clear();
+        let estimated_output_frames = ((total_frames as u64)
+            .saturating_mul(u64::from(output_rate))
+            .saturating_add(u64::from(input_rate) - 1)
+            / u64::from(input_rate))
+        .saturating_add(2) as usize;
+        output.reserve(estimated_output_frames.saturating_mul(2));
+
+        let mut frame_offset = 0usize;
+        while frame_offset < total_frames {
+            let frames = (total_frames - frame_offset).min(block_frames);
+            let input_start = frame_offset.saturating_mul(channels);
+            let input_end = input_start.saturating_add(frames.saturating_mul(channels));
+            let scratch_samples = frames.saturating_mul(2);
+            if engine
+                .render_interleaved_layout(
+                    &input[input_start..input_end],
+                    layout,
+                    &mut self.native_spatial_scratch[..scratch_samples],
+                )
+                .is_err()
+            {
+                engine.reset();
+                self.resampler.reset();
+                output.clear();
+                return false;
+            }
+            self.resampler.process_append(
+                &self.native_spatial_scratch[..scratch_samples],
+                input_rate,
+                output_rate,
+                output,
+            );
+            frame_offset += frames;
+        }
+        true
     }
 }
 
@@ -787,6 +844,35 @@ mod tests {
     }
 
     #[test]
+    fn native_spatial_scratch_is_bounded_by_engine_block_size() {
+        let settings = SpatialPreset::Orbit360.settings();
+        let mut processor =
+            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let scratch_ptr = processor.native_spatial_scratch.as_ptr();
+        let scratch_len = processor.native_spatial_scratch.len();
+        let scratch_capacity = processor.native_spatial_scratch.capacity();
+        let input = vec![0.03_f32; 12 * 8_192];
+        let output = processor.process_with_layout(
+            &input,
+            44_100,
+            12,
+            Some(ChannelLayout::Surround7_1_4),
+        );
+
+        assert!(!output.is_empty());
+        assert_eq!(processor.native_spatial_scratch.as_ptr(), scratch_ptr);
+        assert_eq!(processor.native_spatial_scratch.len(), scratch_len);
+        assert_eq!(processor.native_spatial_scratch.capacity(), scratch_capacity);
+        assert_eq!(
+            processor
+                .native_spatial
+                .as_ref()
+                .and_then(SpatialEngine::scene_motion_sample_clock),
+            Some(8_192)
+        );
+    }
+
+    #[test]
     fn authored_seven_one_family_uses_audio_clock_scene_motion() {
         let cases = [
             (ChannelLayout::Surround7_1, 8_u16),
@@ -1022,15 +1108,13 @@ mod tests {
 
         let mut streaming = StreamingLinearResampler::new(48_000);
         let mut actual = Vec::new();
-        let mut chunk = Vec::new();
         for range in [0..74, 74..161, 161..257] {
-            streaming.process_into(
+            streaming.process_append(
                 &input[range.start * 2..range.end * 2],
                 44_100,
                 48_000,
-                &mut chunk,
+                &mut actual,
             );
-            actual.extend_from_slice(&chunk);
         }
 
         assert_eq!(actual.len(), expected.len());
