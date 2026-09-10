@@ -42,10 +42,12 @@ pub(super) fn render(
     let lyrics = id
         .and_then(|id| app.lyrics.get(&id))
         .map_or(&[][..], |document| document.timed_lines());
-    // Sample the engine transport exactly once for this stage frame. Lyrics, the elapsed/remaining
-    // clocks and the progress rail must derive from the same position; independently reading the
-    // live atomics in different children makes fast seeks visibly disagree for a frame.
-    let (transport_state, live_position_ms, duration_ms) = live_transport(app);
+    // Position/duration come from the hot atomic transport clock, but play/pause presentation must
+    // follow MusicApp's optimistic UI snapshot. `toggle_play()` updates that snapshot immediately;
+    // reading the engine state again here can briefly resurrect the pre-fade state and render the
+    // opposite action icon after the user has already paused/resumed.
+    let (_, live_position_ms, duration_ms) = live_transport(app);
+    let transport_state = snapshot.state;
     let (_, displayed_position_ms, _, progress_ratio) = displayed_transport_from_live(
         app,
         transport_state,
@@ -370,7 +372,7 @@ fn stage_lyrics(
             .min_w(px(0.0))
             .flex_none()
             .pl(px(16.0))
-            .pr(px(92.0))
+            .pr(px(104.0))
             .py(px(11.0))
             .mb(px(10.0))
             .opacity(alpha)
@@ -383,17 +385,27 @@ fn stage_lyrics(
                     .absolute()
                     .right(px(10.0))
                     .top(px(13.0))
+                    .min_w(px(88.0))
                     .px_2p5()
                     .py_1()
                     .rounded_full()
-                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    // Do not animate the badge through parent opacity. GPUI can retain/replay the
+                    // rounded background while the text run remains on the zero-opacity surface,
+                    // producing exactly the empty time capsule seen during lyric hover. Fade the
+                    // actual paint colors instead so text and background share the same hover state.
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.82))
-                    .opacity(0.0)
-                    .group_hover(hover_group_for_time, |style| style.opacity(1.0))
-                    .transition(lyric_focus_transition())
-                    .child(format_lyric_time(timestamp)),
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.0))
+                    .group_hover(hover_group_for_time, |style| {
+                        style
+                            .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                            .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+                    })
+                    .child(SharedString::from(format_lyric_time(timestamp))),
             )
             .on_mouse_down(
                 gpui::MouseButton::Left,
