@@ -132,13 +132,28 @@ pub fn read_local(path: &Path) -> Option<LyricsDocument> {
     ))
 }
 
-const TRANSLATION_SYNC_TOLERANCE_MS: u64 = 900;
+const TRANSLATION_SYNC_TOLERANCE_MS: u64 = 1_500;
 
 fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
     let mut primary = parse_lrc(original);
     let translations = parse_lrc(translated);
-    let mut used = vec![false; translations.len()];
 
+    // Provider translation tracks are authored as a parallel sequence. When both parsed streams
+    // contain the same number of timed rows, sequence identity is stronger than timestamp equality:
+    // some services apply a different global offset or round timestamps independently. Pairing by
+    // index keeps the Chinese subtitle attached to the authored primary line instead of silently
+    // dropping it because the clocks drift by more than the proximity tolerance.
+    if primary.len() == translations.len() {
+        for (line, translation) in primary.iter_mut().zip(&translations) {
+            attach_translation(line, translation);
+        }
+        return primary;
+    }
+
+    // If one provider omits/adds a few timed rows, fall back to one-to-one nearest-timestamp
+    // matching. Never inject an unmatched translation as a new primary lyric row: doing so changes
+    // the playback timeline and makes the immersive view alternate between original/translation.
+    let mut used = vec![false; translations.len()];
     for line in &mut primary {
         let best = translations
             .iter()
@@ -152,20 +167,17 @@ fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
             .map(|(index, _)| index);
         if let Some(index) = best {
             used[index] = true;
-            let value = translations[index].text.trim();
-            if !value.is_empty() && value != line.text.trim() {
-                line.translation = Some(value.to_owned());
-            }
+            attach_translation(line, &translations[index]);
         }
     }
-
-    for (index, translation) in translations.into_iter().enumerate() {
-        if !used[index] && !translation.text.trim().is_empty() {
-            primary.push(translation);
-        }
-    }
-    primary.sort_by_key(|line| line.timestamp_ms);
     primary
+}
+
+fn attach_translation(line: &mut LyricLine, translation: &LyricLine) {
+    let value = translation.text.trim();
+    if !value.is_empty() && value != line.text.trim() {
+        line.translation = Some(value.to_owned());
+    }
 }
 
 fn is_legacy_bilingual_source(source: &str) -> bool {
@@ -468,6 +480,33 @@ mod tests {
             Some("再见")
         );
         assert!(document.has_translation());
+    }
+
+    #[test]
+    fn equal_length_translation_survives_provider_timestamp_drift() {
+        let document = LyricsDocument::from_sources(
+            None,
+            Some("[00:10.00]Hello\n[00:20.00]Goodbye".into()),
+            Some("[00:12.50]你好\n[00:22.50]再见".into()),
+            "测试",
+        );
+        assert_eq!(document.timed_lines().len(), 2);
+        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
+        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("再见"));
+        assert!(document.has_translation());
+    }
+
+    #[test]
+    fn unmatched_translation_does_not_become_primary_lyric_row() {
+        let document = LyricsDocument::from_sources(
+            None,
+            Some("[00:10.00]Hello".into()),
+            Some("[00:10.10]你好\n[00:30.00]额外字幕".into()),
+            "测试",
+        );
+        assert_eq!(document.timed_lines().len(), 1);
+        assert_eq!(document.timed_lines()[0].text, "Hello");
+        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
     }
 
     #[test]
