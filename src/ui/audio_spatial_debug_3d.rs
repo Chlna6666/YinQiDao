@@ -6,9 +6,13 @@ use gpui::{
     GpuMesh3dVertex, WgslShaderSource,
 };
 use yinqidao_audio_spatial::{
-    DEFAULT_HEAD_RADIUS_M, SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3,
+    DEFAULT_HEAD_RADIUS_M, MAX_DEBUG_SOURCES, SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3,
     late_field_telemetry,
 };
+
+#[path = "audio_spatial_debug_sphere.rs"]
+mod spherical_grid;
+use spherical_grid::{bounded_fit_radius, direct_field_radius, for_each_spherical_segment};
 
 mod humanoid_generated {
     include!("audio_debug_humanoid_generated.rs");
@@ -29,8 +33,8 @@ const EAR_HALF_DEPTH: f32 = 0.025;
 const EAR_LONGITUDE_SEGMENTS: usize = 12;
 const EAR_LATITUDE_SEGMENTS: usize = 8;
 const BOUNCE_RADIUS: f32 = 0.035;
-const ROOM_EDGE_WIDTH: f32 = 0.010;
-const LATE_FIELD_EDGE_WIDTH: f32 = 0.006;
+const SPHERE_GRID_WIDTH: f32 = 0.0038;
+const LATE_FIELD_GRID_WIDTH: f32 = 0.0028;
 const PATH_WIDTH: f32 = 0.008;
 const DIRECT_EAR_PATH_WIDTH: f32 = 0.0045;
 const VELOCITY_WIDTH: f32 = 0.010;
@@ -149,9 +153,8 @@ impl SpatialDebug3dScene {
         let radius = fit_radius.max(MIN_SCENE_RADIUS);
         let model = mat4_scale([1.0 / radius, 1.0 / radius, 1.0 / radius]);
 
-        // Keep camera distance fixed and perform zoom by changing field-of-view. The old dolly zoom
-        // moved the camera from 7.0 to 1.45 scene radii, which changed perspective distortion while
-        // scrolling and made the head/speaker geometry look as if it was being deformed.
+        // Keep camera distance fixed and zoom by field-of-view. The spatial field is always centred
+        // on the listener; room reflections are secondary paths and never redefine the camera axis.
         let orbit_distance = 3.35;
         let horizontal = camera.pitch.cos();
         let eye = [
@@ -202,20 +205,36 @@ fn build_scene_mesh(
     let left_ear = to_local(left_ear_world);
     let right_ear = to_local(right_ear_world);
 
-    let room = snapshot.environment.room_size.clamp(0.0, 1.0);
-    let half_width = 1.65 + room * 3.00;
-    let half_height = 1.25 + room * 1.50;
-    let half_depth = 2.10 + room * 4.10;
-    let fit_radius = half_width.max(half_depth).max(half_height).max(MIN_SCENE_RADIUS);
+    let source_count = snapshot.source_count.min(snapshot.sources.len());
+    let mut source_positions = [[0.0_f32; 3]; MAX_DEBUG_SOURCES];
+    for source in snapshot.sources[..source_count].iter().copied() {
+        let index = usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1);
+        source_positions[index] = to_local(source.position);
+    }
+    let active_positions = snapshot.sources[..source_count]
+        .iter()
+        .filter(|source| source.active)
+        .map(|source| {
+            let index = usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1);
+            &source_positions[index]
+        });
+    let field_radius = direct_field_radius(MIN_SCENE_RADIUS, active_positions);
+
+    let reflection_count = snapshot.reflection_count.min(snapshot.reflections.len());
+    let mut acoustic_extent = field_radius;
+    for reflection in snapshot.reflections[..reflection_count].iter().copied() {
+        if reflection.active {
+            acoustic_extent = acoustic_extent.max(length3(to_local(reflection.bounce_position)));
+        }
+    }
+    let fit_radius = bounded_fit_radius(field_radius, acoustic_extent);
 
     builder.push_listener_head(left_ear, right_ear);
-
-    let source_count = snapshot.source_count.min(snapshot.sources.len());
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active {
             continue;
         }
-        let position = to_local(source.position);
+        let position = source_positions[usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
         let activity = source_activity_visual(source.input_peak, source.input_rms);
         let color = source_color(
             source.kind,
@@ -238,19 +257,19 @@ fn build_scene_mesh(
     }
     let opaque_count = builder.indices.len() as u32;
 
-    builder.push_segment(
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.55],
-        0.013,
-        [0.30, 0.92, 1.0, 0.70],
-    );
+    // The listener-centric sphere is the primary world reference. The previous room box/floor/
+    // ceiling grids made six rectangular surfaces look like the source domain even though direct
+    // localization is spherical. Room geometry is now represented only by actual reflection paths.
+    builder.push_spherical_field(field_radius);
+    builder.push_axis_guides(field_radius);
     builder.push_segment(left_ear, right_ear, 0.008, [0.58, 0.68, 0.80, 0.36]);
 
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active {
             continue;
         }
-        let source_position = to_local(source.position);
+        let source_position = source_positions
+            [usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
         let activity = source_activity_visual(source.input_peak, source.input_rms);
         let activity_alpha = 0.16 + activity * 0.84;
         let (left_alpha, right_alpha) = binaural_path_alpha(source.left_gain, source.right_gain);
@@ -277,26 +296,16 @@ fn build_scene_mesh(
         );
     }
 
-    builder.push_room_box(half_width, half_height, half_depth);
-    builder.push_floor_grid(half_width, -half_height, half_depth);
-    builder.push_ceiling_grid(half_width, half_height, half_depth);
-
     let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
     if late.active {
-        builder.push_late_field_volume(
-            half_width,
-            half_height,
-            half_depth,
-            late.wet_gain,
-            late.feedback_gain,
-        );
+        builder.push_late_field_shell(field_radius, late.wet_gain, late.feedback_gain);
     }
 
     for source in snapshot.sources[..source_count].iter().copied() {
         if !source.active || matches!(source.kind, SpatialDebugSourceKind::Lfe) {
             continue;
         }
-        let start = to_local(source.position);
+        let start = source_positions[usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
         let velocity_local = [
             source.velocity.dot(right),
             source.velocity.dot(up),
@@ -315,7 +324,8 @@ fn build_scene_mesh(
         }
     }
 
-    let reflection_count = snapshot.reflection_count.min(snapshot.reflections.len());
+    // Rectangular-room acoustics remain visible only as the real image-source path. This keeps the
+    // reflection implementation inspectable without presenting the room as the virtual source world.
     for reflection in snapshot.reflections[..reflection_count].iter().copied() {
         if !reflection.active {
             continue;
@@ -329,11 +339,11 @@ fn build_scene_mesh(
         else {
             continue;
         };
-        let source_position = to_local(source.position);
+        let source_position = source_positions[source_index.min(MAX_DEBUG_SOURCES - 1)];
         let bounce = to_local(reflection.bounce_position);
         let activity = source_activity_visual(source.input_peak, source.input_rms);
         let energy = (reflection.wet_contribution.clamp(0.0, 1.0) * activity).clamp(0.0, 1.0);
-        let alpha = (0.035 + energy.sqrt() * 0.76).clamp(0.035, 0.82);
+        let alpha = (0.025 + energy.sqrt() * 0.56).clamp(0.025, 0.62);
         let path_color = wall_color(reflection.wall, alpha);
         builder.push_segment(source_position, bounce, PATH_WIDTH, path_color);
 
@@ -347,7 +357,7 @@ fn build_scene_mesh(
                 path_color[0] * 0.72,
                 path_color[1] * 0.82,
                 1.0,
-                alpha * left_alpha * 0.55,
+                alpha * left_alpha * 0.46,
             ],
         );
         builder.push_segment(
@@ -358,13 +368,13 @@ fn build_scene_mesh(
                 1.0,
                 path_color[1] * 0.76,
                 path_color[2] * 0.72,
-                alpha * right_alpha * 0.55,
+                alpha * right_alpha * 0.46,
             ],
         );
         builder.push_octahedron(
             bounce,
             BOUNCE_RADIUS * (0.70 + activity * 0.45),
-            wall_color(reflection.wall, (alpha + 0.12).min(0.92)),
+            wall_color(reflection.wall, (alpha + 0.10).min(0.76)),
         );
     }
 
@@ -455,6 +465,8 @@ fn source_color(
         [0.92, 0.36, 0.32]
     } else if elevation_degrees > 18.0 {
         [0.68, 0.52, 1.0]
+    } else if elevation_degrees < -18.0 {
+        [0.36, 0.78, 0.96]
     } else {
         const PALETTE: [[f32; 3]; 6] = [
             [0.35, 0.86, 0.58],
@@ -498,8 +510,8 @@ struct MeshBuilder {
 impl MeshBuilder {
     fn with_capacity() -> Self {
         Self {
-            vertices: Vec::with_capacity(4_096),
-            indices: Vec::with_capacity(12_288),
+            vertices: Vec::with_capacity(8_192),
+            indices: Vec::with_capacity(36_864),
         }
     }
 
@@ -530,9 +542,6 @@ impl MeshBuilder {
         if HUMANOID_ASSET_READY && !HUMANOID_VERTICES.is_empty() && !HUMANOID_INDICES.is_empty() {
             self.push_static_mesh(HUMANOID_VERTICES, HUMANOID_INDICES, LISTENER_HEAD_COLOR);
         } else {
-            // The checked-in fallback deliberately stays close to the source asset's ~250-vertex
-            // low-poly character: curved/faceted, not an octahedron. It is head-only so the listener
-            // visual does not waste geometry on a torso that has no acoustic meaning.
             self.push_ellipsoid(
                 [0.0, 0.0, 0.0],
                 [
@@ -553,8 +562,6 @@ impl MeshBuilder {
             );
         }
 
-        // Ear marker centres come from ListenerPose::ear_positions(): visual geometry never moves
-        // the DSP ears. Distinct colors make left/right binaural paths immediately readable.
         self.push_ellipsoid(
             left_ear,
             [EAR_HALF_WIDTH, EAR_HALF_HEIGHT, EAR_HALF_DEPTH],
@@ -568,6 +575,53 @@ impl MeshBuilder {
             EAR_LONGITUDE_SEGMENTS,
             EAR_LATITUDE_SEGMENTS,
             RIGHT_EAR_COLOR,
+        );
+    }
+
+    fn push_spherical_field(&mut self, radius: f32) {
+        for_each_spherical_segment(radius, |start, end, equator| {
+            let color = if equator {
+                [0.32, 0.70, 0.88, 0.20]
+            } else {
+                [0.30, 0.46, 0.62, 0.105]
+            };
+            self.push_segment(start, end, SPHERE_GRID_WIDTH, color);
+        });
+    }
+
+    fn push_late_field_shell(&mut self, radius: f32, wet_gain: f32, feedback_gain: f32) {
+        let alpha = (0.018 + wet_gain.clamp(0.0, 0.25) * 0.70).clamp(0.018, 0.12);
+        let feedback = ((feedback_gain - 0.50) / 0.32).clamp(0.0, 1.0);
+        let shell_radius = radius * (0.78 + feedback * 0.10);
+        for_each_spherical_segment(shell_radius, |start, end, equator| {
+            let emphasis = if equator { 1.15 } else { 1.0 };
+            self.push_segment(
+                start,
+                end,
+                LATE_FIELD_GRID_WIDTH,
+                [0.40 + feedback * 0.12, 0.48, 1.0, alpha * emphasis],
+            );
+        });
+    }
+
+    fn push_axis_guides(&mut self, radius: f32) {
+        self.push_segment(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, radius * 0.34],
+            0.010,
+            [0.30, 0.92, 1.0, 0.72],
+        );
+        self.push_segment(
+            [0.0, 0.0, 0.0],
+            [radius * 0.24, 0.0, 0.0],
+            0.006,
+            [0.92, 0.52, 0.42, 0.32],
+        );
+        self.push_segment(
+            [0.0, 0.0, 0.0],
+            [0.0, radius * 0.24, 0.0],
+            0.006,
+            [0.66, 0.54, 1.0, 0.34],
         );
     }
 
@@ -613,11 +667,7 @@ impl MeshBuilder {
         for longitude in 0..longitude_segments {
             let current = longitude.min(u32::MAX as usize) as u32;
             let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
-            self.indices.extend([
-                top,
-                first_ring + current,
-                first_ring + next,
-            ]);
+            self.indices.extend([top, first_ring + current, first_ring + next]);
         }
 
         let ring_count = latitude_segments - 1;
@@ -640,11 +690,7 @@ impl MeshBuilder {
         for longitude in 0..longitude_segments {
             let current = longitude.min(u32::MAX as usize) as u32;
             let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
-            self.indices.extend([
-                last_ring + next,
-                last_ring + current,
-                bottom,
-            ]);
+            self.indices.extend([last_ring + next, last_ring + current, bottom]);
         }
     }
 
@@ -760,113 +806,6 @@ impl MeshBuilder {
         ];
         for triangle in TRIANGLES {
             self.indices.extend(triangle.map(|index| base + index));
-        }
-    }
-
-    fn push_room_box(&mut self, half_width: f32, half_height: f32, half_depth: f32) {
-        self.push_wire_box(
-            half_width,
-            half_height,
-            half_depth,
-            ROOM_EDGE_WIDTH,
-            [0.33, 0.43, 0.56, 0.28],
-        );
-    }
-
-    fn push_late_field_volume(
-        &mut self,
-        half_width: f32,
-        half_height: f32,
-        half_depth: f32,
-        wet_gain: f32,
-        feedback_gain: f32,
-    ) {
-        let base_alpha = (0.055 + wet_gain.clamp(0.0, 0.25) * 1.65).clamp(0.055, 0.26);
-        let feedback_tint = ((feedback_gain - 0.50) / 0.32).clamp(0.0, 1.0);
-        for (scale, alpha_scale) in [(0.38, 0.50), (0.60, 0.72), (0.82, 1.0)] {
-            self.push_wire_box(
-                half_width * scale,
-                half_height * scale,
-                half_depth * scale,
-                LATE_FIELD_EDGE_WIDTH,
-                [
-                    0.30 + feedback_tint * 0.16,
-                    0.42 + feedback_tint * 0.08,
-                    0.96,
-                    base_alpha * alpha_scale,
-                ],
-            );
-        }
-    }
-
-    fn push_wire_box(
-        &mut self,
-        half_width: f32,
-        half_height: f32,
-        half_depth: f32,
-        edge_width: f32,
-        color: [f32; 4],
-    ) {
-        let p = [
-            [-half_width, -half_height, -half_depth],
-            [half_width, -half_height, -half_depth],
-            [half_width, -half_height, half_depth],
-            [-half_width, -half_height, half_depth],
-            [-half_width, half_height, -half_depth],
-            [half_width, half_height, -half_depth],
-            [half_width, half_height, half_depth],
-            [-half_width, half_height, half_depth],
-        ];
-        for (a, b) in [
-            (0, 1),
-            (1, 2),
-            (2, 3),
-            (3, 0),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 4),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
-        ] {
-            self.push_segment(p[a], p[b], edge_width, color);
-        }
-    }
-
-    fn push_floor_grid(&mut self, half_width: f32, y: f32, half_depth: f32) {
-        self.push_horizontal_grid(half_width, y, half_depth, [0.24, 0.32, 0.42, 0.14]);
-    }
-
-    fn push_ceiling_grid(&mut self, half_width: f32, y: f32, half_depth: f32) {
-        self.push_horizontal_grid(half_width, y, half_depth, [0.22, 0.42, 0.50, 0.08]);
-    }
-
-    fn push_horizontal_grid(
-        &mut self,
-        half_width: f32,
-        y: f32,
-        half_depth: f32,
-        color: [f32; 4],
-    ) {
-        let lines = 8usize;
-        for index in 1..lines {
-            let t = index as f32 / lines as f32;
-            let x = -half_width + half_width * 2.0 * t;
-            let z = -half_depth + half_depth * 2.0 * t;
-            self.push_segment(
-                [x, y, -half_depth],
-                [x, y, half_depth],
-                ROOM_EDGE_WIDTH * 0.40,
-                color,
-            );
-            self.push_segment(
-                [-half_width, y, z],
-                [half_width, y, z],
-                ROOM_EDGE_WIDTH * 0.40,
-                color,
-            );
         }
     }
 }
