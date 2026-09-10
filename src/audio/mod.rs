@@ -28,7 +28,7 @@ pub use head_tracking::{
     ManualHeadTrackingProvider,
 };
 pub use head_tracking_opentrack::{
-    OpenTrackUdpConfig, OpenTrackUdpProvider, OpenTrackUdpTransform,
+    OpenTrackHeadTrackingService, OpenTrackUdpConfig, OpenTrackUdpProvider, OpenTrackUdpTransform,
 };
 pub use smart_profile::classify as classify_smart_audio;
 pub use spatial_debug::spatial_debug_latest_snapshot;
