@@ -71,6 +71,20 @@ pub enum SpatialMotionMode {
     NearEar,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBedMode {
+    Off,
+    #[default]
+    Auto,
+    Surround5_1,
+    Surround7_1,
+    Surround5_1_2,
+    Surround5_1_4,
+    Surround7_1_2,
+    Surround7_1_4,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SpatialSettings {
@@ -89,6 +103,9 @@ pub struct SpatialSettings {
     pub room_size: f32,
     /// Static 3D decorrelation amount independent of motion.
     pub immersive_3d: f32,
+    /// Internal speaker-bed virtualization used only for authored mono/stereo programme. Native
+    /// multichannel metadata always keeps its authored layout and ignores this control.
+    pub virtual_bed: VirtualBedMode,
     /// Dynamic source trajectory used by 8D/360/planetary modes.
     pub motion_mode: SpatialMotionMode,
     /// Orbit cycles per second. Normal UI range is roughly 0.02..0.30 Hz.
@@ -112,6 +129,7 @@ impl Default for SpatialSettings {
             crossfeed: 0.08,
             room_size: 0.15,
             immersive_3d: 0.10,
+            virtual_bed: VirtualBedMode::Auto,
             motion_mode: SpatialMotionMode::Static,
             motion_speed_hz: 0.08,
             motion_radius: 0.65,
