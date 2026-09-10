@@ -3,7 +3,7 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb};
 use crate::{
     audio::{EqPreset, SpatialPreset, classify_smart_audio},
     desktop_lyrics::LyricsColorTarget,
-    model::{SpatialMotionMode, TransitionMode, VirtualBedMode},
+    model::{SourceLayoutOverride, SpatialMotionMode, TransitionMode, VirtualBedMode},
     preferences::SpatialControl,
     settings::DesktopLyricsAlignment,
 };
@@ -505,6 +505,24 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
         ));
     }
 
+    let mut source_layouts = div().flex().flex_wrap().items_center().gap_2();
+    for (mode, label) in [
+        (SourceLayoutOverride::None, "None 不覆盖"),
+        (SourceLayoutOverride::Surround5_1, "5.1"),
+        (SourceLayoutOverride::Surround7_1, "7.1"),
+        (SourceLayoutOverride::Surround5_1_2, "5.1.2"),
+        (SourceLayoutOverride::Surround5_1_4, "5.1.4"),
+        (SourceLayoutOverride::Surround7_1_2, "7.1.2"),
+        (SourceLayoutOverride::Surround7_1_4, "7.1.4"),
+    ] {
+        source_layouts = source_layouts.child(preset_chip(
+            SharedString::from(format!("spatial-source-layout-{mode:?}")),
+            label,
+            app.config.spatial.source_layout_override == mode,
+            cx.listener(move |this, _, _, cx| this.set_source_layout_override(mode, cx)),
+        ));
+    }
+
     let mut parameters = div().flex().flex_col().gap_3();
     for (title, subtitle, control, value) in [
         (
@@ -654,10 +672,22 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                     .flex_col()
                     .gap_2()
                     .child(label_block(
-                        "Virtual Speaker Bed / Source Layout Override",
-                        "Mono/Stereo：Auto 可按空间强度建立虚拟 7.1 / 5.1.4 / 7.1.2 / 7.1.4；Off 保留原始双声源。无可靠 speaker metadata 的离散多声道：显式选择与 PCM 声道数严格匹配的布局时，直接作为 Source Layout Override 保留原始 N 通道进入 Native Speaker Bed；可靠 codec/container metadata 永远优先，Auto 不按声道数猜布局。",
+                        "Stereo Virtual Speaker Bed",
+                        "仅用于 Mono/Stereo。Auto 按当前空间参数选择内部虚拟声床；Off 保留原始 L/R 双声源。这里不会声明现有多声道 PCM 的 speaker layout。",
                     ))
                     .child(virtual_beds),
+            )
+            .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(label_block(
+                        "Source Layout Override",
+                        "仅用于 codec/container 没有可靠 speaker metadata 的离散多声道 PCM。选择值必须与实际 PCM 声道数精确匹配；可靠 metadata 永远优先。该声明独立于 Spatial 开关，因此 HiFi Direct 也可保留正确的 Native Speaker Bed 几何。",
+                    ))
+                    .child(source_layouts),
             )
             .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
             .child(parameters),
