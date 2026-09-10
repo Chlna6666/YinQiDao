@@ -204,11 +204,12 @@ impl Render for AudioDebugView {
                                     .text_sm()
                                     .text_color(rgb(0x85909d))
                                     .child(format!(
-                                        "实时 DSP 探针 · {} Hz · frame #{} · 监听 {} · scene {}",
+                                        "实时 DSP 探针 · {} Hz · frame #{} · 监听 {} · scene {} · bed {}",
                                         snapshot.sample_rate,
                                         snapshot.sequence,
                                         snapshot.monitor_mode.label(),
                                         spatial.map_or(0, |scene| scene.sequence),
+                                        spatial.map_or("--", |scene| layout_name(scene.layout)),
                                     )),
                             ),
                     )
@@ -256,7 +257,7 @@ impl Render for AudioDebugView {
                     ))
                     .child(analysis_stage_card(
                         "POST-SPATIAL",
-                        "虚拟声源 / Pinna / 六面 Early / FDN Late",
+                        "球形 Source Bed / Pinna / 次级 Early / FDN Late",
                         &snapshot.spatial,
                         rgb(0x56d38f).into(),
                     )),
@@ -268,11 +269,12 @@ impl Render for AudioDebugView {
                     .items_stretch()
                     .child(
                         panel(
-                            "Spatial Room · GPU 3D",
+                            "Spherical Spatial Field · GPU 3D",
                             Some(spatial.map_or_else(
                                 || "等待 SpatialEngine scene".to_string(),
                                 |scene| format!(
-                                    "{} virtual channel/source · {} early reflection · {} Hz · seq {} · speaker 亮度/大小=实时 RMS+Peak · 独立 L/R ear path",
+                                    "{} · {} source · {} early reflection · {} Hz · seq {} · speaker 亮度/大小=实时 RMS+Peak · 独立 L/R ear path",
+                                    layout_name(scene.layout),
                                     scene.source_count,
                                     scene.reflection_count,
                                     scene.sample_rate,
@@ -280,7 +282,7 @@ impl Render for AudioDebugView {
                                 ),
                             )),
                             div()
-                                .id("spatial-room-3d-interaction")
+                                .id("spatial-sphere-3d-interaction")
                                 .relative()
                                 .w_full()
                                 .h(px(540.0))
@@ -306,7 +308,7 @@ impl Render for AudioDebugView {
                                         .text_sm()
                                         .text_color(rgb(0x74808d))
                                         .child(mesh_error.map_or_else(
-                                            || "播放空间音频后显示 3D 场景".to_string(),
+                                            || "播放空间音频后显示球形 3D 声场".to_string(),
                                             |error| format!("3D shader/mesh: {error}"),
                                         ))
                                         .into_any_element(),
@@ -322,7 +324,7 @@ impl Render for AudioDebugView {
                                         .bg(rgb(0x10151c))
                                         .text_xs()
                                         .text_color(rgb(0x8d98a5))
-                                        .child("蓝=左耳路径 · 红=右耳路径 · speaker 强度=输入活动度 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
+                                        .child("球面网格=直达 Source Field · 彩色 bounce=次级 Room Early · 蓝=左耳路径 · 红=右耳路径 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -394,7 +396,7 @@ impl Render for AudioDebugView {
                     .child(
                         panel(
                             "Spatial Telemetry",
-                            Some("authored channel / Peak+RMS / ITD / ILD / pinna / late field".into()),
+                            Some("exact source-bed layout / Peak+RMS / ITD / ILD / pinna / late field".into()),
                             spatial_telemetry(spatial),
                         )
                         .w(px(455.0)),
@@ -402,7 +404,7 @@ impl Render for AudioDebugView {
             )
             .child(panel(
                 "Image-source Early Reflection Matrix",
-                Some("source → floor/ceiling/wall bounce → left/right ear · excess delay / binaural arrival".into()),
+                Some("secondary room acoustics · source → floor/ceiling/wall bounce → left/right ear · excess delay / binaural arrival".into()),
                 reflection_telemetry(spatial),
             ))
             .child(analysis_sections(snapshot.clone()))
@@ -491,6 +493,9 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
             div()
                 .flex()
                 .gap_2()
+                .flex_wrap()
+                .child(metric("Bed", layout_name(snapshot.layout).to_string()))
+                .child(metric("Sources", snapshot.source_count.to_string()))
                 .child(metric("Room", format!("{:.0}%", snapshot.environment.room_size * 100.0)))
                 .child(metric("Early Wet", format!("{:.0}%", snapshot.environment.mix * 100.0)))
                 .child(metric("Damp", format!("{:.0}%", snapshot.environment.damping * 100.0))),
@@ -510,7 +515,7 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
         if !source.active {
             continue;
         }
-        let channel = channel_name(snapshot.source_count, index);
+        let channel = channel_name(snapshot.layout, index);
         let kind = if matches!(source.kind, SpatialDebugSourceKind::Lfe) {
             "LFE"
         } else {
@@ -623,7 +628,7 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
         }
         shown += 1;
         let source = usize::from(reflection.source_index);
-        let channel = channel_name(snapshot.source_count, source);
+        let channel = channel_name(snapshot.layout, source);
         body = body.child(
             div()
                 .py_1()
@@ -697,14 +702,22 @@ fn linear_dbfs(value: f32) -> f32 {
     }
 }
 
-fn channel_name(source_count: usize, index: usize) -> &'static str {
-    let layout = match source_count {
-        2 => ChannelLayout::Stereo,
-        6 => ChannelLayout::Surround5_1,
-        8 => ChannelLayout::Surround7_1,
-        10 => ChannelLayout::Surround5_1_4,
-        12 => ChannelLayout::Surround7_1_4,
-        _ => return "SRC",
+fn layout_name(layout: Option<ChannelLayout>) -> &'static str {
+    match layout {
+        None => "FREE SOURCE",
+        Some(ChannelLayout::Stereo) => "STEREO",
+        Some(ChannelLayout::Surround5_1) => "5.1",
+        Some(ChannelLayout::Surround7_1) => "7.1",
+        Some(ChannelLayout::Surround5_1_2) => "5.1.2",
+        Some(ChannelLayout::Surround5_1_4) => "5.1.4",
+        Some(ChannelLayout::Surround7_1_2) => "7.1.2",
+        Some(ChannelLayout::Surround7_1_4) => "7.1.4",
+    }
+}
+
+fn channel_name(layout: Option<ChannelLayout>, index: usize) -> &'static str {
+    let Some(layout) = layout else {
+        return "SRC";
     };
     SpeakerLayout::for_layout(layout)
         .role(index)
