@@ -1,8 +1,8 @@
 use std::f32::consts::PI;
 
 const LATITUDE_DEGREES: [f32; 5] = [-60.0, -30.0, 0.0, 30.0, 60.0];
-const MERIDIAN_COUNT: usize = 8;
-const RING_SEGMENTS: usize = 48;
+const MERIDIAN_COUNT: usize = 6;
+const RING_SEGMENTS: usize = 32;
 
 /// Listener-centric spherical reference field used by the GPU spatial debugger.
 ///
@@ -30,7 +30,8 @@ pub(super) fn for_each_spherical_segment(
     }
 
     // A meridian and its PI-shifted counterpart describe the same great circle, so [0, PI) is
-    // sufficient. This keeps the reference field visually spherical without doubling geometry.
+    // sufficient. Six great circles plus five latitude rings keep the sphere immediately readable
+    // while staying cheap enough for the 30 Hz diagnostic mesh rebuild cadence.
     for meridian in 0..MERIDIAN_COUNT {
         let azimuth = PI * meridian as f32 / MERIDIAN_COUNT as f32;
         let mut previous = meridian_point(radius, azimuth, 0.0);
@@ -59,10 +60,7 @@ pub(super) fn direct_field_radius<'a>(
 
 /// Room-reflection paths may extend beyond the direct shell. They are allowed to enlarge the camera
 /// fit only within a bounded multiple of the primary field, preserving direct-source readability.
-pub(super) fn bounded_fit_radius(
-    field_radius: f32,
-    acoustic_extent: f32,
-) -> f32 {
+pub(super) fn bounded_fit_radius(field_radius: f32, acoustic_extent: f32) -> f32 {
     let field_radius = finite_or(field_radius, 1.8).max(0.05);
     let acoustic_extent = finite_or(acoustic_extent, field_radius).max(field_radius);
     (field_radius * 1.22).max(acoustic_extent.min(field_radius * 1.72) * 1.04)
@@ -109,7 +107,10 @@ mod tests {
             assert!((length3(start) - radius).abs() < 1.0e-4);
             assert!((length3(end) - radius).abs() < 1.0e-4);
         });
-        assert_eq!(count, (LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS);
+        assert_eq!(
+            count,
+            (LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS
+        );
     }
 
     #[test]
