@@ -388,7 +388,8 @@ impl CpuRenderer {
         frames: usize,
         start_pose: SourcePose,
         end_pose: SourcePose,
-        listener: ListenerPose,
+        start_listener: ListenerPose,
+        end_listener: ListenerPose,
         kind: SourceKind,
         allow_early_reflections: bool,
         mix_left: &mut [f32],
@@ -406,36 +407,47 @@ impl CpuRenderer {
         let state = &mut self.sources[source_index];
         state.set_early_reflections_allowed(allow_early_reflections);
         let reflections_enabled = allow_early_reflections && environment.mix > REFLECTION_EPSILON;
+        let spatial_endpoint_changed = start_pose != end_pose || start_listener != end_listener;
 
         match kind {
             SourceKind::FullRange => {
-                let start = state.parameters_for(sample_rate, start_pose, listener);
-                let end = if start_pose == end_pose {
-                    start
+                let start = state.parameters_for(sample_rate, start_pose, start_listener);
+                let end = if spatial_endpoint_changed {
+                    state.parameters_for(sample_rate, end_pose, end_listener)
                 } else {
-                    state.parameters_for(sample_rate, end_pose, listener)
+                    start
                 };
                 let mut parameters = start;
                 let parameter_step = start.step_to(end, frames);
 
-                let pinna_start = state.pinna_for(sample_rate, start_pose, listener);
-                let pinna_end = if start_pose == end_pose {
-                    pinna_start
+                let pinna_start = state.pinna_for(sample_rate, start_pose, start_listener);
+                let pinna_end = if spatial_endpoint_changed {
+                    state.pinna_for(sample_rate, end_pose, end_listener)
                 } else {
-                    state.pinna_for(sample_rate, end_pose, listener)
+                    pinna_start
                 };
                 let mut pinna_coefficients = pinna_start;
                 let pinna_step = pinna_start.step_to(pinna_end, frames);
 
                 let reflection_start = if reflections_enabled {
-                    state.reflection_parameters_for(sample_rate, start_pose, listener, environment)
+                    state.reflection_parameters_for(
+                        sample_rate,
+                        start_pose,
+                        start_listener,
+                        environment,
+                    )
                 } else {
                     [ReflectionRenderParameters::default(); EARLY_REFLECTION_TAP_COUNT]
                 };
-                let reflection_end = if !reflections_enabled || start_pose == end_pose {
+                let reflection_end = if !reflections_enabled || !spatial_endpoint_changed {
                     reflection_start
                 } else {
-                    state.reflection_parameters_for(sample_rate, end_pose, listener, environment)
+                    state.reflection_parameters_for(
+                        sample_rate,
+                        end_pose,
+                        end_listener,
+                        environment,
+                    )
                 };
                 let mut reflection_parameters = reflection_start;
                 let reflection_steps: [
@@ -523,9 +535,8 @@ impl CpuRenderer {
                 }
             }
             SourceKind::Lfe => {
-                // LFE remains direction-independent. First-order directional room reflections are
-                // intentionally skipped here; the future diffuse/FDN low-frequency field owns that
-                // responsibility without inventing a localized LFE wall image.
+                // LFE remains direction-independent. Listener start/end orientation never enters
+                // this path, so head tracking cannot turn the LFE channel into a moving source.
                 let mut gain = finite_or_zero(start_pose.gain).clamp(0.0, 4.0);
                 let end_gain = finite_or_zero(end_pose.gain).clamp(0.0, 4.0);
                 let gain_step = if frames == 0 {
@@ -1099,6 +1110,37 @@ mod tests {
         assert!((current.right_gain - end.right_gain).abs() < 1.0e-5);
         assert!((current.left_filter_alpha - end.left_filter_alpha).abs() < 1.0e-5);
         assert!((current.right_filter_alpha - end.right_filter_alpha).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn listener_pose_endpoint_ramp_reaches_rotated_head_target() {
+        let pose = SourcePose::new(Vec3::FORWARD);
+        let start_listener = ListenerPose::identity();
+        let end_listener = ListenerPose {
+            forward: Vec3::RIGHT,
+            up: Vec3::UP,
+            ..ListenerPose::identity()
+        };
+        let start = parameters_for_pose(48_000.0, pose, start_listener);
+        let end = parameters_for_pose(48_000.0, pose, end_listener);
+        assert!(
+            (start.left_delay - end.left_delay).abs() > 1.0e-4
+                || (start.right_delay - end.right_delay).abs() > 1.0e-4
+                || (start.left_gain - end.left_gain).abs() > 1.0e-4
+                || (start.right_gain - end.right_gain).abs() > 1.0e-4
+        );
+
+        let mut current = start;
+        let step = start.step_to(end, 64);
+        for _ in 0..64 {
+            current.advance(step);
+        }
+        assert!((current.left_delay - end.left_delay).abs() < 1.0e-4);
+        assert!((current.right_delay - end.right_delay).abs() < 1.0e-4);
+        assert!((current.left_gain - end.left_gain).abs() < 1.0e-5);
+        assert!((current.right_gain - end.right_gain).abs() < 1.0e-5);
+        assert!(current.left_filter_alpha.is_finite());
+        assert!(current.right_filter_alpha.is_finite());
     }
 
     #[test]

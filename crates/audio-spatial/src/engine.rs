@@ -102,11 +102,16 @@ impl SpatialEngine {
         self.listener = listener;
     }
 
+    /// Capture one coherent listener segment for the next DSP block. The previous block endpoint is
+    /// the new block start; a freshly published head pose becomes the end. Renderer parameter ramps
+    /// then smooth ITD/ILD/pinna/reflection changes sample-by-sample without solving head geometry
+    /// in the inner sample loop.
     #[inline]
-    fn refresh_runtime_listener(&mut self) {
-        if let Some(listener) = latest_runtime_listener_pose() {
-            self.listener = listener;
-        }
+    fn runtime_listener_segment(&mut self) -> (ListenerPose, ListenerPose) {
+        let start = self.listener;
+        let end = latest_runtime_listener_pose().unwrap_or(start);
+        self.listener = end;
+        (start, end)
     }
 
     pub fn set_environment(&mut self, settings: EnvironmentSettings) {
@@ -281,7 +286,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(block_limit);
-            self.refresh_runtime_listener();
+            let (listener_start, listener_end) = self.runtime_listener_segment();
             self.mix_left[..block_frames].fill(0.0);
             self.mix_right[..block_frames].fill(0.0);
             let block_start = frame_offset * channels;
@@ -320,7 +325,8 @@ impl SpatialEngine {
                     block_frames,
                     start_pose,
                     end_pose,
-                    self.listener,
+                    listener_start,
+                    listener_end,
                     speaker.kind,
                     early_reflection_sources[source_index],
                     &mut self.mix_left,
@@ -401,7 +407,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
-            self.refresh_runtime_listener();
+            let (listener_start, listener_end) = self.runtime_listener_segment();
             let block_end_exclusive = frame_offset + block_frames;
             let start_t = frame_offset as f32 / denominator;
             let end_t = block_end_exclusive as f32 / denominator;
@@ -424,7 +430,8 @@ impl SpatialEngine {
                 block_frames,
                 left_block_start,
                 left_block_end,
-                self.listener,
+                listener_start,
+                listener_end,
                 crate::SourceKind::FullRange,
                 true,
                 &mut self.mix_left,
@@ -438,7 +445,8 @@ impl SpatialEngine {
                 block_frames,
                 right_block_start,
                 right_block_end,
-                self.listener,
+                listener_start,
+                listener_end,
                 crate::SourceKind::FullRange,
                 true,
                 &mut self.mix_left,
@@ -488,7 +496,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
-            self.refresh_runtime_listener();
+            let (listener_start, listener_end) = self.runtime_listener_segment();
             self.mix_left[..block_frames].fill(0.0);
             self.mix_right[..block_frames].fill(0.0);
             let block = &input[frame_offset..frame_offset + block_frames];
@@ -502,7 +510,8 @@ impl SpatialEngine {
                 block_frames,
                 start_pose,
                 end_pose,
-                self.listener,
+                listener_start,
+                listener_end,
                 crate::SourceKind::FullRange,
                 true,
                 &mut self.mix_left,
