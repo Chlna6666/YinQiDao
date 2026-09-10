@@ -1,8 +1,8 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    App, Bounds, Div, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div, hsla,
-    prelude::*, px, relative, rgb,
+    App, Bounds, Div, Easing, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, Transition,
+    TransitionProperty, canvas, div, hsla, prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
@@ -176,6 +176,18 @@ fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
     Some(dragging)
 }
 
+fn slider_height_transition() -> Transition {
+    Transition::new(Duration::from_millis(120))
+        .ease(Easing::OutCubic)
+        .properties([TransitionProperty::Height])
+}
+
+fn slider_width_transition() -> Transition {
+    Transition::new(Duration::from_millis(120))
+        .ease(Easing::OutCubic)
+        .properties([TransitionProperty::Width])
+}
+
 fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
@@ -208,7 +220,9 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .rounded_full()
         .bg(style.track_bg)
         .group_hover(track_hover_group, move |s| s.h(style.hover_track_height))
-        .transition(theme::hover_transition())
+        // Height is a layout property in this GPUI fork. The generic hover transition only covers
+        // opacity/transform, so using it here left the rail visually stuck at its idle thickness.
+        .transition(slider_height_transition())
         .child(
             div()
                 .h_full()
@@ -261,6 +275,7 @@ fn vertical_slider_visual(
         .max(f32::from(style.hover_track_height)));
     let hover_group = format!("slider-hover-{id}");
     let thumb_hover_group = hover_group.clone();
+    let track_hover_group = hover_group.clone();
 
     let mut thumb = div()
         .flex_none()
@@ -282,6 +297,8 @@ fn vertical_slider_visual(
         .w(style.track_height)
         .rounded_full()
         .bg(style.track_bg)
+        .group_hover(track_hover_group, move |s| s.w(style.hover_track_height))
+        .transition(slider_width_transition())
         .flex()
         .flex_col()
         .justify_end()
