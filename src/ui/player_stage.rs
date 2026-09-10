@@ -262,6 +262,7 @@ fn stage_lyrics(
     let manual_reading = app
         .lyrics_user_scrolling_until
         .is_some_and(|until| until > Instant::now());
+    let reading_mode = manual_reading || !playing;
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -291,25 +292,28 @@ fn stage_lyrics(
 
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active);
-        let alpha = if manual_reading || !playing {
-            if index == active { 1.0 } else { 0.72 }
+        // Paused/manual-reading mode is a true reading state: no Gaussian blur and no outer-line
+        // dimming. During playback the inactive lines keep enough contrast to remain legible while
+        // the current line stays visually locked in focus.
+        let alpha = if reading_mode {
+            1.0
         } else {
             match distance {
                 0 => 1.0,
-                1 => 0.50,
-                2 => 0.30,
-                _ => 0.18,
+                1 => 0.68,
+                2 => 0.50,
+                _ => 0.36,
             }
         };
-        let blur_radius = if playing && !manual_reading {
+        let blur_radius = if reading_mode {
+            0.0
+        } else {
             match distance {
                 0 => 0.0,
-                1 => 0.9,
-                2 => 1.8,
-                _ => 2.8,
+                1 => 0.55,
+                2 => 1.10,
+                _ => 1.55,
             }
-        } else {
-            0.0
         };
         let timestamp = line.timestamp_ms;
         let weight = if index == active {
@@ -319,6 +323,7 @@ fn stage_lyrics(
         } else {
             gpui::FontWeight::MEDIUM
         };
+        let karaoke_active = index == active && !reading_mode;
 
         let mut text = div()
             .w_full()
@@ -327,7 +332,7 @@ fn stage_lyrics(
             .flex_col()
             .gap_1()
             .font_weight(weight)
-            .child(stage_primary_lyric(line, position_ms, index == active));
+            .child(stage_primary_lyric(line, position_ms, karaoke_active));
 
         if let Some(translation) = line
             .translation
@@ -359,6 +364,9 @@ fn stage_lyrics(
             .mb(px(10.0))
             .opacity(alpha)
             .blur(px(blur_radius))
+            // Blur is deliberately not transitioned. Snapping it to zero on pause/manual scroll
+            // prevents retained paint from leaving the whole lyrics list soft for another frame
+            // sequence; opacity still provides the gentle focus transition.
             .transition(lyric_focus_transition())
             .cursor_pointer()
             .hover(|style| style.opacity(1.0).blur(px(0.0)))
@@ -425,8 +433,14 @@ fn stage_lyrics(
     viewport.into_any_element()
 }
 
-fn stage_primary_lyric(line: &LyricLine, position_ms: u64, active: bool) -> gpui::AnyElement {
-    if !active || line.words.is_empty() {
+fn stage_primary_lyric(
+    line: &LyricLine,
+    position_ms: u64,
+    karaoke_active: bool,
+) -> gpui::AnyElement {
+    // Word-level timing is a playback affordance, not a paused reading style. When playback is
+    // paused or the user manually browses the lyrics, render the complete line at full contrast.
+    if !karaoke_active || line.words.is_empty() {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -452,7 +466,7 @@ fn stage_primary_lyric(line: &LyricLine, position_ms: u64, active: bool) -> gpui
         let alpha = match current_word {
             Some(current) if index < current => 0.86,
             Some(current) if index == current => 1.0,
-            _ => 0.32,
+            _ => 0.36,
         };
         row = row.child(
             div()
@@ -471,9 +485,9 @@ fn stage_primary_lyric(line: &LyricLine, position_ms: u64, active: bool) -> gpui
 }
 
 fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(420))
+    Transition::new(Duration::from_millis(220))
         .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity, TransitionProperty::Blur])
+        .properties([TransitionProperty::Opacity])
 }
 
 fn stage_controls(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
