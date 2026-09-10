@@ -2,7 +2,7 @@ use crate::{
     ChannelLayout, ChannelRole, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SourceActivity,
     SourcePose, SpatialDebugSnapshot, SpatialError, Speaker, SpeakerLayout, Trajectory,
     TrajectoryKind, Vec3, analyze_interleaved_activity, late_field::LateDiffuseField,
-    renderer::CpuRenderer,
+    listener_control::latest_runtime_listener_pose, renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -100,6 +100,13 @@ impl SpatialEngine {
 
     pub fn set_listener(&mut self, listener: ListenerPose) {
         self.listener = listener;
+    }
+
+    #[inline]
+    fn refresh_runtime_listener(&mut self) {
+        if let Some(listener) = latest_runtime_listener_pose() {
+            self.listener = listener;
+        }
     }
 
     pub fn set_environment(&mut self, settings: EnvironmentSettings) {
@@ -274,6 +281,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(block_limit);
+            self.refresh_runtime_listener();
             self.mix_left[..block_frames].fill(0.0);
             self.mix_right[..block_frames].fill(0.0);
             let block_start = frame_offset * channels;
@@ -393,6 +401,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
+            self.refresh_runtime_listener();
             let block_end_exclusive = frame_offset + block_frames;
             let start_t = frame_offset as f32 / denominator;
             let end_t = block_end_exclusive as f32 / denominator;
@@ -479,6 +488,7 @@ impl SpatialEngine {
         let mut frame_offset = 0usize;
         while frame_offset < frames {
             let block_frames = (frames - frame_offset).min(self.config.block_frames);
+            self.refresh_runtime_listener();
             self.mix_left[..block_frames].fill(0.0);
             self.mix_right[..block_frames].fill(0.0);
             let block = &input[frame_offset..frame_offset + block_frames];
