@@ -69,6 +69,7 @@ pub enum SpatialMotionMode {
     FrontBack,
     Planetary,
     NearEar,
+    Helix,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -101,12 +102,14 @@ pub struct SpatialSettings {
     pub crossfeed: f32,
     /// Early-room reflection size/amount.
     pub room_size: f32,
-    /// Static 3D decorrelation amount independent of motion.
+    /// Static externalization/envelopment amount independent of trajectory motion.
     pub immersive_3d: f32,
-    /// Internal speaker-bed virtualization used only for authored mono/stereo programme. Native
-    /// multichannel metadata always keeps its authored layout and ignores this control.
+    /// Mono/stereo selects an internal virtual speaker bed. For metadata-less/discrete
+    /// multichannel, an explicit matching layout also acts as a user-confirmed Source Layout
+    /// Override so the original N-channel PCM can enter the native renderer without a stereo fold.
+    /// Reliable codec/container speaker metadata always has priority over this control.
     pub virtual_bed: VirtualBedMode,
-    /// Dynamic source trajectory used by 8D/360/planetary modes.
+    /// Dynamic source trajectory used by moving spherical scenes, including lower-hemisphere Helix.
     pub motion_mode: SpatialMotionMode,
     /// Orbit cycles per second. Normal UI range is roughly 0.02..0.30 Hz.
     pub motion_speed_hz: f32,
