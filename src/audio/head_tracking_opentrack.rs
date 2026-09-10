@@ -3,7 +3,7 @@ use std::{
     io,
     net::{SocketAddr, UdpSocket},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -265,6 +265,59 @@ impl OpenTrackHeadTrackingService {
 impl Drop for OpenTrackHeadTrackingService {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+/// Process-global control facade used by settings/UI. The Mutex protects lifecycle operations only;
+/// neither the realtime audio callback nor the OpenTrack polling loop ever locks it. This keeps the
+/// convenience API separate from the lock-free ListenerPose transport consumed by SpatialEngine.
+fn global_service_slot() -> &'static Mutex<Option<OpenTrackHeadTrackingService>> {
+    static SERVICE: OnceLock<Mutex<Option<OpenTrackHeadTrackingService>>> = OnceLock::new();
+    SERVICE.get_or_init(|| Mutex::new(None))
+}
+
+/// Start (or restart) the process-wide OpenTrack input service. An existing service is stopped before
+/// binding the requested UDP endpoint so rebinding the default port cannot race the old socket.
+pub fn start_opentrack_head_tracking(config: OpenTrackUdpConfig) -> io::Result<()> {
+    let mut slot = lock_service_slot();
+    if let Some(service) = slot.take() {
+        service.stop();
+    }
+    *slot = Some(OpenTrackHeadTrackingService::start(config)?);
+    Ok(())
+}
+
+/// Stop the process-wide OpenTrack service. Returns whether a live service object existed.
+pub fn stop_opentrack_head_tracking() -> bool {
+    let service = lock_service_slot().take();
+    let Some(service) = service else {
+        return false;
+    };
+    service.stop();
+    true
+}
+
+/// Ask the process-wide service to use its latest valid tracker sample as the new neutral pose.
+/// The request is asynchronous and never enters the realtime audio command path.
+pub fn recenter_opentrack_head_tracking() -> bool {
+    let slot = lock_service_slot();
+    let Some(service) = slot.as_ref().filter(|service| service.is_running()) else {
+        return false;
+    };
+    service.request_recenter();
+    true
+}
+
+pub fn opentrack_head_tracking_running() -> bool {
+    lock_service_slot()
+        .as_ref()
+        .is_some_and(OpenTrackHeadTrackingService::is_running)
+}
+
+fn lock_service_slot() -> std::sync::MutexGuard<'static, Option<OpenTrackHeadTrackingService>> {
+    match global_service_slot().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
