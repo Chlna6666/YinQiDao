@@ -9,6 +9,7 @@ mod engine;
 mod facade;
 mod fingerprint;
 mod head_tracking;
+mod head_tracking_opentrack;
 mod smart_profile;
 mod spatial_activity;
 mod spatial_debug;
@@ -25,6 +26,9 @@ pub(crate) use fingerprint::fingerprint_file;
 pub use head_tracking::{
     HeadTrackingBridge, HeadTrackingCalibration, HeadTrackingEulerPose, HeadTrackingProvider,
     ManualHeadTrackingProvider,
+};
+pub use head_tracking_opentrack::{
+    OpenTrackUdpConfig, OpenTrackUdpProvider, OpenTrackUdpTransform,
 };
 pub use smart_profile::classify as classify_smart_audio;
 pub use spatial_debug::spatial_debug_latest_snapshot;
