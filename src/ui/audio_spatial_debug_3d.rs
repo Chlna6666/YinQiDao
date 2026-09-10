@@ -14,6 +14,10 @@ use yinqidao_audio_spatial::{
 mod spherical_grid;
 use spherical_grid::{bounded_fit_radius, direct_field_radius, for_each_spherical_segment};
 
+#[path = "audio_spatial_debug_room.rs"]
+mod room_reference;
+use room_reference::{ProjectedRoomReference, RoomSegmentKind};
+
 mod humanoid_generated {
     include!("audio_debug_humanoid_generated.rs");
 }
@@ -35,6 +39,8 @@ const EAR_LATITUDE_SEGMENTS: usize = 8;
 const BOUNCE_RADIUS: f32 = 0.035;
 const SPHERE_GRID_WIDTH: f32 = 0.0038;
 const LATE_FIELD_GRID_WIDTH: f32 = 0.0028;
+const ROOM_EDGE_WIDTH: f32 = 0.0022;
+const ROOM_GRID_WIDTH: f32 = 0.0014;
 const PATH_WIDTH: f32 = 0.008;
 const DIRECT_EAR_PATH_WIDTH: f32 = 0.0045;
 const VELOCITY_WIDTH: f32 = 0.010;
@@ -204,6 +210,9 @@ fn build_scene_mesh(
     let (left_ear_world, right_ear_world) = listener.ear_positions();
     let left_ear = to_local(left_ear_world);
     let right_ear = to_local(right_ear_world);
+    let room_reference = (snapshot.environment.mix > 1.0e-5).then(|| {
+        ProjectedRoomReference::from_fixed_world_room(listener, snapshot.environment)
+    });
 
     let source_count = snapshot.source_count.min(snapshot.sources.len());
     let mut source_positions = [[0.0_f32; 3]; MAX_DEBUG_SOURCES];
@@ -226,6 +235,9 @@ fn build_scene_mesh(
         if reflection.active {
             acoustic_extent = acoustic_extent.max(length3(to_local(reflection.bounce_position)));
         }
+    }
+    if let Some(room) = room_reference {
+        acoustic_extent = acoustic_extent.max(room.max_extent());
     }
     let fit_radius = bounded_fit_radius(field_radius, acoustic_extent);
 
@@ -257,11 +269,33 @@ fn build_scene_mesh(
     }
     let opaque_count = builder.indices.len() as u32;
 
-    // The listener-centric sphere is the primary world reference. The previous room box/floor/
-    // ceiling grids made six rectangular surfaces look like the source domain even though direct
-    // localization is spherical. Room geometry is now represented only by actual reflection paths.
+    // Direct localization stays listener-centric and spherical. The rectangular room is drawn only
+    // as a low-alpha diagnostic reference in the fixed world frame, projected through ListenerPose;
+    // rotating/moving the listener therefore changes the view of the walls instead of dragging the
+    // walls along with the head.
     builder.push_spherical_field(field_radius);
     builder.push_axis_guides(field_radius);
+    if let Some(room) = room_reference {
+        let room_alpha = (0.035 + snapshot.environment_contribution.clamp(0.0, 1.0) * 0.13)
+            .clamp(0.035, 0.085);
+        room.for_each_segment(|start, end, kind| {
+            let (width, color) = match kind {
+                RoomSegmentKind::Edge => (
+                    ROOM_EDGE_WIDTH,
+                    [0.54, 0.64, 0.76, room_alpha],
+                ),
+                RoomSegmentKind::FloorGrid => (
+                    ROOM_GRID_WIDTH,
+                    [0.96, 0.74, 0.30, room_alpha * 0.68],
+                ),
+                RoomSegmentKind::CeilingGrid => (
+                    ROOM_GRID_WIDTH,
+                    [0.44, 0.86, 0.96, room_alpha * 0.62],
+                ),
+            };
+            builder.push_segment(start, end, width, color);
+        });
+    }
     builder.push_segment(left_ear, right_ear, 0.008, [0.58, 0.68, 0.80, 0.36]);
 
     for source in snapshot.sources[..source_count].iter().copied() {
@@ -324,8 +358,8 @@ fn build_scene_mesh(
         }
     }
 
-    // Rectangular-room acoustics remain visible only as the real image-source path. This keeps the
-    // reflection implementation inspectable without presenting the room as the virtual source world.
+    // The faint projected box shows where the world-fixed room surfaces actually are; the stronger
+    // paths below remain the authoritative image-source source→bounce→ear geometry.
     for reflection in snapshot.reflections[..reflection_count].iter().copied() {
         if !reflection.active {
             continue;
