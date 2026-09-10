@@ -1,47 +1,63 @@
 use std::f32::consts::PI;
+use std::sync::OnceLock;
 
 const LATITUDE_DEGREES: [f32; 5] = [-60.0, -30.0, 0.0, 30.0, 60.0];
 const MERIDIAN_COUNT: usize = 6;
 const RING_SEGMENTS: usize = 32;
+type UnitSegment = ([f32; 3], [f32; 3], bool);
 
 /// Listener-centric spherical reference field used by the GPU spatial debugger.
 ///
-/// This module deliberately produces only line segments. The caller owns the actual GPU mesh
-/// builder, so the field stays independent from GPUI and can be unit-tested without a graphics
-/// context. The rectangular room is an acoustics implementation detail and must not define the
-/// primary source-space visualization.
+/// Trigonometry is evaluated only once for the unit sphere. The 30 Hz debug mesh update then only
+/// scales cached endpoints by the current direct-field radius. The rectangular room is an acoustics
+/// implementation detail and never defines the primary source-space visualization.
 pub(super) fn for_each_spherical_segment(
     radius: f32,
     mut visit: impl FnMut([f32; 3], [f32; 3], bool),
 ) {
     let radius = finite_or(radius, 1.8).max(0.05);
-
-    for latitude_degrees in LATITUDE_DEGREES {
-        let latitude = latitude_degrees.to_radians();
-        let y = radius * latitude.sin();
-        let ring_radius = radius * latitude.cos();
-        let mut previous = latitude_point(ring_radius, y, 0.0);
-        for segment in 1..=RING_SEGMENTS {
-            let phase = PI * 2.0 * segment as f32 / RING_SEGMENTS as f32;
-            let current = latitude_point(ring_radius, y, phase);
-            visit(previous, current, latitude_degrees == 0.0);
-            previous = current;
-        }
+    for &(start, end, equator) in unit_segments() {
+        visit(scale3(start, radius), scale3(end, radius), equator);
     }
+}
 
-    // A meridian and its PI-shifted counterpart describe the same great circle, so [0, PI) is
-    // sufficient. Six great circles plus five latitude rings keep the sphere immediately readable
-    // while staying cheap enough for the 30 Hz diagnostic mesh rebuild cadence.
-    for meridian in 0..MERIDIAN_COUNT {
-        let azimuth = PI * meridian as f32 / MERIDIAN_COUNT as f32;
-        let mut previous = meridian_point(radius, azimuth, 0.0);
-        for segment in 1..=RING_SEGMENTS {
-            let phase = PI * 2.0 * segment as f32 / RING_SEGMENTS as f32;
-            let current = meridian_point(radius, azimuth, phase);
-            visit(previous, current, false);
-            previous = current;
-        }
-    }
+fn unit_segments() -> &'static [UnitSegment] {
+    static SEGMENTS: OnceLock<Box<[UnitSegment]>> = OnceLock::new();
+    SEGMENTS
+        .get_or_init(|| {
+            let mut segments = Vec::with_capacity(
+                (LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS,
+            );
+
+            for latitude_degrees in LATITUDE_DEGREES {
+                let latitude = latitude_degrees.to_radians();
+                let y = latitude.sin();
+                let ring_radius = latitude.cos();
+                let mut previous = latitude_point(ring_radius, y, 0.0);
+                for segment in 1..=RING_SEGMENTS {
+                    let phase = PI * 2.0 * segment as f32 / RING_SEGMENTS as f32;
+                    let current = latitude_point(ring_radius, y, phase);
+                    segments.push((previous, current, latitude_degrees == 0.0));
+                    previous = current;
+                }
+            }
+
+            // A meridian and its PI-shifted counterpart describe the same great circle, so [0, PI)
+            // is sufficient. Six great circles plus five latitude rings keep the sphere readable.
+            for meridian in 0..MERIDIAN_COUNT {
+                let azimuth = PI * meridian as f32 / MERIDIAN_COUNT as f32;
+                let mut previous = meridian_point(1.0, azimuth, 0.0);
+                for segment in 1..=RING_SEGMENTS {
+                    let phase = PI * 2.0 * segment as f32 / RING_SEGMENTS as f32;
+                    let current = meridian_point(1.0, azimuth, phase);
+                    segments.push((previous, current, false));
+                    previous = current;
+                }
+            }
+
+            segments.into_boxed_slice()
+        })
+        .as_ref()
 }
 
 /// Choose the visible listener-centric shell from the actual direct-source geometry. Reflection
@@ -85,6 +101,11 @@ fn meridian_point(radius: f32, azimuth: f32, phase: f32) -> [f32; 3] {
 }
 
 #[inline]
+fn scale3(value: [f32; 3], scale: f32) -> [f32; 3] {
+    [value[0] * scale, value[1] * scale, value[2] * scale]
+}
+
+#[inline]
 fn length3(value: [f32; 3]) -> f32 {
     (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
 }
@@ -111,6 +132,13 @@ mod tests {
             count,
             (LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS
         );
+    }
+
+    #[test]
+    fn unit_grid_is_built_once_and_reused() {
+        let first = unit_segments().as_ptr();
+        let second = unit_segments().as_ptr();
+        assert_eq!(first, second);
     }
 
     #[test]
