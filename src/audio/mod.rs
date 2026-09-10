@@ -8,6 +8,7 @@ mod engine;
 #[rustfmt::skip]
 mod facade;
 mod fingerprint;
+mod head_tracking;
 mod smart_profile;
 mod spatial_activity;
 mod spatial_debug;
@@ -21,6 +22,10 @@ pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::AudioEngine;
 pub(crate) use fingerprint::fingerprint_file;
+pub use head_tracking::{
+    HeadTrackingBridge, HeadTrackingCalibration, HeadTrackingEulerPose, HeadTrackingProvider,
+    ManualHeadTrackingProvider,
+};
 pub use smart_profile::classify as classify_smart_audio;
 pub use spatial_debug::spatial_debug_latest_snapshot;
 pub use yinqidao_audio_spatial::{
