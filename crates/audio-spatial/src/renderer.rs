@@ -19,6 +19,7 @@ const NEAR_FIELD_FULL_METERS: f32 = 0.25;
 const NEAR_FIELD_FADE_METERS: f32 = 1.20;
 const AIR_ABSORPTION_START_METERS: f32 = 1.0;
 const REFLECTION_EPSILON: f32 = 1.0e-5;
+const REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES: f32 = 0.90;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderParameters {
@@ -209,9 +210,14 @@ impl SourceState {
         if environment.mix <= REFLECTION_EPSILON {
             return [ReflectionRenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
         }
-        if self.cached_reflection_pose == Some(pose)
-            && self.cached_reflection_listener == Some(listener)
-            && self.cached_reflection_environment == Some(environment)
+        if self.cached_reflection_environment == Some(environment)
+            && reflection_control_cache_matches(
+                sample_rate,
+                self.cached_reflection_pose,
+                pose,
+                self.cached_reflection_listener,
+                listener,
+            )
         {
             return self.cached_reflection_parameters;
         }
@@ -546,6 +552,57 @@ impl CpuRenderer {
 }
 
 #[inline]
+fn reflection_control_cache_matches(
+    sample_rate: f32,
+    cached_pose: Option<SourcePose>,
+    pose: SourcePose,
+    cached_listener: Option<ListenerPose>,
+    listener: ListenerPose,
+) -> bool {
+    let (Some(cached_pose), Some(cached_listener)) = (cached_pose, cached_listener) else {
+        return false;
+    };
+
+    // Gain/spread alter reflected level and pinna coefficients directly. Head orientation changes
+    // reflected binaural direction even when world-space geometry is stationary, so these controls
+    // stay exact while only translation is allowed to use the control-rate tolerance.
+    if cached_pose.gain != pose.gain
+        || cached_pose.spread != pose.spread
+        || cached_listener.forward != listener.forward
+        || cached_listener.up != listener.up
+    {
+        return false;
+    }
+
+    let Some(source_motion) = finite_distance(cached_pose.position, pose.position) else {
+        return false;
+    };
+    let Some(listener_motion) = finite_distance(cached_listener.position, listener.position) else {
+        return false;
+    };
+
+    source_motion + listener_motion <= reflection_control_displacement_budget(sample_rate)
+}
+
+#[inline]
+fn reflection_control_displacement_budget(sample_rate: f32) -> f32 {
+    // The excess image-source path is |image-listener| - |source-listener|. Both distances are
+    // 1-Lipschitz under source/listener translation, so bounding their combined displacement by
+    // error*c/(2*Fs) keeps the worst-case excess-delay error strictly below one sample.
+    REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES * SPEED_OF_SOUND_M_S
+        / (2.0 * sample_rate.max(1.0))
+}
+
+#[inline]
+fn finite_distance(a: Vec3, b: Vec3) -> Option<f32> {
+    let delta = a - b;
+    if !delta.x.is_finite() || !delta.y.is_finite() || !delta.z.is_finite() {
+        return None;
+    }
+    Some(delta.length())
+}
+
+#[inline]
 fn listener_direction_angles(position: Vec3, listener: ListenerPose) -> (f32, f32) {
     let raw_relative = position - listener.position;
     let relative = Vec3::new(
@@ -857,6 +914,63 @@ mod tests {
                 .all(|reflection| reflection.path.left_delay >= direct.left_delay)
         );
         assert!(wet.iter().any(|reflection| reflection.path.left_gain > 0.0));
+    }
+
+    #[test]
+    fn reflection_control_cache_reuses_sub_sample_translation() {
+        let mut state = SourceState::new(4_096, 64);
+        let listener = ListenerPose::identity();
+        let environment = EnvironmentSettings {
+            mix: 0.18,
+            ..EnvironmentSettings::default()
+        };
+        let anchor = SourcePose::new(Vec3::new(0.45, 0.15, 1.0));
+        state.reflection_parameters_for(48_000.0, anchor, listener, environment);
+        assert_eq!(state.cached_reflection_pose, Some(anchor));
+
+        let budget = reflection_control_displacement_budget(48_000.0);
+        let mut near = anchor;
+        near.position.x += budget * 0.5;
+        state.reflection_parameters_for(48_000.0, near, listener, environment);
+        assert_eq!(state.cached_reflection_pose, Some(anchor));
+
+        let mut beyond = anchor;
+        beyond.position.x += budget * 1.5;
+        state.reflection_parameters_for(48_000.0, beyond, listener, environment);
+        assert_eq!(state.cached_reflection_pose, Some(beyond));
+    }
+
+    #[test]
+    fn reflection_control_budget_is_strictly_sub_sample() {
+        let sample_rate = 48_000.0;
+        let budget = reflection_control_displacement_budget(sample_rate);
+        let worst_case_path_error_samples =
+            budget * 2.0 / SPEED_OF_SOUND_M_S * sample_rate;
+        assert!(worst_case_path_error_samples < 1.0);
+        assert!(
+            (worst_case_path_error_samples - REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES).abs()
+                < 1.0e-6
+        );
+    }
+
+    #[test]
+    fn reflection_control_cache_does_not_quantize_head_rotation() {
+        let mut state = SourceState::new(4_096, 64);
+        let environment = EnvironmentSettings {
+            mix: 0.18,
+            ..EnvironmentSettings::default()
+        };
+        let pose = SourcePose::new(Vec3::new(0.45, 0.15, 1.0));
+        let identity = ListenerPose::identity();
+        state.reflection_parameters_for(48_000.0, pose, identity, environment);
+
+        let rotated = ListenerPose {
+            forward: Vec3::RIGHT,
+            up: Vec3::UP,
+            ..identity
+        };
+        state.reflection_parameters_for(48_000.0, pose, rotated, environment);
+        assert_eq!(state.cached_reflection_listener, Some(rotated));
     }
 
     #[test]
