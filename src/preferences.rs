@@ -3,7 +3,7 @@ use gpui::Context;
 use crate::{
     audio::{EqPreset, PlayerCommand, SpatialPreset, clamp_eq, clamp_spatial},
     audio_policy::{policy_from_config, set_audio_runtime_policy},
-    model::{SpatialSettings, TransitionMode},
+    model::{SpatialSettings, TransitionMode, VirtualBedMode},
     ui::MusicApp,
 };
 
@@ -139,6 +139,29 @@ impl MusicApp {
         self.config.spatial.enabled = !self.config.spatial.enabled;
         self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
         self.persist_audio_preferences();
+        cx.notify();
+    }
+
+    /// Select the internal speaker bed used only when the decoder supplies mono/stereo programme.
+    /// Native multichannel layouts never pass through this setting: their authored channel contract
+    /// is preserved by `render_native_spatial_into` and only receives the shared scene transform.
+    pub(crate) fn set_virtual_bed_mode(
+        &mut self,
+        mode: VirtualBedMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.disable_smart_audio_for_manual_tuning();
+        self.config.spatial.virtual_bed = mode;
+        if mode != VirtualBedMode::Off {
+            self.config.spatial.enabled = true;
+        }
+        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
+        self.persist_audio_preferences();
+        self.status = match mode {
+            VirtualBedMode::Off => "立体声虚拟多声道已关闭；保留双声源空间处理".into(),
+            VirtualBedMode::Auto => "立体声虚拟声床已切换为自动布局".into(),
+            _ => format!("立体声虚拟声床已切换为 {mode:?}"),
+        };
         cx.notify();
     }
 
