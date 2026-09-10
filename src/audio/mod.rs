@@ -26,3 +26,20 @@ pub use spatial_debug::spatial_debug_latest_snapshot;
 pub use yinqidao_audio_spatial::{
     ListenerPose, Vec3, reset_runtime_listener_pose, set_runtime_listener_pose,
 };
+
+impl AudioEngine {
+    /// Publish a high-rate listener/head pose directly to the spatial DSP without entering the
+    /// bounded PlayerCommand mailbox. The spatial engines consume the latest coherent pose once per
+    /// internal render block, so head tracking cannot queue stale orientation updates behind decoder
+    /// or transport work.
+    #[inline]
+    pub fn set_listener_pose(&self, pose: ListenerPose) {
+        set_runtime_listener_pose(pose);
+    }
+
+    /// Restore the identity listener pose through the same lock-free runtime channel.
+    #[inline]
+    pub fn reset_listener_pose(&self) {
+        reset_runtime_listener_pose();
+    }
+}
