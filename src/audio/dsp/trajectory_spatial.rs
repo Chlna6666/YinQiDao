@@ -11,7 +11,8 @@ use crate::model::{SpatialMotionMode, SpatialSettings, VirtualBedMode};
 use stereo_virtual_bed::StereoVirtualBed;
 use yinqidao_audio_spatial::{
     ChannelLayout, EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
-    SpatialDebugSnapshot, SpatialEngine, SpeakerLayout, Trajectory, TrajectoryKind, Vec3,
+    SpeakerBedGeometry, SpatialDebugSnapshot, SpatialEngine, SpeakerLayout, Trajectory,
+    TrajectoryKind, Vec3,
 };
 
 const MIN_TRAJECTORY_RADIUS_METERS: f32 = 0.45;
@@ -24,6 +25,10 @@ const MAX_STEREO_HALF_ANGLE_DEGREES: f32 = 120.0;
 const STEREO_DEPTH_ELEVATION_RANGE_DEGREES: f32 = 10.0;
 const STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES: f32 = 34.0;
 const MAX_STEREO_ELEVATION_DEGREES: f32 = 42.0;
+const STATIC_VIRTUAL_FRONT_ELEVATION_DEGREES: f32 = 8.0;
+const STATIC_VIRTUAL_SURROUND_ELEVATION_DEGREES: f32 = -22.0;
+const STATIC_VIRTUAL_REAR_ELEVATION_DEGREES: f32 = -32.0;
+const STATIC_VIRTUAL_TOP_ELEVATION_DEGREES: f32 = 14.0;
 const MIN_STEREO_DISTANCE_METERS: f32 = 0.72;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.00;
 const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
@@ -190,6 +195,35 @@ impl EnvironmentSignature {
 
     fn settings(self) -> EnvironmentSettings {
         self.settings
+    }
+}
+
+/// Static stereo-derived beds use a different vertical calibration from moving Scene Motion.
+///
+/// Dynamic trajectories already supply signed elevation to the whole bed, so adding another fixed
+/// tilt there would double-count height and distort a rigid 8D/360/Helix scene. Static virtual beds
+/// instead place synthesized surround/rear support below the horizon while lifting top roles above
+/// their standard +45° geometry. The centre channel remains at 0° in the spatial crate. These are
+/// virtual-source positions only; they do not redefine 5.1.4/7.1.4 as having floor speakers.
+#[inline]
+fn static_virtual_bed_geometry(
+    settings: &SpatialSettings,
+    dynamic: bool,
+) -> SpeakerBedGeometry {
+    if dynamic || !settings.enabled {
+        return SpeakerBedGeometry::IDENTITY;
+    }
+    let immersive = settings.immersive_3d.clamp(0.0, 1.0);
+    let depth = settings.depth.clamp(0.0, 1.0);
+    let vertical = (immersive * 0.82 + depth * 0.18).clamp(0.0, 1.0);
+    if vertical <= 1.0e-5 {
+        return SpeakerBedGeometry::IDENTITY;
+    }
+    SpeakerBedGeometry {
+        front_elevation_offset_degrees: STATIC_VIRTUAL_FRONT_ELEVATION_DEGREES * vertical,
+        surround_elevation_offset_degrees: STATIC_VIRTUAL_SURROUND_ELEVATION_DEGREES * vertical,
+        rear_elevation_offset_degrees: STATIC_VIRTUAL_REAR_ELEVATION_DEGREES * vertical,
+        top_elevation_offset_degrees: STATIC_VIRTUAL_TOP_ELEVATION_DEGREES * vertical,
     }
 }
 
@@ -436,8 +470,10 @@ impl StereoSpatializer {
         self.ensure_field(settings);
         self.ensure_environment(settings);
         let trajectory_signature = TrajectorySignature::from_settings(settings);
-        let virtual_layout = virtual_bed_layout(settings, trajectory_signature.is_some());
-        let wet_mix = stereo_wet_mix(settings, trajectory_signature.is_some());
+        let dynamic = trajectory_signature.is_some();
+        let virtual_layout = virtual_bed_layout(settings, dynamic);
+        let virtual_geometry = static_virtual_bed_geometry(settings, dynamic);
+        let wet_mix = stereo_wet_mix(settings, dynamic);
         if wet_mix <= 1.0e-5 {
             self.tonal_anchor.reset();
             return true;
@@ -455,7 +491,13 @@ impl StereoSpatializer {
             // trajectory so there is exactly one sample clock and exactly one spatialization pass.
             self.ensure_trajectory(None);
             apply_scene_motion_settings(&mut self.engine, settings);
-            return self.process_virtual_bed(samples, layout, wet_mix, tonal_target);
+            return self.process_virtual_bed(
+                samples,
+                layout,
+                virtual_geometry,
+                wet_mix,
+                tonal_target,
+            );
         }
 
         self.engine.set_scene_motion(None, 0.10, 1.0, 0.0, true);
@@ -518,6 +560,7 @@ impl StereoSpatializer {
         &mut self,
         samples: &mut [f32],
         layout: ChannelLayout,
+        geometry: SpeakerBedGeometry,
         wet_mix: f32,
         tonal_target: StereoTonalTarget,
     ) -> bool {
@@ -547,9 +590,10 @@ impl StereoSpatializer {
             }
             if self
                 .engine
-                .render_interleaved_layout(
+                .render_interleaved_layout_with_geometry(
                     &self.virtual_bed_scratch[..virtual_samples],
                     layout,
+                    geometry,
                     &mut self.wet_scratch[..frames * 2],
                 )
                 .is_err()
@@ -920,6 +964,41 @@ mod tests {
         let elevation = field.elevation_sin.asin().to_degrees();
         assert!(elevation > 30.0);
         assert!(elevation <= MAX_STEREO_ELEVATION_DEGREES);
+    }
+
+    #[test]
+    fn static_virtual_bed_uses_both_hemispheres_without_redefining_dynamic_scene_motion() {
+        let static_geometry =
+            static_virtual_bed_geometry(&SpatialPreset::Immersive3d.settings(), false);
+        assert!(static_geometry.front_elevation_offset_degrees > 5.0);
+        assert!(static_geometry.surround_elevation_offset_degrees < -15.0);
+        assert!(static_geometry.rear_elevation_offset_degrees < -22.0);
+        assert!(static_geometry.top_elevation_offset_degrees > 10.0);
+
+        for preset in [SpatialPreset::Orbit8d, SpatialPreset::Orbit360, SpatialPreset::HelixSphere] {
+            assert_eq!(
+                static_virtual_bed_geometry(&preset.settings(), true),
+                SpeakerBedGeometry::IDENTITY
+            );
+        }
+    }
+
+    #[test]
+    fn static_immersive_virtual_bed_publishes_upper_and_lower_source_geometry() {
+        let settings = SpatialPreset::Immersive3d.settings();
+        let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
+        spatializer.set_debug_enabled(true);
+        let mut samples = vec![0.12_f32; 64 * 2];
+        assert!(spatializer.process_in_place(&mut samples, &settings));
+        let snapshot = spatializer.debug_snapshot().expect("debug snapshot");
+        assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
+        assert!(snapshot.sources[4].position.y < -0.35);
+        assert!(snapshot.sources[6].position.y < -0.25);
+        assert!(snapshot.sources[8].position.y > 0.75);
+        assert!(snapshot.sources[10].position.y > 0.75);
+        assert!(snapshot.sources[2].position.y.abs() < 1.0e-5);
+        assert_eq!(snapshot.sources[3].kind, yinqidao_audio_spatial::SpatialDebugSourceKind::Lfe);
+        assert_eq!(snapshot.sources[3].position, Vec3::FORWARD);
     }
 
     #[test]
