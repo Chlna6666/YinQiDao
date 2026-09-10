@@ -5,6 +5,9 @@ use crate::{
     listener_control::latest_runtime_listener_pose, renderer::CpuRenderer,
 };
 
+mod bed_geometry;
+pub use bed_geometry::SpeakerBedGeometry;
+
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
 pub const DEFAULT_MAX_SOURCES: usize = 32;
 
