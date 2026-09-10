@@ -49,6 +49,7 @@ impl TrajectorySignature {
             SpatialMotionMode::FrontBack => TrajectoryKind::FrontBack,
             SpatialMotionMode::Planetary => TrajectoryKind::Planetary,
             SpatialMotionMode::NearEar => TrajectoryKind::NearEar,
+            SpatialMotionMode::Helix => TrajectoryKind::Helix,
         };
         let speed_hz = if settings.motion_speed_hz.is_finite() {
             settings.motion_speed_hz.clamp(0.005, 2.0)
@@ -573,6 +574,14 @@ mod tests {
     }
 
     #[test]
+    fn helix_sphere_maps_to_audio_clock_helix() {
+        let settings = SpatialPreset::HelixSphere.settings();
+        let signature = TrajectorySignature::from_settings(&settings).expect("dynamic");
+        assert_eq!(signature.kind, TrajectoryKind::Helix);
+        assert!(signature.radius_meters > MIN_TRAJECTORY_RADIUS_METERS);
+    }
+
+    #[test]
     fn front_back_preset_maps_to_audio_clock_front_back() {
         let settings = SpatialPreset::FrontBack.settings();
         let signature = TrajectorySignature::from_settings(&settings).expect("dynamic");
@@ -618,6 +627,7 @@ mod tests {
             SpatialPreset::FrontBack,
             SpatialPreset::Planetary,
             SpatialPreset::NearEar,
+            SpatialPreset::HelixSphere,
         ] {
             let settings = preset.settings();
             assert_eq!(
@@ -625,6 +635,16 @@ mod tests {
                 Some(ChannelLayout::Surround7_1_4)
             );
         }
+    }
+
+    #[test]
+    fn hifi_direct_disables_virtual_bed_and_synthetic_spatial_processing() {
+        let settings = SpatialPreset::Hifi.settings();
+        assert!(!settings.enabled);
+        assert_eq!(settings.virtual_bed, VirtualBedMode::Off);
+        assert_eq!(settings.motion_mode, SpatialMotionMode::Static);
+        assert_eq!(settings.mix, 0.0);
+        assert_eq!(virtual_bed_layout(&settings, false), None);
     }
 
     #[test]
@@ -748,6 +768,20 @@ mod tests {
         assert_eq!(spatializer.sample_clock(), Some(128));
         spatializer.reset();
         assert_eq!(spatializer.sample_clock(), Some(0));
+    }
+
+    #[test]
+    fn helix_virtual_bed_uses_native_scene_motion_clock() {
+        let settings = SpatialPreset::HelixSphere.settings();
+        let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
+        let mut samples = vec![0.20_f32; 128 * 2];
+        assert!(spatializer.process_in_place(&mut samples, &settings));
+        assert_eq!(
+            spatializer.active_virtual_layout(),
+            Some(ChannelLayout::Surround7_1_4)
+        );
+        assert_eq!(spatializer.sample_clock(), Some(128));
+        assert!(samples.iter().all(|sample| sample.is_finite()));
     }
 
     #[test]
