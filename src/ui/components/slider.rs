@@ -125,11 +125,13 @@ struct SliderInteractionState {
 
 impl Global for SliderInteractionState {}
 
-fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
-    let thumb = f32::from(thumb_size);
-    let usable_width = (f32::from(bounds.size.width) - thumb).max(1.0);
-    let local = f32::from(position_x - bounds.left()) - thumb * 0.5;
-    (local / usable_width).clamp(0.0, 1.0)
+fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
+    // The colored rail is painted across the complete element width, so pointer coordinates must
+    // use that exact same interval. The old half-thumb inset mapped a click to a different ratio
+    // than the visible fill and accumulated into seconds of seek error on long tracks.
+    let width = f32::from(bounds.size.width).max(1.0);
+    let local = f32::from(position_x - bounds.left());
+    (local / width).clamp(0.0, 1.0)
 }
 
 fn vertical_ratio(position_y: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels) -> f32 {
@@ -199,6 +201,7 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
     let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
+    let half_thumb = px(f32::from(style.thumb_size) * 0.5);
 
     let mut thumb = div()
         .flex_none()
@@ -266,11 +269,13 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     };
 
     let thumb_layer = if style.edge_overlay {
-        // Centre the knob on the expanded outward rail rather than pushing it into the player body.
+        // Keep the thumb centre on the same full-width coordinate as the fill and pointer mapping.
+        // The layer itself stays W wide while extending half a thumb to the left, so 0/1 map to
+        // the exact rail endpoints rather than an inset [thumb/2, W-thumb/2] interval.
         div()
             .absolute()
-            .left(px(0.0))
-            .right(style.thumb_size)
+            .left(px(-f32::from(half_thumb)))
+            .right(half_thumb)
             .top(edge_hover_top)
             .h(style.hover_track_height)
             .flex()
@@ -280,8 +285,8 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     } else {
         div()
             .absolute()
-            .left(px(0.0))
-            .right(style.thumb_size)
+            .left(px(-f32::from(half_thumb)))
+            .right(half_thumb)
             .top(px(0.0))
             .bottom(px(0.0))
             .flex()
@@ -613,15 +618,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pointer_mapping_matches_thumb_travel() {
+    fn pointer_mapping_matches_visible_track() {
         let bounds = Bounds::new(
             gpui::point(px(100.0), px(0.0)),
             gpui::size(px(210.0), px(12.0)),
         );
         let thumb = px(10.0);
-        assert_eq!(horizontal_ratio(px(105.0), bounds, thumb), 0.0);
+        assert_eq!(horizontal_ratio(px(100.0), bounds, thumb), 0.0);
         assert!((horizontal_ratio(px(205.0), bounds, thumb) - 0.5).abs() < 0.0001);
-        assert_eq!(horizontal_ratio(px(305.0), bounds, thumb), 1.0);
+        assert_eq!(horizontal_ratio(px(310.0), bounds, thumb), 1.0);
     }
 
     #[test]
