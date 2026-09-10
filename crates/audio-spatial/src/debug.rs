@@ -2,7 +2,9 @@ use std::f32::consts::PI;
 
 use crate::environment::{EARLY_REFLECTION_TAP_COUNT, ReflectionWall, SPEED_OF_SOUND_M_S};
 use crate::image_source::source_reflection_descriptors;
-use crate::{EnvironmentSettings, ListenerPose, SourceActivity, SourceKind, SourcePose, Vec3};
+use crate::{
+    ChannelLayout, EnvironmentSettings, ListenerPose, SourceActivity, SourceKind, SourcePose, Vec3,
+};
 
 pub const MAX_DEBUG_SOURCES: usize = 32;
 pub const MAX_DEBUG_REFLECTION_SOURCES: usize = 12;
@@ -110,6 +112,11 @@ pub struct SpatialDebugSnapshot {
     pub sequence: u64,
     pub sample_rate: u32,
     pub rendered_frames: u64,
+    /// Exact semantic layout of the source bed that produced this snapshot. `None` is reserved for
+    /// render paths without a speaker-bed contract (for example one moving mono source).
+    /// Keeping this explicitly avoids the invalid 8ch=7.1 / 10ch=5.1.4 guesses in diagnostics:
+    /// 8 channels may also be 5.1.2 and 10 channels may also be 7.1.2.
+    pub layout: Option<ChannelLayout>,
     pub listener: ListenerPose,
     pub environment: EnvironmentSettings,
     pub environment_contribution: f32,
@@ -125,6 +132,7 @@ impl SpatialDebugSnapshot {
             sequence: 0,
             sample_rate,
             rendered_frames: 0,
+            layout: None,
             listener: ListenerPose::identity(),
             environment: EnvironmentSettings {
                 mix: 0.0,
@@ -190,11 +198,16 @@ impl SpatialDebugSnapshot {
         listener: ListenerPose,
         environment: EnvironmentSettings,
     ) {
+        self.layout = None;
         self.listener = listener;
         self.environment = environment;
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
         self.source_count = 0;
         self.reflection_count = 0;
+    }
+
+    pub(crate) fn set_layout(&mut self, layout: Option<ChannelLayout>) {
+        self.layout = layout;
     }
 
     pub(crate) fn record_source(
@@ -247,6 +260,7 @@ impl SpatialDebugSnapshot {
         listener: ListenerPose,
         environment: EnvironmentSettings,
     ) {
+        self.layout = None;
         self.listener = listener;
         self.environment = environment;
         self.environment_contribution = environment.mix.clamp(0.0, 1.0);
@@ -500,14 +514,17 @@ mod tests {
         assert_eq!(snapshot.sources.len(), MAX_DEBUG_SOURCES);
         assert_eq!(snapshot.reflections.len(), 72);
         assert_eq!(snapshot.source_count, 0);
+        assert_eq!(snapshot.layout, None);
     }
 
     #[test]
     fn source_activity_is_bound_to_scene_source_slot() {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
+        snapshot.set_layout(Some(ChannelLayout::Surround5_1_2));
         snapshot.record_source(0, SourceKind::FullRange, SourcePose::new(Vec3::FORWARD));
         snapshot.set_source_activity(0, SourceActivity { peak: 0.75, rms: 0.25 });
+        assert_eq!(snapshot.layout, Some(ChannelLayout::Surround5_1_2));
         assert!((snapshot.sources[0].input_peak - 0.75).abs() < f32::EPSILON);
         assert!((snapshot.sources[0].input_rms - 0.25).abs() < f32::EPSILON);
     }
