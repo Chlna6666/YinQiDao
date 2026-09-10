@@ -28,7 +28,9 @@ pub use debug::{
 };
 pub use debug_activity::{SourceActivity, analyze_interleaved_activity};
 pub use debug_room::debug_room_half_extents;
-pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine};
+pub use engine::{
+    DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpeakerBedGeometry, SpatialEngine,
+};
 pub use environment::EnvironmentSettings;
 pub use error::SpatialError;
 pub use late_field::{LateFieldTelemetry, late_field_telemetry};
