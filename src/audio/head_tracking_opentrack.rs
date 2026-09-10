@@ -1,0 +1,285 @@
+use std::{
+    f32::consts::PI,
+    io,
+    net::{SocketAddr, UdpSocket},
+};
+
+use yinqidao_audio_spatial::{ListenerPose, Vec3};
+
+use super::head_tracking::{HeadTrackingEulerPose, HeadTrackingProvider};
+
+const OPENTRACK_PACKET_VALUES: usize = 6;
+const OPENTRACK_PACKET_BYTES: usize = OPENTRACK_PACKET_VALUES * std::mem::size_of::<f64>();
+
+/// Coordinate/unit conversion applied to OpenTrack's raw `X/Y/Z/Yaw/Pitch/Roll` packet.
+///
+/// OpenTrack's UDP protocol transports six native-endian `double` values without a framing header.
+/// The default conversion follows its usual UI convention: translation in centimetres and rotation
+/// in degrees. Every scale/sign remains explicit so unusual tracker mappings can be adapted without
+/// changing the spatial renderer's +X right / +Y up / +Z forward convention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OpenTrackUdpTransform {
+    pub translation_scale_meters_per_unit: f32,
+    pub rotation_scale_radians_per_unit: f32,
+    pub position_sign: Vec3,
+    pub yaw_sign: f32,
+    pub pitch_sign: f32,
+    pub roll_sign: f32,
+}
+
+impl OpenTrackUdpTransform {
+    pub const fn centimeters_degrees() -> Self {
+        Self {
+            translation_scale_meters_per_unit: 0.01,
+            rotation_scale_radians_per_unit: PI / 180.0,
+            position_sign: Vec3::new(1.0, 1.0, 1.0),
+            yaw_sign: 1.0,
+            pitch_sign: 1.0,
+            roll_sign: 1.0,
+        }
+    }
+
+    pub fn map_raw(self, raw: [f64; OPENTRACK_PACKET_VALUES]) -> HeadTrackingEulerPose {
+        let translation_scale = finite_or(
+            self.translation_scale_meters_per_unit,
+            Self::centimeters_degrees().translation_scale_meters_per_unit,
+        );
+        let rotation_scale = finite_or(
+            self.rotation_scale_radians_per_unit,
+            Self::centimeters_degrees().rotation_scale_radians_per_unit,
+        );
+        let signs = sanitize_signs(self.position_sign);
+        let yaw_sign = sanitize_sign(self.yaw_sign);
+        let pitch_sign = sanitize_sign(self.pitch_sign);
+        let roll_sign = sanitize_sign(self.roll_sign);
+
+        HeadTrackingEulerPose {
+            position_meters: Vec3::new(
+                raw[0] as f32 * translation_scale * signs.x,
+                raw[1] as f32 * translation_scale * signs.y,
+                raw[2] as f32 * translation_scale * signs.z,
+            ),
+            yaw_radians: raw[3] as f32 * rotation_scale * yaw_sign,
+            pitch_radians: raw[4] as f32 * rotation_scale * pitch_sign,
+            roll_radians: raw[5] as f32 * rotation_scale * roll_sign,
+        }
+    }
+}
+
+impl Default for OpenTrackUdpTransform {
+    fn default() -> Self {
+        Self::centimeters_degrees()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OpenTrackUdpConfig {
+    /// Address YinQiDao listens on. OpenTrack's UDP output defaults to port 4242.
+    pub bind_addr: SocketAddr,
+    pub transform: OpenTrackUdpTransform,
+}
+
+impl Default for OpenTrackUdpConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 4242)),
+            transform: OpenTrackUdpTransform::default(),
+        }
+    }
+}
+
+/// Non-blocking OpenTrack "UDP over network" provider.
+///
+/// `poll_pose()` drains all currently queued datagrams and returns only the newest valid pose. This
+/// is intentional: head tracking is a latest-state control signal and stale UDP samples must not form
+/// a latency-growing queue ahead of the realtime spatial engine. Socket I/O belongs on an input/UI
+/// service thread; the audio callback still consumes only the lock-free ListenerPose slot.
+pub struct OpenTrackUdpProvider {
+    socket: UdpSocket,
+    transform: OpenTrackUdpTransform,
+    last_sender: Option<SocketAddr>,
+    accepted_packets: u64,
+    rejected_packets: u64,
+    last_io_error: Option<io::ErrorKind>,
+}
+
+impl OpenTrackUdpProvider {
+    pub fn bind(config: OpenTrackUdpConfig) -> io::Result<Self> {
+        let socket = UdpSocket::bind(config.bind_addr)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            socket,
+            transform: config.transform,
+            last_sender: None,
+            accepted_packets: 0,
+            rejected_packets: 0,
+            last_io_error: None,
+        })
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    pub fn transform(&self) -> OpenTrackUdpTransform {
+        self.transform
+    }
+
+    pub fn set_transform(&mut self, transform: OpenTrackUdpTransform) {
+        self.transform = transform;
+    }
+
+    pub fn last_sender(&self) -> Option<SocketAddr> {
+        self.last_sender
+    }
+
+    pub fn accepted_packets(&self) -> u64 {
+        self.accepted_packets
+    }
+
+    pub fn rejected_packets(&self) -> u64 {
+        self.rejected_packets
+    }
+
+    pub fn last_io_error(&self) -> Option<io::ErrorKind> {
+        self.last_io_error
+    }
+}
+
+impl HeadTrackingProvider for OpenTrackUdpProvider {
+    fn poll_pose(&mut self) -> Option<ListenerPose> {
+        let mut packet = [0_u8; 256];
+        let mut newest = None;
+
+        loop {
+            match self.socket.recv_from(&mut packet) {
+                Ok((length, sender)) => {
+                    self.last_io_error = None;
+                    let Some(raw) = decode_opentrack_packet(&packet[..length]) else {
+                        self.rejected_packets = self.rejected_packets.saturating_add(1);
+                        continue;
+                    };
+                    self.accepted_packets = self.accepted_packets.saturating_add(1);
+                    self.last_sender = Some(sender);
+                    newest = Some(self.transform.map_raw(raw).listener_pose());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    self.last_io_error = Some(error.kind());
+                    break;
+                }
+            }
+        }
+
+        newest
+    }
+
+    fn reset(&mut self) {
+        self.last_sender = None;
+        self.last_io_error = None;
+        let mut packet = [0_u8; 256];
+        loop {
+            match self.socket.recv_from(&mut packet) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+#[inline]
+fn decode_opentrack_packet(packet: &[u8]) -> Option<[f64; OPENTRACK_PACKET_VALUES]> {
+    if packet.len() != OPENTRACK_PACKET_BYTES {
+        return None;
+    }
+
+    let values = std::array::from_fn(|index| {
+        let start = index * std::mem::size_of::<f64>();
+        let bytes: [u8; 8] = packet[start..start + 8].try_into().expect("fixed packet slice");
+        f64::from_ne_bytes(bytes)
+    });
+    values.iter().all(|value| value.is_finite()).then_some(values)
+}
+
+#[inline]
+fn sanitize_signs(signs: Vec3) -> Vec3 {
+    Vec3::new(
+        sanitize_sign(signs.x),
+        sanitize_sign(signs.y),
+        sanitize_sign(signs.z),
+    )
+}
+
+#[inline]
+fn sanitize_sign(value: f32) -> f32 {
+    if !value.is_finite() || value == 0.0 {
+        1.0
+    } else if value < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+#[inline]
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packet(values: [f64; OPENTRACK_PACKET_VALUES]) -> [u8; OPENTRACK_PACKET_BYTES] {
+        let mut packet = [0_u8; OPENTRACK_PACKET_BYTES];
+        for (index, value) in values.into_iter().enumerate() {
+            let start = index * 8;
+            packet[start..start + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+        packet
+    }
+
+    #[test]
+    fn parses_exact_six_double_udp_contract() {
+        let raw = [12.0, -4.0, 35.0, 90.0, -30.0, 15.0];
+        assert_eq!(decode_opentrack_packet(&packet(raw)), Some(raw));
+        assert!(decode_opentrack_packet(&[0_u8; 47]).is_none());
+        assert!(decode_opentrack_packet(&[0_u8; 49]).is_none());
+    }
+
+    #[test]
+    fn rejects_non_finite_tracker_packets() {
+        let raw = [0.0, 0.0, 0.0, f64::NAN, 0.0, 0.0];
+        assert!(decode_opentrack_packet(&packet(raw)).is_none());
+    }
+
+    #[test]
+    fn default_transform_maps_centimeters_and_degrees() {
+        let pose = OpenTrackUdpTransform::default()
+            .map_raw([25.0, -10.0, 50.0, 90.0, 30.0, 0.0]);
+        assert!((pose.position_meters.x - 0.25).abs() < 1.0e-6);
+        assert!((pose.position_meters.y + 0.10).abs() < 1.0e-6);
+        assert!((pose.position_meters.z - 0.50).abs() < 1.0e-6);
+        assert!((pose.yaw_radians - PI * 0.5).abs() < 1.0e-6);
+        assert!((pose.pitch_radians - PI / 6.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn axis_signs_can_adapt_tracker_coordinate_conventions() {
+        let transform = OpenTrackUdpTransform {
+            position_sign: Vec3::new(-1.0, 1.0, -1.0),
+            yaw_sign: -1.0,
+            pitch_sign: 1.0,
+            roll_sign: -1.0,
+            ..OpenTrackUdpTransform::default()
+        };
+        let pose = transform.map_raw([10.0, 20.0, 30.0, 45.0, 10.0, -15.0]);
+        assert!((pose.position_meters.x + 0.10).abs() < 1.0e-6);
+        assert!((pose.position_meters.y - 0.20).abs() < 1.0e-6);
+        assert!((pose.position_meters.z + 0.30).abs() < 1.0e-6);
+        assert!(pose.yaw_radians < 0.0);
+        assert!(pose.roll_radians > 0.0);
+    }
+}
