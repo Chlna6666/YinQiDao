@@ -3,7 +3,7 @@ use gpui::Context;
 use crate::{
     audio::{EqPreset, PlayerCommand, SpatialPreset, clamp_eq, clamp_spatial},
     audio_policy::{policy_from_config, set_audio_runtime_policy},
-    model::{SpatialSettings, TransitionMode, VirtualBedMode},
+    model::{SourceLayoutOverride, SpatialSettings, TransitionMode, VirtualBedMode},
     ui::MusicApp,
 };
 
@@ -127,7 +127,11 @@ impl MusicApp {
         cx: &mut Context<Self>,
     ) {
         self.disable_smart_audio_for_manual_tuning();
+        // Source layout declares the input stream, not the acoustic scene. Do not silently clear a
+        // user-confirmed metadata override when switching HiFi/Concert/Immersive/motion presets.
+        let source_layout_override = self.config.spatial.source_layout_override;
         self.config.spatial = preset.settings();
+        self.config.spatial.source_layout_override = source_layout_override;
         self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
         self.persist_audio_preferences();
         self.status = format!("空间音频已切换为 {preset:?}");
@@ -142,10 +146,7 @@ impl MusicApp {
         cx.notify();
     }
 
-    /// Select the internal virtual speaker bed for mono/stereo programme. When a multichannel
-    /// decoder reports no reliable speaker layout at all, an explicit selection may additionally
-    /// act as a Source Layout Override if and only if its speaker count exactly matches the decoded
-    /// PCM channel count. Reliable codec/container metadata always wins and is never overwritten.
+    /// Select the synthesized speaker bed used only for mono/stereo programme.
     pub(crate) fn set_virtual_bed_mode(
         &mut self,
         mode: VirtualBedMode,
@@ -159,14 +160,30 @@ impl MusicApp {
         self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
         self.persist_audio_preferences();
         self.status = match mode {
-            VirtualBedMode::Off => {
-                "Virtual Bed 已关闭；Mono/Stereo 保留双声源，Source Layout Override 关闭".into()
-            }
-            VirtualBedMode::Auto => {
-                "Virtual Bed 已切换为自动；未知多声道不会按声道数量猜 speaker layout".into()
+            VirtualBedMode::Off => "Stereo Virtual Bed 已关闭；Mono/Stereo 保留双声源".into(),
+            VirtualBedMode::Auto => "Stereo Virtual Bed 已切换为自动".into(),
+            _ => format!("Stereo Virtual Bed 已切换为 {mode:?}"),
+        };
+        cx.notify();
+    }
+
+    /// Declare the speaker semantics of metadata-less multichannel PCM. This setting is independent
+    /// from spatial enable/mix: HiFi Direct can still use an exact native layout for correct
+    /// binaural channel geometry while keeping synthetic room and Scene Motion disabled.
+    pub(crate) fn set_source_layout_override(
+        &mut self,
+        mode: SourceLayoutOverride,
+        cx: &mut Context<Self>,
+    ) {
+        self.config.spatial.source_layout_override = mode;
+        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
+        self.persist_audio_preferences();
+        self.status = match mode {
+            SourceLayoutOverride::None => {
+                "Source Layout Override 已关闭；仅信任 codec/container speaker metadata".into()
             }
             _ => format!(
-                "已选择 {mode:?}：用于 Mono/Stereo Virtual Bed；无可靠布局元数据且声道数严格匹配时同时作为 Source Layout Override"
+                "Source Layout Override 已设为 {mode:?}；仅在源缺少可靠布局元数据且 PCM 声道数精确匹配时生效"
             ),
         };
         cx.notify();
