@@ -539,13 +539,13 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
         ),
         (
             "Room Size",
-            "早期反射空间尺度",
+            "参数化早期反射与晚期扩散场的空间尺度",
             SpatialControl::Room,
             app.config.spatial.room_size,
         ),
         (
-            "3D Decorrelation",
-            "非相关空间尾部与包围感",
+            "Envelopment 空间包围度",
+            "控制外部化以及上下、侧后方的包围感，不代表额外实体声道",
             SpatialControl::Immersive3d,
             app.config.spatial.immersive_3d,
         ),
@@ -565,7 +565,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
             .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
             .child(spatial_parameter_row(
                 "运动速度 Speed",
-                "动态虚拟声源的轨道速度",
+                "音频采样时钟驱动的球面轨迹速度",
                 SpatialControl::MotionSpeed,
                 format!("{:.3} Hz", app.config.spatial.motion_speed_hz),
                 0.01,
@@ -573,7 +573,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
             ))
             .child(spatial_parameter_row(
                 "轨道半径 Radius",
-                "虚拟声源绕听者的距离尺度",
+                "虚拟声源或完整 speaker bed 相对听者的运动尺度",
                 SpatialControl::MotionRadius,
                 format!(
                     "{}%",
@@ -584,7 +584,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
             ))
             .child(spatial_parameter_row(
                 "运动强度 Intensity",
-                "动态声源在空间处理中的占比",
+                "Scene Motion 对球形声场姿态的作用强度",
                 SpatialControl::MotionIntensity,
                 format!(
                     "{}%",
@@ -601,7 +601,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                     .gap_4()
                     .child(label_block(
                         "轨道方向",
-                        "动态 8D / 360° / 前后 / 行星模式的运动方向",
+                        "8D / 360° / 前后 / 行星 / Helix 等 Scene Motion 的运动方向",
                     ))
                     .child(
                         div()
@@ -628,8 +628,8 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
     }
 
     card(
-        "空间音频 · 球形声场与虚拟多声道",
-        "真实多声道始终保留 authored speaker bed；Mono/Stereo 可选择内部虚拟声床，并与 3D / 8D / 360° / 前后穿梭共用同一球形双耳渲染器",
+        "专业空间音频 · 参数化双耳球形声场",
+        "HiFi Direct 保持低处理参考；音乐厅、演唱会、影院与 Immersive 使用静态空间场；8D / 360° / Planetary / Helix 使用音频时钟 Scene Motion。Helix 可穿越上下半球，不伪造 7.1.4 不存在的 floor speaker。",
         div()
             .flex()
             .flex_col()
@@ -654,8 +654,8 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                     .flex_col()
                     .gap_2()
                     .child(label_block(
-                        "Stereo Virtual Speaker Bed",
-                        "仅影响 Mono/Stereo。Auto 按空间强度选择 7.1 / 5.1.4 / 7.1.2 / 7.1.4；Off 仍保留原双声源球形空间处理。真实 5.1/.2/.4/7.1 使用解码器明确布局，不受这里覆盖。",
+                        "Virtual Speaker Bed / Source Layout Override",
+                        "Mono/Stereo：Auto 可按空间强度建立虚拟 7.1 / 5.1.4 / 7.1.2 / 7.1.4；Off 保留原始双声源。无可靠 speaker metadata 的离散多声道：显式选择与 PCM 声道数严格匹配的布局时，直接作为 Source Layout Override 保留原始 N 通道进入 Native Speaker Bed；可靠 codec/container metadata 永远优先，Auto 不按声道数猜布局。",
                     ))
                     .child(virtual_beds),
             )
@@ -1498,16 +1498,20 @@ fn eq_preset_name(preset: EqPreset) -> &'static str {
 
 fn spatial_preset_name(preset: SpatialPreset) -> &'static str {
     match preset {
+        SpatialPreset::Hifi => "HiFi Direct",
         SpatialPreset::Studio => "Studio 监听",
         SpatialPreset::Wide => "Wide 宽阔",
         SpatialPreset::Headphones => "Headphone 耳机",
+        SpatialPreset::ConcertHall => "Concert Hall 音乐厅",
+        SpatialPreset::LiveConcert => "Live Concert 演唱会",
         SpatialPreset::Cinema => "Cinema 影院",
-        SpatialPreset::Immersive3d => "3D 沉浸",
-        SpatialPreset::Orbit8d => "8D 环绕",
+        SpatialPreset::Immersive3d => "Immersive 全景声场",
+        SpatialPreset::Orbit8d => "8D 球面轨迹",
         SpatialPreset::Orbit360 => "360° 环绕",
-        SpatialPreset::Pendulum => "左右摆动",
-        SpatialPreset::FrontBack => "前后穿梭",
-        SpatialPreset::Planetary => "音乐行星",
-        SpatialPreset::NearEar => "近耳旋绕",
+        SpatialPreset::Pendulum => "Pendulum 左右摆动",
+        SpatialPreset::FrontBack => "Front/Back 前后穿梭",
+        SpatialPreset::Planetary => "Planetary 音乐行星",
+        SpatialPreset::NearEar => "Near Ear 近耳旋绕",
+        SpatialPreset::HelixSphere => "Helix 全域螺旋",
     }
 }
