@@ -7,6 +7,35 @@ const CENTER_GAIN: f32 = 0.28;
 const MAX_FRONT_PRE_GAIN: f32 = 1.60;
 const MAX_AUXILIARY_PRE_GAIN: f32 = 1.25;
 
+// Authored Side keeps the lateral/difference information of the stereo mix. These coefficients are
+// deliberately frequency-selective so the virtual bed does not become a set of delayed full-band
+// copies of L/R.
+const SIDE_SURROUND_MID: f32 = 0.70;
+const SIDE_SURROUND_HIGH: f32 = 0.10;
+const SIDE_REAR_LOW: f32 = 0.40;
+const SIDE_REAR_MID: f32 = 0.34;
+const SIDE_TOP_FRONT_MID: f32 = 0.08;
+const SIDE_TOP_FRONT_HIGH: f32 = 0.52;
+const SIDE_TOP_REAR_MID: f32 = -0.16;
+const SIDE_TOP_REAR_HIGH: f32 = 0.32;
+
+// Mid is not treated as "front only". A centre-heavy vocal or mono programme must still inhabit the
+// listener-centric sphere. We therefore build a lower-gain, spectrally complementary spherical
+// support field from Mid while retaining the original L/R and centre channels as the direct anchor.
+// No random phase or Haas delay is used; each region receives a different deterministic band blend.
+const MID_SURROUND_LOW: f32 = 0.08;
+const MID_SURROUND_MID: f32 = 0.30;
+const MID_SURROUND_HIGH: f32 = 0.12;
+const MID_REAR_LOW: f32 = 0.18;
+const MID_REAR_MID: f32 = 0.22;
+const MID_REAR_HIGH: f32 = -0.06;
+const MID_TOP_FRONT_LOW: f32 = -0.04;
+const MID_TOP_FRONT_MID: f32 = 0.10;
+const MID_TOP_FRONT_HIGH: f32 = 0.28;
+const MID_TOP_REAR_LOW: f32 = 0.06;
+const MID_TOP_REAR_MID: f32 = -0.14;
+const MID_TOP_REAR_HIGH: f32 = 0.20;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct VirtualBedRoleMap {
     front_left: Option<usize>,
@@ -67,10 +96,10 @@ impl VirtualBedMixProfile {
         let front_pre_gain = safe_ratio(reference.normalization(), layout.normalization())
             .clamp(0.0, MAX_FRONT_PRE_GAIN);
 
-        // Auxiliary feeds are complementary slices of the same authored Side signal. Normalize
-        // their aggregate nominal band power after speaker gain + layout normalization, instead of
-        // applying the much larger front compensation to every extra speaker. This prevents denser
-        // .2/.4 beds from gaining loudness merely because they contain more virtual sources.
+        // The spherical support field contains both Side-derived directionality and Mid-derived
+        // centre energy. Normalize its aggregate nominal band power after speaker gain + layout
+        // normalization so .2/.4 layouts spread the same programme around more directions without
+        // gaining loudness merely because more virtual sources exist.
         let reference_auxiliary_power = auxiliary_effective_power(reference);
         let layout_auxiliary_power = auxiliary_effective_power(layout);
         let auxiliary_pre_gain = if reference_auxiliary_power > 1.0e-12
@@ -97,6 +126,8 @@ impl VirtualBedMixProfile {
 pub(super) struct StereoVirtualBed {
     side_low: f32,
     side_body: f32,
+    mid_low: f32,
+    mid_body: f32,
     low_alpha: f32,
     body_alpha: f32,
     profile_layout: ChannelLayout,
@@ -110,6 +141,8 @@ impl StereoVirtualBed {
         Self {
             side_low: 0.0,
             side_body: 0.0,
+            mid_low: 0.0,
+            mid_body: 0.0,
             low_alpha: one_pole_alpha(sample_rate, 680.0),
             body_alpha: one_pole_alpha(sample_rate, 4_200.0),
             profile_layout,
@@ -120,11 +153,18 @@ impl StereoVirtualBed {
     pub(super) fn reset(&mut self) {
         self.side_low = 0.0;
         self.side_body = 0.0;
+        self.mid_low = 0.0;
+        self.mid_body = 0.0;
     }
 
-    /// Expand authored stereo into an explicit virtual speaker bed without inventing a synthetic
-    /// LFE channel or adding Haas-style copies. Only the authored side component is distributed to
-    /// surround/rear/height roles, so mono/centre programme remains anchored at the front.
+    /// Expand authored stereo into an explicit listener-centric virtual speaker bed without
+    /// inventing a synthetic LFE channel or adding Haas-style copies.
+    ///
+    /// The original L/R pair remains the direct anchor, but centre-correlated Mid content is also
+    /// projected into surround/rear/height roles through complementary frequency bands. This means
+    /// centre vocals and mono programme still occupy the complete spherical scene instead of being
+    /// artificially pinned to the front. Scene Motion can then rotate this complete bed for
+    /// 8D/360/FrontBack/Planetary/NearEar just like an authored multichannel bed.
     ///
     /// The crossover state is fixed-size and streaming. Channel-role lookup and layout energy
     /// compensation are rebuilt only when the selected virtual layout changes; the per-frame path
@@ -169,13 +209,41 @@ impl StereoVirtualBed {
             let side_mid = self.side_body - side_low;
             let side_high = side - self.side_body;
 
-            // Keep the original L/R pair dominant. Surround roles receive complementary spectral
-            // portions of the authored side signal, which decorrelates spatial feeds without
-            // duplicate delayed full-band programme and the resulting comb filtering.
-            let surround = (side_mid * 0.70 + side_high * 0.10) * auxiliary_pre_gain;
-            let rear = (side_low * 0.40 + side_mid * 0.34) * auxiliary_pre_gain;
-            let top_front = (side_high * 0.52 + side_mid * 0.08) * auxiliary_pre_gain;
-            let top_rear = (side_high * 0.32 - side_mid * 0.16) * auxiliary_pre_gain;
+            self.mid_low += self.low_alpha * (mid - self.mid_low);
+            self.mid_body += self.body_alpha * (mid - self.mid_body);
+            let mid_low = self.mid_low;
+            let mid_mid = self.mid_body - mid_low;
+            let mid_high = mid - self.mid_body;
+
+            // Side provides left/right opposition; Mid provides coherent spherical support. Keeping
+            // the two components separate until the final role write preserves authored stereo
+            // directionality while allowing centre-heavy material to exist behind/above the listener.
+            let side_surround = side_mid * SIDE_SURROUND_MID + side_high * SIDE_SURROUND_HIGH;
+            let side_rear = side_low * SIDE_REAR_LOW + side_mid * SIDE_REAR_MID;
+            let side_top_front =
+                side_high * SIDE_TOP_FRONT_HIGH + side_mid * SIDE_TOP_FRONT_MID;
+            let side_top_rear = side_high * SIDE_TOP_REAR_HIGH + side_mid * SIDE_TOP_REAR_MID;
+
+            let mid_surround = mid_low * MID_SURROUND_LOW
+                + mid_mid * MID_SURROUND_MID
+                + mid_high * MID_SURROUND_HIGH;
+            let mid_rear =
+                mid_low * MID_REAR_LOW + mid_mid * MID_REAR_MID + mid_high * MID_REAR_HIGH;
+            let mid_top_front = mid_low * MID_TOP_FRONT_LOW
+                + mid_mid * MID_TOP_FRONT_MID
+                + mid_high * MID_TOP_FRONT_HIGH;
+            let mid_top_rear = mid_low * MID_TOP_REAR_LOW
+                + mid_mid * MID_TOP_REAR_MID
+                + mid_high * MID_TOP_REAR_HIGH;
+
+            let surround_left = (mid_surround + side_surround) * auxiliary_pre_gain;
+            let surround_right = (mid_surround - side_surround) * auxiliary_pre_gain;
+            let rear_left = (mid_rear + side_rear) * auxiliary_pre_gain;
+            let rear_right = (mid_rear - side_rear) * auxiliary_pre_gain;
+            let top_front_left = (mid_top_front + side_top_front) * auxiliary_pre_gain;
+            let top_front_right = (mid_top_front - side_top_front) * auxiliary_pre_gain;
+            let top_rear_left = (mid_top_rear + side_top_rear) * auxiliary_pre_gain;
+            let top_rear_right = (mid_top_rear - side_top_rear) * auxiliary_pre_gain;
 
             let frame_start = frame_index * channels;
             let frame_out = &mut output[frame_start..frame_start + channels];
@@ -190,17 +258,17 @@ impl StereoVirtualBed {
                 right * FRONT_LEFT_RIGHT_GAIN * front_pre_gain,
             );
             write_channel(frame_out, roles.center, mid * CENTER_GAIN * front_pre_gain);
-            // Stereo has no authored effects/LFE stem. Duplicating bass into LFE would increase
-            // low-frequency energy and is not a valid upmix inference.
+            // Stereo has no authored effects/LFE stem. The spherical field uses only full-range
+            // speaker roles; duplicating bass into LFE would be a false channel inference.
             write_channel(frame_out, roles.lfe, 0.0);
-            write_channel(frame_out, roles.surround_left, surround);
-            write_channel(frame_out, roles.surround_right, -surround);
-            write_channel(frame_out, roles.rear_left, rear);
-            write_channel(frame_out, roles.rear_right, -rear);
-            write_channel(frame_out, roles.top_front_left, top_front);
-            write_channel(frame_out, roles.top_front_right, -top_front);
-            write_channel(frame_out, roles.top_rear_left, top_rear);
-            write_channel(frame_out, roles.top_rear_right, -top_rear);
+            write_channel(frame_out, roles.surround_left, surround_left);
+            write_channel(frame_out, roles.surround_right, surround_right);
+            write_channel(frame_out, roles.rear_left, rear_left);
+            write_channel(frame_out, roles.rear_right, rear_right);
+            write_channel(frame_out, roles.top_front_left, top_front_left);
+            write_channel(frame_out, roles.top_front_right, top_front_right);
+            write_channel(frame_out, roles.top_rear_left, top_rear_left);
+            write_channel(frame_out, roles.top_rear_right, top_rear_right);
         }
 
         Some(frames)
@@ -232,10 +300,34 @@ fn auxiliary_effective_power(layout: SpeakerLayout) -> f32 {
 #[inline]
 const fn auxiliary_band_power(role: ChannelRole) -> f32 {
     match role {
-        ChannelRole::SurroundLeft | ChannelRole::SurroundRight => 0.70 * 0.70 + 0.10 * 0.10,
-        ChannelRole::RearLeft | ChannelRole::RearRight => 0.40 * 0.40 + 0.34 * 0.34,
-        ChannelRole::TopFrontLeft | ChannelRole::TopFrontRight => 0.52 * 0.52 + 0.08 * 0.08,
-        ChannelRole::TopRearLeft | ChannelRole::TopRearRight => 0.32 * 0.32 + 0.16 * 0.16,
+        ChannelRole::SurroundLeft | ChannelRole::SurroundRight => {
+            SIDE_SURROUND_MID * SIDE_SURROUND_MID
+                + SIDE_SURROUND_HIGH * SIDE_SURROUND_HIGH
+                + MID_SURROUND_LOW * MID_SURROUND_LOW
+                + MID_SURROUND_MID * MID_SURROUND_MID
+                + MID_SURROUND_HIGH * MID_SURROUND_HIGH
+        }
+        ChannelRole::RearLeft | ChannelRole::RearRight => {
+            SIDE_REAR_LOW * SIDE_REAR_LOW
+                + SIDE_REAR_MID * SIDE_REAR_MID
+                + MID_REAR_LOW * MID_REAR_LOW
+                + MID_REAR_MID * MID_REAR_MID
+                + MID_REAR_HIGH * MID_REAR_HIGH
+        }
+        ChannelRole::TopFrontLeft | ChannelRole::TopFrontRight => {
+            SIDE_TOP_FRONT_MID * SIDE_TOP_FRONT_MID
+                + SIDE_TOP_FRONT_HIGH * SIDE_TOP_FRONT_HIGH
+                + MID_TOP_FRONT_LOW * MID_TOP_FRONT_LOW
+                + MID_TOP_FRONT_MID * MID_TOP_FRONT_MID
+                + MID_TOP_FRONT_HIGH * MID_TOP_FRONT_HIGH
+        }
+        ChannelRole::TopRearLeft | ChannelRole::TopRearRight => {
+            SIDE_TOP_REAR_MID * SIDE_TOP_REAR_MID
+                + SIDE_TOP_REAR_HIGH * SIDE_TOP_REAR_HIGH
+                + MID_TOP_REAR_LOW * MID_TOP_REAR_LOW
+                + MID_TOP_REAR_MID * MID_TOP_REAR_MID
+                + MID_TOP_REAR_HIGH * MID_TOP_REAR_HIGH
+        }
         ChannelRole::FrontLeft
         | ChannelRole::FrontRight
         | ChannelRole::Center
@@ -276,21 +368,65 @@ mod tests {
     ];
 
     #[test]
-    fn mono_programme_stays_front_anchored_and_does_not_invent_lfe() {
+    fn mono_programme_populates_the_spherical_bed_without_inventing_lfe() {
         let mut upmixer = StereoVirtualBed::new(48_000);
-        let input = [0.25_f32, 0.25, 0.50, 0.50];
+        let input = (0..512)
+            .flat_map(|index| {
+                let phase = index as f32 * 0.173;
+                let sample = 0.36 * phase.sin() + 0.14 * (phase * 7.1).sin();
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
         let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
-        let mut output = [0.0_f32; 24];
+        let mut output = vec![0.0_f32; 512 * layout.channels()];
         assert_eq!(
             upmixer.render(&input, ChannelLayout::Surround7_1_4, &mut output),
-            Some(2)
+            Some(512)
         );
+
+        let mut role_energy = [0.0_f32; 12];
+        for frame in output.chunks_exact(layout.channels()).skip(64) {
+            for (index, sample) in frame.iter().copied().enumerate() {
+                role_energy[index] += sample * sample;
+            }
+        }
+        for (index, role) in layout.roles().iter().copied().enumerate() {
+            match role {
+                ChannelRole::Lfe => assert_eq!(role_energy[index], 0.0),
+                _ => assert!(
+                    role_energy[index] > 1.0e-5,
+                    "mono spherical support missing for {role:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn mono_spherical_support_keeps_left_right_pairs_symmetric() {
+        let mut upmixer = StereoVirtualBed::new(48_000);
+        let input = (0..256)
+            .flat_map(|index| {
+                let sample = (index as f32 * 0.11).sin() * 0.4;
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
+        let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
+        let mut output = vec![0.0_f32; 256 * layout.channels()];
+        assert_eq!(
+            upmixer.render(&input, ChannelLayout::Surround7_1_4, &mut output),
+            Some(256)
+        );
+        let roles = VirtualBedRoleMap::for_layout(layout);
         for frame in output.chunks_exact(layout.channels()) {
-            for (index, role) in layout.roles().iter().copied().enumerate() {
-                match role {
-                    ChannelRole::FrontLeft | ChannelRole::FrontRight | ChannelRole::Center => {}
-                    _ => assert_eq!(frame[index], 0.0),
-                }
+            for (left, right) in [
+                (roles.surround_left, roles.surround_right),
+                (roles.rear_left, roles.rear_right),
+                (roles.top_front_left, roles.top_front_right),
+                (roles.top_rear_left, roles.top_rear_right),
+            ] {
+                let left = frame[left.expect("left role")];
+                let right = frame[right.expect("right role")];
+                assert!((left - right).abs() <= 1.0e-6);
             }
         }
     }
@@ -373,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_side_power_matches_five_one_reference_across_layouts() {
+    fn spherical_support_power_matches_five_one_reference_across_layouts() {
         let reference = auxiliary_effective_power(SpeakerLayout::for_layout(
             ChannelLayout::Surround5_1,
         ))
