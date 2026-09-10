@@ -237,6 +237,7 @@ impl SpatialEngine {
         layout: ChannelLayout,
         output: &mut [f32],
     ) -> Result<usize, SpatialError> {
+        let debug_layout = layout;
         let layout = SpeakerLayout::for_layout(layout);
         let channels = layout.channels();
         if channels == 0 {
@@ -332,6 +333,7 @@ impl SpatialEngine {
         if self.debug_enabled {
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
+            self.debug_snapshot.set_layout(Some(debug_layout));
             for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
                 self.debug_snapshot
                     .record_source(source_index, speaker.kind, latest_poses[source_index]);
@@ -441,6 +443,7 @@ impl SpatialEngine {
             analyze_interleaved_activity(input, 2, &mut self.debug_activity);
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
+            self.debug_snapshot.set_layout(Some(ChannelLayout::Stereo));
             self.debug_snapshot
                 .record_source(0, crate::SourceKind::FullRange, left_end);
             self.debug_snapshot
@@ -640,6 +643,7 @@ mod tests {
 
         assert_eq!(engine.scene_motion_sample_clock(), Some(frames as u64));
         let snapshot = engine.debug_snapshot().expect("debug snapshot");
+        assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(snapshot.source_count, 12);
         assert!(
             (snapshot.sources[0].position - SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4)
@@ -748,6 +752,7 @@ mod tests {
             .unwrap();
 
         let snapshot = engine.debug_snapshot().expect("enabled snapshot");
+        assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, frames as u64);
         assert_eq!(snapshot.sequence, 1);
