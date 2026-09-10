@@ -2,14 +2,21 @@ use std::{
     f32::consts::PI,
     io,
     net::{SocketAddr, UdpSocket},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use yinqidao_audio_spatial::{ListenerPose, Vec3};
 
-use super::head_tracking::{HeadTrackingEulerPose, HeadTrackingProvider};
+use super::head_tracking::{HeadTrackingBridge, HeadTrackingEulerPose, HeadTrackingProvider};
 
 const OPENTRACK_PACKET_VALUES: usize = 6;
 const OPENTRACK_PACKET_BYTES: usize = OPENTRACK_PACKET_VALUES * std::mem::size_of::<f64>();
+const OPENTRACK_POLL_IDLE: Duration = Duration::from_millis(2);
 
 /// Coordinate/unit conversion applied to OpenTrack's raw `X/Y/Z/Yaw/Pitch/Roll` packet.
 ///
@@ -186,6 +193,61 @@ impl HeadTrackingProvider for OpenTrackUdpProvider {
                 Err(_) => break,
             }
         }
+    }
+}
+
+/// Dedicated non-realtime poller for OpenTrack. Starting this service is an explicit user/UI action;
+/// the worker owns the UDP socket and calibration bridge while the audio callback remains completely
+/// unaware of sockets, threads and packet parsing. OpenTrack can emit around 250 updates/s, so an
+/// idle 2 ms poll interval is sufficient to drain bursts while still publishing only the newest pose.
+pub struct OpenTrackHeadTrackingService {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl OpenTrackHeadTrackingService {
+    pub fn start(config: OpenTrackUdpConfig) -> io::Result<Self> {
+        let provider = OpenTrackUdpProvider::bind(config)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("yinqidao-opentrack".to_string())
+            .spawn(move || {
+                let mut bridge = HeadTrackingBridge::new(provider);
+                while !worker_stop.load(Ordering::Acquire) {
+                    if bridge.poll_and_publish().is_none() {
+                        thread::sleep(OPENTRACK_POLL_IDLE);
+                    }
+                }
+                bridge.reset();
+            })?;
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+    }
+
+    pub fn stop(mut self) {
+        self.stop_worker();
+    }
+
+    fn stop_worker(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for OpenTrackHeadTrackingService {
+    fn drop(&mut self) {
+        self.stop_worker();
     }
 }
 
