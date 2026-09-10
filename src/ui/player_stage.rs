@@ -263,7 +263,6 @@ fn stage_lyrics(
         .lyrics_user_scrolling_until
         .is_some_and(|until| until > Instant::now());
     let reading_mode = manual_reading || !playing;
-    let render_mode = if reading_mode { "read" } else { "play" };
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -293,6 +292,10 @@ fn stage_lyrics(
 
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active);
+        // GPUI's current offscreen element blur path produces dark tile/rectangle artifacts when
+        // translucent glyph surfaces are composited over the animated fluid background. Keep the
+        // Apple Music focus hierarchy through contrast and font weight until that renderer path is
+        // fixed; never run the stage lyrics through an element blur filter.
         let alpha = if reading_mode {
             1.0
         } else {
@@ -301,16 +304,6 @@ fn stage_lyrics(
                 1 => 0.78,
                 2 => 0.60,
                 _ => 0.46,
-            }
-        };
-        let blur_radius = if reading_mode {
-            0.0
-        } else {
-            match distance {
-                0 => 0.0,
-                1 => 0.35,
-                2 => 0.70,
-                _ => 1.10,
             }
         };
         let timestamp = line.timestamp_ms;
@@ -323,7 +316,6 @@ fn stage_lyrics(
         };
         let karaoke_active = index == active && !reading_mode;
         let hover_group = format!("lyric-hover-{index}");
-        let hover_group_for_text = hover_group.clone();
         let hover_group_for_time = hover_group.clone();
 
         let mut text = div()
@@ -350,23 +342,9 @@ fn stage_lyrics(
             );
         }
 
-        // Only the glyph subtree is blurred. Keeping the row/hitbox/time badge outside the filter
-        // avoids the large offscreen blurred surface that previously produced smeared blocks. More
-        // importantly, reading mode does not instantiate a blur filter at all.
-        if !reading_mode && blur_radius > 0.0 {
-            text = text
-                .blur(px(blur_radius))
-                .group_hover(hover_group_for_text, |style| style.blur(px(0.0)));
-        }
-
         let line_element = div()
             .group(hover_group)
-            // Changing the retained id across play/read modes forces GPUI to discard any cached
-            // filtered surface. A paused/manual-reading frame therefore cannot inherit blur from
-            // the preceding playback frame even if retained compositing reuses siblings.
-            .id(SharedString::from(format!(
-                "lyric-line-{render_mode}-{index}"
-            )))
+            .id(SharedString::from(format!("lyric-line-{index}")))
             .relative()
             .w_full()
             .min_w(px(0.0))
