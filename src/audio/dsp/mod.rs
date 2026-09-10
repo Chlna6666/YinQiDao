@@ -281,9 +281,13 @@ impl AudioProcessor {
 
         let output_rate = self.eq.sample_rate();
         let authored_multichannel = input_channels > 2;
-        let native_layout = validated_native_spatial_layout(input_channels, spatial_layout_hint);
         let debug_enabled = audio_debug_enabled();
         let spatial_settings = self.spatial.settings().clone();
+        let native_layout = resolved_native_spatial_layout(
+            input_channels,
+            spatial_layout_hint,
+            &spatial_settings,
+        );
         if let Some(renderer) = self.stereo_spatial.as_mut() {
             renderer.set_debug_enabled(debug_enabled);
         }
@@ -308,7 +312,7 @@ impl AudioProcessor {
             ) {
                 native_spatial_used = true;
             } else {
-                // A verified bed that could not initialize the native renderer must not be
+                // A verified/explicit bed that could not initialize the native renderer must not be
                 // re-labelled as another height layout. Fall back to a layout-neutral fold.
                 to_stereo_into(input, input_channels, &mut self.stereo_scratch);
                 self.resampler
@@ -317,7 +321,8 @@ impl AudioProcessor {
         } else {
             // Missing/discrete/custom metadata is intentionally not guessed from 6/8/10/12 alone.
             // A neutral Mid/Side fold preserves common programme plus inter-channel difference;
-            // an explicitly selected VirtualBedMode may then rebuild it into a spherical bed.
+            // an explicitly selected VirtualBedMode may then rebuild it into a spherical bed when
+            // its channel count does not match a direct Source Layout Override.
             to_stereo_into(input, input_channels, &mut self.stereo_scratch);
             self.resampler
                 .process_into(&self.stereo_scratch, input_rate, output_rate, output);
@@ -332,12 +337,13 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        // Unknown/discrete multichannel stays conservative in Auto/Off. Enthusiast users can opt
-        // into a specific VirtualBedMode; in that case the layout-neutral stereo fold becomes a
-        // new virtual 5.1..7.1.4 source bed and uses the same spherical Scene Motion as authored
-        // stereo. Verified native multichannel never enters this path.
+        // Auto/Off never guesses an unknown bed. If metadata is absent and the user's explicit
+        // layout did not match the actual PCM channel count, keep the previous enthusiast fallback:
+        // fold neutrally then synthesize the requested virtual bed. Contradictory metadata is never
+        // overridden or reinterpreted by this fallback.
         let allow_explicit_virtual_fallback = authored_multichannel
             && !native_spatial_used
+            && spatial_layout_hint.is_none()
             && explicit_virtual_bed_requested(&spatial_settings);
         let allow_stereo_spatial = !authored_multichannel || allow_explicit_virtual_fallback;
         let mut stereo_spatial_used = false;
@@ -539,17 +545,43 @@ fn validated_native_spatial_layout(
 }
 
 #[inline]
+fn explicit_virtual_bed_layout(mode: VirtualBedMode) -> Option<ChannelLayout> {
+    match mode {
+        VirtualBedMode::Off | VirtualBedMode::Auto => None,
+        VirtualBedMode::Surround5_1 => Some(ChannelLayout::Surround5_1),
+        VirtualBedMode::Surround7_1 => Some(ChannelLayout::Surround7_1),
+        VirtualBedMode::Surround5_1_2 => Some(ChannelLayout::Surround5_1_2),
+        VirtualBedMode::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
+        VirtualBedMode::Surround7_1_2 => Some(ChannelLayout::Surround7_1_2),
+        VirtualBedMode::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
+    }
+}
+
+/// Resolve a native authored/declared bed without channel-count guessing.
+///
+/// Reliable codec/container metadata wins. Only when metadata is completely absent may an
+/// enthusiast's explicit VirtualBedMode act as Source Layout Override, and then only if its exact
+/// speaker count matches the decoded PCM. This lets old DTS/AAC/FLAC/WAV `Discrete(N)` streams keep
+/// all N decoded channels instead of being folded to stereo first.
+#[inline]
+fn resolved_native_spatial_layout(
+    channels: u16,
+    hint: Option<ChannelLayout>,
+    settings: &SpatialSettings,
+) -> Option<ChannelLayout> {
+    if let Some(layout) = validated_native_spatial_layout(channels, hint) {
+        return Some(layout);
+    }
+    if hint.is_some() || !settings.enabled {
+        return None;
+    }
+    let layout = explicit_virtual_bed_layout(settings.virtual_bed)?;
+    (SpeakerLayout::for_layout(layout).channels() == usize::from(channels)).then_some(layout)
+}
+
+#[inline]
 fn explicit_virtual_bed_requested(settings: &SpatialSettings) -> bool {
-    settings.enabled
-        && matches!(
-            settings.virtual_bed,
-            VirtualBedMode::Surround5_1
-                | VirtualBedMode::Surround7_1
-                | VirtualBedMode::Surround5_1_2
-                | VirtualBedMode::Surround5_1_4
-                | VirtualBedMode::Surround7_1_2
-                | VirtualBedMode::Surround7_1_4
-        )
+    settings.enabled && explicit_virtual_bed_layout(settings.virtual_bed).is_some()
 }
 
 #[inline]
@@ -685,6 +717,42 @@ mod tests {
     }
 
     #[test]
+    fn matching_manual_layout_can_override_metadata_less_multichannel() {
+        let mut settings = SpatialPreset::Studio.settings();
+        settings.virtual_bed = VirtualBedMode::Surround5_1_2;
+        assert_eq!(
+            resolved_native_spatial_layout(8, None, &settings),
+            Some(ChannelLayout::Surround5_1_2)
+        );
+        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        assert_eq!(
+            resolved_native_spatial_layout(10, None, &settings),
+            Some(ChannelLayout::Surround7_1_2)
+        );
+        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        assert_eq!(
+            resolved_native_spatial_layout(12, None, &settings),
+            Some(ChannelLayout::Surround7_1_4)
+        );
+    }
+
+    #[test]
+    fn source_layout_override_never_beats_verified_or_conflicting_metadata() {
+        let mut settings = SpatialPreset::Studio.settings();
+        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        assert_eq!(
+            resolved_native_spatial_layout(10, Some(ChannelLayout::Surround5_1_4), &settings),
+            Some(ChannelLayout::Surround5_1_4)
+        );
+        assert_eq!(
+            resolved_native_spatial_layout(10, Some(ChannelLayout::Surround7_1_4), &settings),
+            None
+        );
+        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        assert_eq!(resolved_native_spatial_layout(10, None, &settings), None);
+    }
+
+    #[test]
     fn ambiguous_ten_channel_pcm_without_hint_stays_out_of_native_renderer() {
         let input = vec![0.05_f32; 10 * 64];
         let mut processor = AudioProcessor::new(
@@ -741,6 +809,31 @@ mod tests {
             Some(128)
         );
         assert!(output.iter().any(|sample| sample.abs() > 1.0e-4));
+    }
+
+    #[test]
+    fn metadata_less_ten_channel_override_preserves_native_pcm_path() {
+        let mut settings = SpatialPreset::Orbit360.settings();
+        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        let input = vec![0.04_f32; 10 * 128];
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process(&input, 48_000, 10);
+        assert_eq!(output.len(), 256);
+        assert!(processor.native_spatial.is_some());
+        assert_eq!(
+            processor
+                .native_spatial
+                .as_ref()
+                .and_then(SpatialEngine::scene_motion_sample_clock),
+            Some(128)
+        );
+        assert_eq!(
+            processor
+                .stereo_spatial
+                .as_ref()
+                .and_then(StereoSpatializer::sample_clock),
+            None
+        );
     }
 
     #[test]
