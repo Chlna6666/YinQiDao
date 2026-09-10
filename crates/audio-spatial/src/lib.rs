@@ -8,6 +8,7 @@
 
 mod debug;
 mod debug_activity;
+mod debug_room;
 mod delay;
 mod engine;
 mod environment;
@@ -25,6 +26,7 @@ pub use debug::{
     SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
 };
 pub use debug_activity::{SourceActivity, analyze_interleaved_activity};
+pub use debug_room::debug_room_half_extents;
 pub use engine::{DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine};
 pub use environment::EnvironmentSettings;
 pub use error::SpatialError;
