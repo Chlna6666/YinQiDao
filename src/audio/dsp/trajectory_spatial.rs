@@ -227,6 +227,23 @@ fn static_virtual_bed_geometry(
     }
 }
 
+/// Strip only the static stereo elevation when a two-source fallback is following a moving
+/// trajectory. Azimuth, distance, gain and spread remain untouched; the trajectory's own signed Y
+/// excursion becomes the sole vertical motion source. Static Stereo keeps the full calibrated
+/// opposite-elevation aperture.
+#[inline]
+fn stereo_field_for_render(field: StereoField, dynamic: bool) -> StereoField {
+    if dynamic {
+        StereoField {
+            elevation_sin: 0.0,
+            elevation_cos: 1.0,
+            ..field
+        }
+    } else {
+        field
+    }
+}
+
 /// Low-frequency foundation and dry-air anchor applied only while stereo programme is being mixed
 /// with the binaural wet field. This is not a synthetic LFE channel: the original stereo programme
 /// supplies the energy and the virtual speaker bed keeps its LFE slot silent. The anchor compensates
@@ -507,6 +524,7 @@ impl StereoSpatializer {
             self.block_frames,
             trajectory_signature,
         );
+        let pair_field = stereo_field_for_render(self.field, dynamic);
 
         let dry_mix = 1.0 - wet_mix;
         let total_frames = samples.len() / 2;
@@ -519,11 +537,11 @@ impl StereoSpatializer {
             let (center_start, center_end) = if let Some(trajectory) = self.trajectory.as_mut() {
                 trajectory.next_segment(frames)
             } else {
-                let center = SourcePose::new(Vec3::new(0.0, 0.0, self.field.distance_meters));
+                let center = SourcePose::new(Vec3::new(0.0, 0.0, pair_field.distance_meters));
                 (center, center)
             };
-            let (left_start, right_start) = stereo_pair(center_start, self.field);
-            let (left_end, right_end) = stereo_pair(center_end, self.field);
+            let (left_start, right_start) = stereo_pair(center_start, pair_field);
+            let (left_end, right_end) = stereo_pair(center_end, pair_field);
 
             let rendered = self.engine.render_interleaved_stereo_pair(
                 &samples[sample_start..sample_end],
@@ -964,6 +982,18 @@ mod tests {
         let elevation = field.elevation_sin.asin().to_degrees();
         assert!(elevation > 30.0);
         assert!(elevation <= MAX_STEREO_ELEVATION_DEGREES);
+    }
+
+    #[test]
+    fn dynamic_two_source_fallback_uses_trajectory_as_its_only_vertical_motion() {
+        let field = StereoField::from_settings(&SpatialPreset::Orbit8d.settings());
+        assert!(field.elevation_sin.abs() > 0.1);
+        let moving = stereo_field_for_render(field, true);
+        assert_eq!(moving.elevation_sin, 0.0);
+        assert_eq!(moving.elevation_cos, 1.0);
+        let static_field = stereo_field_for_render(field, false);
+        assert_eq!(static_field.elevation_sin, field.elevation_sin);
+        assert_eq!(static_field.elevation_cos, field.elevation_cos);
     }
 
     #[test]
