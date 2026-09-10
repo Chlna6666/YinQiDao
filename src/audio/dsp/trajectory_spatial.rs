@@ -1,3 +1,5 @@
+use std::f32::consts::PI;
+
 #[path = "spatial_environment.rs"]
 mod spatial_environment;
 pub(crate) use spatial_environment::spatial_environment_settings;
@@ -17,16 +19,24 @@ const TRAJECTORY_RADIUS_RANGE_METERS: f32 = 0.85;
 const MIN_STEREO_HALF_ANGLE_DEGREES: f32 = 16.0;
 const STEREO_HALF_ANGLE_RANGE_DEGREES: f32 = 44.0;
 const STEREO_DEPTH_AZIMUTH_RANGE_DEGREES: f32 = 16.0;
-const STEREO_IMMERSIVE_AZIMUTH_RANGE_DEGREES: f32 = 30.0;
-const MAX_STEREO_HALF_ANGLE_DEGREES: f32 = 102.0;
-const STEREO_DEPTH_ELEVATION_RANGE_DEGREES: f32 = 8.0;
-const STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES: f32 = 20.0;
-const MAX_STEREO_ELEVATION_DEGREES: f32 = 28.0;
+const STEREO_IMMERSIVE_AZIMUTH_RANGE_DEGREES: f32 = 44.0;
+const MAX_STEREO_HALF_ANGLE_DEGREES: f32 = 120.0;
+const STEREO_DEPTH_ELEVATION_RANGE_DEGREES: f32 = 10.0;
+const STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES: f32 = 34.0;
+const MAX_STEREO_ELEVATION_DEGREES: f32 = 42.0;
 const MIN_STEREO_DISTANCE_METERS: f32 = 0.72;
 const STEREO_DISTANCE_RANGE_METERS: f32 = 2.00;
 const MAX_TRAJECTORY_SEGMENT_DEGREES: f32 = 1.0;
 const STEREO_SOURCE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
 const MAX_VIRTUAL_BED_CHANNELS: usize = 12;
+const TONAL_INFRA_HZ: f32 = 24.0;
+const TONAL_SUB_HZ: f32 = 105.0;
+const TONAL_PUNCH_HZ: f32 = 240.0;
+const TONAL_AIR_HZ: f32 = 5_600.0;
+const TONAL_CONTROL_SMOOTH_SECONDS: f32 = 0.015;
+const MAX_SUB_FOUNDATION_DB: f32 = 9.0;
+const MAX_BASS_PUNCH_DB: f32 = 4.5;
+const MAX_AIR_PRESENCE_DB: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrajectorySignature {
@@ -127,9 +137,8 @@ impl StereoField {
             width * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
 
         // The authored stereo pair lives on a listener-centric spherical shell rather than a
-        // horizontal ring. Width still controls the ordinary left/right aperture, while Depth and
-        // 3D immersion are allowed to move the wet field continuously around the lateral plane and
-        // slightly into the rear hemisphere. The dry programme remains the frontal anchor.
+        // horizontal ring. Strong Immersive settings are allowed well into the rear hemisphere so
+        // a static scene can feel panoramic without requiring a rotating 8D trajectory.
         let half_angle_degrees = (MIN_STEREO_HALF_ANGLE_DEGREES
             + effective_width * STEREO_HALF_ANGLE_RANGE_DEGREES
             + depth * STEREO_DEPTH_AZIMUTH_RANGE_DEGREES
@@ -137,9 +146,10 @@ impl StereoField {
             .clamp(MIN_STEREO_HALF_ANGLE_DEGREES, MAX_STEREO_HALF_ANGLE_DEGREES);
         let (half_angle_sin, half_angle_cos) = half_angle_degrees.to_radians().sin_cos();
 
-        // Give the two authored channels opposite elevations so the stereo centroid stays near the
-        // listener's horizon while the wet field has genuine above/below geometry. This produces
-        // signed pinna/elevation cues without inventing extra delayed copies of the programme.
+        // Opposite elevations keep the authored stereo centroid stable while strong immersive
+        // scenes now reach a substantially larger vertical aperture. The direct renderer's pinna
+        // cues still provide the actual above/below discrimination; this only supplies real 3D
+        // geometry instead of trying to fake height with EQ alone.
         let elevation_degrees = (depth * STEREO_DEPTH_ELEVATION_RANGE_DEGREES
             + immersive * STEREO_IMMERSIVE_ELEVATION_RANGE_DEGREES)
             .clamp(0.0, MAX_STEREO_ELEVATION_DEGREES);
@@ -183,6 +193,159 @@ impl EnvironmentSignature {
     }
 }
 
+/// Low-frequency foundation and dry-air anchor applied only while stereo programme is being mixed
+/// with the binaural wet field. This is not a synthetic LFE channel: the original stereo programme
+/// supplies the energy and the virtual speaker bed keeps its LFE slot silent. The anchor compensates
+/// for bass/air loss caused by dense HRTF + room mixing while preserving a stable sub-bass centre.
+#[derive(Clone, Copy, Debug, Default)]
+struct StereoTonalTarget {
+    sub_gain: f32,
+    punch_gain: f32,
+    air_gain: f32,
+    sub_mono_blend: f32,
+}
+
+impl StereoTonalTarget {
+    fn from_settings(settings: &SpatialSettings, wet_mix: f32) -> Self {
+        let immersive = settings.immersive_3d.clamp(0.0, 1.0);
+        let depth = settings.depth.clamp(0.0, 1.0);
+        let width = settings.width.clamp(0.0, 1.0);
+        let room = settings.room_size.clamp(0.0, 1.0);
+        let distance = settings.distance.clamp(0.0, 1.0);
+        let mix = settings.mix.clamp(0.0, 1.0);
+        let bass_amount = (immersive * 0.58 + depth * 0.22 + mix * 0.20).clamp(0.0, 1.0);
+        let air_amount = (0.08
+            + width * 0.18
+            + immersive * 0.34
+            + depth * 0.10
+            + room * 0.12
+            - distance * 0.12)
+            .clamp(0.0, 1.0);
+        let wet_weight = wet_mix.clamp(0.0, 1.0).sqrt();
+        Self {
+            sub_gain: (db_to_linear(MAX_SUB_FOUNDATION_DB * bass_amount) - 1.0) * wet_weight,
+            punch_gain: (db_to_linear(MAX_BASS_PUNCH_DB * bass_amount) - 1.0) * wet_weight,
+            air_gain: (db_to_linear(MAX_AIR_PRESENCE_DB * air_amount) - 1.0) * wet_weight,
+            sub_mono_blend: (bass_amount * 0.58).clamp(0.0, 0.58),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StereoTonalAnchor {
+    infra_left: f32,
+    infra_right: f32,
+    sub_left: f32,
+    sub_right: f32,
+    punch_left: f32,
+    punch_right: f32,
+    air_low_left: f32,
+    air_low_right: f32,
+    infra_alpha: f32,
+    sub_alpha: f32,
+    punch_alpha: f32,
+    air_alpha: f32,
+    control_alpha: f32,
+    sub_gain: f32,
+    punch_gain: f32,
+    air_gain: f32,
+    sub_mono_blend: f32,
+}
+
+impl StereoTonalAnchor {
+    fn new(sample_rate: u32) -> Self {
+        let sample_rate = sample_rate.max(1) as f32;
+        Self {
+            infra_left: 0.0,
+            infra_right: 0.0,
+            sub_left: 0.0,
+            sub_right: 0.0,
+            punch_left: 0.0,
+            punch_right: 0.0,
+            air_low_left: 0.0,
+            air_low_right: 0.0,
+            infra_alpha: one_pole_alpha(sample_rate, TONAL_INFRA_HZ),
+            sub_alpha: one_pole_alpha(sample_rate, TONAL_SUB_HZ),
+            punch_alpha: one_pole_alpha(sample_rate, TONAL_PUNCH_HZ),
+            air_alpha: one_pole_alpha(sample_rate, TONAL_AIR_HZ),
+            control_alpha: 1.0
+                - (-1.0 / (sample_rate * TONAL_CONTROL_SMOOTH_SECONDS).max(1.0)).exp(),
+            sub_gain: 0.0,
+            punch_gain: 0.0,
+            air_gain: 0.0,
+            sub_mono_blend: 0.0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.infra_left = 0.0;
+        self.infra_right = 0.0;
+        self.sub_left = 0.0;
+        self.sub_right = 0.0;
+        self.punch_left = 0.0;
+        self.punch_right = 0.0;
+        self.air_low_left = 0.0;
+        self.air_low_right = 0.0;
+        self.sub_gain = 0.0;
+        self.punch_gain = 0.0;
+        self.air_gain = 0.0;
+        self.sub_mono_blend = 0.0;
+    }
+
+    #[inline]
+    fn mix_pair(
+        &mut self,
+        dry_left: f32,
+        dry_right: f32,
+        wet_left: f32,
+        wet_right: f32,
+        dry_mix: f32,
+        wet_mix: f32,
+        target: StereoTonalTarget,
+    ) -> (f32, f32) {
+        self.sub_gain += self.control_alpha * (target.sub_gain - self.sub_gain);
+        self.punch_gain += self.control_alpha * (target.punch_gain - self.punch_gain);
+        self.air_gain += self.control_alpha * (target.air_gain - self.air_gain);
+        self.sub_mono_blend +=
+            self.control_alpha * (target.sub_mono_blend - self.sub_mono_blend);
+
+        self.infra_left += self.infra_alpha * (dry_left - self.infra_left);
+        self.infra_right += self.infra_alpha * (dry_right - self.infra_right);
+        self.sub_left += self.sub_alpha * (dry_left - self.sub_left);
+        self.sub_right += self.sub_alpha * (dry_right - self.sub_right);
+        self.punch_left += self.punch_alpha * (dry_left - self.punch_left);
+        self.punch_right += self.punch_alpha * (dry_right - self.punch_right);
+        self.air_low_left += self.air_alpha * (dry_left - self.air_low_left);
+        self.air_low_right += self.air_alpha * (dry_right - self.air_low_right);
+
+        // 24..105 Hz forms the deep foundation. Only this band is gently pulled toward mono to
+        // stabilize headphone impact and prevent phasey stereo sub-bass from collapsing after HRTF
+        // mixing. 105..240 Hz punch stays fully stereo so kick/bass attack keeps authored width.
+        let sub_left = self.sub_left - self.infra_left;
+        let sub_right = self.sub_right - self.infra_right;
+        let mono_sub = (sub_left + sub_right) * 0.5;
+        let sub_left = sub_left + (mono_sub - sub_left) * self.sub_mono_blend;
+        let sub_right = sub_right + (mono_sub - sub_right) * self.sub_mono_blend;
+        let punch_left = self.punch_left - self.sub_left;
+        let punch_right = self.punch_right - self.sub_right;
+        let air_left = dry_left - self.air_low_left;
+        let air_right = dry_right - self.air_low_right;
+
+        let mixed_left = dry_left * dry_mix + wet_left * wet_mix;
+        let mixed_right = dry_right * dry_mix + wet_right * wet_mix;
+        (
+            mixed_left
+                + sub_left * self.sub_gain
+                + punch_left * self.punch_gain
+                + air_left * self.air_gain,
+            mixed_right
+                + sub_right * self.sub_gain
+                + punch_right * self.punch_gain
+                + air_right * self.air_gain,
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct StereoSpatializer {
     sample_rate: u32,
@@ -197,6 +360,7 @@ pub(crate) struct StereoSpatializer {
     virtual_bed_layout: Option<ChannelLayout>,
     virtual_bed_scratch: Vec<f32>,
     wet_scratch: Vec<f32>,
+    tonal_anchor: StereoTonalAnchor,
 }
 
 impl StereoSpatializer {
@@ -229,12 +393,14 @@ impl StereoSpatializer {
                 block_frames.saturating_mul(MAX_VIRTUAL_BED_CHANNELS)
             ],
             wet_scratch: vec![0.0; block_frames.saturating_mul(2)],
+            tonal_anchor: StereoTonalAnchor::new(sample_rate),
         })
     }
 
     pub(crate) fn reset(&mut self) {
         self.engine.reset();
         self.virtual_bed.reset();
+        self.tonal_anchor.reset();
         if let Some(trajectory) = self.trajectory.as_mut() {
             trajectory.reset();
         }
@@ -260,6 +426,7 @@ impl StereoSpatializer {
         settings: &SpatialSettings,
     ) -> bool {
         if !settings.enabled || samples.is_empty() {
+            self.tonal_anchor.reset();
             return true;
         }
         if samples.len() % 2 != 0 {
@@ -272,8 +439,10 @@ impl StereoSpatializer {
         let virtual_layout = virtual_bed_layout(settings, trajectory_signature.is_some());
         let wet_mix = stereo_wet_mix(settings, trajectory_signature.is_some());
         if wet_mix <= 1.0e-5 {
+            self.tonal_anchor.reset();
             return true;
         }
+        let tonal_target = StereoTonalTarget::from_settings(settings, wet_mix);
 
         if self.virtual_bed_layout != virtual_layout {
             self.virtual_bed.reset();
@@ -286,7 +455,7 @@ impl StereoSpatializer {
             // trajectory so there is exactly one sample clock and exactly one spatialization pass.
             self.ensure_trajectory(None);
             apply_scene_motion_settings(&mut self.engine, settings);
-            return self.process_virtual_bed(samples, layout, wet_mix);
+            return self.process_virtual_bed(samples, layout, wet_mix, tonal_target);
         }
 
         self.engine.set_scene_motion(None, 0.10, 1.0, 0.0, true);
@@ -325,10 +494,20 @@ impl StereoSpatializer {
             if rendered.is_err() {
                 return false;
             }
-            for index in 0..frames * 2 {
-                let output_index = sample_start + index;
-                samples[output_index] =
-                    samples[output_index] * dry_mix + self.wet_scratch[index] * wet_mix;
+            for frame in 0..frames {
+                let output_index = sample_start + frame * 2;
+                let wet_index = frame * 2;
+                let (left, right) = self.tonal_anchor.mix_pair(
+                    samples[output_index],
+                    samples[output_index + 1],
+                    self.wet_scratch[wet_index],
+                    self.wet_scratch[wet_index + 1],
+                    dry_mix,
+                    wet_mix,
+                    tonal_target,
+                );
+                samples[output_index] = left;
+                samples[output_index + 1] = right;
             }
             frame_offset += frames;
         }
@@ -340,6 +519,7 @@ impl StereoSpatializer {
         samples: &mut [f32],
         layout: ChannelLayout,
         wet_mix: f32,
+        tonal_target: StereoTonalTarget,
     ) -> bool {
         let channels = SpeakerLayout::for_layout(layout).channels();
         if channels <= 2 || channels > MAX_VIRTUAL_BED_CHANNELS {
@@ -376,10 +556,20 @@ impl StereoSpatializer {
             {
                 return false;
             }
-            for index in 0..frames * 2 {
-                let output_index = sample_start + index;
-                samples[output_index] =
-                    samples[output_index] * dry_mix + self.wet_scratch[index] * wet_mix;
+            for frame in 0..frames {
+                let output_index = sample_start + frame * 2;
+                let wet_index = frame * 2;
+                let (left, right) = self.tonal_anchor.mix_pair(
+                    samples[output_index],
+                    samples[output_index + 1],
+                    self.wet_scratch[wet_index],
+                    self.wet_scratch[wet_index + 1],
+                    dry_mix,
+                    wet_mix,
+                    tonal_target,
+                );
+                samples[output_index] = left;
+                samples[output_index + 1] = right;
             }
             frame_offset += frames;
         }
@@ -455,7 +645,7 @@ fn virtual_bed_layout(settings: &SpatialSettings, dynamic: bool) -> Option<Chann
             let depth = settings.depth.clamp(0.0, 1.0);
             let width = settings.width.clamp(0.0, 1.0);
 
-            if dynamic || immersive >= 0.72 {
+            if dynamic || immersive >= 0.64 {
                 Some(ChannelLayout::Surround7_1_4)
             } else if immersive >= 0.52 || depth >= 0.50 {
                 Some(ChannelLayout::Surround5_1_4)
@@ -559,6 +749,16 @@ fn rotate_x(position: Vec3, sin: f32, cos: f32) -> Vec3 {
         position.y * cos + position.z * sin,
         -position.y * sin + position.z * cos,
     )
+}
+
+#[inline]
+fn one_pole_alpha(sample_rate: f32, cutoff_hz: f32) -> f32 {
+    1.0 - (-2.0 * PI * cutoff_hz.min(sample_rate * 0.45) / sample_rate.max(1.0)).exp()
+}
+
+#[inline]
+fn db_to_linear(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
 }
 
 #[cfg(test)]
@@ -712,6 +912,46 @@ mod tests {
         let (left, right) = stereo_pair(center, field);
         assert!(left.position.z < 0.0);
         assert!(right.position.z < 0.0);
+    }
+
+    #[test]
+    fn immersive_static_field_has_a_large_vertical_aperture() {
+        let field = StereoField::from_settings(&SpatialPreset::Immersive3d.settings());
+        let elevation = field.elevation_sin.asin().to_degrees();
+        assert!(elevation > 30.0);
+        assert!(elevation <= MAX_STEREO_ELEVATION_DEGREES);
+    }
+
+    #[test]
+    fn tonal_anchor_scales_from_studio_to_immersive() {
+        let studio = StereoTonalTarget::from_settings(&SpatialPreset::Studio.settings(), 0.5);
+        let immersive =
+            StereoTonalTarget::from_settings(&SpatialPreset::Immersive3d.settings(), 0.64);
+        assert!(immersive.sub_gain > studio.sub_gain * 2.0);
+        assert!(immersive.punch_gain > studio.punch_gain * 2.0);
+        assert!(immersive.air_gain > studio.air_gain);
+        assert!(immersive.sub_mono_blend > studio.sub_mono_blend);
+    }
+
+    #[test]
+    fn tonal_anchor_keeps_processing_finite_under_full_impact() {
+        let mut settings = SpatialPreset::Immersive3d.settings();
+        settings.width = 1.0;
+        settings.depth = 1.0;
+        settings.mix = 1.0;
+        settings.immersive_3d = 1.0;
+        let target = StereoTonalTarget::from_settings(&settings, 1.0);
+        let mut anchor = StereoTonalAnchor::new(48_000);
+        let mut phase = 0.0_f32;
+        for _ in 0..4_800 {
+            let dry = (phase * 2.0 * PI).sin() * 0.2;
+            phase += 55.0 / 48_000.0;
+            let (left, right) = anchor.mix_pair(dry, dry, 0.0, 0.0, 0.25, 0.75, target);
+            assert!(left.is_finite());
+            assert!(right.is_finite());
+        }
+        assert!(anchor.sub_gain > 0.5);
+        assert!(anchor.punch_gain > 0.2);
     }
 
     #[test]
