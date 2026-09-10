@@ -110,6 +110,7 @@ struct SourceState {
     reflection_filter_left: [f32; EARLY_REFLECTION_TAP_COUNT],
     reflection_filter_right: [f32; EARLY_REFLECTION_TAP_COUNT],
     reflection_pinna: [StereoPinnaState; EARLY_REFLECTION_TAP_COUNT],
+    early_reflections_allowed: bool,
     lfe_state: f32,
     scratch_left: Vec<f32>,
     scratch_right: Vec<f32>,
@@ -135,6 +136,7 @@ impl SourceState {
             reflection_filter_left: [0.0; EARLY_REFLECTION_TAP_COUNT],
             reflection_filter_right: [0.0; EARLY_REFLECTION_TAP_COUNT],
             reflection_pinna: [StereoPinnaState::default(); EARLY_REFLECTION_TAP_COUNT],
+            early_reflections_allowed: true,
             lfe_state: 0.0,
             scratch_left: vec![0.0; block_frames],
             scratch_right: vec![0.0; block_frames],
@@ -272,6 +274,17 @@ impl SourceState {
         parameters
     }
 
+    #[inline]
+    fn set_early_reflections_allowed(&mut self, allowed: bool) {
+        if self.early_reflections_allowed == allowed {
+            return;
+        }
+        self.early_reflections_allowed = allowed;
+        // A source slot can change semantic role when the caller switches layouts. Never let an
+        // old horizontal-speaker reflection tail leak into a height channel (or vice versa).
+        self.invalidate_environment();
+    }
+
     fn invalidate_environment(&mut self) {
         self.reflection_filter_left.fill(0.0);
         self.reflection_filter_right.fill(0.0);
@@ -292,6 +305,7 @@ impl SourceState {
         self.filter_left = 0.0;
         self.filter_right = 0.0;
         self.pinna.reset();
+        self.early_reflections_allowed = true;
         self.lfe_state = 0.0;
         self.scratch_left.fill(0.0);
         self.scratch_right.fill(0.0);
@@ -378,6 +392,7 @@ impl CpuRenderer {
         end_pose: SourcePose,
         listener: ListenerPose,
         kind: SourceKind,
+        allow_early_reflections: bool,
         mix_left: &mut [f32],
         mix_right: &mut [f32],
     ) -> Result<(), SpatialError> {
@@ -390,8 +405,9 @@ impl CpuRenderer {
         let lfe_alpha = self.lfe_alpha;
         let sample_rate = self.sample_rate;
         let environment = self.environment;
-        let reflections_enabled = environment.mix > REFLECTION_EPSILON;
         let state = &mut self.sources[source_index];
+        state.set_early_reflections_allowed(allow_early_reflections);
+        let reflections_enabled = allow_early_reflections && environment.mix > REFLECTION_EPSILON;
 
         match kind {
             SourceKind::FullRange => {
@@ -864,6 +880,32 @@ mod tests {
         assert_ne!(reflections[3].pinna, StereoPinnaCoefficients::IDENTITY);
         assert_ne!(reflections[4].pinna, StereoPinnaCoefficients::IDENTITY);
         assert_ne!(reflections[5].pinna, StereoPinnaCoefficients::IDENTITY);
+    }
+
+    #[test]
+    fn disabling_reflections_clears_room_history_without_invalidating_direct_cache() {
+        let mut state = SourceState::new(4_096, 64);
+        let listener = ListenerPose::identity();
+        let pose = SourcePose::new(Vec3::FORWARD);
+        let direct = state.parameters_for(48_000.0, pose, listener);
+        let pinna = state.pinna_for(48_000.0, pose, listener);
+        state.reflection_filter_left[0] = 0.5;
+        state.reflection_filter_right[0] = -0.25;
+        state.reflection_parameters_for(
+            48_000.0,
+            pose,
+            listener,
+            EnvironmentSettings::default(),
+        );
+
+        state.set_early_reflections_allowed(false);
+
+        assert_eq!(state.cached_pose, Some(pose));
+        assert_eq!(state.cached_parameters.left_gain, direct.left_gain);
+        assert_eq!(state.cached_pinna_coefficients, pinna);
+        assert!(state.reflection_filter_left.iter().all(|sample| *sample == 0.0));
+        assert!(state.reflection_filter_right.iter().all(|sample| *sample == 0.0));
+        assert!(state.cached_reflection_pose.is_none());
     }
 
     #[test]

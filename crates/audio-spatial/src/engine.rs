@@ -1,7 +1,8 @@
 use crate::{
-    ChannelLayout, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
-    SpatialDebugSnapshot, SpatialError, Speaker, SpeakerLayout, Trajectory, TrajectoryKind, Vec3,
-    analyze_interleaved_activity, late_field::LateDiffuseField, renderer::CpuRenderer,
+    ChannelLayout, ChannelRole, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SourceActivity,
+    SourcePose, SpatialDebugSnapshot, SpatialError, Speaker, SpeakerLayout, Trajectory,
+    TrajectoryKind, Vec3, analyze_interleaved_activity, late_field::LateDiffuseField,
+    renderer::CpuRenderer,
 };
 
 pub const DEFAULT_BLOCK_FRAMES: usize = 64;
@@ -263,8 +264,11 @@ impl SpatialEngine {
         let block_limit = self.scene_block_frames();
         let scene_intensity = self.scene_motion.map_or(0.0, |motion| motion.intensity);
         let mut latest_poses = [SourcePose::default(); MAX_DEBUG_SOURCES];
+        let mut early_reflection_sources = [false; MAX_DEBUG_SOURCES];
         for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
             latest_poses[source_index] = static_speaker_pose(speaker);
+            early_reflection_sources[source_index] =
+                authored_role_uses_early_reflections(layout.role(source_index));
         }
 
         let mut frame_offset = 0usize;
@@ -310,6 +314,7 @@ impl SpatialEngine {
                     end_pose,
                     self.listener,
                     speaker.kind,
+                    early_reflection_sources[source_index],
                     &mut self.mix_left,
                     &mut self.mix_right,
                 )?;
@@ -412,6 +417,7 @@ impl SpatialEngine {
                 left_block_end,
                 self.listener,
                 crate::SourceKind::FullRange,
+                true,
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
@@ -425,6 +431,7 @@ impl SpatialEngine {
                 right_block_end,
                 self.listener,
                 crate::SourceKind::FullRange,
+                true,
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
@@ -487,6 +494,7 @@ impl SpatialEngine {
                 end_pose,
                 self.listener,
                 crate::SourceKind::FullRange,
+                true,
                 &mut self.mix_left,
                 &mut self.mix_right,
             )?;
@@ -513,6 +521,27 @@ impl SpatialEngine {
         }
         Ok(frames)
     }
+}
+
+/// First-order image-source reflections are a room-acoustics layer, not the spherical source model.
+/// In dense height beds, keep direct HRTF/pinna processing for every top channel but let the
+/// horizontal bed own localized early wall reflections. The summed field still enters the shared
+/// late diffuse processor, so height programme remains present in the room tail without paying six
+/// moving image-source taps per top speaker.
+#[inline]
+fn authored_role_uses_early_reflections(role: Option<ChannelRole>) -> bool {
+    matches!(
+        role,
+        Some(
+            ChannelRole::FrontLeft
+                | ChannelRole::FrontRight
+                | ChannelRole::Center
+                | ChannelRole::SurroundLeft
+                | ChannelRole::SurroundRight
+                | ChannelRole::RearLeft
+                | ChannelRole::RearRight
+        )
+    )
 }
 
 #[inline]
@@ -618,6 +647,44 @@ mod tests {
             frames
         );
         assert!(output.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn height_roles_keep_direct_spatialization_but_skip_localized_early_reflections() {
+        for role in [
+            ChannelRole::TopFrontLeft,
+            ChannelRole::TopFrontRight,
+            ChannelRole::TopRearLeft,
+            ChannelRole::TopRearRight,
+            ChannelRole::Lfe,
+        ] {
+            assert!(!authored_role_uses_early_reflections(Some(role)));
+        }
+        for role in [
+            ChannelRole::FrontLeft,
+            ChannelRole::FrontRight,
+            ChannelRole::Center,
+            ChannelRole::SurroundLeft,
+            ChannelRole::SurroundRight,
+            ChannelRole::RearLeft,
+            ChannelRole::RearRight,
+        ] {
+            assert!(authored_role_uses_early_reflections(Some(role)));
+        }
+        assert!(!authored_role_uses_early_reflections(None));
+    }
+
+    #[test]
+    fn seven_one_four_reduces_first_order_reflection_sources_from_eleven_to_seven() {
+        let layout = SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4);
+        let reflection_sources = layout
+            .roles()
+            .iter()
+            .copied()
+            .filter(|role| authored_role_uses_early_reflections(Some(*role)))
+            .count();
+        assert_eq!(reflection_sources, 7);
+        assert_eq!(layout.channels(), 12);
     }
 
     #[test]
