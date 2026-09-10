@@ -8,7 +8,7 @@ pub use spatial::{SpatialPreset, clamp_spatial};
 
 use std::cell::Cell;
 
-use crate::model::{EqSettings, SpatialSettings, VirtualBedMode};
+use crate::model::{EqSettings, SourceLayoutOverride, SpatialSettings, VirtualBedMode};
 use yinqidao_audio_spatial::{
     ChannelLayout, EngineConfig as NativeSpatialConfig, EnvironmentSettings, SpeakerLayout,
     SpatialDebugSnapshot, SpatialEngine,
@@ -321,8 +321,8 @@ impl AudioProcessor {
         } else {
             // Missing/discrete/custom metadata is intentionally not guessed from 6/8/10/12 alone.
             // A neutral Mid/Side fold preserves common programme plus inter-channel difference;
-            // an explicitly selected VirtualBedMode may then rebuild it into a spherical bed when
-            // its channel count does not match a direct Source Layout Override.
+            // VirtualBedMode is a separate explicit synthesis choice and never declares the input
+            // channel semantics by itself.
             to_stereo_into(input, input_channels, &mut self.stereo_scratch);
             self.resampler
                 .process_into(&self.stereo_scratch, input_rate, output_rate, output);
@@ -337,10 +337,9 @@ impl AudioProcessor {
             copy_reuse(output, &mut self.eq_debug_scratch);
         }
 
-        // Auto/Off never guesses an unknown bed. If metadata is absent and the user's explicit
-        // layout did not match the actual PCM channel count, keep the previous enthusiast fallback:
-        // fold neutrally then synthesize the requested virtual bed. Contradictory metadata is never
-        // overridden or reinterpreted by this fallback.
+        // Source Layout Override and Virtual Bed are intentionally independent. If metadata is
+        // absent and no exact native source declaration resolved, a separately selected explicit
+        // Virtual Bed may still synthesize a new bed from the conservative stereo fold.
         let allow_explicit_virtual_fallback = authored_multichannel
             && !native_spatial_used
             && spatial_layout_hint.is_none()
@@ -557,12 +556,26 @@ fn explicit_virtual_bed_layout(mode: VirtualBedMode) -> Option<ChannelLayout> {
     }
 }
 
+#[inline]
+fn source_layout_override_layout(mode: SourceLayoutOverride) -> Option<ChannelLayout> {
+    match mode {
+        SourceLayoutOverride::None => None,
+        SourceLayoutOverride::Surround5_1 => Some(ChannelLayout::Surround5_1),
+        SourceLayoutOverride::Surround7_1 => Some(ChannelLayout::Surround7_1),
+        SourceLayoutOverride::Surround5_1_2 => Some(ChannelLayout::Surround5_1_2),
+        SourceLayoutOverride::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
+        SourceLayoutOverride::Surround7_1_2 => Some(ChannelLayout::Surround7_1_2),
+        SourceLayoutOverride::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
+    }
+}
+
 /// Resolve a native authored/declared bed without channel-count guessing.
 ///
-/// Reliable codec/container metadata wins. Only when metadata is completely absent may an
-/// enthusiast's explicit VirtualBedMode act as Source Layout Override, and then only if its exact
-/// speaker count matches the decoded PCM. This lets old DTS/AAC/FLAC/WAV `Discrete(N)` streams keep
-/// all N decoded channels instead of being folded to stereo first.
+/// Reliable codec/container metadata wins. Only when metadata is completely absent may the
+/// independent Source Layout Override declare speaker semantics, and then only if its exact speaker
+/// count matches decoded PCM. The declaration is intentionally independent from spatial enable/mix
+/// so HiFi Direct can still preserve a metadata-less native bed without enabling synthetic room or
+/// Scene Motion.
 #[inline]
 fn resolved_native_spatial_layout(
     channels: u16,
@@ -572,10 +585,10 @@ fn resolved_native_spatial_layout(
     if let Some(layout) = validated_native_spatial_layout(channels, hint) {
         return Some(layout);
     }
-    if hint.is_some() || !settings.enabled {
+    if hint.is_some() {
         return None;
     }
-    let layout = explicit_virtual_bed_layout(settings.virtual_bed)?;
+    let layout = source_layout_override_layout(settings.source_layout_override)?;
     (SpeakerLayout::for_layout(layout).channels() == usize::from(channels)).then_some(layout)
 }
 
@@ -615,9 +628,9 @@ fn to_stereo_into(input: &[f32], channels: u16, output: &mut Vec<f32>) {
 
 /// Fold an unknown/discrete multichannel stream without assigning speaker semantics that the
 /// decoder did not provide. The average is the layout-neutral common programme (Mid); a zero-sum
-/// alternating projection retains some inter-channel difference as Side. The explicit Virtual Bed
-/// stage can then distribute both components around the full sphere without pretending that 8ch is
-/// definitely 7.1 or that 10ch is definitely 5.1.4/7.1.2.
+/// alternating projection retains some inter-channel difference as Side. A separately selected
+/// Virtual Bed may then distribute both components around the full sphere without pretending that
+/// 8ch is definitely 7.1 or that 10ch is definitely 5.1.4/7.1.2.
 fn layout_neutral_multichannel_fold_into(input: &[f32], channels: usize, output: &mut Vec<f32>) {
     let scale = 1.0 / channels.max(1) as f32;
     for frame in input.chunks_exact(channels) {
@@ -717,19 +730,19 @@ mod tests {
     }
 
     #[test]
-    fn matching_manual_layout_can_override_metadata_less_multichannel() {
+    fn matching_source_layout_override_declares_metadata_less_multichannel() {
         let mut settings = SpatialPreset::Studio.settings();
-        settings.virtual_bed = VirtualBedMode::Surround5_1_2;
+        settings.source_layout_override = SourceLayoutOverride::Surround5_1_2;
         assert_eq!(
             resolved_native_spatial_layout(8, None, &settings),
             Some(ChannelLayout::Surround5_1_2)
         );
-        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_2;
         assert_eq!(
             resolved_native_spatial_layout(10, None, &settings),
             Some(ChannelLayout::Surround7_1_2)
         );
-        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_4;
         assert_eq!(
             resolved_native_spatial_layout(12, None, &settings),
             Some(ChannelLayout::Surround7_1_4)
@@ -737,9 +750,20 @@ mod tests {
     }
 
     #[test]
+    fn source_layout_override_is_independent_from_spatial_enable() {
+        let mut settings = SpatialPreset::Hifi.settings();
+        assert!(!settings.enabled);
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_2;
+        assert_eq!(
+            resolved_native_spatial_layout(10, None, &settings),
+            Some(ChannelLayout::Surround7_1_2)
+        );
+    }
+
+    #[test]
     fn source_layout_override_never_beats_verified_or_conflicting_metadata() {
         let mut settings = SpatialPreset::Studio.settings();
-        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_2;
         assert_eq!(
             resolved_native_spatial_layout(10, Some(ChannelLayout::Surround5_1_4), &settings),
             Some(ChannelLayout::Surround5_1_4)
@@ -748,7 +772,15 @@ mod tests {
             resolved_native_spatial_layout(10, Some(ChannelLayout::Surround7_1_4), &settings),
             None
         );
-        settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_4;
+        assert_eq!(resolved_native_spatial_layout(10, None, &settings), None);
+    }
+
+    #[test]
+    fn virtual_bed_selection_does_not_declare_unknown_multichannel_layout() {
+        let mut settings = SpatialPreset::Studio.settings();
+        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        settings.source_layout_override = SourceLayoutOverride::None;
         assert_eq!(resolved_native_spatial_layout(10, None, &settings), None);
     }
 
@@ -775,6 +807,7 @@ mod tests {
             .collect::<Vec<_>>();
         let settings = SpatialPreset::Orbit360.settings();
         assert_eq!(settings.virtual_bed, VirtualBedMode::Auto);
+        assert_eq!(settings.source_layout_override, SourceLayoutOverride::None);
         let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let output = processor.process(&input, 48_000, 10);
         assert_eq!(output.len(), 256);
@@ -797,6 +830,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut settings = SpatialPreset::Orbit360.settings();
         settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        settings.source_layout_override = SourceLayoutOverride::None;
         let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let output = processor.process(&input, 48_000, 10);
         assert_eq!(output.len(), 256);
@@ -814,7 +848,7 @@ mod tests {
     #[test]
     fn metadata_less_ten_channel_override_preserves_native_pcm_path() {
         let mut settings = SpatialPreset::Orbit360.settings();
-        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_2;
         let input = vec![0.04_f32; 10 * 128];
         let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let output = processor.process(&input, 48_000, 10);
@@ -837,9 +871,23 @@ mod tests {
     }
 
     #[test]
+    fn hifi_override_preserves_native_layout_without_scene_motion() {
+        let mut settings = SpatialPreset::Hifi.settings();
+        settings.source_layout_override = SourceLayoutOverride::Surround7_1_2;
+        let input = vec![0.04_f32; 10 * 64];
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let output = processor.process(&input, 48_000, 10);
+        assert_eq!(output.len(), 128);
+        let engine = processor.native_spatial.as_ref().expect("native engine");
+        assert_eq!(engine.scene_motion_sample_clock(), None);
+        assert_eq!(engine.config().environment.mix, 0.0);
+    }
+
+    #[test]
     fn verified_native_layout_never_uses_virtual_fallback_even_when_explicit() {
         let mut settings = SpatialPreset::Orbit8d.settings();
         settings.virtual_bed = VirtualBedMode::Surround7_1_4;
+        settings.source_layout_override = SourceLayoutOverride::Surround5_1_4;
         let input = vec![0.04_f32; 12 * 128];
         let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let output = processor.process_with_layout(
