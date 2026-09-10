@@ -573,6 +573,14 @@ mod tests {
     }
 
     #[test]
+    fn front_back_preset_maps_to_audio_clock_front_back() {
+        let settings = SpatialPreset::FrontBack.settings();
+        let signature = TrajectorySignature::from_settings(&settings).expect("dynamic");
+        assert_eq!(signature.kind, TrajectoryKind::FrontBack);
+        assert!(signature.radius_meters > MIN_TRAJECTORY_RADIUS_METERS);
+    }
+
+    #[test]
     fn dynamic_mix_no_longer_collapses_the_binaural_bed() {
         let settings = SpatialPreset::Orbit8d.settings();
         let wet = stereo_wet_mix(&settings, true);
@@ -607,6 +615,7 @@ mod tests {
             SpatialPreset::Orbit8d,
             SpatialPreset::Orbit360,
             SpatialPreset::Pendulum,
+            SpatialPreset::FrontBack,
             SpatialPreset::Planetary,
             SpatialPreset::NearEar,
         ] {
