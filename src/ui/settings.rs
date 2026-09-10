@@ -3,7 +3,7 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb};
 use crate::{
     audio::{EqPreset, SpatialPreset, classify_smart_audio},
     desktop_lyrics::LyricsColorTarget,
-    model::{SpatialMotionMode, TransitionMode},
+    model::{SpatialMotionMode, TransitionMode, VirtualBedMode},
     preferences::SpatialControl,
     settings::DesktopLyricsAlignment,
 };
@@ -486,6 +486,25 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
         presets = presets.child(readonly_chip("Custom 自定义", true));
     }
 
+    let mut virtual_beds = div().flex().flex_wrap().items_center().gap_2();
+    for (mode, label) in [
+        (VirtualBedMode::Auto, "Auto 自动"),
+        (VirtualBedMode::Off, "Off 双声源"),
+        (VirtualBedMode::Surround5_1, "5.1"),
+        (VirtualBedMode::Surround7_1, "7.1"),
+        (VirtualBedMode::Surround5_1_2, "5.1.2"),
+        (VirtualBedMode::Surround5_1_4, "5.1.4"),
+        (VirtualBedMode::Surround7_1_2, "7.1.2"),
+        (VirtualBedMode::Surround7_1_4, "7.1.4"),
+    ] {
+        virtual_beds = virtual_beds.child(preset_chip(
+            SharedString::from(format!("spatial-virtual-bed-{mode:?}")),
+            label,
+            app.config.spatial.virtual_bed == mode,
+            cx.listener(move |this, _, _, cx| this.set_virtual_bed_mode(mode, cx)),
+        ));
+    }
+
     let mut parameters = div().flex().flex_col().gap_3();
     for (title, subtitle, control, value) in [
         (
@@ -609,8 +628,8 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
     }
 
     card(
-        "空间音频 · 立体声声场增强",
-        "包含 Studio、Wide、Headphone、Cinema、3D、8D、360°、左右摆动、音乐行星与近耳旋绕；手动调整会关闭自动曲风模式",
+        "空间音频 · 球形声场与虚拟多声道",
+        "真实多声道始终保留 authored speaker bed；Mono/Stereo 可选择内部虚拟声床，再与 8D / 360° / 3D 共用同一球形双耳渲染器",
         div()
             .flex()
             .flex_col()
@@ -628,6 +647,19 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                         cx.listener(|this, _, _, cx| this.toggle_manual_spatial(cx)),
                     )),
             )
+            .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(label_block(
+                        "Stereo Virtual Speaker Bed",
+                        "仅影响 Mono/Stereo。Auto 按空间强度选择 7.1 / 5.1.4 / 7.1.2 / 7.1.4；Off 仍保留原双声源球形空间处理。真实 5.1/.2/.4/7.1 使用解码器明确布局，不受这里覆盖。",
+                    ))
+                    .child(virtual_beds),
+            )
+            .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
             .child(parameters),
     )
 }
