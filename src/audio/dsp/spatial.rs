@@ -7,9 +7,12 @@ const MAX_ITD_SECONDS: f32 = 0.00068;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpatialPreset {
+    Hifi,
     Studio,
     Wide,
     Headphones,
+    ConcertHall,
+    LiveConcert,
     Cinema,
     Immersive3d,
     Orbit8d,
@@ -18,13 +21,17 @@ pub enum SpatialPreset {
     FrontBack,
     Planetary,
     NearEar,
+    HelixSphere,
 }
 
 impl SpatialPreset {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
+        Self::Hifi,
         Self::Studio,
         Self::Wide,
         Self::Headphones,
+        Self::ConcertHall,
+        Self::LiveConcert,
         Self::Cinema,
         Self::Immersive3d,
         Self::Orbit8d,
@@ -33,10 +40,30 @@ impl SpatialPreset {
         Self::FrontBack,
         Self::Planetary,
         Self::NearEar,
+        Self::HelixSphere,
     ];
 
     pub fn settings(self) -> SpatialSettings {
         match self {
+            // HiFi Direct deliberately avoids synthetic room, widening and trajectory processing.
+            // It is a low-processing playback preset, not a claim of bit-perfect output: decoding,
+            // sample-rate conversion, limiter and the host audio device can still alter samples.
+            Self::Hifi => SpatialSettings {
+                enabled: false,
+                width: 0.50,
+                depth: 0.00,
+                distance: 0.00,
+                mix: 0.00,
+                crossfeed: 0.00,
+                room_size: 0.00,
+                immersive_3d: 0.00,
+                virtual_bed: VirtualBedMode::Off,
+                motion_mode: SpatialMotionMode::Static,
+                motion_speed_hz: 0.08,
+                motion_radius: 0.55,
+                motion_intensity: 0.0,
+                clockwise: true,
+            },
             Self::Studio => SpatialSettings {
                 enabled: true,
                 width: 0.50,
@@ -82,6 +109,42 @@ impl SpatialPreset {
                 motion_mode: SpatialMotionMode::Static,
                 motion_speed_hz: 0.08,
                 motion_radius: 0.62,
+                motion_intensity: 0.0,
+                clockwise: true,
+            },
+            // Parameterized venue scene. This uses the existing image-source early field + FDN
+            // late field and must not be described as a measured concert-hall impulse response.
+            Self::ConcertHall => SpatialSettings {
+                enabled: true,
+                width: 0.78,
+                depth: 0.72,
+                distance: 0.10,
+                mix: 0.60,
+                crossfeed: 0.05,
+                room_size: 0.82,
+                immersive_3d: 0.58,
+                virtual_bed: VirtualBedMode::Auto,
+                motion_mode: SpatialMotionMode::Static,
+                motion_speed_hz: 0.08,
+                motion_radius: 0.75,
+                motion_intensity: 0.0,
+                clockwise: true,
+            },
+            // Front-stage focus with stronger lateral/rear envelopment than ConcertHall. The scene
+            // stays static so vocals/instruments do not orbit merely because the preset is "live".
+            Self::LiveConcert => SpatialSettings {
+                enabled: true,
+                width: 0.92,
+                depth: 0.58,
+                distance: 0.05,
+                mix: 0.66,
+                crossfeed: 0.04,
+                room_size: 0.58,
+                immersive_3d: 0.78,
+                virtual_bed: VirtualBedMode::Auto,
+                motion_mode: SpatialMotionMode::Static,
+                motion_speed_hz: 0.08,
+                motion_radius: 0.82,
                 motion_intensity: 0.0,
                 clockwise: true,
             },
@@ -213,12 +276,32 @@ impl SpatialPreset {
                 motion_intensity: 0.88,
                 clockwise: true,
             },
+            // Full-sphere moving scene. The native trajectory uses signed elevation and therefore
+            // passes below as well as above the listener instead of inventing non-standard floor
+            // channels in a 7.1.4 speaker layout.
+            Self::HelixSphere => SpatialSettings {
+                enabled: true,
+                width: 0.82,
+                depth: 0.50,
+                distance: 0.04,
+                mix: 0.72,
+                crossfeed: 0.04,
+                room_size: 0.26,
+                immersive_3d: 0.86,
+                virtual_bed: VirtualBedMode::Auto,
+                motion_mode: SpatialMotionMode::Helix,
+                motion_speed_hz: 0.055,
+                motion_radius: 0.95,
+                motion_intensity: 0.86,
+                clockwise: true,
+            },
         }
     }
 
     pub fn matches(self, settings: &SpatialSettings) -> bool {
         let preset = self.settings();
-        preset.motion_mode == settings.motion_mode
+        preset.enabled == settings.enabled
+            && preset.motion_mode == settings.motion_mode
             && preset.virtual_bed == settings.virtual_bed
             && preset.clockwise == settings.clockwise
             && [
@@ -513,6 +596,9 @@ fn motion_position(mode: SpatialMotionMode, sin: f32, cos: f32) -> (f32, f32, f3
         SpatialMotionMode::FrontBack => (sin * 0.16, cos, 0.90 + 0.10 * sin.abs()),
         SpatialMotionMode::Planetary => (sin, cos, 0.62 + 0.38 * sin3.abs()),
         SpatialMotionMode::NearEar => (sin, 0.20 + cos * 0.80, 0.88 + 0.12 * sin2.abs()),
+        // The legacy stereo fallback has no elevation axis; keep phase/radius coherent while the
+        // primary Trajectory renderer provides the actual signed-elevation Helix path.
+        SpatialMotionMode::Helix => (sin, cos2, 0.88 + 0.12 * cos.abs()),
     }
 }
 
