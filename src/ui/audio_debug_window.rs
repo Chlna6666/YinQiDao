@@ -12,8 +12,9 @@ use yinqidao_audio_spatial::{
 };
 
 use crate::audio::{
-    AudioDebugMonitorMode, AudioDebugSnapshot, audio_debug_latest_snapshot, set_audio_debug_enabled,
-    set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
+    AudioDebugMonitorMode, AudioDebugSnapshot, HeadTrackingBridge, HeadTrackingEulerPose,
+    ManualHeadTrackingProvider, Vec3, audio_debug_latest_snapshot, reset_runtime_listener_pose,
+    set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
 
 use super::{
@@ -25,6 +26,7 @@ const DEBUG_UI_TICK: Duration = Duration::from_millis(33);
 const SOURCE_ROWS: usize = 12;
 const REFLECTION_ROWS: usize = 24;
 const CAMERA_ORBIT_RADIANS_PER_PIXEL: f32 = 0.0075;
+const HEAD_TRACK_RADIANS_PER_PIXEL: f32 = 0.0065;
 
 #[derive(Default)]
 struct AudioDebugWindowState {
@@ -73,6 +75,7 @@ pub(crate) fn open(cx: &mut App) -> Result<()> {
 pub(crate) fn shutdown(cx: &mut App) {
     ensure_window_state(cx);
     set_audio_debug_enabled(false);
+    reset_runtime_listener_pose();
     let tracked = cx.update_global(|state: &mut AudioDebugWindowState, _cx| state.window.take());
     if let Some(window) = tracked {
         let _ = window.update(cx, |_view, window, _cx| window.remove_window());
@@ -127,6 +130,7 @@ fn start_debug_ui_service(window: WindowHandle<AudioDebugView>, cx: &mut App) {
                     if cx.has_global::<AudioDebugWindowState>() {
                         cx.update_global(|state: &mut AudioDebugWindowState, _cx| state.window = None);
                     }
+                    reset_runtime_listener_pose();
                     set_audio_debug_enabled(false);
                     return false;
                 }
@@ -147,6 +151,10 @@ pub(crate) struct AudioDebugView {
     gpu_scene: SpatialDebug3dScene,
     camera: SpatialDebug3dCamera,
     drag_anchor: Option<(f32, f32)>,
+    head_tracking: HeadTrackingBridge<ManualHeadTrackingProvider>,
+    head_tracking_demo: bool,
+    head_yaw: f32,
+    head_pitch: f32,
     frozen: bool,
 }
 
@@ -158,7 +166,32 @@ impl Default for AudioDebugView {
             gpu_scene: SpatialDebug3dScene::default(),
             camera: SpatialDebug3dCamera::default(),
             drag_anchor: None,
+            head_tracking: HeadTrackingBridge::new(ManualHeadTrackingProvider::default()),
+            head_tracking_demo: false,
+            head_yaw: 0.0,
+            head_pitch: 0.0,
             frozen: false,
+        }
+    }
+}
+
+impl AudioDebugView {
+    fn publish_debug_head_pose(&mut self) {
+        self.head_tracking.provider_mut().push_euler(HeadTrackingEulerPose {
+            position_meters: Vec3::ZERO,
+            yaw_radians: self.head_yaw,
+            pitch_radians: self.head_pitch,
+            roll_radians: 0.0,
+        });
+        let _ = self.head_tracking.poll_and_publish();
+    }
+
+    fn center_debug_head_pose(&mut self) {
+        self.head_yaw = 0.0;
+        self.head_pitch = 0.0;
+        self.head_tracking.reset();
+        if self.head_tracking_demo {
+            self.publish_debug_head_pose();
         }
     }
 }
@@ -171,6 +204,12 @@ impl Render for AudioDebugView {
         let mesh_error = self.gpu_scene.error();
         let draw_parameters = self.gpu_scene.draw_parameters(1.58, self.camera);
         let frozen = self.frozen;
+        let head_tracking_demo = self.head_tracking_demo;
+        let interaction_hint = if head_tracking_demo {
+            "HEAD TRACK 开启 · 拖拽=实时听者转头 · 滚轮=Zoom · 双击=听者归中"
+        } else {
+            "球面网格=直达 Source Field · 彩色 bounce=次级 Room Early · 蓝=左耳路径 · 红=右耳路径 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"
+        };
 
         div()
             .id("audio-debug-root")
@@ -224,9 +263,28 @@ impl Render for AudioDebugView {
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostEq))))
                             .child(monitor_button("C SPATIAL", snapshot.monitor_mode == AudioDebugMonitorMode::PostSpatial)
                                 .on_click(cx.listener(|_, _, _, _| set_audio_debug_monitor_mode(AudioDebugMonitorMode::PostSpatial))))
+                            .child(monitor_button("HEAD TRACK", head_tracking_demo).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.head_tracking_demo = !this.head_tracking_demo;
+                                    this.drag_anchor = None;
+                                    if this.head_tracking_demo {
+                                        this.publish_debug_head_pose();
+                                    } else {
+                                        this.center_debug_head_pose();
+                                    }
+                                    cx.notify();
+                                }),
+                            ))
                             .child(action_button("重置视角").on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.camera.reset();
+                                    this.drag_anchor = None;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(action_button("听者归中").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.center_debug_head_pose();
                                     this.drag_anchor = None;
                                     cx.notify();
                                 }),
@@ -324,14 +382,18 @@ impl Render for AudioDebugView {
                                         .bg(rgb(0x10151c))
                                         .text_xs()
                                         .text_color(rgb(0x8d98a5))
-                                        .child("球面网格=直达 Source Field · 彩色 bounce=次级 Room Early · 蓝=左耳路径 · 红=右耳路径 · 拖拽 Orbit · 滚轮 Zoom · 双击 Reset"),
+                                        .child(interaction_hint),
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
                                         cx.stop_propagation();
                                         if event.click_count >= 2 {
-                                            this.camera.reset();
+                                            if this.head_tracking_demo {
+                                                this.center_debug_head_pose();
+                                            } else {
+                                                this.camera.reset();
+                                            }
                                             this.drag_anchor = None;
                                             cx.notify();
                                             return;
@@ -358,10 +420,20 @@ impl Render for AudioDebugView {
                                         let dx = current.0 - previous.0;
                                         let dy = current.1 - previous.1;
                                         if dx.abs() > f32::EPSILON || dy.abs() > f32::EPSILON {
-                                            this.camera.orbit(
-                                                -dx * CAMERA_ORBIT_RADIANS_PER_PIXEL,
-                                                dy * CAMERA_ORBIT_RADIANS_PER_PIXEL,
-                                            );
+                                            if this.head_tracking_demo {
+                                                this.head_yaw = (this.head_yaw
+                                                    - dx * HEAD_TRACK_RADIANS_PER_PIXEL)
+                                                    .rem_euclid(std::f32::consts::PI * 2.0);
+                                                this.head_pitch = (this.head_pitch
+                                                    - dy * HEAD_TRACK_RADIANS_PER_PIXEL)
+                                                    .clamp(-1.35, 1.35);
+                                                this.publish_debug_head_pose();
+                                            } else {
+                                                this.camera.orbit(
+                                                    -dx * CAMERA_ORBIT_RADIANS_PER_PIXEL,
+                                                    dy * CAMERA_ORBIT_RADIANS_PER_PIXEL,
+                                                );
+                                            }
                                             this.drag_anchor = Some(current);
                                             cx.notify();
                                         }
