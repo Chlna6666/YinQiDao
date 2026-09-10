@@ -1,8 +1,8 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    App, Bounds, Div, Easing, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, Transition,
-    TransitionProperty, canvas, div, hsla, prelude::*, px, relative, rgb,
+    App, Bounds, Div, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div, hsla,
+    prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
@@ -45,8 +45,8 @@ impl Default for SliderStyle {
 impl SliderStyle {
     pub fn mini_progress() -> Self {
         Self {
-            // Idle remains a 2 px player-edge hairline. Hover grows only inside the existing
-            // overlay hit strip, so interaction is easier without lifting the player layout.
+            // Keep the idle rail as a true 2 px player edge. The 6 px interaction rail is painted
+            // as a separate hover layer so retained layout animation cannot leave it stuck at 2 px.
             track_height: px(2.0),
             hover_track_height: px(6.0),
             thumb_size: px(10.0),
@@ -176,16 +176,19 @@ fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
     Some(dragging)
 }
 
-fn slider_height_transition() -> Transition {
-    Transition::new(Duration::from_millis(120))
-        .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Height])
-}
-
-fn slider_width_transition() -> Transition {
-    Transition::new(Duration::from_millis(120))
-        .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Width])
+fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
+    div()
+        .w_full()
+        .h(height)
+        .rounded_full()
+        .bg(style.track_bg)
+        .child(
+            div()
+                .h_full()
+                .w(relative(ratio))
+                .rounded_full()
+                .bg(style.filled_color),
+        )
 }
 
 fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div> {
@@ -194,7 +197,7 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .max(f32::from(style.hover_track_height)));
     let hover_group = format!("slider-hover-{id}");
     let thumb_hover_group = hover_group.clone();
-    let track_hover_group = hover_group.clone();
+    let rail_hover_group = hover_group.clone();
 
     let mut thumb = div()
         .flex_none()
@@ -202,8 +205,6 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .rounded_full()
         .bg(style.thumb_color)
         .shadow_md()
-        // A slider position is already visible through its filled rail. Keep the knob out of the
-        // idle composition and reveal it only while this slider's interaction strip is hovered.
         .opacity(0.0)
         .group_hover(thumb_hover_group, move |s| {
             s.opacity(1.0).scale(style.hover_thumb_scale)
@@ -214,22 +215,63 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         thumb = thumb.border_1().border_color(border);
     }
 
-    let track = div()
-        .w_full()
-        .h(style.track_height)
-        .rounded_full()
-        .bg(style.track_bg)
-        .group_hover(track_hover_group, move |s| s.h(style.hover_track_height))
-        // Height is a layout property in this GPUI fork. The generic hover transition only covers
-        // opacity/transform, so using it here left the rail visually stuck at its idle thickness.
-        .transition(slider_height_transition())
-        .child(
-            div()
-                .h_full()
-                .w(relative(clamped_ratio))
-                .rounded_full()
-                .bg(style.filled_color),
-        );
+    let base_track_layer = {
+        let layer = div().absolute().inset_0().flex();
+        let layer = if style.edge_overlay {
+            layer.items_start()
+        } else {
+            layer.items_center()
+        };
+        layer.child(horizontal_track(
+            clamped_ratio,
+            style.track_height,
+            style,
+        ))
+    };
+    let hover_track_layer = {
+        let layer = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .opacity(0.0)
+            .group_hover(rail_hover_group, |s| s.opacity(1.0))
+            .transition(theme::hover_transition());
+        let layer = if style.edge_overlay {
+            layer.items_start()
+        } else {
+            layer.items_center()
+        };
+        layer.child(horizontal_track(
+            clamped_ratio,
+            style.hover_track_height,
+            style,
+        ))
+    };
+
+    let thumb_layer = if style.edge_overlay {
+        // Centre the knob on the expanded edge rail, not in the middle of the larger pointer strip.
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(style.thumb_size)
+            .top(px(0.0))
+            .h(style.hover_track_height)
+            .flex()
+            .items_center()
+            .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
+            .child(thumb)
+    } else {
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(style.thumb_size)
+            .top(px(0.0))
+            .bottom(px(0.0))
+            .flex()
+            .items_center()
+            .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
+            .child(thumb)
+    };
 
     let root = div()
         .group(hover_group)
@@ -237,28 +279,17 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .relative()
         .cursor_pointer()
         .h(interaction_height)
-        .flex()
-        .items_center()
-        .child(track)
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .right(style.thumb_size)
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .flex()
-                .items_center()
-                .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
-                .child(thumb),
-        );
+        .child(base_track_layer)
+        .child(hover_track_layer)
+        .child(thumb_layer);
 
     if style.edge_overlay {
-        // Keep a real hover/scrub hit strip, but remove it from normal layout and center it across
-        // the player's top edge. This eliminates the old several-pixel progress row above the
-        // controls while preserving easy pointer acquisition.
-        let extent = f32::from(interaction_height);
-        root.top(px(-extent * 0.5)).mb(px(-extent))
+        // The mini-player owns the containing stacking context. Keep the entire hit strip inside
+        // the player so the body cannot cover it; the visual rail itself starts at y=0 exactly.
+        root.absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(0.0))
     } else {
         root
     }
@@ -275,7 +306,7 @@ fn vertical_slider_visual(
         .max(f32::from(style.hover_track_height)));
     let hover_group = format!("slider-hover-{id}");
     let thumb_hover_group = hover_group.clone();
-    let track_hover_group = hover_group.clone();
+    let rail_hover_group = hover_group.clone();
 
     let mut thumb = div()
         .flex_none()
@@ -292,23 +323,23 @@ fn vertical_slider_visual(
         thumb = thumb.border_1().border_color(border);
     }
 
-    let track = div()
-        .h_full()
-        .w(style.track_height)
-        .rounded_full()
-        .bg(style.track_bg)
-        .group_hover(track_hover_group, move |s| s.w(style.hover_track_height))
-        .transition(slider_width_transition())
-        .flex()
-        .flex_col()
-        .justify_end()
-        .child(
-            div()
-                .w_full()
-                .h(relative(clamped_ratio))
-                .rounded_full()
-                .bg(style.filled_color),
-        );
+    let track = |width: Pixels| {
+        div()
+            .h_full()
+            .w(width)
+            .rounded_full()
+            .bg(style.track_bg)
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(
+                div()
+                    .w_full()
+                    .h(relative(clamped_ratio))
+                    .rounded_full()
+                    .bg(style.filled_color),
+            )
+    };
 
     div()
         .group(hover_group)
@@ -319,7 +350,18 @@ fn vertical_slider_visual(
         .h(height)
         .flex()
         .justify_center()
-        .child(track)
+        .child(track(style.track_height))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .opacity(0.0)
+                .group_hover(rail_hover_group, |s| s.opacity(1.0))
+                .transition(theme::hover_transition())
+                .child(track(style.hover_track_height)),
+        )
         .child(
             div()
                 .absolute()
