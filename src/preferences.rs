@@ -142,9 +142,10 @@ impl MusicApp {
         cx.notify();
     }
 
-    /// Select the internal speaker bed used only when the decoder supplies mono/stereo programme.
-    /// Native multichannel layouts never pass through this setting: their authored channel contract
-    /// is preserved by `render_native_spatial_into` and only receives the shared scene transform.
+    /// Select the internal virtual speaker bed for mono/stereo programme. When a multichannel
+    /// decoder reports no reliable speaker layout at all, an explicit selection may additionally
+    /// act as a Source Layout Override if and only if its speaker count exactly matches the decoded
+    /// PCM channel count. Reliable codec/container metadata always wins and is never overwritten.
     pub(crate) fn set_virtual_bed_mode(
         &mut self,
         mode: VirtualBedMode,
@@ -158,9 +159,15 @@ impl MusicApp {
         self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
         self.persist_audio_preferences();
         self.status = match mode {
-            VirtualBedMode::Off => "立体声虚拟多声道已关闭；保留双声源空间处理".into(),
-            VirtualBedMode::Auto => "立体声虚拟声床已切换为自动布局".into(),
-            _ => format!("立体声虚拟声床已切换为 {mode:?}"),
+            VirtualBedMode::Off => {
+                "Virtual Bed 已关闭；Mono/Stereo 保留双声源，Source Layout Override 关闭".into()
+            }
+            VirtualBedMode::Auto => {
+                "Virtual Bed 已切换为自动；未知多声道不会按声道数量猜 speaker layout".into()
+            }
+            _ => format!(
+                "已选择 {mode:?}：用于 Mono/Stereo Virtual Bed；无可靠布局元数据且声道数严格匹配时同时作为 Source Layout Override"
+            ),
         };
         cx.notify();
     }
