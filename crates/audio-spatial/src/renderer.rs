@@ -20,6 +20,7 @@ const NEAR_FIELD_FADE_METERS: f32 = 1.20;
 const AIR_ABSORPTION_START_METERS: f32 = 1.0;
 const REFLECTION_EPSILON: f32 = 1.0e-5;
 const REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES: f32 = 0.90;
+const FIRST_PINNA_REFLECTION_TAP: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderParameters {
@@ -75,7 +76,6 @@ struct RenderParameterStep {
 struct ReflectionRenderParameters {
     path: RenderParameters,
     pinna: StereoPinnaCoefficients,
-    pinna_enabled: bool,
 }
 
 impl ReflectionRenderParameters {
@@ -84,14 +84,6 @@ impl ReflectionRenderParameters {
         ReflectionRenderParameterStep {
             path: self.path.step_to(end.path, frames),
             pinna: self.pinna.step_to(end.pinna, frames),
-        }
-    }
-
-    #[inline]
-    fn advance(&mut self, step: ReflectionRenderParameterStep) {
-        self.path.advance(step.path);
-        if self.pinna_enabled {
-            self.pinna.advance_primary(step.pinna);
         }
     }
 }
@@ -243,17 +235,17 @@ impl SourceState {
             path.left_filter_alpha = path.left_filter_alpha.min(wall_alpha);
             path.right_filter_alpha = path.right_filter_alpha.min(wall_alpha);
 
-            // Lateral wall reflections already have strong ITD/ILD. Spend the extra biquad only on
-            // front/rear/floor/ceiling image sources, where preserving sagittal spectral identity
-            // materially improves depth/elevation without multiplying the full room-path cost.
-            let pinna_enabled = matches!(
-                reflection.wall,
-                ReflectionWall::Front
-                    | ReflectionWall::Rear
-                    | ReflectionWall::Floor
-                    | ReflectionWall::Ceiling
-            );
-            let pinna = if pinna_enabled {
+            // The image-source contract keeps Left/Right in slots 0/1 and sagittal walls in 2..6.
+            // Only the latter carry lightweight pinna colouration; the hot sample loop uses the
+            // same partition to avoid a per-tap branch for every rendered sample.
+            let pinna = if index >= FIRST_PINNA_REFLECTION_TAP {
+                debug_assert!(matches!(
+                    reflection.wall,
+                    ReflectionWall::Front
+                        | ReflectionWall::Rear
+                        | ReflectionWall::Floor
+                        | ReflectionWall::Ceiling
+                ));
                 let (azimuth, elevation) =
                     listener_direction_angles(reflected_pose.position, listener);
                 reflection_coefficients_for_direction(
@@ -263,14 +255,14 @@ impl SourceState {
                     reflected_pose.spread,
                 )
             } else {
+                debug_assert!(matches!(
+                    reflection.wall,
+                    ReflectionWall::Left | ReflectionWall::Right
+                ));
                 StereoPinnaCoefficients::IDENTITY
             };
 
-            ReflectionRenderParameters {
-                path,
-                pinna,
-                pinna_enabled,
-            }
+            ReflectionRenderParameters { path, pinna }
         });
 
         self.cached_reflection_pose = Some(pose);
@@ -472,7 +464,10 @@ impl CpuRenderer {
                         state.pinna.process(direct_left, direct_right, pinna_coefficients);
 
                     if reflections_enabled {
-                        for tap in 0..EARLY_REFLECTION_TAP_COUNT {
+                        // Left/Right wall images rely on ITD/ILD and wall filtering only. Keeping
+                        // them in a dedicated loop removes the old `if pinna_enabled` branch from
+                        // every tap of every sample.
+                        for tap in 0..FIRST_PINNA_REFLECTION_TAP {
                             let reflection = reflection_parameters[tap];
                             let path = reflection.path;
                             let (reflected_left, reflected_right) =
@@ -481,21 +476,43 @@ impl CpuRenderer {
                                 * (reflected_left - state.reflection_filter_left[tap]);
                             state.reflection_filter_right[tap] += path.right_filter_alpha
                                 * (reflected_right - state.reflection_filter_right[tap]);
-                            let mut reflected_left =
+                            output_left += state.reflection_filter_left[tap] * path.left_gain;
+                            output_right += state.reflection_filter_right[tap] * path.right_gain;
+                            reflection_parameters[tap]
+                                .path
+                                .advance(reflection_steps[tap].path);
+                        }
+
+                        // Front/Rear/Floor/Ceiling always carry the lightweight primary pinna cue.
+                        // This loop is branch-free with respect to wall class and advances the pinna
+                        // coefficients explicitly alongside the path ramp.
+                        for tap in FIRST_PINNA_REFLECTION_TAP..EARLY_REFLECTION_TAP_COUNT {
+                            let reflection = reflection_parameters[tap];
+                            let path = reflection.path;
+                            let (reflected_left, reflected_right) =
+                                state.delay.read_pair(path.left_delay, path.right_delay);
+                            state.reflection_filter_left[tap] += path.left_filter_alpha
+                                * (reflected_left - state.reflection_filter_left[tap]);
+                            state.reflection_filter_right[tap] += path.right_filter_alpha
+                                * (reflected_right - state.reflection_filter_right[tap]);
+                            let reflected_left =
                                 state.reflection_filter_left[tap] * path.left_gain;
-                            let mut reflected_right =
+                            let reflected_right =
                                 state.reflection_filter_right[tap] * path.right_gain;
-                            if reflection.pinna_enabled {
-                                (reflected_left, reflected_right) = state.reflection_pinna[tap]
-                                    .process_primary(
-                                        reflected_left,
-                                        reflected_right,
-                                        reflection.pinna,
-                                    );
-                            }
+                            let (reflected_left, reflected_right) = state.reflection_pinna[tap]
+                                .process_primary(
+                                    reflected_left,
+                                    reflected_right,
+                                    reflection.pinna,
+                                );
                             output_left += reflected_left;
                             output_right += reflected_right;
-                            reflection_parameters[tap].advance(reflection_steps[tap]);
+                            reflection_parameters[tap]
+                                .path
+                                .advance(reflection_steps[tap].path);
+                            reflection_parameters[tap]
+                                .pinna
+                                .advance_primary(reflection_steps[tap].pinna);
                         }
                     }
 
@@ -985,15 +1002,17 @@ mod tests {
                 ..EnvironmentSettings::default()
             },
         );
-        assert!(!reflections[0].pinna_enabled);
-        assert!(!reflections[1].pinna_enabled);
-        assert!(reflections[2..].iter().all(|reflection| reflection.pinna_enabled));
-        assert_eq!(reflections[0].pinna, StereoPinnaCoefficients::IDENTITY);
-        assert_eq!(reflections[1].pinna, StereoPinnaCoefficients::IDENTITY);
-        assert_ne!(reflections[2].pinna, StereoPinnaCoefficients::IDENTITY);
-        assert_ne!(reflections[3].pinna, StereoPinnaCoefficients::IDENTITY);
-        assert_ne!(reflections[4].pinna, StereoPinnaCoefficients::IDENTITY);
-        assert_ne!(reflections[5].pinna, StereoPinnaCoefficients::IDENTITY);
+        assert_eq!(FIRST_PINNA_REFLECTION_TAP, 2);
+        assert!(
+            reflections[..FIRST_PINNA_REFLECTION_TAP]
+                .iter()
+                .all(|reflection| reflection.pinna == StereoPinnaCoefficients::IDENTITY)
+        );
+        assert!(
+            reflections[FIRST_PINNA_REFLECTION_TAP..]
+                .iter()
+                .all(|reflection| reflection.pinna != StereoPinnaCoefficients::IDENTITY)
+        );
     }
 
     #[test]
