@@ -79,6 +79,10 @@
 - [x] HiFi Direct 是低处理参考模式：关闭 synthetic spatial/room/motion/virtual-bed，但**不宣称 bit-perfect**；decoder、SRC、limiter 与系统输出链仍可能改变样本。
 - [x] UI 已将误导性的 `3D 沉浸` / `3D Decorrelation` 分别改为 `Immersive 全景声场` / `Envelopment 空间包围度`。
 - [x] Source Layout Override 已从 `VirtualBedMode` 解耦为独立持久化字段和独立 UI selector；Virtual Bed 只负责 Mono/Stereo 合成声床，Source Layout Override 只声明 metadata-less multichannel 的输入 speaker semantics，切换空间预设不会清除已确认的输入布局。
+- [x] realtime ListenerPose 使用独立 latest-only lock-free 控制槽；Stereo、Virtual Bed 与 native 5.1/7.1/.2/.4 每个内部 block 读取同一完整 `position + forward + up` 姿态。
+- [x] ListenerPose 在 block 起点/终点间驱动 ITD/ILD/Pinna/Early 参数 ramp，避免高频 head-tracking 在 64-frame block 边界产生阶跃。
+- [x] `AudioEngine` 已公开直接 ListenerPose 发布/复位接口，不经过 bounded `PlayerCommand` mailbox。
+- [x] Head Tracking provider abstraction 已支持 Euler→ListenerPose、recenter calibration、latest-only Manual provider；OpenTrack UDP 后端/专用轮询线程/进程级 start-stop-recenter 控制入口已接入。
 - [ ] 删除 legacy `src/audio/dsp/spatial.rs` renderer；当前仍作为 failure fallback 与 settings/preset holder。
 
 ## Phase 2 — CPU kernel / 声学质量
@@ -144,7 +148,7 @@
 - [ ] Audio Vivid object metadata 接入。
 - [ ] HOA 参数化 binaural path。
 - [ ] object source culling / audibility budget。
-- [ ] listener pose / head orientation 从播放器命令/UI 到 `AudioProcessor → stereo/native SpatialEngine` 的 runtime 接口；底层 `SpatialEngine::set_listener` 已存在，但尚未向上贯通。
+- [x] listener pose / head orientation 已贯通到 Stereo/native SpatialEngine；高频输入走 latest-only lock-free 槽而不是 PlayerCommand，block 内平滑更新 binaural cues，同时 world room 保持固定。
 - [ ] source directivity / spread 高级模型。
 
 ## Phase 5 — Spatial Debug / 发烧级可视化
@@ -175,9 +179,10 @@
 - [x] FDN telemetry 复用 realtime parameter derivation。
 - [x] GPU 3D 明确区分 Early/Late：离散折线路径代表六面 image-source Early，监听者周围半透明 volume 代表 FDN Late。
 - [x] Debug channel label 直接消费公开 `ChannelRole` / `SpeakerLayout::role()`，不维护重复 channel-role 名称数组。
+- [x] GPU room wireframe / Floor / Ceiling grid 已按固定 world room → listener-view 投影；Listener 转头/移动只改变观察投影，不会把墙面跟着头部旋转或平移。
+- [x] Audio Laboratory 已加入 Manual HEAD TRACK 演示输入，可直接驱动真实 runtime ListenerPose，同时与 camera orbit 分离。
 - [x] 已建立指定 CC0 `Humanoid Low Poly Mesh (With Basic Face)` 的离线导入链：`tools/audio_debug/export_humanoid_cc0.py` 使用 Blender 将 `.blend` 一次性烘焙成 `src/ui/audio_debug_humanoid_generated.rs` 的静态 `GpuMesh3d` 顶点/索引；运行时无需 Blender、OBJ/GLTF parser 或文件 I/O。
 - [ ] 当前仓库的 `audio_debug_humanoid_generated.rs` 仍是 `HUMANOID_ASSET_READY=false` 的 build-safe placeholder；需要本地取得 `HumanoidBaseMesh_new.blend` 后运行 exporter，才能把**指定 CC0 真模型**烘焙进仓库。此项完成前不得宣称实际渲染的就是原始 CC0 mesh。
-- [ ] GPU room wireframe / Floor / Ceiling grid 还需要从固定 world room 投影到 listener-view；DSP reflection 已 world-fixed，但在 runtime Listener orientation 向上层开放前必须先完成这项，避免声音墙面与 Debug 房间框语义不一致。
 - [ ] object ID / Audio Vivid metadata 可视化。
 
 ## Phase 6 — 音频 GPU Compute（暂缓）
@@ -239,6 +244,8 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 - [x] 设置界面已暴露上述预设，并将 `3D 沉浸` 改名为 `Immersive 全景声场`、`3D Decorrelation` 改名为 `Envelopment 空间包围度`。
 - [x] 设置界面明确说明“下方直接声像”来自 signed-elevation trajectory，而不是 7.1.4 floor speaker。
 - [x] Source Layout Override 已成为独立 `SourceLayoutOverride` 配置字段，并有独立 selector；Stereo Virtual Bed 选择不会再意外声明 metadata-less multichannel 布局，空间预设切换也不会清除 Source Layout Override。
+- [x] runtime ListenerPose 已贯通到正式 Stereo/native DSP，并使用 block endpoint smoothing；world-fixed room 与 Listener orientation 保持解耦。
+- [x] Head Tracking provider abstraction 已加入 Manual provider、recenter calibration 与 OpenTrack UDP 输入；OpenTrack socket/packet parsing/polling 均在非 realtime 专用线程，audio callback 只读取 lock-free latest pose。
 
 ## 当前验证状态
 
@@ -246,7 +253,7 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 - **本助手环境尚未执行 `cargo test`**；
 - **尚未执行 `cpu_bench`**；
 - 用户本地编译已推进到并反馈 2026-09-09 一轮编译错误，但最新主线是否完整通过仍待下一次本地构建确认；
-- 新增 channel-order / codec→spatial handoff / Source Layout Override / Scene Motion / Helix / ear-position / source-activity / RoomPose / world-room image-source tests 已写入源码，但尚未执行；
+- 新增 channel-order / codec→spatial handoff / Source Layout Override / Scene Motion / Helix / ear-position / source-activity / RoomPose / world-room image-source / ListenerPose smoothing / Head Tracking/OpenTrack packet contract tests 已写入源码，但尚未执行；
 - **尚未得到 serial/parallel break-even**；
 - `Cargo.lock` 尚未通过当前环境中的 Cargo 重新生成/校验。
 
@@ -263,12 +270,12 @@ cargo run --release -p yinqidao-audio-spatial --example cpu_bench
 
 ## 下一步
 
-1. 用户本地重新执行 `cargo check`，继续消除剩余 GPUI 3D / pinna / limiter / native-room / handoff type/API 问题，直到根包完整通过。
-2. 让 GPU room wireframe / Floor / Ceiling grid 使用固定 world room → listener-view 投影；完成前不向播放器/UI 开放 runtime Listener orientation。
-3. 在 `AudioProcessor → StereoSpatializer/native SpatialEngine` 贯通 Listener pose，再接播放器命令/UI/head-tracking 输入；验证转头只改变 binaural cues，不旋转 world room。
+1. 用户本地重新执行 `cargo check`，继续消除剩余 GPUI 3D / pinna / limiter / native-room / handoff / OpenTrack type/API 问题，直到根包完整通过。
+2. 把 OpenTrack lifecycle 控制接到设置 UI（启停、归中、端口/轴向映射），并显示 provider health；socket/service 仍保持非 realtime。
+3. 推进 `SpatialEngine` runtime custom `RoomPose` setter + reflection cache invalidation + Debug room pose publication，使音乐厅/演唱会等高级场景可使用显式 world-room transform。
 4. 本地获取 `HumanoidBaseMesh_new.blend` 后运行 `tools/audio_debug/export_humanoid_cc0.py`，把指定 CC0 真模型烘焙进 `audio_debug_humanoid_generated.rs`，并核对模型朝向/头中心与 DSP ear markers 对齐。
 5. 实际跑 serial benchmark，补齐 5.1/7.1/.2/.4 与 Helix case，并分别测 dry / 双级 pinna / 六面 Early / FDN / limiter / Debug 的边际成本。
 6. 用真实音乐与峰值测试素材标定 HiFi Direct 的低处理链、Concert Hall/Live Concert 场景参数、limiter ceiling/release、post-spatial headroom 与 true-peak 风险。
 7. 只有 benchmark + 听感同时证明收益时才尝试 reflection-pinna / tap audibility budget / realtime worker pool。
 8. 编译与性能稳定后删除 legacy `src/audio/dsp/spatial.rs` renderer/fallback。
-9. 再推进 runtime custom `RoomPose`、source directivity、Audio Vivid object metadata 与 object/HOA 路径。
+9. 再推进 source directivity、Audio Vivid object metadata、object culling 与 HOA 路径。
