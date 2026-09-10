@@ -5,7 +5,7 @@ pub(crate) use spatial_environment::spatial_environment_settings;
 #[path = "stereo_virtual_bed.rs"]
 mod stereo_virtual_bed;
 
-use crate::model::{SpatialMotionMode, SpatialSettings};
+use crate::model::{SpatialMotionMode, SpatialSettings, VirtualBedMode};
 use stereo_virtual_bed::StereoVirtualBed;
 use yinqidao_audio_spatial::{
     ChannelLayout, EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
@@ -440,20 +440,32 @@ fn virtual_bed_layout(settings: &SpatialSettings, dynamic: bool) -> Option<Chann
     if !settings.enabled {
         return None;
     }
-    let immersive = settings.immersive_3d.clamp(0.0, 1.0);
-    let depth = settings.depth.clamp(0.0, 1.0);
-    let width = settings.width.clamp(0.0, 1.0);
 
-    if dynamic || immersive >= 0.72 {
-        Some(ChannelLayout::Surround7_1_4)
-    } else if immersive >= 0.52 || depth >= 0.50 {
-        Some(ChannelLayout::Surround5_1_4)
-    } else if immersive >= 0.36 {
-        Some(ChannelLayout::Surround7_1_2)
-    } else if width >= 0.78 && depth >= 0.18 {
-        Some(ChannelLayout::Surround7_1)
-    } else {
-        None
+    match settings.virtual_bed {
+        VirtualBedMode::Off => None,
+        VirtualBedMode::Surround5_1 => Some(ChannelLayout::Surround5_1),
+        VirtualBedMode::Surround7_1 => Some(ChannelLayout::Surround7_1),
+        VirtualBedMode::Surround5_1_2 => Some(ChannelLayout::Surround5_1_2),
+        VirtualBedMode::Surround5_1_4 => Some(ChannelLayout::Surround5_1_4),
+        VirtualBedMode::Surround7_1_2 => Some(ChannelLayout::Surround7_1_2),
+        VirtualBedMode::Surround7_1_4 => Some(ChannelLayout::Surround7_1_4),
+        VirtualBedMode::Auto => {
+            let immersive = settings.immersive_3d.clamp(0.0, 1.0);
+            let depth = settings.depth.clamp(0.0, 1.0);
+            let width = settings.width.clamp(0.0, 1.0);
+
+            if dynamic || immersive >= 0.72 {
+                Some(ChannelLayout::Surround7_1_4)
+            } else if immersive >= 0.52 || depth >= 0.50 {
+                Some(ChannelLayout::Surround5_1_4)
+            } else if immersive >= 0.36 {
+                Some(ChannelLayout::Surround7_1_2)
+            } else if width >= 0.78 && depth >= 0.18 {
+                Some(ChannelLayout::Surround7_1)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -607,6 +619,51 @@ mod tests {
     }
 
     #[test]
+    fn virtual_bed_off_keeps_dynamic_stereo_on_two_source_trajectory() {
+        let mut settings = SpatialPreset::Orbit8d.settings();
+        settings.virtual_bed = VirtualBedMode::Off;
+        assert_eq!(virtual_bed_layout(&settings, true), None);
+
+        let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
+        let mut samples = vec![0.25_f32; 128 * 2];
+        assert!(spatializer.process_in_place(&mut samples, &settings));
+        assert_eq!(spatializer.active_virtual_layout(), None);
+        assert_eq!(spatializer.sample_clock(), Some(128));
+    }
+
+    #[test]
+    fn explicit_virtual_bed_modes_preserve_ambiguous_layout_semantics() {
+        let mut settings = SpatialPreset::Studio.settings();
+        settings.virtual_bed = VirtualBedMode::Surround5_1_2;
+        assert_eq!(
+            virtual_bed_layout(&settings, false),
+            Some(ChannelLayout::Surround5_1_2)
+        );
+        settings.virtual_bed = VirtualBedMode::Surround7_1_2;
+        assert_eq!(
+            virtual_bed_layout(&settings, false),
+            Some(ChannelLayout::Surround7_1_2)
+        );
+    }
+
+    #[test]
+    fn every_explicit_virtual_bed_mode_maps_without_channel_count_guessing() {
+        let modes = [
+            (VirtualBedMode::Surround5_1, ChannelLayout::Surround5_1),
+            (VirtualBedMode::Surround7_1, ChannelLayout::Surround7_1),
+            (VirtualBedMode::Surround5_1_2, ChannelLayout::Surround5_1_2),
+            (VirtualBedMode::Surround5_1_4, ChannelLayout::Surround5_1_4),
+            (VirtualBedMode::Surround7_1_2, ChannelLayout::Surround7_1_2),
+            (VirtualBedMode::Surround7_1_4, ChannelLayout::Surround7_1_4),
+        ];
+        for (mode, layout) in modes {
+            let mut settings = SpatialPreset::Studio.settings();
+            settings.virtual_bed = mode;
+            assert_eq!(virtual_bed_layout(&settings, false), Some(layout));
+        }
+    }
+
+    #[test]
     fn stereo_pair_keeps_left_and_right_as_distinct_sources() {
         let field = StereoField::from_settings(&SpatialPreset::Immersive3d.settings());
         let center = SourcePose::new(Vec3::new(0.0, 0.0, field.distance_meters));
@@ -675,7 +732,10 @@ mod tests {
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
         let mut samples = vec![0.25_f32; 128 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
-        assert_eq!(spatializer.active_virtual_layout(), Some(ChannelLayout::Surround7_1_4));
+        assert_eq!(
+            spatializer.active_virtual_layout(),
+            Some(ChannelLayout::Surround7_1_4)
+        );
         assert_eq!(spatializer.sample_clock(), Some(128));
         spatializer.reset();
         assert_eq!(spatializer.sample_clock(), Some(0));
@@ -687,7 +747,10 @@ mod tests {
         let mut spatializer = StereoSpatializer::new(48_000).expect("engine");
         let mut samples = vec![0.20_f32; 128 * 2];
         assert!(spatializer.process_in_place(&mut samples, &settings));
-        assert_eq!(spatializer.active_virtual_layout(), Some(ChannelLayout::Surround7_1_4));
+        assert_eq!(
+            spatializer.active_virtual_layout(),
+            Some(ChannelLayout::Surround7_1_4)
+        );
         assert_eq!(spatializer.sample_clock(), None);
         assert!(samples.iter().all(|sample| sample.is_finite()));
     }
@@ -703,6 +766,7 @@ mod tests {
         let activity = spatializer
             .debug_source_activity()
             .expect("debug source activity");
+        assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, 64);
         assert!((activity[0].peak - 0.096).abs() < 1.0e-5);
