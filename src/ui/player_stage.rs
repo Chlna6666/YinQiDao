@@ -364,7 +364,7 @@ fn stage_lyrics(
             );
         }
 
-        let line_element = div()
+        let mut line_element = div()
             .group(hover_group)
             .id(SharedString::from(format!("lyric-line-{index}")))
             .relative()
@@ -379,8 +379,14 @@ fn stage_lyrics(
             .transition(lyric_focus_transition())
             .cursor_pointer()
             .hover(|style| style.opacity(1.0))
-            .child(text)
-            .child(
+            .child(text);
+
+        // Do not materialize hover-time badges while the viewport is in manual reading/scrolling
+        // mode. Rows move underneath a stationary pointer during a fast wheel/trackpad gesture, so
+        // CSS-style hover alone would otherwise activate a badge even though the user never hovered
+        // that lyric intentionally. Once scrolling settles, the badge returns with normal hover.
+        if !reading_mode {
+            line_element = line_element.child(
                 div()
                     .absolute()
                     .right(px(10.0))
@@ -392,37 +398,40 @@ fn stage_lyrics(
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Do not animate the badge through parent opacity. GPUI can retain/replay the
-                    // rounded background while the text run remains on the zero-opacity surface,
-                    // producing exactly the empty time capsule seen during lyric hover. Fade the
-                    // actual paint colors instead so text and background share the same hover state.
-                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    // Keep the text run minimally materialized instead of exact alpha zero. GPUI's
+                    // retained text capture may cull a zero-alpha run while retaining the rounded
+                    // hover background, which is what produced the empty time capsule after rapid
+                    // scroll/reconciliation. These idle alphas are visually transparent but keep
+                    // background and glyph lifetime in the same retained subtree.
+                    .bg(hsla(0.0, 0.0, 0.0, 0.002))
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.0))
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.003))
                     .group_hover(hover_group_for_time, |style| {
                         style
                             .bg(hsla(0.0, 0.0, 0.0, 0.28))
                             .text_color(hsla(0.0, 0.0, 1.0, 0.92))
                     })
                     .child(SharedString::from(format_lyric_time(timestamp))),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.seek_to_ms(timestamp, cx);
-                    this.pending_progress_ratio = None;
-                    this.lyrics_user_scrolling_until = None;
-                    if this.last_lyric_index != Some(index) {
-                        this.last_lyric_index = Some(index);
-                        this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
-                    }
-                    this.lyrics_scroll_target_y =
-                        Some(f32::from(this.lyrics_scroll_handle.offset().y));
-                    this.wake_stage_controls_immediately(cx);
-                }),
             );
+        }
+
+        let line_element = line_element.on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.seek_to_ms(timestamp, cx);
+                this.pending_progress_ratio = None;
+                this.lyrics_user_scrolling_until = None;
+                if this.last_lyric_index != Some(index) {
+                    this.last_lyric_index = Some(index);
+                    this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
+                }
+                this.lyrics_scroll_target_y =
+                    Some(f32::from(this.lyrics_scroll_handle.offset().y));
+                this.wake_stage_controls_immediately(cx);
+            }),
+        );
 
         let line_element = if index == active {
             let enter = Animation::from_spec(
