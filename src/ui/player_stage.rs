@@ -263,6 +263,7 @@ fn stage_lyrics(
         .lyrics_user_scrolling_until
         .is_some_and(|until| until > Instant::now());
     let reading_mode = manual_reading || !playing;
+    let render_mode = if reading_mode { "read" } else { "play" };
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -292,17 +293,14 @@ fn stage_lyrics(
 
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active);
-        // Paused/manual-reading mode is a true reading state: no Gaussian blur and no outer-line
-        // dimming. During playback the inactive lines keep enough contrast to remain legible while
-        // the current line stays visually locked in focus.
         let alpha = if reading_mode {
             1.0
         } else {
             match distance {
                 0 => 1.0,
-                1 => 0.68,
-                2 => 0.50,
-                _ => 0.36,
+                1 => 0.78,
+                2 => 0.60,
+                _ => 0.46,
             }
         };
         let blur_radius = if reading_mode {
@@ -310,9 +308,9 @@ fn stage_lyrics(
         } else {
             match distance {
                 0 => 0.0,
-                1 => 0.55,
-                2 => 1.10,
-                _ => 1.55,
+                1 => 0.35,
+                2 => 0.70,
+                _ => 1.10,
             }
         };
         let timestamp = line.timestamp_ms;
@@ -324,6 +322,9 @@ fn stage_lyrics(
             gpui::FontWeight::MEDIUM
         };
         let karaoke_active = index == active && !reading_mode;
+        let hover_group = format!("lyric-hover-{index}");
+        let hover_group_for_text = hover_group.clone();
+        let hover_group_for_time = hover_group.clone();
 
         let mut text = div()
             .w_full()
@@ -349,11 +350,23 @@ fn stage_lyrics(
             );
         }
 
-        let hover_group = format!("lyric-hover-{index}");
-        let hover_group_for_time = hover_group.clone();
+        // Only the glyph subtree is blurred. Keeping the row/hitbox/time badge outside the filter
+        // avoids the large offscreen blurred surface that previously produced smeared blocks. More
+        // importantly, reading mode does not instantiate a blur filter at all.
+        if !reading_mode && blur_radius > 0.0 {
+            text = text
+                .blur(px(blur_radius))
+                .group_hover(hover_group_for_text, |style| style.blur(px(0.0)));
+        }
+
         let line_element = div()
             .group(hover_group)
-            .id(SharedString::from(format!("lyric-line-{index}")))
+            // Changing the retained id across play/read modes forces GPUI to discard any cached
+            // filtered surface. A paused/manual-reading frame therefore cannot inherit blur from
+            // the preceding playback frame even if retained compositing reuses siblings.
+            .id(SharedString::from(format!(
+                "lyric-line-{render_mode}-{index}"
+            )))
             .relative()
             .w_full()
             .min_w(px(0.0))
@@ -363,13 +376,9 @@ fn stage_lyrics(
             .py(px(11.0))
             .mb(px(10.0))
             .opacity(alpha)
-            .blur(px(blur_radius))
-            // Blur is deliberately not transitioned. Snapping it to zero on pause/manual scroll
-            // prevents retained paint from leaving the whole lyrics list soft for another frame
-            // sequence; opacity still provides the gentle focus transition.
             .transition(lyric_focus_transition())
             .cursor_pointer()
-            .hover(|style| style.opacity(1.0).blur(px(0.0)))
+            .hover(|style| style.opacity(1.0))
             .child(text)
             .child(
                 div()
@@ -438,8 +447,6 @@ fn stage_primary_lyric(
     position_ms: u64,
     karaoke_active: bool,
 ) -> gpui::AnyElement {
-    // Word-level timing is a playback affordance, not a paused reading style. When playback is
-    // paused or the user manually browses the lyrics, render the complete line at full contrast.
     if !karaoke_active || line.words.is_empty() {
         return div()
             .w_full()
@@ -464,14 +471,17 @@ fn stage_primary_lyric(
 
     for (index, word) in line.words.iter().enumerate() {
         let alpha = match current_word {
-            Some(current) if index < current => 0.86,
+            Some(current) if index < current => 0.88,
             Some(current) if index == current => 1.0,
-            _ => 0.36,
+            Some(_) => 0.42,
+            None if index == 0 => 0.90,
+            None => 0.42,
         };
         row = row.child(
             div()
                 .flex_none()
-                .font_weight(if current_word == Some(index) {
+                .font_weight(if current_word == Some(index) || (current_word.is_none() && index == 0)
+                {
                     gpui::FontWeight::BOLD
                 } else {
                     gpui::FontWeight::SEMIBOLD
@@ -485,7 +495,7 @@ fn stage_primary_lyric(
 }
 
 fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(220))
+    Transition::new(Duration::from_millis(180))
         .ease(Easing::OutCubic)
         .properties([TransitionProperty::Opacity])
 }
