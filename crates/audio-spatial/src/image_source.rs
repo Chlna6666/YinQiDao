@@ -4,6 +4,19 @@ use crate::{EnvironmentSettings, ListenerPose, RoomPose, SourcePose, Vec3};
 pub(crate) const MAX_REFLECTION_DELAY_SECONDS: f32 = 0.080;
 const WALL_INTERIOR_EPSILON_M: f32 = 0.05;
 
+const REFLECTION_WALLS: [ReflectionWall; EARLY_REFLECTION_TAP_COUNT] = [
+    ReflectionWall::Left,
+    ReflectionWall::Right,
+    ReflectionWall::Front,
+    ReflectionWall::Rear,
+    ReflectionWall::Floor,
+    ReflectionWall::Ceiling,
+];
+const WALL_BASE_REFLECTANCE: [f32; EARLY_REFLECTION_TAP_COUNT] =
+    [0.62, 0.60, 0.56, 0.52, 0.46, 0.50];
+const WALL_TILT_HZ: [f32; EARLY_REFLECTION_TAP_COUNT] =
+    [700.0, 700.0, 0.0, -1_200.0, -2_000.0, -800.0];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RoomHalfExtents {
     pub width: f32,
@@ -34,21 +47,22 @@ pub(crate) struct SourceReflectionDescriptor {
 
 /// Solve reflections in the engine's default world-space room.
 ///
-/// The room no longer follows listener position/orientation. Direct binaural cues still use the
-/// listener's head basis, while wall geometry remains stable in world space.
+/// The production room is identity/world aligned. Keep this as a dedicated hot path rather than
+/// routing every source through `RoomPose::{world_to_local, local_to_world}`: those helpers rebuild
+/// an orthonormal basis on every call, and six reflections previously paid that cost repeatedly for
+/// both image and bounce points. The generic transformed-room solver remains available below.
 pub(crate) fn source_reflection_descriptors(
     sample_rate: f32,
     source: SourcePose,
     listener: ListenerPose,
     settings: EnvironmentSettings,
 ) -> [SourceReflectionDescriptor; EARLY_REFLECTION_TAP_COUNT] {
-    source_reflection_descriptors_in_room(
-        sample_rate,
-        source,
-        listener,
-        RoomPose::identity(),
-        settings,
-    )
+    let sample_rate = sample_rate.max(1.0);
+    let settings = sanitize_settings(settings);
+    let room = room_half_extents(settings);
+    let source_local = clamp_inside_room(source.position, room);
+    let listener_local = clamp_inside_room(listener.position, room);
+    solve_local_reflections(sample_rate, source_local, listener_local, room, settings)
 }
 
 /// Solve all six first-order rectangular-room reflections in a world-space room frame.
@@ -67,59 +81,103 @@ pub(crate) fn source_reflection_descriptors_in_room(
     let settings = sanitize_settings(settings);
     let room = room_half_extents(settings);
 
-    let source_local = clamp_inside_room(room_pose.world_to_local(source.position), room);
-    let listener_local = clamp_inside_room(room_pose.world_to_local(listener.position), room);
+    // `RoomPose::world_to_local/local_to_world` each call `basis()`. Compute the orthonormal basis
+    // once for the complete six-wall solve so custom/rotated-room diagnostics do not repeat those
+    // normalizations fourteen times per source update.
+    let (right, up, forward) = room_pose.basis();
+    let source_local = clamp_inside_room(
+        world_to_room_local(source.position, room_pose.position, right, up, forward),
+        room,
+    );
+    let listener_local = clamp_inside_room(
+        world_to_room_local(listener.position, room_pose.position, right, up, forward),
+        room,
+    );
+    let mut descriptors =
+        solve_local_reflections(sample_rate, source_local, listener_local, room, settings);
+    for descriptor in &mut descriptors {
+        descriptor.image_position = room_local_to_world(
+            descriptor.image_position,
+            room_pose.position,
+            right,
+            up,
+            forward,
+        );
+        descriptor.bounce_position = room_local_to_world(
+            descriptor.bounce_position,
+            room_pose.position,
+            right,
+            up,
+            forward,
+        );
+    }
+    descriptors
+}
+
+#[inline]
+fn solve_local_reflections(
+    sample_rate: f32,
+    source_local: Vec3,
+    listener_local: Vec3,
+    room: RoomHalfExtents,
+    settings: EnvironmentSettings,
+) -> [SourceReflectionDescriptor; EARLY_REFLECTION_TAP_COUNT] {
     let direct_distance = (source_local - listener_local).length().max(0.05);
-    let walls = [
-        ReflectionWall::Left,
-        ReflectionWall::Right,
-        ReflectionWall::Front,
-        ReflectionWall::Rear,
-        ReflectionWall::Floor,
-        ReflectionWall::Ceiling,
-    ];
+    let samples_per_meter = sample_rate / SPEED_OF_SOUND_M_S;
+    let max_delay_samples = sample_rate * MAX_REFLECTION_DELAY_SECONDS;
+    let reflectance_scale = 1.0 - settings.damping * 0.34;
+    let damping_cutoff_base_hz = 18_500.0 - settings.damping * 11_500.0;
 
     std::array::from_fn(|index| {
-        let wall = walls[index];
+        let wall = REFLECTION_WALLS[index];
         let image_local = image_source_for_wall(source_local, room, wall);
         let bounce_local = bounce_point(listener_local, image_local, room, wall);
         let path_length_meters = (image_local - listener_local)
             .length()
             .max(direct_distance);
         let excess_path_meters = (path_length_meters - direct_distance).max(0.0);
-        let excess_delay_samples = (excess_path_meters / SPEED_OF_SOUND_M_S * sample_rate)
-            .clamp(0.0, sample_rate * MAX_REFLECTION_DELAY_SECONDS);
-
-        let wall_base = match wall {
-            ReflectionWall::Left => 0.62,
-            ReflectionWall::Right => 0.60,
-            ReflectionWall::Front => 0.56,
-            ReflectionWall::Rear => 0.52,
-            ReflectionWall::Floor => 0.46,
-            ReflectionWall::Ceiling => 0.50,
-        };
-        let wall_reflectance = wall_base * (1.0 - settings.damping * 0.34);
-        let wall_tilt_hz = match wall {
-            ReflectionWall::Left | ReflectionWall::Right => 700.0,
-            ReflectionWall::Front => 0.0,
-            ReflectionWall::Rear => -1_200.0,
-            ReflectionWall::Floor => -2_000.0,
-            ReflectionWall::Ceiling => -800.0,
-        };
-        let damping_cutoff_hz =
-            (18_500.0 - settings.damping * 11_500.0 + wall_tilt_hz).clamp(3_800.0, 19_500.0);
+        let excess_delay_samples =
+            (excess_path_meters * samples_per_meter).clamp(0.0, max_delay_samples);
 
         SourceReflectionDescriptor {
             wall,
-            image_position: room_pose.local_to_world(image_local),
-            bounce_position: room_pose.local_to_world(bounce_local),
+            image_position: image_local,
+            bounce_position: bounce_local,
             path_length_meters,
             excess_path_meters,
             excess_delay_samples,
-            wall_reflectance,
-            damping_cutoff_hz,
+            wall_reflectance: WALL_BASE_REFLECTANCE[index] * reflectance_scale,
+            damping_cutoff_hz: (damping_cutoff_base_hz + WALL_TILT_HZ[index])
+                .clamp(3_800.0, 19_500.0),
         }
     })
+}
+
+#[inline]
+fn world_to_room_local(
+    point: Vec3,
+    room_position: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
+) -> Vec3 {
+    let relative = point - room_position;
+    Vec3::new(
+        relative.dot(right),
+        relative.dot(up),
+        relative.dot(forward),
+    )
+}
+
+#[inline]
+fn room_local_to_world(
+    point: Vec3,
+    room_position: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
+) -> Vec3 {
+    room_position + right * point.x + up * point.y + forward * point.z
 }
 
 #[inline]
