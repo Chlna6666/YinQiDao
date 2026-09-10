@@ -1,5 +1,3 @@
-use std::f32::consts::PI;
-
 use super::*;
 
 /// Optional elevation remap for a synthesized speaker bed.
@@ -36,11 +34,6 @@ impl SpeakerBedGeometry {
             rear_elevation_offset_degrees: sanitize_offset(self.rear_elevation_offset_degrees),
             top_elevation_offset_degrees: sanitize_offset(self.top_elevation_offset_degrees),
         }
-    }
-
-    #[inline]
-    fn is_identity(self) -> bool {
-        self == Self::IDENTITY
     }
 
     #[inline]
@@ -101,9 +94,9 @@ impl SpeakerBedGeometry {
 
 /// Render a synthesized speaker bed with an explicit vertical geometry remap.
 ///
-/// `render_interleaved_layout()` remains the canonical native/authored path. This variant exists so
-/// stereo-derived virtual beds can occupy both hemispheres without mutating standard speaker-layout
-/// semantics. Identity geometry delegates to the native method exactly.
+/// `render_interleaved_layout()` remains the canonical native/authored API and calls the same core
+/// with identity geometry. This variant exists so stereo-derived virtual beds can occupy both
+/// hemispheres without mutating standard speaker-layout semantics.
 impl SpatialEngine {
     pub fn render_interleaved_layout_with_geometry(
         &mut self,
@@ -112,11 +105,17 @@ impl SpatialEngine {
         geometry: SpeakerBedGeometry,
         output: &mut [f32],
     ) -> Result<usize, SpatialError> {
-        let geometry = geometry.sanitized();
-        if geometry.is_identity() {
-            return self.render_interleaved_layout(input, layout_kind, output);
-        }
+        self.render_interleaved_layout_geometry_impl(input, layout_kind, geometry, output)
+    }
 
+    pub(super) fn render_interleaved_layout_geometry_impl(
+        &mut self,
+        input: &[f32],
+        layout_kind: ChannelLayout,
+        geometry: SpeakerBedGeometry,
+        output: &mut [f32],
+    ) -> Result<usize, SpatialError> {
+        let geometry = geometry.sanitized();
         let debug_layout = layout_kind;
         let layout = SpeakerLayout::for_layout(layout_kind);
         let channels = layout.channels();
@@ -247,6 +246,8 @@ fn sanitize_offset(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::PI;
+
     use super::*;
 
     fn immersive_virtual_geometry() -> SpeakerBedGeometry {
