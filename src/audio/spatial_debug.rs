@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use yinqidao_audio_spatial::{
-    EnvironmentSettings, ListenerPose, MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES,
+    ChannelLayout, EnvironmentSettings, ListenerPose, MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES,
     SpatialDebugReflection, SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource,
     SpatialDebugSourceKind, Vec3,
 };
@@ -17,6 +17,7 @@ static EPOCH: AtomicU64 = AtomicU64::new(0);
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
 static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static CHANNEL_LAYOUT: AtomicU32 = AtomicU32::new(0);
 static SOURCE_COUNT: AtomicU32 = AtomicU32::new(0);
 static REFLECTION_COUNT: AtomicU32 = AtomicU32::new(0);
 static LISTENER: [AtomicU32; LISTENER_WORDS] = [const { AtomicU32::new(0) }; LISTENER_WORDS];
@@ -33,6 +34,7 @@ pub(crate) fn publish_spatial_debug_snapshot(snapshot: SpatialDebugSnapshot) {
     SNAPSHOT_SEQUENCE.store(snapshot.sequence, Ordering::Relaxed);
     SAMPLE_RATE.store(snapshot.sample_rate, Ordering::Relaxed);
     RENDERED_FRAMES.store(snapshot.rendered_frames, Ordering::Relaxed);
+    CHANNEL_LAYOUT.store(encode_channel_layout(snapshot.layout), Ordering::Relaxed);
     SOURCE_COUNT.store(
         snapshot.source_count.min(MAX_DEBUG_SOURCES) as u32,
         Ordering::Relaxed,
@@ -109,6 +111,7 @@ pub fn spatial_debug_latest_snapshot() -> Option<SpatialDebugSnapshot> {
             sequence: SNAPSHOT_SEQUENCE.load(Ordering::Relaxed),
             sample_rate: SAMPLE_RATE.load(Ordering::Relaxed),
             rendered_frames: RENDERED_FRAMES.load(Ordering::Relaxed),
+            layout: decode_channel_layout(CHANNEL_LAYOUT.load(Ordering::Relaxed)),
             listener: ListenerPose {
                 position: Vec3::new(
                     load_f32(&LISTENER[0]),
@@ -145,6 +148,34 @@ pub fn spatial_debug_latest_snapshot() -> Option<SpatialDebugSnapshot> {
         std::hint::spin_loop();
     }
     None
+}
+
+#[inline]
+fn encode_channel_layout(layout: Option<ChannelLayout>) -> u32 {
+    match layout {
+        None => 0,
+        Some(ChannelLayout::Stereo) => 1,
+        Some(ChannelLayout::Surround5_1) => 2,
+        Some(ChannelLayout::Surround7_1) => 3,
+        Some(ChannelLayout::Surround5_1_2) => 4,
+        Some(ChannelLayout::Surround5_1_4) => 5,
+        Some(ChannelLayout::Surround7_1_2) => 6,
+        Some(ChannelLayout::Surround7_1_4) => 7,
+    }
+}
+
+#[inline]
+fn decode_channel_layout(value: u32) -> Option<ChannelLayout> {
+    match value {
+        1 => Some(ChannelLayout::Stereo),
+        2 => Some(ChannelLayout::Surround5_1),
+        3 => Some(ChannelLayout::Surround7_1),
+        4 => Some(ChannelLayout::Surround5_1_2),
+        5 => Some(ChannelLayout::Surround5_1_4),
+        6 => Some(ChannelLayout::Surround7_1_2),
+        7 => Some(ChannelLayout::Surround7_1_4),
+        _ => None,
+    }
 }
 
 fn store_source(index: usize, source: SpatialDebugSource) {
@@ -324,7 +355,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atomic_publication_round_trips_source_activity_and_vertical_reflection() {
+    fn atomic_publication_round_trips_layout_activity_and_vertical_reflection() {
         let source = SpatialDebugSource {
             active: true,
             source_index: 1,
@@ -338,6 +369,7 @@ mod tests {
         let mut snapshot = SpatialDebugSnapshot::new(48_000);
         snapshot.sequence = 7;
         snapshot.rendered_frames = 1_600;
+        snapshot.layout = Some(ChannelLayout::Surround5_1_2);
         snapshot.source_count = 2;
         snapshot.sources[1] = source;
         snapshot.reflection_count = 12;
@@ -368,6 +400,7 @@ mod tests {
         publish_spatial_debug_snapshot(snapshot);
 
         let read = spatial_debug_latest_snapshot().expect("published snapshot");
+        assert_eq!(read.layout, Some(ChannelLayout::Surround5_1_2));
         assert!((read.sources[1].input_peak - 0.75).abs() < f32::EPSILON);
         assert!((read.sources[1].input_rms - 0.25).abs() < f32::EPSILON);
         assert_eq!(read.reflection_count, 12);
@@ -377,5 +410,25 @@ mod tests {
 
         clear_spatial_debug_snapshot();
         assert!(spatial_debug_latest_snapshot().is_none());
+    }
+
+    #[test]
+    fn channel_layout_encoding_preserves_ambiguous_channel_counts() {
+        assert_eq!(
+            decode_channel_layout(encode_channel_layout(Some(ChannelLayout::Surround7_1))),
+            Some(ChannelLayout::Surround7_1)
+        );
+        assert_eq!(
+            decode_channel_layout(encode_channel_layout(Some(ChannelLayout::Surround5_1_2))),
+            Some(ChannelLayout::Surround5_1_2)
+        );
+        assert_eq!(
+            decode_channel_layout(encode_channel_layout(Some(ChannelLayout::Surround5_1_4))),
+            Some(ChannelLayout::Surround5_1_4)
+        );
+        assert_eq!(
+            decode_channel_layout(encode_channel_layout(Some(ChannelLayout::Surround7_1_2))),
+            Some(ChannelLayout::Surround7_1_2)
+        );
     }
 }
