@@ -391,8 +391,8 @@ impl DecoderStream {
             })?;
         // Prefer the decoder's normalized channel map because codec-specific decoders (AAC/Vorbis
         // in particular) may turn an encoded channel order into Symphonia's canonical positioned
-        // order during construction. Fall back to the demuxer's map when both describe the same
-        // stream but the decoder leaves its copy unset.
+        // order during construction. A second opportunity exists on every decoded frame below,
+        // because some codecs only publish their final channel map in the decoded SignalSpec.
         let spatial_layout_hint = symphonia_spatial_layout_hint(decoder.codec_params().channels.as_ref())
             .or_else(|| symphonia_spatial_layout_hint(codec_params.channels.as_ref()));
 
@@ -448,7 +448,7 @@ impl DecoderStream {
         &mut self,
         samples: &mut Vec<f32>,
     ) -> Result<Option<(u32, u16)>, DecodeError> {
-        let (sample_rate, channels) = match &mut self.backend {
+        let (sample_rate, channels, decoded_layout_hint) = match &mut self.backend {
             DecoderBackend::Symphonia(backend) => loop {
                 let packet = match backend.format.next_packet() {
                     Ok(Some(packet)) => packet,
@@ -500,15 +500,27 @@ impl DecoderStream {
                 {
                     return Ok(None);
                 }
-                (backend.sample_rate(), backend.channels())
+                (backend.sample_rate(), backend.channels(), None)
             }
             DecoderBackend::Av3aProcess(backend) => {
                 if !backend.next_chunk_into(samples)? {
                     return Ok(None);
                 }
-                (backend.sample_rate, backend.channels)
+                (backend.sample_rate, backend.channels, None)
             }
         };
+
+        if let Some(layout) = decoded_layout_hint
+            && self.spatial_layout_hint != Some(layout)
+        {
+            tracing::debug!(
+                path = %self.path.display(),
+                channels,
+                ?layout,
+                "从 Symphonia 解码帧恢复多声道扬声器布局"
+            );
+            self.spatial_layout_hint = Some(layout);
+        }
 
         self.decoded_frames = self
             .decoded_frames
@@ -708,14 +720,18 @@ pub fn decode_to_pcm(path: &Path) -> Result<DecodedChunk, DecodeError> {
     })
 }
 
-fn decoded_to_f32_into(decoded: GenericAudioBufferRef<'_>, samples: &mut Vec<f32>) -> (u32, u16) {
+fn decoded_to_f32_into(
+    decoded: GenericAudioBufferRef<'_>,
+    samples: &mut Vec<f32>,
+) -> (u32, u16, Option<ChannelLayout>) {
     let spec = decoded.spec().clone();
     let channels = spec.channels().count() as u16;
     let sample_rate = spec.rate();
+    let spatial_layout_hint = symphonia_spatial_layout_hint(Some(spec.channels()));
     samples.clear();
     samples.resize(decoded.samples_interleaved(), 0.0);
     decoded.copy_to_slice_interleaved(samples);
-    (sample_rate, channels)
+    (sample_rate, channels, spatial_layout_hint)
 }
 
 #[cfg(test)]
