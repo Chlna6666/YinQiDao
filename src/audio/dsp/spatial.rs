@@ -15,12 +15,13 @@ pub enum SpatialPreset {
     Orbit8d,
     Orbit360,
     Pendulum,
+    FrontBack,
     Planetary,
     NearEar,
 }
 
 impl SpatialPreset {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Studio,
         Self::Wide,
         Self::Headphones,
@@ -29,6 +30,7 @@ impl SpatialPreset {
         Self::Orbit8d,
         Self::Orbit360,
         Self::Pendulum,
+        Self::FrontBack,
         Self::Planetary,
         Self::NearEar,
     ];
@@ -161,6 +163,22 @@ impl SpatialPreset {
                 motion_speed_hz: 0.15,
                 motion_radius: 0.95,
                 motion_intensity: 0.84,
+                clockwise: true,
+            },
+            Self::FrontBack => SpatialSettings {
+                enabled: true,
+                width: 0.66,
+                depth: 0.56,
+                distance: 0.04,
+                mix: 0.68,
+                crossfeed: 0.05,
+                room_size: 0.18,
+                immersive_3d: 0.68,
+                virtual_bed: VirtualBedMode::Auto,
+                motion_mode: SpatialMotionMode::FrontBack,
+                motion_speed_hz: 0.085,
+                motion_radius: 0.95,
+                motion_intensity: 0.90,
                 clockwise: true,
             },
             Self::Planetary => SpatialSettings {

@@ -601,7 +601,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
                     .gap_4()
                     .child(label_block(
                         "轨道方向",
-                        "动态 8D / 360° / 行星模式的旋转方向",
+                        "动态 8D / 360° / 前后 / 行星模式的运动方向",
                     ))
                     .child(
                         div()
@@ -629,7 +629,7 @@ fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement
 
     card(
         "空间音频 · 球形声场与虚拟多声道",
-        "真实多声道始终保留 authored speaker bed；Mono/Stereo 可选择内部虚拟声床，再与 8D / 360° / 3D 共用同一球形双耳渲染器",
+        "真实多声道始终保留 authored speaker bed；Mono/Stereo 可选择内部虚拟声床，并与 3D / 8D / 360° / 前后穿梭共用同一球形双耳渲染器",
         div()
             .flex()
             .flex_col()
@@ -1506,6 +1506,7 @@ fn spatial_preset_name(preset: SpatialPreset) -> &'static str {
         SpatialPreset::Orbit8d => "8D 环绕",
         SpatialPreset::Orbit360 => "360° 环绕",
         SpatialPreset::Pendulum => "左右摆动",
+        SpatialPreset::FrontBack => "前后穿梭",
         SpatialPreset::Planetary => "音乐行星",
         SpatialPreset::NearEar => "近耳旋绕",
     }
