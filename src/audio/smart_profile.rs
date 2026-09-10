@@ -228,12 +228,10 @@ fn target_settings(profile: SmartAudioProfileKind) -> (EqSettings, SpatialSettin
             spatial.enabled = false;
             (EqPreset::Flat.settings(), spatial)
         }
-        SmartAudioProfileKind::Classical => {
-            let mut spatial = SpatialPreset::Studio.settings();
-            spatial.width = 0.62;
-            spatial.depth = 0.30;
-            (EqPreset::Classical.settings(), spatial)
-        }
+        SmartAudioProfileKind::Classical => (
+            EqPreset::Classical.settings(),
+            SpatialPreset::ConcertHall.settings(),
+        ),
         SmartAudioProfileKind::Pop => (EqPreset::Pop.settings(), SpatialPreset::Wide.settings()),
         SmartAudioProfileKind::Rock => (EqPreset::Rock.settings(), SpatialPreset::Wide.settings()),
         SmartAudioProfileKind::Electronic => {
@@ -273,12 +271,10 @@ fn target_settings(profile: SmartAudioProfileKind) -> (EqSettings, SpatialSettin
             spatial.mix = 0.70;
             (EqPreset::Classical.settings(), spatial)
         }
-        SmartAudioProfileKind::Live => {
-            let mut spatial = SpatialPreset::Cinema.settings();
-            spatial.depth = 0.70;
-            spatial.room_size = 0.72;
-            (EqPreset::Rock.settings(), spatial)
-        }
+        SmartAudioProfileKind::Live => (
+            EqPreset::Rock.settings(),
+            SpatialPreset::LiveConcert.settings(),
+        ),
         SmartAudioProfileKind::Balanced => {
             let mut spatial = SpatialPreset::Studio.settings();
             spatial.enabled = true;
@@ -386,6 +382,16 @@ mod tests {
             classify(&track(Some("Rock"), "x")).0,
             SmartAudioProfileKind::Rock
         );
+    }
+
+    #[test]
+    fn professional_static_scenes_are_used_for_classical_and_live_targets() {
+        let (_, classical) = target_settings(SmartAudioProfileKind::Classical);
+        let (_, live) = target_settings(SmartAudioProfileKind::Live);
+        assert!(SpatialPreset::ConcertHall.matches(&classical));
+        assert!(SpatialPreset::LiveConcert.matches(&live));
+        assert_eq!(classical.motion_mode, SpatialMotionMode::Static);
+        assert_eq!(live.motion_mode, SpatialMotionMode::Static);
     }
 
     #[test]
