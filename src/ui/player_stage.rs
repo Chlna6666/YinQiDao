@@ -107,7 +107,6 @@ pub(super) fn render(
                             app,
                             lyrics,
                             displayed_position_ms,
-                            fluid_playing,
                             cx,
                         )),
                 )
@@ -243,7 +242,6 @@ fn stage_lyrics(
     app: &MusicApp,
     lyrics: &[LyricLine],
     position_ms: u64,
-    playing: bool,
     cx: &mut Context<MusicApp>,
 ) -> impl IntoElement {
     if lyrics.is_empty() {
@@ -279,10 +277,12 @@ fn stage_lyrics(
         .iter()
         .rposition(|line| line.timestamp_ms <= position_ms)
         .unwrap_or(0);
-    let manual_reading = app
+    let reading_mode = app
         .lyrics_user_scrolling_until
         .is_some_and(|until| until > Instant::now());
-    let reading_mode = manual_reading || !playing;
+    // Pausing freezes transport time; it must not implicitly enter manual-reading mode. Keep the
+    // active-line focus hierarchy and enhanced-LRC word highlight frozen at the exact pause point.
+    // Only explicit lyric scrolling temporarily flattens the focus hierarchy for reading.
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
