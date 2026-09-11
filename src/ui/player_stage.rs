@@ -305,6 +305,7 @@ fn stage_lyrics(
     // frozen but removes Gaussian blur immediately, while explicit scrolling additionally flattens
     // opacity so the viewport becomes a clean reading surface.
     let depth_blur_active = app.snapshot.state == PlaybackState::Playing && !reading_mode;
+    let blur_capture_mode = if depth_blur_active { "blur" } else { "direct" };
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -349,7 +350,15 @@ fn stage_lyrics(
         let hover_group_for_blur = hover_group.clone();
         let hover_group_for_time = hover_group.clone();
 
+        // Switching between direct ClearType text and a grayscale element-blur capture changes the
+        // render target and blend pipeline. Give the text subtree a mode-specific identity so GPUI's
+        // retained reconciliation cannot replay the pre-Play direct-text node inside a newly-created
+        // blur capture. This is intentionally keyed only by capture mode: normal playback position
+        // ticks keep the same retained subtree and do not rebuild lyrics every 100 ms.
         let mut text = div()
+            .id(SharedString::from(format!(
+                "lyric-text-{index}-{blur_capture_mode}"
+            )))
             .w_full()
             .min_w(px(0.0))
             .flex()
