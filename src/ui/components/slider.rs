@@ -434,7 +434,8 @@ pub fn interactive_slider(
     let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string;
-    let click_for_up = on_click;
+    let click_for_up = on_click.clone();
+    let click_for_up_out = on_click;
     let drag_for_move = on_drag;
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
@@ -455,9 +456,9 @@ pub fn interactive_slider(
             if bounds_for_down.borrow().is_none() {
                 return;
             }
-            // Do not seek/change on press. A direct click is committed on mouse-up, while a scrub
-            // only starts after crossing DRAG_THRESHOLD_PX. This keeps the two interaction paths
-            // disjoint and prevents a press + every drag sample from becoming separate seeks.
+            // Direct clicks commit on release, while scrub only starts after crossing the drag
+            // threshold. Both in-bounds and out-of-bounds releases are handled below so a click
+            // cannot disappear merely because the pointer left the thin visual rail by a pixel.
             begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
@@ -499,14 +500,14 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
                 return;
             };
-            if !was_dragging {
+            let Some(bounds) = *bounds_for_up_out.borrow() else {
                 return;
-            }
-            if let Some(bounds) = *bounds_for_up_out.borrow() {
-                (drag_end_for_up_out)(
-                    horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+            };
+            let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
+            if was_dragging {
+                (drag_end_for_up_out)(ratio, cx);
+            } else {
+                (click_for_up_out)(ratio, cx);
             }
         })
 }
