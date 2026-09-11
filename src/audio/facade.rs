@@ -152,8 +152,24 @@ impl SnapshotCache {
                     .as_millis()
                     .min(u128::from(NO_POSITION_OVERRIDE - 1)) as u64,
             ),
+            PlayerCommand::RestoreTrack { position, .. } => Some(
+                position
+                    .as_millis()
+                    .min(u128::from(NO_POSITION_OVERRIDE - 1)) as u64,
+            ),
             _ => None,
         }
+    }
+
+    fn resets_position_override(command: &PlayerCommand) -> bool {
+        matches!(
+            command,
+            PlayerCommand::PlayTrack(_)
+                | PlayerCommand::Next
+                | PlayerCommand::Previous
+                | PlayerCommand::SetQueue(_)
+                | PlayerCommand::Stop
+        )
     }
 
     fn set_optimistic_state(&self, state: PlaybackState) {
@@ -161,10 +177,22 @@ impl SnapshotCache {
             .store(encode_state(state), Ordering::Release);
     }
 
-    fn set_optimistic_position_ms(&self, position_ms: u64) {
-        self.position_override_ms.store(
-            position_ms.min(NO_POSITION_OVERRIDE - 1),
-            Ordering::Release,
+    fn set_optimistic_position_ms(&self, position_ms: u64) -> u64 {
+        self.position_override_ms
+            .swap(position_ms.min(NO_POSITION_OVERRIDE - 1), Ordering::Release)
+    }
+
+    fn clear_optimistic_position_ms(&self) -> u64 {
+        self.position_override_ms
+            .swap(NO_POSITION_OVERRIDE, Ordering::Release)
+    }
+
+    fn restore_optimistic_position_ms(&self, expected: u64, previous: u64) {
+        let _ = self.position_override_ms.compare_exchange(
+            expected,
+            previous,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         );
     }
 
@@ -386,22 +414,40 @@ impl AudioEngine {
     }
 
     pub fn try_send(&self, command: PlayerCommand) -> bool {
-        // Extract only tiny optimistic transport values before moving the command. Seek position is
-        // published through atomics immediately after enqueue so every UI progress surface observes
-        // one monotonic target while the asynchronous bridge/decoder applies the request.
+        // Publish a seek target before enqueueing it. The bridge can process a request immediately,
+        // so publishing after enqueue leaves a race where the confirmed position is written first
+        // and the late override then pins the UI to a stale target forever.
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
+        let position_override_update = optimistic_position_ms
+            .map(|position_ms| {
+                (
+                    position_ms,
+                    self.snapshot.set_optimistic_position_ms(position_ms),
+                )
+            })
+            .or_else(|| {
+                SnapshotCache::resets_position_override(&command).then(|| {
+                    (
+                        NO_POSITION_OVERRIDE,
+                        self.snapshot.clear_optimistic_position_ms(),
+                    )
+                })
+            });
         match self.request_tx.try_send(EngineRequest::Command(command)) {
             Ok(()) => {
                 if let Some(state) = optimistic_state {
                     self.snapshot.set_optimistic_state(state);
                 }
-                if let Some(position_ms) = optimistic_position_ms {
-                    self.snapshot.set_optimistic_position_ms(position_ms);
-                }
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                if let Some((position_ms, previous)) = position_override_update {
+                    self.snapshot
+                        .restore_optimistic_position_ms(position_ms, previous);
+                }
+                false
+            }
         }
     }
 
@@ -666,6 +712,19 @@ mod tests {
             cache.position_override_ms.load(Ordering::Acquire),
             8_000
         );
+    }
+
+    #[test]
+    fn restoring_failed_seek_does_not_clobber_newer_target() {
+        let cache = SnapshotCache::new(PlayerSnapshot::default());
+        let previous = cache.set_optimistic_position_ms(4_000);
+        let failed_target_previous = cache.set_optimistic_position_ms(7_500);
+
+        cache.set_optimistic_position_ms(9_000);
+        cache.restore_optimistic_position_ms(7_500, failed_target_previous);
+
+        assert_eq!(cache.progress().1, 9_000);
+        assert_eq!(previous, NO_POSITION_OVERRIDE);
     }
 
     #[test]
