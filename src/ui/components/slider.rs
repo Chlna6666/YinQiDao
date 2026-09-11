@@ -45,8 +45,6 @@ impl Default for SliderStyle {
 impl SliderStyle {
     pub fn mini_progress() -> Self {
         Self {
-            // Keep the idle rail as a true 2 px player edge. The 6 px interaction rail is painted
-            // as a separate hover layer so retained layout animation cannot leave it stuck at 2 px.
             track_height: px(2.0),
             hover_track_height: px(6.0),
             thumb_size: px(10.0),
@@ -125,10 +123,16 @@ struct SliderInteractionState {
 
 impl Global for SliderInteractionState {}
 
+#[inline]
+fn copied_bounds(
+    bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+) -> Option<Bounds<Pixels>> {
+    // Never keep a RefCell guard alive across a UI callback. Seek/volume callbacks may synchronously
+    // notify/repaint, causing the canvas prepaint hook to borrow_mut this same cell re-entrantly.
+    *bounds.borrow()
+}
+
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
-    // The colored rail is painted across the complete element width, so pointer coordinates must
-    // use that exact same interval. The old half-thumb inset mapped a click to a different ratio
-    // than the visible fill and accumulated into seconds of seek error on long tracks.
     let width = f32::from(bounds.size.width).max(1.0);
     let local = f32::from(position_x - bounds.left());
     (local / width).clamp(0.0, 1.0)
@@ -226,16 +230,9 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         } else {
             layer.items_center()
         };
-        layer.child(horizontal_track(
-            clamped_ratio,
-            style.track_height,
-            style,
-        ))
+        layer.child(horizontal_track(clamped_ratio, style.track_height, style))
     };
     let hover_track_layer = if style.edge_overlay {
-        // The mini-player rail is its top boundary. Grow the hover thickness out of the player
-        // (negative Y) while keeping the idle 2 px edge anchored in place, so the expanded rail
-        // never consumes control-space inside the 72 px player body.
         div()
             .absolute()
             .left(px(0.0))
@@ -269,9 +266,6 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
     };
 
     let thumb_layer = if style.edge_overlay {
-        // Keep the thumb centre on the same full-width coordinate as the fill and pointer mapping.
-        // The layer itself stays W wide while extending half a thumb to the left, so 0/1 map to
-        // the exact rail endpoints rather than an inset [thumb/2, W-thumb/2] interval.
         div()
             .absolute()
             .left(px(-f32::from(half_thumb)))
@@ -306,8 +300,6 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Stateful<Div>
         .child(thumb_layer);
 
     if style.edge_overlay {
-        // The mini-player owns the containing stacking context. Keep the hit strip inside the
-        // player; only the visual hover rail grows outward above the boundary.
         root.absolute()
             .left(px(0.0))
             .right(px(0.0))
@@ -404,12 +396,10 @@ fn vertical_slider_visual(
         )
 }
 
-/// Pure visual slider kept for places that do not need pointer interaction.
 pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
     slider_visual(id.into(), ratio, style)
 }
 
-/// Slider with one pointer state machine for both direct clicks and scrubbing.
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -453,12 +443,9 @@ pub fn interactive_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            if bounds_for_down.borrow().is_none() {
+            if copied_bounds(&bounds_for_down).is_none() {
                 return;
             }
-            // Direct clicks commit on release, while scrub only starts after crossing the drag
-            // threshold. Both in-bounds and out-of-bounds releases are handled below so a click
-            // cannot disappear merely because the pointer left the thin visual rail by a pixel.
             begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
         })
         .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
@@ -475,7 +462,7 @@ pub fn interactive_slider(
             if !dragging {
                 mark_pointer_dragging(&id_for_move, cx);
             }
-            if let Some(bounds) = *bounds_for_move.borrow() {
+            if let Some(bounds) = copied_bounds(&bounds_for_move) {
                 let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
                 (drag_for_move)(ratio, cx);
             }
@@ -485,7 +472,7 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
                 return;
             };
-            let Some(bounds) = *bounds_for_up.borrow() else {
+            let Some(bounds) = copied_bounds(&bounds_for_up) else {
                 return;
             };
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
@@ -500,7 +487,7 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
                 return;
             };
-            let Some(bounds) = *bounds_for_up_out.borrow() else {
+            let Some(bounds) = copied_bounds(&bounds_for_up_out) else {
                 return;
             };
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
@@ -512,7 +499,6 @@ pub fn interactive_slider(
         })
 }
 
-/// Vertical variant for professional EQ faders. Ratio 0 is the bottom and ratio 1 is the top.
 pub fn interactive_vertical_slider(
     id: impl Into<ElementId>,
     ratio: f32,
@@ -552,7 +538,7 @@ pub fn interactive_vertical_slider(
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(bounds) = *bounds_for_down.borrow() else {
+            let Some(bounds) = copied_bounds(&bounds_for_down) else {
                 return;
             };
             begin_pointer_press(&id_for_down, f32::from(event.position.y), cx);
@@ -575,7 +561,7 @@ pub fn interactive_vertical_slider(
             if !dragging {
                 mark_pointer_dragging(&id_for_move, cx);
             }
-            if let Some(bounds) = *bounds_for_move.borrow() {
+            if let Some(bounds) = copied_bounds(&bounds_for_move) {
                 (change_for_move)(
                     vertical_ratio(event.position.y, bounds, style.thumb_size),
                     cx,
@@ -590,7 +576,7 @@ pub fn interactive_vertical_slider(
             if !was_dragging {
                 return;
             }
-            if let Some(bounds) = *bounds_for_up.borrow() {
+            if let Some(bounds) = copied_bounds(&bounds_for_up) {
                 (change_for_up)(
                     vertical_ratio(event.position.y, bounds, style.thumb_size),
                     cx,
@@ -605,7 +591,7 @@ pub fn interactive_vertical_slider(
             if !was_dragging {
                 return;
             }
-            if let Some(bounds) = *bounds_for_up_out.borrow() {
+            if let Some(bounds) = copied_bounds(&bounds_for_up_out) {
                 (change_for_up_out)(
                     vertical_ratio(event.position.y, bounds, style.thumb_size),
                     cx,
@@ -653,5 +639,15 @@ mod tests {
         let style = SliderStyle::mini_progress();
         assert!(f32::from(style.hover_track_height) > f32::from(style.track_height));
         assert!(f32::from(style.track_height) - f32::from(style.hover_track_height) < 0.0);
+    }
+
+    #[test]
+    fn copied_bounds_does_not_hold_a_refcell_guard() {
+        let cell = Rc::new(RefCell::new(Some(Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(100.0), px(12.0)),
+        ))));
+        assert!(copied_bounds(&cell).is_some());
+        assert!(cell.try_borrow_mut().is_ok());
     }
 }
