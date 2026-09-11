@@ -282,9 +282,10 @@ fn stage_lyrics(
     let reading_mode = app
         .lyrics_user_scrolling_until
         .is_some_and(|until| until > Instant::now());
-    // Pausing freezes transport time; it must not implicitly enter manual-reading mode. Keep the
-    // active-line focus hierarchy and enhanced-LRC word highlight frozen at the exact pause point.
-    // Only explicit lyric scrolling temporarily flattens the focus hierarchy for reading.
+    // Only active playback uses the depth-of-field blur. Pausing keeps the exact lyric/word timing
+    // frozen but removes Gaussian blur immediately, while explicit scrolling additionally flattens
+    // opacity so the viewport becomes a clean reading surface.
+    let depth_blur_active = app.snapshot.state == PlaybackState::Playing && !reading_mode;
 
     let mut viewport = div()
         .id("stage-lyrics-viewport")
@@ -314,20 +315,7 @@ fn stage_lyrics(
 
     for (index, line) in lyrics.iter().enumerate() {
         let distance = index.abs_diff(active);
-        // GPUI's current offscreen element blur path produces dark tile/rectangle artifacts when
-        // translucent glyph surfaces are composited over the animated fluid background. Keep the
-        // Apple Music focus hierarchy through contrast and font weight until that renderer path is
-        // fixed; never run the stage lyrics through an element blur filter.
-        let alpha = if reading_mode {
-            1.0
-        } else {
-            match distance {
-                0 => 1.0,
-                1 => 0.78,
-                2 => 0.60,
-                _ => 0.46,
-            }
-        };
+        let (alpha, blur_sigma) = lyric_focus_profile(distance, reading_mode, depth_blur_active);
         let timestamp = line.timestamp_ms;
         let weight = if index == active {
             gpui::FontWeight::BOLD
@@ -338,6 +326,7 @@ fn stage_lyrics(
         };
         let karaoke_active = index == active && !reading_mode;
         let hover_group = format!("lyric-hover-{index}");
+        let hover_group_for_text = hover_group.clone();
         let hover_group_for_time = hover_group.clone();
 
         let mut text = div()
@@ -362,6 +351,18 @@ fn stage_lyrics(
                     .text_color(hsla(0.0, 0.0, 1.0, 0.72))
                     .child(translation.to_owned()),
             );
+        }
+
+        // GPUI 742bec4 forces grayscale glyph rasterization only while an element-blur capture is
+        // active, avoiding the SubpixelDualSource/ClearType alpha corruption that previously made
+        // the capture quad opaque. Keep the capture scoped to glyph content: the row hitbox and
+        // hover-time badge stay outside the offscreen texture. Limit captures to the nearby visual
+        // field as distant rows are normally clipped and extra Gaussian passes would waste GPU work.
+        if blur_sigma > 0.0 {
+            text = text
+                .blur(px(blur_sigma))
+                .transition(lyric_blur_transition())
+                .group_hover(hover_group_for_text, |style| style.blur(px(0.0)));
         }
 
         let mut line_element = div()
@@ -461,6 +462,40 @@ fn stage_lyrics(
     viewport.into_any_element()
 }
 
+fn lyric_focus_profile(
+    distance: usize,
+    reading_mode: bool,
+    depth_blur_active: bool,
+) -> (f32, f32) {
+    if reading_mode {
+        return (1.0, 0.0);
+    }
+
+    let alpha = match distance {
+        0 => 1.0,
+        1 => 0.82,
+        2 => 0.66,
+        3 => 0.53,
+        _ => 0.44,
+    };
+    let blur_sigma = if depth_blur_active {
+        match distance {
+            0 => 0.0,
+            1 => 0.35,
+            2 => 0.70,
+            3 => 1.05,
+            4..=6 => 1.35,
+            // Playback keeps the active line centered, so rows beyond this band are normally
+            // outside the viewport. Do not allocate/filter offscreen textures for them.
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+
+    (alpha, blur_sigma)
+}
+
 fn stage_primary_lyric(
     line: &LyricLine,
     position_ms: u64,
@@ -547,6 +582,12 @@ fn lyric_focus_transition() -> Transition {
     Transition::new(Duration::from_millis(180))
         .ease(Easing::OutCubic)
         .properties([TransitionProperty::Opacity])
+}
+
+fn lyric_blur_transition() -> Transition {
+    Transition::new(Duration::from_millis(220))
+        .ease(Easing::OutCubic)
+        .properties([TransitionProperty::Blur])
 }
 
 fn stage_controls(
@@ -830,6 +871,16 @@ mod tests {
     fn precise_lyric_time_keeps_subsecond_timing() {
         assert_eq!(format_lyric_time(62_345), "01:02.345");
         assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
+    }
+
+    #[test]
+    fn lyric_depth_profile_preserves_focus_and_readability() {
+        assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
+        assert_eq!(lyric_focus_profile(1, false, true), (0.82, 0.35));
+        assert_eq!(lyric_focus_profile(3, false, true), (0.53, 1.05));
+        assert_eq!(lyric_focus_profile(7, false, true), (0.44, 0.0));
+        assert_eq!(lyric_focus_profile(2, false, false), (0.66, 0.0));
+        assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
     }
 
     #[test]
