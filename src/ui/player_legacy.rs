@@ -32,6 +32,14 @@ fn mini_clock_visible(parent: &WeakEntity<MusicApp>, cx: &gpui::App) -> bool {
         .unwrap_or(false)
 }
 
+#[inline]
+fn pending_ratio_for_current_track(app: &MusicApp) -> Option<f32> {
+    let current_track_id = app.snapshot.current_track.as_ref()?.id as u64;
+    app.pending_progress_ratio.and_then(|(target_track_id, ratio)| {
+        (target_track_id == current_track_id).then_some(ratio)
+    })
+}
+
 pub(super) struct PlaybackProgress {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
@@ -84,7 +92,7 @@ impl Render for PlaybackProgress {
             .read_with(cx, |app, _| {
                 (
                     app.drag_progress_ratio,
-                    app.pending_progress_ratio.map(|(_, ratio)| ratio),
+                    pending_ratio_for_current_track(app),
                 )
             })
             .unwrap_or((None, None));
@@ -107,8 +115,10 @@ impl Render for PlaybackProgress {
                 let this = this.clone();
                 move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
+                        // Keep the track-bound pending ratio until AudioEngine reports the seeked
+                        // transport position. Clearing it here made the rail snap back to the old
+                        // decoder clock for one or more refreshes after a direct click.
                         app.seek_to_ratio(ratio, app_cx);
-                        app.pending_progress_ratio = None;
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
@@ -137,8 +147,9 @@ impl Render for PlaybackProgress {
                         } else {
                             app.begin_drag(DragTarget::Progress, ratio, app_cx);
                         }
+                        // commit_drag records a pending seek keyed by the current TrackId. Polling
+                        // releases it once the engine clock reaches the target or the track changes.
                         app.commit_drag(app_cx);
-                        app.pending_progress_ratio = None;
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
@@ -201,7 +212,7 @@ impl Render for PlaybackTime {
             .read_with(cx, |app, _| {
                 (
                     app.drag_progress_ratio,
-                    app.pending_progress_ratio.map(|(_, ratio)| ratio),
+                    pending_ratio_for_current_track(app),
                 )
             })
             .unwrap_or((None, None));
