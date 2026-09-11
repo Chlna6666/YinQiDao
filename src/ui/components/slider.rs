@@ -113,27 +113,54 @@ impl SliderStyle {
     }
 }
 
-#[derive(Default)]
+const DRAG_THRESHOLD_PX: f32 = 3.0;
+
+#[derive(Debug, Default, PartialEq)]
 struct SliderInteractionState {
     pressed_id: Option<String>,
+    press_position: f32,
     dragging: bool,
 }
 
 impl Global for SliderInteractionState {}
 
-#[derive(Clone)]
-struct SliderDrag {
-    id: String,
+fn begin_pointer_press_state(state: &mut SliderInteractionState, id: &str, position: Pixels) {
+    state.pressed_id = Some(id.to_owned());
+    state.press_position = f32::from(position);
+    state.dragging = false;
 }
 
-fn begin_pointer_press(id: &str, cx: &mut App) {
+fn mark_pointer_dragging_state(state: &mut SliderInteractionState, id: &str) -> bool {
+    if state.pressed_id.as_deref() != Some(id) {
+        return false;
+    }
+    state.dragging = true;
+    true
+}
+
+fn end_pointer_press_state(state: &mut SliderInteractionState, id: &str) -> Option<bool> {
+    if state.pressed_id.as_deref() != Some(id) {
+        return None;
+    }
+    let dragging = state.dragging;
+    state.pressed_id = None;
+    state.press_position = 0.0;
+    state.dragging = false;
+    Some(dragging)
+}
+
+fn begin_pointer_press(id: &str, position: Pixels, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.pressed_id = Some(id.to_owned());
-        state.dragging = false;
+        begin_pointer_press_state(state, id, position);
     });
+}
+
+fn pointer_state(id: &str, cx: &App) -> Option<(f32, bool)> {
+    let state = cx.try_global::<SliderInteractionState>()?;
+    (state.pressed_id.as_deref() == Some(id)).then_some((state.press_position, state.dragging))
 }
 
 fn mark_pointer_dragging(id: &str, cx: &mut App) -> bool {
@@ -141,11 +168,7 @@ fn mark_pointer_dragging(id: &str, cx: &mut App) -> bool {
         return false;
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        if state.pressed_id.as_deref() != Some(id) {
-            return false;
-        }
-        state.dragging = true;
-        true
+        mark_pointer_dragging_state(state, id)
     })
 }
 
@@ -153,15 +176,7 @@ fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
     if !cx.has_global::<SliderInteractionState>() {
         return None;
     }
-    cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        if state.pressed_id.as_deref() != Some(id) {
-            return None;
-        }
-        let dragging = state.dragging;
-        state.pressed_id = None;
-        state.dragging = false;
-        Some(dragging)
-    })
+    cx.update_global(|state: &mut SliderInteractionState, _cx| end_pointer_press_state(state, id))
 }
 
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
@@ -412,10 +427,11 @@ pub fn interactive_slider(
 
     let bounds_for_prepaint = bounds.clone();
     let bounds_for_down = bounds.clone();
+    let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
     let id_for_down = id_string.clone();
-    let id_for_drag = id_string.clone();
+    let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string.clone();
     let click_for_up = on_click.clone();
@@ -423,7 +439,6 @@ pub fn interactive_slider(
     let drag_for_move = on_drag;
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
-    let drag_payload = SliderDrag { id: id_string };
 
     slider_visual(id, ratio, style)
         .child(
@@ -436,19 +451,30 @@ pub fn interactive_slider(
             .absolute()
             .inset_0(),
         )
-        .on_drag(drag_payload, |_: &SliderDrag, _, _, cx| cx.new(|_| gpui::Empty))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
             if bounds_for_down.get().is_some() {
-                begin_pointer_press(&id_for_down, cx);
+                begin_pointer_press(&id_for_down, event.position.x, cx);
             }
         })
-        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
-            let drag = event.drag(cx);
-            if drag.id != id_for_drag || !mark_pointer_dragging(&id_for_drag, cx) {
+        .on_mouse_move(move |event, _window, cx| {
+            if !event.dragging() {
                 return;
             }
-            let ratio = horizontal_ratio(event.event.position.x, event.bounds, style.thumb_size);
+            let Some((press_position, dragging)) = pointer_state(&id_for_move, cx) else {
+                return;
+            };
+            if !dragging && (f32::from(event.position.x) - press_position).abs() < DRAG_THRESHOLD_PX
+            {
+                return;
+            }
+            if !dragging && !mark_pointer_dragging(&id_for_move, cx) {
+                return;
+            }
+            let Some(bounds) = bounds_for_move.get() else {
+                return;
+            };
+            let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
             (drag_for_move)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
@@ -497,17 +523,17 @@ pub fn interactive_vertical_slider(
 
     let bounds_for_prepaint = bounds.clone();
     let bounds_for_down = bounds.clone();
+    let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
     let id_for_down = id_string.clone();
-    let id_for_drag = id_string.clone();
+    let id_for_move = id_string.clone();
     let id_for_up = id_string.clone();
     let id_for_up_out = id_string.clone();
     let change_for_down = on_change.clone();
     let change_for_move = on_change.clone();
     let change_for_up = on_change.clone();
     let change_for_up_out = on_change;
-    let drag_payload = SliderDrag { id: id_string };
 
     vertical_slider_visual(id, ratio, height, style)
         .child(
@@ -520,24 +546,35 @@ pub fn interactive_vertical_slider(
             .absolute()
             .inset_0(),
         )
-        .on_drag(drag_payload, |_: &SliderDrag, _, _, cx| cx.new(|_| gpui::Empty))
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
             let Some(bounds) = bounds_for_down.get() else {
                 return;
             };
-            begin_pointer_press(&id_for_down, cx);
+            begin_pointer_press(&id_for_down, event.position.y, cx);
             (change_for_down)(
                 vertical_ratio(event.position.y, bounds, style.thumb_size),
                 cx,
             );
         })
-        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
-            let drag = event.drag(cx);
-            if drag.id != id_for_drag || !mark_pointer_dragging(&id_for_drag, cx) {
+        .on_mouse_move(move |event, _window, cx| {
+            if !event.dragging() {
                 return;
             }
-            let ratio = vertical_ratio(event.event.position.y, event.bounds, style.thumb_size);
+            let Some((press_position, dragging)) = pointer_state(&id_for_move, cx) else {
+                return;
+            };
+            if !dragging && (f32::from(event.position.y) - press_position).abs() < DRAG_THRESHOLD_PX
+            {
+                return;
+            }
+            if !dragging && !mark_pointer_dragging(&id_for_move, cx) {
+                return;
+            }
+            let Some(bounds) = bounds_for_move.get() else {
+                return;
+            };
+            let ratio = vertical_ratio(event.position.y, bounds, style.thumb_size);
             (change_for_move)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
@@ -616,5 +653,19 @@ mod tests {
         assert!(cell.get().is_some());
         cell.set(None);
         assert!(cell.get().is_none());
+    }
+
+    #[test]
+    fn click_release_clears_binding_before_next_drag() {
+        let mut state = SliderInteractionState::default();
+
+        begin_pointer_press_state(&mut state, "progress", px(40.0));
+        assert_eq!(end_pointer_press_state(&mut state, "progress"), Some(false));
+        assert_eq!(state, SliderInteractionState::default());
+
+        begin_pointer_press_state(&mut state, "progress", px(40.0));
+        assert!(mark_pointer_dragging_state(&mut state, "progress"));
+        assert_eq!(end_pointer_press_state(&mut state, "progress"), Some(true));
+        assert_eq!(state, SliderInteractionState::default());
     }
 }
