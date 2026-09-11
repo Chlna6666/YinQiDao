@@ -135,33 +135,13 @@ fn live_transport(app: &MusicApp) -> (PlaybackState, u64, u64) {
     )
 }
 
-fn track_bound_progress_override(
-    drag_ratio: Option<f32>,
-    pending_progress_ratio: Option<(u64, f32)>,
-    current_track_id: Option<i64>,
-) -> Option<f32> {
-    drag_ratio.or_else(|| {
-        let current_track_id = current_track_id? as u64;
-        pending_progress_ratio.and_then(|(target_track_id, ratio)| {
-            (target_track_id == current_track_id).then_some(ratio)
-        })
-    })
-}
-
 fn displayed_transport_from_live(
     app: &MusicApp,
     state: PlaybackState,
     live_position_ms: u64,
     duration_ms: u64,
 ) -> (PlaybackState, u64, u64, f32) {
-    // A pending seek belongs to one concrete decoded track. Never let the optimistic ratio from
-    // the previous source override the transport clock of a newly-selected track while the next
-    // polling pass is still catching up.
-    let override_ratio = track_bound_progress_override(
-        app.drag_progress_ratio,
-        app.pending_progress_ratio,
-        app.snapshot.current_track.as_ref().map(|track| track.id),
-    );
+    let override_ratio = app.drag_progress_ratio;
 
     let position_ms = override_ratio.map_or(live_position_ms, |ratio| {
         (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
@@ -459,19 +439,6 @@ fn stage_lyrics(
             gpui::MouseButton::Left,
             cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                let duration_ms = this.snapshot.duration_ms;
-                if duration_ms > 0 {
-                    let ratio = (timestamp.min(duration_ms) as f32 / duration_ms as f32)
-                        .clamp(0.0, 1.0);
-                    let current_track_id = this
-                        .snapshot
-                        .current_track
-                        .as_ref()
-                        .map_or(0, |track| track.id as u64);
-                    this.pending_progress_ratio = Some((current_track_id, ratio));
-                } else {
-                    this.pending_progress_ratio = None;
-                }
                 this.seek_to_ms(timestamp, cx);
                 this.lyrics_user_scrolling_until = None;
                 if this.last_lyric_index != Some(index) {
@@ -926,22 +893,6 @@ mod tests {
     fn precise_lyric_time_keeps_subsecond_timing() {
         assert_eq!(format_lyric_time(62_345), "01:02.345");
         assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
-    }
-
-    #[test]
-    fn pending_seek_is_bound_to_the_current_track() {
-        assert_eq!(
-            track_bound_progress_override(None, Some((42, 0.65)), Some(42)),
-            Some(0.65)
-        );
-        assert_eq!(
-            track_bound_progress_override(None, Some((42, 0.65)), Some(43)),
-            None
-        );
-        assert_eq!(
-            track_bound_progress_override(Some(0.25), Some((42, 0.65)), Some(43)),
-            Some(0.25)
-        );
     }
 
     #[test]

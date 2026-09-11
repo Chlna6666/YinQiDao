@@ -91,7 +91,6 @@ pub struct MusicApp {
     pub(crate) drag_target: Option<DragTarget>,
     pub(crate) drag_progress_ratio: Option<f32>,
     pub(crate) drag_volume_ratio: Option<f32>,
-    pub(crate) pending_progress_ratio: Option<(u64, f32)>,
     pub(crate) pending_volume_ratio: Option<f32>,
     lyrics_checked: HashSet<TrackId>,
     last_polled_track_id: Option<TrackId>,
@@ -420,7 +419,6 @@ impl MusicApp {
             drag_target: None,
             drag_progress_ratio: None,
             drag_volume_ratio: None,
-            pending_progress_ratio: None,
             pending_volume_ratio: None,
             lyrics_checked: HashSet::new(),
             last_polled_track_id: None,
@@ -799,7 +797,6 @@ impl MusicApp {
             self.drag_progress_ratio = None;
             self.seeking = false;
         }
-        self.pending_progress_ratio = None;
         self.snapshot.position_ms = 0;
         self.position_ms = 0;
         self.config.position_ms = 0;
@@ -1452,23 +1449,6 @@ impl MusicApp {
                 self.config.position_ms = self.position_ms;
             }
 
-            let curr_gen = self
-                .snapshot
-                .current_track
-                .as_ref()
-                .map_or(0, |t| t.id as u64);
-            if let Some((target_gen, ratio)) = self.pending_progress_ratio {
-                if target_gen != curr_gen {
-                    self.pending_progress_ratio = None;
-                } else if self.snapshot.duration_ms > 0 {
-                    let curr_ratio =
-                        self.snapshot.position_ms as f32 / self.snapshot.duration_ms as f32;
-                    if (curr_ratio - ratio).abs() < 0.02 {
-                        self.pending_progress_ratio = None;
-                    }
-                }
-            }
-
             if let Some(ratio) = self.pending_volume_ratio
                 && (self.config.volume - ratio).abs() < 0.02
             {
@@ -1782,16 +1762,14 @@ impl MusicApp {
     }
 
     pub(crate) fn displayed_progress_ratio(&self) -> f32 {
-        self.drag_progress_ratio
-            .or_else(|| self.pending_progress_ratio.map(|(_, ratio)| ratio))
-            .unwrap_or_else(|| {
-                let duration_ms = self.snapshot.duration_ms;
-                if duration_ms == 0 {
-                    0.0
-                } else {
-                    (self.snapshot.position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
-                }
-            })
+        self.drag_progress_ratio.unwrap_or_else(|| {
+            let duration_ms = self.snapshot.duration_ms;
+            if duration_ms == 0 {
+                0.0
+            } else {
+                (self.snapshot.position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+            }
+        })
     }
 
     pub(crate) fn displayed_volume_ratio(&self) -> f32 {
@@ -1802,10 +1780,7 @@ impl MusicApp {
 
     pub(crate) fn displayed_position_ms(&self) -> u64 {
         let duration_ms = self.snapshot.duration_ms;
-        if let Some(ratio) = self
-            .drag_progress_ratio
-            .or_else(|| self.pending_progress_ratio.map(|(_, r)| r))
-        {
+        if let Some(ratio) = self.drag_progress_ratio {
             (duration_ms as f32 * ratio).round() as u64
         } else {
             self.snapshot.position_ms
@@ -1868,12 +1843,6 @@ impl MusicApp {
                 if let Some(ratio) = self.drag_progress_ratio {
                     let duration_ms = self.snapshot.duration_ms;
                     let target_ms = (duration_ms as f32 * ratio).round() as u64;
-                    let current_gen = self
-                        .snapshot
-                        .current_track
-                        .as_ref()
-                        .map_or(0, |t| t.id as u64);
-                    self.pending_progress_ratio = Some((current_gen, ratio));
                     self.seek_to_ms(target_ms, cx);
                 }
             }
@@ -1904,10 +1873,11 @@ impl MusicApp {
         } else {
             position_ms
         };
-        self.send(PlayerCommand::Seek(Duration::from_millis(clamped)));
-        self.snapshot.position_ms = clamped;
-        self.position_ms = clamped;
-        cx.notify();
+        if self.send(PlayerCommand::Seek(Duration::from_millis(clamped))) {
+            self.snapshot.position_ms = clamped;
+            self.position_ms = clamped;
+            cx.notify();
+        }
     }
 
     #[allow(dead_code)]
@@ -1917,12 +1887,6 @@ impl MusicApp {
             return;
         }
         let ratio = ratio.clamp(0.0, 1.0);
-        let current_gen = self
-            .snapshot
-            .current_track
-            .as_ref()
-            .map_or(0, |track| track.id as u64);
-        self.pending_progress_ratio = Some((current_gen, ratio));
         let position_ms = (duration_ms as f32 * ratio).round() as u64;
         self.seek_to_ms(position_ms, cx);
     }
@@ -2940,18 +2904,11 @@ mod tests {
         assert!((app.displayed_progress_ratio() - 0.20).abs() < 0.001);
         assert_eq!(app.displayed_position_ms(), 20_000);
 
-        app.pending_progress_ratio = Some((1, 0.55));
-        assert!((app.displayed_progress_ratio() - 0.55).abs() < 0.001);
-        assert_eq!(app.displayed_position_ms(), 55_000);
-
         app.drag_progress_ratio = Some(0.85);
         assert!((app.displayed_progress_ratio() - 0.85).abs() < 0.001);
         assert_eq!(app.displayed_position_ms(), 85_000);
 
         app.drag_progress_ratio = None;
-        assert!((app.displayed_progress_ratio() - 0.55).abs() < 0.001);
-
-        app.pending_progress_ratio = None;
         assert!((app.displayed_progress_ratio() - 0.20).abs() < 0.001);
     }
 

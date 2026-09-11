@@ -32,14 +32,6 @@ fn mini_clock_visible(parent: &WeakEntity<MusicApp>, cx: &gpui::App) -> bool {
         .unwrap_or(false)
 }
 
-#[inline]
-fn pending_ratio_for_current_track(app: &MusicApp) -> Option<f32> {
-    let current_track_id = app.snapshot.current_track.as_ref()?.id as u64;
-    app.pending_progress_ratio.and_then(|(target_track_id, ratio)| {
-        (target_track_id == current_track_id).then_some(ratio)
-    })
-}
-
 pub(super) struct PlaybackProgress {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
@@ -87,16 +79,11 @@ impl Render for PlaybackProgress {
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
-        let overrides = self
+        let drag_ratio = self
             .parent
-            .read_with(cx, |app, _| {
-                (
-                    app.drag_progress_ratio,
-                    pending_ratio_for_current_track(app),
-                )
-            })
-            .unwrap_or((None, None));
-        let ratio = overrides.0.or(overrides.1).unwrap_or_else(|| {
+            .read_with(cx, |app, _| app.drag_progress_ratio)
+            .unwrap_or(None);
+        let ratio = drag_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
                 0.0
             } else {
@@ -207,16 +194,11 @@ impl Render for PlaybackTime {
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
-        let (drag_ratio, pending_ratio) = self
+        let drag_ratio = self
             .parent
-            .read_with(cx, |app, _| {
-                (
-                    app.drag_progress_ratio,
-                    pending_ratio_for_current_track(app),
-                )
-            })
-            .unwrap_or((None, None));
-        let display_position = drag_ratio.or(pending_ratio).map_or(position_ms, |ratio| {
+            .read_with(cx, |app, _| app.drag_progress_ratio)
+            .unwrap_or(None);
+        let display_position = drag_ratio.map_or(position_ms, |ratio| {
             (duration_ms as f32 * ratio).round() as u64
         });
 
