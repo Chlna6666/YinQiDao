@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, IntoElement, KeyDownEvent, Render, SharedString,
-    Subscription, Timer, WeakEntity, Window, WindowBounds, WindowOptions, div, hsla, prelude::*,
-    px, relative, rgb, size,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
+    Context, Easing, Entity, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Timer,
+    WeakEntity, Window, WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -35,7 +35,7 @@ use super::{
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const STAGE_CONTROLS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-const STAGE_TRANSITION_RESPONSE: f32 = 8.0;
+const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -101,6 +101,7 @@ pub struct MusicApp {
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
+    stage_transition_epoch: u64,
     pub(crate) last_frame_instant: Option<std::time::Instant>,
     pub(crate) stage_controls_visibility: f32,
     pub(crate) stage_last_user_activity: std::time::Instant,
@@ -429,6 +430,7 @@ impl MusicApp {
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
+            stage_transition_epoch: 0,
             last_frame_instant: None,
             stage_controls_visibility: 1.0,
             stage_last_user_activity: std::time::Instant::now(),
@@ -495,6 +497,30 @@ impl MusicApp {
         view
     }
 
+    fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.stage_transition_epoch = self.stage_transition_epoch.wrapping_add(1);
+        let epoch = self.stage_transition_epoch;
+        self.stage_open = open;
+        // The drawer stays fully laid out for the whole transition. GPUI owns only the visual
+        // translation, so children keep stable geometry and the app does not relayout the stage on
+        // every display tick.
+        self.stage_progress = 1.0;
+        self.stage_animating = true;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            Timer::after(STAGE_TRANSITION_DURATION).await;
+            this.update(cx, |this, cx| {
+                if this.stage_transition_epoch != epoch {
+                    return;
+                }
+                this.stage_animating = false;
+                this.stage_progress = if this.stage_open { 1.0 } else { 0.0 };
+                cx.notify();
+            })?;
+            Ok(())
+        })
+        .detach();
+    }
+
     pub(crate) fn show_page(&mut self, page: AppPage, cx: &mut Context<Self>) {
         if page == AppPage::Player {
             self.open_stage(cx);
@@ -513,8 +539,7 @@ impl MusicApp {
         if self.page != AppPage::Player {
             self.previous_page = self.page;
         }
-        self.stage_open = true;
-        self.stage_animating = true;
+        self.begin_stage_transition(true, cx);
         self.last_frame_instant = None;
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_last_mouse_pos = None;
@@ -526,8 +551,7 @@ impl MusicApp {
     }
 
     pub(crate) fn close_stage(&mut self, cx: &mut Context<Self>) {
-        self.stage_open = false;
-        self.stage_animating = true;
+        self.begin_stage_transition(false, cx);
         self.last_frame_instant = None;
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
@@ -657,10 +681,12 @@ impl MusicApp {
             && self.lyrics_scroll_target_y.is_some_and(|target| {
                 (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.30
             });
-        self.stage_animating
-            || (self.stage_open
-                && (self.stage_controls_visibility > 0.005
-                    && self.stage_controls_visibility < 0.995))
+        // Stage drawer motion is renderer-owned by AnimationProperty::Translation and schedules its
+        // own retained animation frames. Only the remaining sampled UI animations need to rerender
+        // MusicApp here.
+        (self.stage_open
+            && (self.stage_controls_visibility > 0.005
+                && self.stage_controls_visibility < 0.995))
             || lyrics_scrolling
     }
 
@@ -817,7 +843,7 @@ impl MusicApp {
         if is_at_start
             && self.config.repeat == RepeatMode::Off
             && self.snapshot.position_ms < 3_000
-            && let Some(last) = self.config.queue.last().copied()
+            && let Some(last) = self.config.queue.first().copied()
         {
             self.play_track(last, cx);
             return;
@@ -1030,6 +1056,7 @@ impl MusicApp {
             .await
             .map_err(|_| anyhow::anyhow!("音频设备切换任务异常退出"))?
         });
+        self.status = format!("正在切换输出设备：{device}");
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -2346,18 +2373,6 @@ impl Render for MusicApp {
             .clamp(0.001, 0.1);
         self.last_frame_instant = Some(now);
 
-        if self.stage_animating {
-            let target = if self.stage_open { 1.0 } else { 0.0 };
-            let diff = target - self.stage_progress;
-            if diff.abs() < 0.003 {
-                self.stage_progress = target;
-                self.stage_animating = false;
-            } else {
-                let factor = 1.0 - (-STAGE_TRANSITION_RESPONSE * dt).exp();
-                self.stage_progress += diff * factor;
-            }
-        }
-
         let is_idle = self.stage_open
             && self.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
             && !self.seeking
@@ -2433,17 +2448,23 @@ impl Render for MusicApp {
         };
 
         let stage_drawer = if self.stage_progress > 0.001 {
-            let progress = self.stage_progress.clamp(0.0, 1.0);
-            let y_offset = 1.0 - progress;
+            let viewport_height = window.viewport_size().height;
+            let zero = point(px(0.0), px(0.0));
+            let below_viewport = point(px(0.0), viewport_height);
+            let motion = if self.stage_open {
+                AnimationProperty::translation(below_viewport, zero)
+            } else {
+                AnimationProperty::translation(zero, below_viewport)
+            };
+            let transition = Animation::from_spec(
+                AnimationSpec::new(STAGE_TRANSITION_DURATION).ease(Easing::InOutCubic),
+            )
+            .with_property(motion);
             Some(
                 div()
                     .id("stage-drawer-root")
                     .absolute()
                     .inset_0()
-                    // Move a full-size layer instead of changing only its top inset, which shrank
-                    // the drawer during the transition and exposed a top seam.
-                    .top(relative(y_offset))
-                    .bottom(relative(-y_offset))
                     .overflow_hidden()
                     .occlude()
                     .bg(rgb(0x0e0f16))
@@ -2502,6 +2523,14 @@ impl Render for MusicApp {
                             .left(px(0.0))
                             .right(px(0.0))
                             .child(self.stage_titlebar(window, cx)),
+                    )
+                    .with_animation(
+                        SharedString::from(format!(
+                            "stage-drawer-motion-{}",
+                            self.stage_transition_epoch
+                        )),
+                        transition,
+                        |element, _| element,
                     ),
             )
         } else {
@@ -3002,6 +3031,11 @@ mod tests {
     #[test]
     fn stage_idle_policy_is_twenty_seconds() {
         assert_eq!(STAGE_CONTROLS_IDLE_TIMEOUT, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn stage_transition_is_short_and_bounded() {
+        assert_eq!(STAGE_TRANSITION_DURATION, Duration::from_millis(190));
     }
 
     #[test]
