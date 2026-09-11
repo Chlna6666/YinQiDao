@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     App, Bounds, Div, ElementId, Global, Hsla, MouseButton, Pixels, Stateful, canvas, div, hsla,
@@ -8,7 +8,6 @@ use gpui::{
 use crate::ui::theme;
 
 type SliderCallback = Rc<dyn Fn(f32, &mut App)>;
-const DRAG_THRESHOLD_PX: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SliderStyle {
@@ -117,19 +116,52 @@ impl SliderStyle {
 #[derive(Default)]
 struct SliderInteractionState {
     pressed_id: Option<String>,
-    press_axis: f32,
     dragging: bool,
 }
 
 impl Global for SliderInteractionState {}
 
-#[inline]
-fn copied_bounds(
-    bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
-) -> Option<Bounds<Pixels>> {
-    // Never keep a RefCell guard alive across a UI callback. Seek/volume callbacks may synchronously
-    // notify/repaint, causing the canvas prepaint hook to borrow_mut this same cell re-entrantly.
-    *bounds.borrow()
+#[derive(Clone)]
+struct SliderDrag {
+    id: String,
+}
+
+fn begin_pointer_press(id: &str, cx: &mut App) {
+    if !cx.has_global::<SliderInteractionState>() {
+        cx.set_global(SliderInteractionState::default());
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.pressed_id = Some(id.to_owned());
+        state.dragging = false;
+    });
+}
+
+fn mark_pointer_dragging(id: &str, cx: &mut App) -> bool {
+    if !cx.has_global::<SliderInteractionState>() {
+        return false;
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        if state.pressed_id.as_deref() != Some(id) {
+            return false;
+        }
+        state.dragging = true;
+        true
+    })
+}
+
+fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
+    if !cx.has_global::<SliderInteractionState>() {
+        return None;
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        if state.pressed_id.as_deref() != Some(id) {
+            return None;
+        }
+        let dragging = state.dragging;
+        state.pressed_id = None;
+        state.dragging = false;
+        Some(dragging)
+    })
 }
 
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
@@ -143,43 +175,6 @@ fn vertical_ratio(position_y: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels
     let usable_height = (f32::from(bounds.size.height) - thumb).max(1.0);
     let local = f32::from(position_y - bounds.top()) - thumb * 0.5;
     (1.0 - local / usable_height).clamp(0.0, 1.0)
-}
-
-fn begin_pointer_press(id: &str, axis: f32, cx: &mut App) {
-    if !cx.has_global::<SliderInteractionState>() {
-        cx.set_global(SliderInteractionState::default());
-    }
-    cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.pressed_id = Some(id.to_owned());
-        state.press_axis = axis;
-        state.dragging = false;
-    });
-}
-
-fn pointer_state(id: &str, cx: &App) -> Option<(f32, bool)> {
-    let state = cx.try_global::<SliderInteractionState>()?;
-    (state.pressed_id.as_deref() == Some(id)).then_some((state.press_axis, state.dragging))
-}
-
-fn mark_pointer_dragging(id: &str, cx: &mut App) {
-    if cx
-        .try_global::<SliderInteractionState>()
-        .is_none_or(|state| state.pressed_id.as_deref() != Some(id))
-    {
-        return;
-    }
-    cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.dragging = true;
-    });
-}
-
-fn end_pointer_press(id: &str, cx: &mut App) -> Option<bool> {
-    let dragging = pointer_state(id, cx)?.1;
-    cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.pressed_id = None;
-        state.dragging = false;
-    });
-    Some(dragging)
 }
 
 fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
@@ -413,66 +408,55 @@ pub fn interactive_slider(
     let on_click: SliderCallback = Rc::new(on_click);
     let on_drag: SliderCallback = Rc::new(on_drag);
     let on_drag_end: SliderCallback = Rc::new(on_drag_end);
-    let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+    let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
 
     let bounds_for_prepaint = bounds.clone();
     let bounds_for_down = bounds.clone();
-    let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
     let id_for_down = id_string.clone();
-    let id_for_move = id_string.clone();
+    let id_for_drag = id_string.clone();
     let id_for_up = id_string.clone();
-    let id_for_up_out = id_string;
+    let id_for_up_out = id_string.clone();
     let click_for_up = on_click.clone();
     let click_for_up_out = on_click;
     let drag_for_move = on_drag;
     let drag_end_for_up = on_drag_end.clone();
     let drag_end_for_up_out = on_drag_end;
+    let drag_payload = SliderDrag { id: id_string };
 
     slider_visual(id, ratio, style)
         .child(
             canvas(
                 move |bounds, _window, _cx| {
-                    *bounds_for_prepaint.borrow_mut() = Some(bounds);
+                    bounds_for_prepaint.set(Some(bounds));
                 },
                 |_bounds, (), _window, _cx| {},
             )
             .absolute()
             .inset_0(),
         )
-        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+        .on_drag(drag_payload, |_: &SliderDrag, _, _, cx| cx.new(|_| gpui::Empty))
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             cx.stop_propagation();
-            if copied_bounds(&bounds_for_down).is_none() {
-                return;
+            if bounds_for_down.get().is_some() {
+                begin_pointer_press(&id_for_down, cx);
             }
-            begin_pointer_press(&id_for_down, f32::from(event.position.x), cx);
         })
-        .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
-            if !event.dragging() {
+        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
+            let drag = event.drag(cx);
+            if drag.id != id_for_drag || !mark_pointer_dragging(&id_for_drag, cx) {
                 return;
             }
-            let Some((press_axis, dragging)) = pointer_state(&id_for_move, cx) else {
-                return;
-            };
-            let distance = (f32::from(event.position.x) - press_axis).abs();
-            if !dragging && distance < DRAG_THRESHOLD_PX {
-                return;
-            }
-            if !dragging {
-                mark_pointer_dragging(&id_for_move, cx);
-            }
-            if let Some(bounds) = copied_bounds(&bounds_for_move) {
-                let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
-                (drag_for_move)(ratio, cx);
-            }
+            let ratio = horizontal_ratio(event.event.position.x, event.bounds, style.thumb_size);
+            (drag_for_move)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
             let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
                 return;
             };
-            let Some(bounds) = copied_bounds(&bounds_for_up) else {
+            let Some(bounds) = bounds_for_up.get() else {
                 return;
             };
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
@@ -487,7 +471,7 @@ pub fn interactive_slider(
             let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
                 return;
             };
-            let Some(bounds) = copied_bounds(&bounds_for_up_out) else {
+            let Some(bounds) = bounds_for_up_out.get() else {
                 return;
             };
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
@@ -509,64 +493,52 @@ pub fn interactive_vertical_slider(
     let id = id.into();
     let id_string = id.to_string();
     let on_change: SliderCallback = Rc::new(on_change);
-    let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+    let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
 
     let bounds_for_prepaint = bounds.clone();
     let bounds_for_down = bounds.clone();
-    let bounds_for_move = bounds.clone();
     let bounds_for_up = bounds.clone();
     let bounds_for_up_out = bounds.clone();
     let id_for_down = id_string.clone();
-    let id_for_move = id_string.clone();
+    let id_for_drag = id_string.clone();
     let id_for_up = id_string.clone();
-    let id_for_up_out = id_string;
+    let id_for_up_out = id_string.clone();
     let change_for_down = on_change.clone();
     let change_for_move = on_change.clone();
     let change_for_up = on_change.clone();
     let change_for_up_out = on_change;
+    let drag_payload = SliderDrag { id: id_string };
 
     vertical_slider_visual(id, ratio, height, style)
         .child(
             canvas(
                 move |bounds, _window, _cx| {
-                    *bounds_for_prepaint.borrow_mut() = Some(bounds);
+                    bounds_for_prepaint.set(Some(bounds));
                 },
                 |_bounds, (), _window, _cx| {},
             )
             .absolute()
             .inset_0(),
         )
+        .on_drag(drag_payload, |_: &SliderDrag, _, _, cx| cx.new(|_| gpui::Empty))
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(bounds) = copied_bounds(&bounds_for_down) else {
+            let Some(bounds) = bounds_for_down.get() else {
                 return;
             };
-            begin_pointer_press(&id_for_down, f32::from(event.position.y), cx);
+            begin_pointer_press(&id_for_down, cx);
             (change_for_down)(
                 vertical_ratio(event.position.y, bounds, style.thumb_size),
                 cx,
             );
         })
-        .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, cx| {
-            if !event.dragging() {
+        .on_drag_move::<SliderDrag>(move |event, _window, cx| {
+            let drag = event.drag(cx);
+            if drag.id != id_for_drag || !mark_pointer_dragging(&id_for_drag, cx) {
                 return;
             }
-            let Some((press_axis, dragging)) = pointer_state(&id_for_move, cx) else {
-                return;
-            };
-            let distance = (f32::from(event.position.y) - press_axis).abs();
-            if !dragging && distance < DRAG_THRESHOLD_PX {
-                return;
-            }
-            if !dragging {
-                mark_pointer_dragging(&id_for_move, cx);
-            }
-            if let Some(bounds) = copied_bounds(&bounds_for_move) {
-                (change_for_move)(
-                    vertical_ratio(event.position.y, bounds, style.thumb_size),
-                    cx,
-                );
-            }
+            let ratio = vertical_ratio(event.event.position.y, event.bounds, style.thumb_size);
+            (change_for_move)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
@@ -576,7 +548,7 @@ pub fn interactive_vertical_slider(
             if !was_dragging {
                 return;
             }
-            if let Some(bounds) = copied_bounds(&bounds_for_up) {
+            if let Some(bounds) = bounds_for_up.get() {
                 (change_for_up)(
                     vertical_ratio(event.position.y, bounds, style.thumb_size),
                     cx,
@@ -591,7 +563,7 @@ pub fn interactive_vertical_slider(
             if !was_dragging {
                 return;
             }
-            if let Some(bounds) = copied_bounds(&bounds_for_up_out) {
+            if let Some(bounds) = bounds_for_up_out.get() {
                 (change_for_up_out)(
                     vertical_ratio(event.position.y, bounds, style.thumb_size),
                     cx,
@@ -629,12 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn drag_threshold_keeps_click_and_scrub_disjoint() {
-        assert!(2.9 < DRAG_THRESHOLD_PX);
-        assert!(3.0 >= DRAG_THRESHOLD_PX);
-    }
-
-    #[test]
     fn mini_progress_hover_expands_outward() {
         let style = SliderStyle::mini_progress();
         assert!(f32::from(style.hover_track_height) > f32::from(style.track_height));
@@ -642,12 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn copied_bounds_does_not_hold_a_refcell_guard() {
-        let cell = Rc::new(RefCell::new(Some(Bounds::new(
+    fn bounds_cell_can_be_updated_without_runtime_borrowing() {
+        let cell = Rc::new(Cell::new(Some(Bounds::new(
             gpui::point(px(0.0), px(0.0)),
             gpui::size(px(100.0), px(12.0)),
         ))));
-        assert!(copied_bounds(&cell).is_some());
-        assert!(cell.try_borrow_mut().is_ok());
+        assert!(cell.get().is_some());
+        cell.set(None);
+        assert!(cell.get().is_none());
     }
 }
