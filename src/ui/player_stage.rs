@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing,
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Transition,
     TransitionProperty, StatefulInteractiveElement as _, div, hsla, img, linear_color_stop,
-    linear_gradient, point, prelude::*, px, rgb,
+    linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -163,6 +163,8 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
     let title = track.map_or("未在播放音乐", |track| track.title.as_str());
     let artist = track.map_or("请选择音乐", |track| track.artist.as_str());
     let album = track.map_or("未知专辑", |track| track.album.as_str());
+    let track_key = track.map_or(i64::MIN, |track| track.id);
+    let artwork_ready = artwork.is_some();
     let cover = if let Some(bytes) = artwork {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))
             .size_full()
@@ -188,6 +190,32 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
             .into_any_element()
     };
 
+    let cover_enter = Animation::from_spec(
+        AnimationSpec::new(Duration::from_millis(280)).ease(Easing::OutCubic),
+    )
+    .with_property(AnimationProperty::scale_opacity(
+        0.965,
+        1.0,
+        0.0,
+        1.0,
+        gpui::TransformOrigin::CENTER,
+    ));
+    let cover_card = div()
+        .size(px(280.0))
+        .rounded_2xl()
+        .overflow_hidden()
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 1.0, 0.15))
+        .shadow_lg()
+        .child(cover)
+        .with_animation(
+            SharedString::from(format!(
+                "stage-cover-enter-{track_key}-{artwork_ready}"
+            )),
+            cover_enter,
+            |element, _| element,
+        );
+
     div()
         .w(px(380.0))
         .flex_none()
@@ -196,16 +224,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
         .items_center()
         .justify_center()
         .gap_6()
-        .child(
-            div()
-                .size(px(280.0))
-                .rounded_2xl()
-                .overflow_hidden()
-                .border_1()
-                .border_color(hsla(0.0, 0.0, 1.0, 0.15))
-                .shadow_lg()
-                .child(cover),
-        )
+        .child(cover_card)
         .child(
             div()
                 .flex()
@@ -327,6 +346,7 @@ fn stage_lyrics(
         let karaoke_active = index == active && !reading_mode;
         let hover_group = format!("lyric-hover-{index}");
         let hover_group_for_text = hover_group.clone();
+        let hover_group_for_blur = hover_group.clone();
         let hover_group_for_time = hover_group.clone();
 
         let mut text = div()
@@ -353,17 +373,19 @@ fn stage_lyrics(
             );
         }
 
-        // GPUI 742bec4 forces grayscale glyph rasterization only while an element-blur capture is
-        // active, avoiding the SubpixelDualSource/ClearType alpha corruption that previously made
-        // the capture quad opaque. Keep the capture scoped to glyph content: the row hitbox and
-        // hover-time badge stay outside the offscreen texture. Limit captures to the nearby visual
-        // field as distant rows are normally clipped and extra Gaussian passes would waste GPU work.
+        // Enter/leave the blur capture directly. Interpolating Blur across the transition used to
+        // bridge a direct ClearType text scene and a grayscale offscreen capture for ~220 ms, which
+        // could expose a stale capture quad on the first frame after Play. Opacity remains a cheap
+        // renderer-owned transition, while Gaussian depth itself switches atomically.
         if blur_sigma > 0.0 {
             text = text
                 .blur(px(blur_sigma))
-                .transition(lyric_blur_transition())
-                .group_hover(hover_group_for_text, |style| style.blur(px(0.0)));
+                .group_hover(hover_group_for_blur, |style| style.blur(px(0.0)));
         }
+        text = text
+            .opacity(alpha)
+            .transition(lyric_focus_transition())
+            .group_hover(hover_group_for_text, |style| style.opacity(1.0));
 
         let mut line_element = div()
             .group(hover_group)
@@ -376,19 +398,16 @@ fn stage_lyrics(
             .pr(px(104.0))
             .py(px(11.0))
             .mb(px(10.0))
-            .opacity(alpha)
-            .transition(lyric_focus_transition())
             .cursor_pointer()
-            .hover(|style| style.opacity(1.0))
             .child(text);
 
-        // Do not materialize hover-time badges while the viewport is in manual reading/scrolling
-        // mode. Rows move underneath a stationary pointer during a fast wheel/trackpad gesture, so
-        // CSS-style hover alone would otherwise activate a badge even though the user never hovered
-        // that lyric intentionally. Once scrolling settles, the badge returns with normal hover.
+        // Keep badge glyphs and background at their real colors and control visibility through one
+        // parent opacity. This binds both pieces to the same lyric hover state and avoids the former
+        // epsilon-alpha split where the retained background could become visible without its text.
         if !reading_mode {
             line_element = line_element.child(
                 div()
+                    .id(SharedString::from(format!("lyric-time-{index}")))
                     .absolute()
                     .right(px(10.0))
                     .top(px(13.0))
@@ -399,20 +418,12 @@ fn stage_lyrics(
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Keep the text run minimally materialized instead of exact alpha zero. GPUI's
-                    // retained text capture may cull a zero-alpha run while retaining the rounded
-                    // hover background, which is what produced the empty time capsule after rapid
-                    // scroll/reconciliation. These idle alphas are visually transparent but keep
-                    // background and glyph lifetime in the same retained subtree.
-                    .bg(hsla(0.0, 0.0, 0.0, 0.002))
+                    .opacity(0.0)
+                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.003))
-                    .group_hover(hover_group_for_time, |style| {
-                        style
-                            .bg(hsla(0.0, 0.0, 0.0, 0.28))
-                            .text_color(hsla(0.0, 0.0, 1.0, 0.92))
-                    })
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+                    .group_hover(hover_group_for_time, |style| style.opacity(1.0))
                     .child(SharedString::from(format_lyric_time(timestamp))),
             );
         }
@@ -434,28 +445,9 @@ fn stage_lyrics(
             }),
         );
 
-        let line_element = if index == active {
-            let enter = Animation::from_spec(
-                AnimationSpec::new(Duration::from_millis(440)).ease(Easing::OutCubic),
-            )
-            .with_property(AnimationProperty::translation(
-                point(px(0.0), px(20.0)),
-                point(px(0.0), px(0.0)),
-            ));
-            line_element
-                .with_animation(
-                    SharedString::from(format!(
-                        "lyric-enter-{}-{index}",
-                        app.lyric_motion_epoch
-                    )),
-                    enter,
-                    |element, _| element,
-                )
-                .into_any_element()
-        } else {
-            line_element.into_any_element()
-        };
-
+        // The viewport already eases toward the new active row. A second 440 ms per-line translate
+        // animated the same motion twice and forced unnecessary animation work at every lyric
+        // boundary, so the row itself remains geometrically stable.
         viewport = viewport.child(line_element);
     }
 
@@ -471,22 +463,24 @@ fn lyric_focus_profile(
         return (1.0, 0.0);
     }
 
+    // The active line must be visually unambiguous. Nearby context stays readable but is no longer
+    // almost as white as the lyric currently being sung.
     let alpha = match distance {
         0 => 1.0,
-        1 => 0.82,
-        2 => 0.66,
-        3 => 0.53,
-        _ => 0.44,
+        1 => 0.56,
+        2 => 0.42,
+        3 => 0.32,
+        _ => 0.26,
     };
     let blur_sigma = if depth_blur_active {
         match distance {
             0 => 0.0,
-            1 => 0.35,
-            2 => 0.70,
-            3 => 1.05,
-            4..=6 => 1.35,
-            // Playback keeps the active line centered, so rows beyond this band are normally
-            // outside the viewport. Do not allocate/filter offscreen textures for them.
+            1 => 0.40,
+            2 => 0.80,
+            3 => 1.15,
+            4 => 1.40,
+            // Only the local focus field needs a Gaussian capture. Far rows are contextual and are
+            // dimmed without allocating additional two-pass offscreen blur surfaces.
             _ => 0.0,
         }
     } else {
@@ -579,15 +573,9 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(180))
+    Transition::new(Duration::from_millis(120))
         .ease(Easing::OutCubic)
         .properties([TransitionProperty::Opacity])
-}
-
-fn lyric_blur_transition() -> Transition {
-    Transition::new(Duration::from_millis(220))
-        .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Blur])
 }
 
 fn stage_controls(
@@ -874,12 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_profile_preserves_focus_and_readability() {
+    fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
         assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.82, 0.35));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.53, 1.05));
-        assert_eq!(lyric_focus_profile(7, false, true), (0.44, 0.0));
-        assert_eq!(lyric_focus_profile(2, false, false), (0.66, 0.0));
+        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 0.40));
+        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.15));
+        assert_eq!(lyric_focus_profile(5, false, true), (0.26, 0.0));
+        assert_eq!(lyric_focus_profile(2, false, false), (0.42, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
     }
 
