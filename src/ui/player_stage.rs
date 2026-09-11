@@ -182,7 +182,6 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
     let artist = track.map_or("请选择音乐", |track| track.artist.as_str());
     let album = track.map_or("未知专辑", |track| track.album.as_str());
     let track_key = track.map_or(i64::MIN, |track| track.id);
-    let artwork_ready = artwork.is_some();
     let cover = if let Some(bytes) = artwork {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))
             .size_full()
@@ -208,11 +207,14 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
             .into_any_element()
     };
 
+    // Keep the transition identity tied only to the track. Async artwork replacing the fallback
+    // image must not create a second animation identity, otherwise opening the stage can replay the
+    // same scale/fade several times while cover metadata arrives.
     let cover_enter = Animation::from_spec(
-        AnimationSpec::new(Duration::from_millis(280)).ease(Easing::OutCubic),
+        AnimationSpec::new(Duration::from_millis(220)).ease(Easing::OutCubic),
     )
     .with_property(AnimationProperty::scale_opacity(
-        0.965,
+        0.975,
         1.0,
         0.0,
         1.0,
@@ -227,9 +229,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
         .shadow_lg()
         .child(cover)
         .with_animation(
-            SharedString::from(format!(
-                "stage-cover-enter-{track_key}-{artwork_ready}"
-            )),
+            SharedString::from(format!("stage-cover-enter-{track_key}")),
             cover_enter,
             |element, _| element,
         );
@@ -484,9 +484,34 @@ fn stage_lyrics(
             }),
         );
 
-        // The viewport already eases toward the new active row. A second 440 ms per-line translate
-        // animated the same motion twice and forced unnecessary animation work at every lyric
-        // boundary, so the row itself remains geometrically stable.
+        // The viewport owns the geometric scroll. Give only the newly active row a short
+        // renderer-owned focus pulse so a lyric boundary has continuity without starting another
+        // layout animation or competing with the scroll easing.
+        let line_element = if index == active && !reading_mode {
+            let active_focus = Animation::from_spec(
+                AnimationSpec::new(Duration::from_millis(180)).ease(Easing::OutCubic),
+            )
+            .with_property(AnimationProperty::scale_opacity(
+                0.988,
+                1.0,
+                0.78,
+                1.0,
+                gpui::TransformOrigin::CENTER,
+            ));
+            line_element
+                .with_animation(
+                    SharedString::from(format!(
+                        "lyric-active-focus-{index}-{}",
+                        app.lyric_motion_epoch
+                    )),
+                    active_focus,
+                    |element, _| element,
+                )
+                .into_any_element()
+        } else {
+            line_element.into_any_element()
+        };
+
         viewport = viewport.child(line_element);
     }
 
