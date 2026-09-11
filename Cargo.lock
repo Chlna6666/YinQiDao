@@ -2122,7 +2122,7 @@ dependencies = [
 [[package]]
 name = "gfx-core"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "bitflags 2.13.1",
  "smallvec",
@@ -2132,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "gfx-dx12"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "gfx-core",
  "gfx-memory",
@@ -2146,7 +2146,7 @@ dependencies = [
 [[package]]
 name = "gfx-memory"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "ash",
  "gfx-core",
@@ -2160,7 +2160,7 @@ dependencies = [
 [[package]]
 name = "gfx-metal"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "gfx-core",
  "gfx-memory",
@@ -2178,7 +2178,7 @@ dependencies = [
 [[package]]
 name = "gfx-shader"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "gfx-core",
  "naga",
@@ -2188,7 +2188,7 @@ dependencies = [
 [[package]]
 name = "gfx-vulkan"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "ash",
  "ash-window",
@@ -2256,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -2328,7 +2328,7 @@ dependencies = [
  "rand 0.10.2",
  "resvg",
  "schemars",
- "sctk-adwaita 0.10.1 (git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3)",
+ "sctk-adwaita 0.10.1 (git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892)",
  "seahash",
  "serde",
  "serde_json",
@@ -2504,7 +2504,7 @@ dependencies = [
 [[package]]
 name = "gpui_tokio"
 version = "0.1.0"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "anyhow",
  "gpui",
@@ -5399,7 +5399,7 @@ dependencies = [
 [[package]]
 name = "sctk-adwaita"
 version = "0.10.1"
-source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3#2901f3f40ec9daf87c0b067e6210f7dae0e3dfb3"
+source = "git+https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git?rev=5e22e6fa96fb704f161c637235d191869b016892#5e22e6fa96fb704f161c637235d191869b016892"
 dependencies = [
  "ab_glyph",
  "log",
