@@ -148,9 +148,16 @@ impl StageLyricsView {
         let position_ms = app.drag_progress_ratio.map_or(live_position_ms, |ratio| {
             (app.snapshot.duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
         });
-        if self.position_ms != position_ms {
+        let previous_word = if source_changed {
+            None
+        } else {
+            self.active_word_index()
+        };
+        let position_changed = self.position_ms != position_ms;
+        if position_changed {
+            // Keep the hot transport sample locally, but do not invalidate the lyric view merely
+            // because another 100 ms of audio elapsed. Rendering changes only at line/word edges.
             self.position_ms = position_ms;
-            changed = true;
         }
         if self.playback_state != app.snapshot.state {
             self.playback_state = app.snapshot.state;
@@ -161,7 +168,12 @@ impl StageLyricsView {
             changed = true;
         }
 
-        if self.update_active_index() {
+        let active_changed = self.update_active_index();
+        let word_changed = position_changed
+            && !source_changed
+            && !active_changed
+            && previous_word != self.active_word_index();
+        if active_changed || word_changed {
             changed = true;
         }
 
@@ -265,12 +277,11 @@ impl StageLyricsView {
             return;
         }
 
-        let previous_active = self.active_index;
         let previous_word = self.active_word_index();
         self.position_ms = position_ms;
         let active_changed = self.update_active_index();
         let word_changed = !active_changed && previous_word != self.active_word_index();
-        if active_changed || word_changed || previous_active != self.active_index {
+        if active_changed || word_changed {
             // Text shaping and blur/list item invalidation happen only at semantic lyric boundaries;
             // the smooth vertical motion itself remains driven by request_animation_frame().
             cx.notify();
