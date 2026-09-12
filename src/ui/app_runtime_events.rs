@@ -8,7 +8,7 @@ use gpui::{Context, Entity, EventEmitter, Global, Subscription, Timer};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::{
-    audio::{AudioUiEvent, PlayerCommand},
+    audio::AudioUiEvent,
     media_controls::SystemMediaEvent,
     model::PlaybackState,
 };
@@ -288,13 +288,11 @@ fn apply_system_media_event(
         SystemMediaEvent::Toggle => app.toggle_play(cx),
         SystemMediaEvent::Next => app.next(cx),
         SystemMediaEvent::Previous => app.previous(cx),
-        SystemMediaEvent::Stop => {
-            app.send(PlayerCommand::Stop);
-            cx.notify();
-        }
+        SystemMediaEvent::Stop => app.stop(cx),
         SystemMediaEvent::SeekBy(delta_ms) => app.seek_relative(*delta_ms, cx),
         SystemMediaEvent::SetPosition(position) => {
-            app.seek_to_ms(position.as_millis() as u64, cx);
+            let millis = position.as_millis().min(u128::from(u64::MAX)) as u64;
+            app.seek_to_ms(millis, cx);
         }
         SystemMediaEvent::SetVolume(volume) => app.set_app_volume(*volume, cx),
     }
