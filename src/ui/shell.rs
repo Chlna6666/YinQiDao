@@ -723,58 +723,12 @@ impl MusicApp {
         }
     }
 
-    fn advance_lyrics_scroll_animation(&mut self, dt: f32) {
-        if !self.stage_open {
-            self.lyrics_scroll_target_y = None;
-            return;
-        }
-        if self
-            .lyrics_user_scrolling_until
-            .is_some_and(|until| std::time::Instant::now() < until)
-        {
-            self.lyrics_scroll_target_y = None;
-            return;
-        }
-        let Some(index) = self.last_lyric_index else {
-            self.lyrics_scroll_target_y = None;
-            return;
-        };
-        let viewport = self.lyrics_scroll_handle.bounds();
-        let Some(line) = self.lyrics_scroll_handle.bounds_for_item(index) else {
-            self.lyrics_scroll_target_y = Some(f32::from(self.lyrics_scroll_handle.offset().y));
-            return;
-        };
-        let max_offset = f32::from(self.lyrics_scroll_handle.max_offset().height).max(0.0);
-        let anchor_y = f32::from(viewport.origin.y) + f32::from(viewport.size.height) * 0.43;
-        let target = (anchor_y - f32::from(line.center().y)).clamp(-max_offset, 0.0);
-        self.lyrics_scroll_target_y = Some(target);
-
-        let offset = self.lyrics_scroll_handle.offset();
-        let current = f32::from(offset.y);
-        let diff = target - current;
-        if diff.abs() <= 0.30 {
-            self.lyrics_scroll_handle
-                .set_offset(gpui::Point::new(offset.x, gpui::px(target)));
-            return;
-        }
-
-        let factor = 1.0 - (-9.5 * dt).exp();
-        let next = current + diff * factor;
-        self.lyrics_scroll_handle
-            .set_offset(gpui::Point::new(offset.x, gpui::px(next)));
-    }
-
     pub(crate) fn has_active_animations(&self) -> bool {
-        let lyrics_scrolling = self.stage_open
-            && self.lyrics_scroll_target_y.is_some_and(|target| {
-                (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.30
-            });
         let stage_transition = self.stage_animating && self.stage_transition_started_at.is_some();
         stage_transition
             || (self.stage_open
-                && (self.stage_controls_visibility > 0.005
-                    && self.stage_controls_visibility < 0.995))
-            || lyrics_scrolling
+                && self.stage_controls_visibility > 0.005
+                && self.stage_controls_visibility < 0.995)
     }
 
     pub(crate) fn show_library_tab(&mut self, tab: LibraryTab, cx: &mut Context<Self>) {
@@ -1610,35 +1564,6 @@ impl MusicApp {
                 self.request_current_enrichment(cx);
             }
 
-            if let Some(track) = &self.snapshot.current_track
-                && let Some(doc) = self.lyrics.get(&track.id)
-            {
-                let timed = doc.timed_lines();
-                if !timed.is_empty() {
-                    let current_idx = timed
-                        .iter()
-                        .rposition(|line| line.timestamp_ms <= self.snapshot.position_ms)
-                        .unwrap_or(0);
-                    if self.last_lyric_index != Some(current_idx) {
-                        self.last_lyric_index = Some(current_idx);
-                        self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
-                        // A stationary pointer must not transfer its timestamp badge to whichever row
-                        // scrolls underneath it after the active lyric changes.
-                        self.hovered_lyric_index = None;
-                        let in_user_scroll = self
-                            .lyrics_user_scrolling_until
-                            .is_some_and(|until| std::time::Instant::now() < until);
-                        if !in_user_scroll {
-                            self.lyrics_scroll_target_y =
-                                Some(f32::from(self.lyrics_scroll_handle.offset().y));
-                        }
-                        if self.stage_open {
-                            cx.notify();
-                        }
-                    }
-                }
-            }
-
             self.update_system_media_async(cx);
         }
 
@@ -2044,7 +1969,6 @@ impl MusicApp {
                 let res = this.update(cx, |this, cx| {
                     let old_track_id = this.snapshot.current_track.as_ref().map(|track| track.id);
                     let old_state = this.snapshot.state;
-                    let old_position_ms = this.snapshot.position_ms;
                     this.poll_player(cx);
                     this.flush_config_save_if_due();
                     let playing = this.snapshot.state == PlaybackState::Playing;
@@ -2061,8 +1985,6 @@ impl MusicApp {
                         this.snapshot.current_track.as_ref().map(|track| track.id),
                         old_state,
                         this.snapshot.state,
-                        old_position_ms != this.snapshot.position_ms,
-                        this.stage_open,
                         is_dragging,
                         stage_idle_due,
                     );
@@ -2402,24 +2324,18 @@ impl MusicApp {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn should_refresh_main_view(
     old_track_id: Option<TrackId>,
     current_track_id: Option<TrackId>,
     old_state: PlaybackState,
     current_state: PlaybackState,
-    position_changed: bool,
-    stage_open: bool,
     is_dragging: bool,
     stage_idle_due: bool,
 ) -> bool {
     if is_dragging {
         return false;
     }
-    old_track_id != current_track_id
-        || old_state != current_state
-        || (stage_open && position_changed)
-        || (stage_open && stage_idle_due)
+    old_track_id != current_track_id || old_state != current_state || stage_idle_due
 }
 
 impl Drop for MusicApp {
@@ -2473,8 +2389,6 @@ impl Render for MusicApp {
         } else {
             self.stage_controls_visibility = target_visibility;
         }
-
-        self.advance_lyrics_scroll_animation(dt);
 
         let fluid_background = self.ensure_fluid_background(cx);
         let fluid_track_id = self
@@ -3043,15 +2957,37 @@ mod tests {
     }
 
     #[test]
-    fn position_only_refreshes_progress_view_when_stage_is_closed() {
+    fn transport_position_is_child_owned() {
         assert!(!should_refresh_main_view(
             Some(1),
             Some(1),
             PlaybackState::Playing,
             PlaybackState::Playing,
+            false,
+            false,
+        ));
+        assert!(should_refresh_main_view(
+            Some(1),
+            Some(2),
+            PlaybackState::Playing,
+            PlaybackState::Playing,
+            false,
+            false,
+        ));
+        assert!(should_refresh_main_view(
+            Some(1),
+            Some(1),
+            PlaybackState::Paused,
+            PlaybackState::Playing,
+            false,
+            false,
+        ));
+        assert!(!should_refresh_main_view(
+            Some(1),
+            Some(2),
+            PlaybackState::Playing,
+            PlaybackState::Playing,
             true,
-            false,
-            false,
             false,
         ));
         assert!(should_refresh_main_view(
@@ -3059,28 +2995,6 @@ mod tests {
             Some(1),
             PlaybackState::Playing,
             PlaybackState::Playing,
-            true,
-            true,
-            false,
-            false,
-        ));
-        assert!(!should_refresh_main_view(
-            Some(1),
-            Some(1),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            true,
-            true,
-            true,
-            false,
-        ));
-        assert!(should_refresh_main_view(
-            Some(1),
-            Some(1),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            false,
-            true,
             false,
             true,
         ));
