@@ -104,8 +104,8 @@ fn main() -> Result<()> {
             }
         };
 
-        desktop_lyrics::start_ui_service(main_window, cx);
-        global_shortcuts::start_ui_service(main_window, cx);
+        desktop_lyrics::initialize(main_window, cx);
+        global_shortcuts::install_event_bridge(main_window, cx);
         audio::set_audio_debug_enabled(false);
 
         let main_window_id = main_window.window_id();

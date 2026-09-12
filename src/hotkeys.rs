@@ -6,7 +6,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LyricsHotkeyAction {
@@ -47,7 +48,7 @@ enum HotkeyEvent {
 
 struct HotkeyService {
     command_tx: Sender<ServiceCommand>,
-    lyrics_event_rx: Receiver<LyricsHotkeyAction>,
+    lyrics_event_rx: Option<UnboundedReceiver<LyricsHotkeyAction>>,
     app_event_rx: Option<UnboundedReceiver<AppHotkeyAction>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -55,7 +56,7 @@ struct HotkeyService {
 impl HotkeyService {
     fn new() -> Self {
         let (command_tx, command_rx) = mpsc::channel();
-        let (lyrics_event_tx, lyrics_event_rx) = mpsc::channel();
+        let (lyrics_event_tx, lyrics_event_rx) = unbounded_channel();
         let (app_event_tx, app_event_rx) = unbounded_channel();
         let worker = thread::Builder::new()
             .name("yinqidao-global-hotkeys".into())
@@ -63,7 +64,7 @@ impl HotkeyService {
             .ok();
         Self {
             command_tx,
-            lyrics_event_rx,
+            lyrics_event_rx: Some(lyrics_event_rx),
             app_event_rx: Some(app_event_rx),
             worker,
         }
@@ -82,22 +83,63 @@ pub(crate) fn set_enabled(enabled: bool) {
     }
 }
 
-/// Drain lyric-window actions. Kept separate from application actions so the lightweight lyric
-/// refresh loop never needs to understand transport or main-window state.
-pub(crate) fn drain_actions() -> Vec<LyricsHotkeyAction> {
-    let Ok(service) = service().lock() else {
-        return Vec::new();
-    };
-    service.lyrics_event_rx.try_iter().collect()
+pub(crate) struct HotkeyEventBridge;
+
+impl EventEmitter<AppHotkeyAction> for HotkeyEventBridge {}
+impl EventEmitter<LyricsHotkeyAction> for HotkeyEventBridge {}
+
+impl HotkeyEventBridge {
+    fn new(
+        mut app_actions: UnboundedReceiver<AppHotkeyAction>,
+        mut lyrics_actions: UnboundedReceiver<LyricsHotkeyAction>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.spawn(async move |this, cx| {
+            while let Some(action) = app_actions.recv().await {
+                if this.update(cx, |_, cx| cx.emit(action)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            while let Some(action) = lyrics_actions.recv().await {
+                if this.update(cx, |_, cx| cx.emit(action)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        Self
+    }
 }
 
-/// Take the event-driven transport/main-window action stream. The receiver is single-consumer and
-/// is moved into the GPUI foreground task so no mutex is held across an async wait.
-pub(crate) fn take_app_action_receiver() -> Option<UnboundedReceiver<AppHotkeyAction>> {
+pub(crate) fn event_bridge(cx: &mut App) -> Option<Entity<HotkeyEventBridge>> {
+    let (app_actions, lyrics_actions) = take_event_receivers()?;
+    Some(cx.new(move |cx| {
+        HotkeyEventBridge::new(app_actions, lyrics_actions, cx)
+    }))
+}
+
+fn take_event_receivers() -> Option<(
+    UnboundedReceiver<AppHotkeyAction>,
+    UnboundedReceiver<LyricsHotkeyAction>,
+)> {
     let Ok(mut service) = service().lock() else {
         return None;
     };
-    service.app_event_rx.take()
+    if service.app_event_rx.is_none() || service.lyrics_event_rx.is_none() {
+        return None;
+    }
+    Some((
+        service.app_event_rx.take().expect("checked app hotkey receiver"),
+        service
+            .lyrics_event_rx
+            .take()
+            .expect("checked lyrics hotkey receiver"),
+    ))
 }
 
 pub(crate) fn shutdown() {
@@ -119,11 +161,13 @@ mod platform {
         ffi::c_void,
         mem::MaybeUninit,
         ptr,
-        sync::mpsc::{Receiver, RecvTimeoutError, Sender},
+        sync::mpsc::{Receiver, RecvTimeoutError},
         time::Duration,
     };
 
-    use super::{AppHotkeyAction, HotkeyEvent, LyricsHotkeyAction, ServiceCommand};
+    use super::{
+        AppHotkeyAction, HotkeyEvent, LyricsHotkeyAction, ServiceCommand, UnboundedSender,
+    };
 
     const WM_HOTKEY: u32 = 0x0312;
     const PM_REMOVE: u32 = 0x0001;
@@ -200,11 +244,9 @@ mod platform {
 
     pub(super) fn run(
         command_rx: Receiver<ServiceCommand>,
-        lyrics_event_tx: Sender<LyricsHotkeyAction>,
-        app_event_tx: tokio::sync::mpsc::UnboundedSender<AppHotkeyAction>,
+        lyrics_event_tx: UnboundedSender<LyricsHotkeyAction>,
+        app_event_tx: UnboundedSender<AppHotkeyAction>,
     ) {
-        // RegisterHotKey(NULL, ...) posts WM_HOTKEY to this worker thread. Force creation of the
-        // Win32 message queue before registration so the first shortcut cannot be lost at startup.
         let mut message = MaybeUninit::<Msg>::zeroed();
         unsafe {
             let _ = PeekMessageW(message.as_mut_ptr(), ptr::null_mut(), 0, 0, PM_NOREMOVE);
@@ -283,8 +325,7 @@ mod platform {
                 if message.message != WM_HOTKEY {
                     continue;
                 }
-                let event = event_for_id(message.w_param as i32);
-                match event {
+                match event_for_id(message.w_param as i32) {
                     Some(HotkeyEvent::Lyrics(action)) => {
                         let _ = lyrics_event_tx.send(action);
                     }
@@ -384,14 +425,16 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::sync::mpsc::{Receiver, Sender};
+    use std::sync::mpsc::Receiver;
 
-    use super::{AppHotkeyAction, LyricsHotkeyAction, ServiceCommand};
+    use super::{
+        AppHotkeyAction, LyricsHotkeyAction, ServiceCommand, UnboundedSender,
+    };
 
     pub(super) fn run(
         command_rx: Receiver<ServiceCommand>,
-        _lyrics_event_tx: Sender<LyricsHotkeyAction>,
-        _app_event_tx: tokio::sync::mpsc::UnboundedSender<AppHotkeyAction>,
+        _lyrics_event_tx: UnboundedSender<LyricsHotkeyAction>,
+        _app_event_tx: UnboundedSender<AppHotkeyAction>,
     ) {
         let mut warned = false;
         loop {

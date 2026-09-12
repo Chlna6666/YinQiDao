@@ -1,18 +1,21 @@
+use std::time::Duration;
+
 use gpui::{
-    App, AppContext, BorrowAppContext, Bounds, Context, Global, Timer, WindowBackgroundAppearance,
+    App, AppContext, BorrowAppContext, Bounds, Context, Global, WindowBackgroundAppearance,
     WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size,
 };
 
 use crate::{
     hotkeys::LyricsHotkeyAction,
+    model::PlaybackState,
     settings::DesktopLyricsAlignment,
     ui::{MusicApp, lyrics_overlay::DesktopLyricsView},
 };
 
-const LYRICS_UI_TICK: std::time::Duration = std::time::Duration::from_millis(80);
 const MIN_OVERLAY_WIDTH: f32 = 420.0;
 const MIN_OVERLAY_HEIGHT: f32 = 92.0;
 const DEFAULT_DESKTOP_LYRICS_BACKGROUND_OPACITY: f32 = 0.22;
+const DESKTOP_LYRICS_MIN_WAKE_MS: u64 = 8;
 
 #[derive(Default)]
 struct DesktopLyricsWindowState {
@@ -20,15 +23,6 @@ struct DesktopLyricsWindowState {
 }
 
 impl Global for DesktopLyricsWindowState {}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LyricsUiKey {
-    track_id: Option<i64>,
-    line_index: Option<usize>,
-    content_hash: u64,
-    style_hash: u64,
-    desktop_visible: bool,
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct LyricsDisplay {
@@ -110,7 +104,7 @@ impl MusicApp {
         };
 
         match cx.open_window(options, move |_, cx| {
-            cx.new(|_| DesktopLyricsView::new(parent))
+            cx.new(|cx| DesktopLyricsView::new(parent, cx))
         }) {
             Ok(window) => {
                 cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
@@ -372,117 +366,37 @@ impl MusicApp {
         })
     }
 
-    pub(crate) fn lyrics_ui_key(&self) -> LyricsUiKey {
-        let track_id = self.snapshot.current_track.as_ref().map(|track| track.id);
+    pub(crate) fn desktop_lyrics_next_boundary_delay(&self) -> Option<Duration> {
+        if !self.config.desktop_lyrics.visible || self.snapshot.state != PlaybackState::Playing {
+            return None;
+        }
+        let track = self.snapshot.current_track.as_ref()?;
+        let lines = self.lyrics.get(&track.id)?.timed_lines();
+        if lines.len() < 2 {
+            return None;
+        }
         let position_ms = self
             .engine
             .as_ref()
             .map_or(self.snapshot.position_ms, |engine| engine.progress().1);
-        let (line_index, content_hash) = track_id
-            .and_then(|id| self.lyrics.get(&id))
-            .map(|document| {
-                let lines = document.timed_lines();
-                if lines.is_empty() {
-                    let text = document.plain.as_deref().unwrap_or_default();
-                    (None, hash_text(text))
-                } else {
-                    let index = lines
-                        .iter()
-                        .rposition(|line| line.timestamp_ms <= position_ms)
-                        .unwrap_or(0);
-                    let mut hash = hash_text(&lines[index].text);
-                    if let Some(translation) = lines[index].translation.as_deref() {
-                        hash = mix_hash(hash, hash_text(translation));
-                    }
-                    if self.config.desktop_lyrics.two_line
-                        && let Some(next) = lines.get(index + 1)
-                    {
-                        hash = mix_hash(hash, hash_text(&next.text));
-                        if let Some(translation) = next.translation.as_deref() {
-                            hash = mix_hash(hash, hash_text(translation));
-                        }
-                    }
-                    (Some(index), hash)
-                }
-            })
-            .unwrap_or((None, 0));
-
-        let config = &self.config.desktop_lyrics;
-        let mut style_hash = 0xcbf2_9ce4_8422_2325_u64;
-        for value in [
-            u64::from(config.active_color),
-            u64::from(config.inactive_color),
-            u64::from(config.translation_color),
-            u64::from(config.font_size.to_bits()),
-            u64::from(config.background_opacity.to_bits()),
-            config.show_translation as u64,
-            config.two_line as u64,
-            config.locked as u64,
-            config.always_on_top as u64,
-            config.alignment as u64,
-        ] {
-            style_hash = mix_hash(style_hash, value);
-        }
-
-        LyricsUiKey {
-            track_id,
-            line_index,
-            content_hash,
-            style_hash,
-            desktop_visible: config.visible,
-        }
+        let index = lines
+            .iter()
+            .rposition(|line| line.timestamp_ms <= position_ms)
+            .unwrap_or(0);
+        let next = lines.get(index + 1)?;
+        Some(Duration::from_millis(
+            next.timestamp_ms
+                .saturating_sub(position_ms)
+                .max(DESKTOP_LYRICS_MIN_WAKE_MS),
+        ))
     }
 }
 
-pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App) {
+pub(crate) fn initialize(main_window: WindowHandle<MusicApp>, cx: &mut App) {
     ensure_window_state(cx);
-    cx.spawn(async move |cx| -> anyhow::Result<()> {
-        let mut last_key: Option<LyricsUiKey> = None;
-        loop {
-            Timer::after(LYRICS_UI_TICK).await;
-            let actions = crate::hotkeys::drain_actions();
-            let still_open = cx.update(|cx| {
-                let mut changed = false;
-                let result = main_window.update(cx, |app, _window, app_cx| {
-                    for action in actions {
-                        app.apply_lyrics_hotkey(action, app_cx);
-                    }
-                    app.sync_desktop_lyrics_window(app_cx);
-                    let key = app.lyrics_ui_key();
-                    changed = last_key.as_ref() != Some(&key);
-                    last_key = Some(key);
-                });
-                if result.is_err() {
-                    shutdown(cx);
-                    return false;
-                }
-                if changed {
-                    let window = cx
-                        .try_global::<DesktopLyricsWindowState>()
-                        .and_then(|state| state.window.clone());
-                    if let Some(window) = window {
-                        if window
-                            .update(cx, |_view, window, view_cx| {
-                                view_cx.notify();
-                                window.refresh();
-                            })
-                            .is_err()
-                        {
-                            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-                                state.window = None;
-                            });
-                        }
-                    }
-                }
-                true
-            })?;
-            if !still_open {
-                break;
-            }
-        }
-        Ok(())
-    })
-    .detach();
+    let _ = main_window.update(cx, |app, _window, app_cx| {
+        app.sync_desktop_lyrics_window(app_cx);
+    });
 }
 
 pub(crate) fn shutdown(cx: &mut App) {
@@ -509,18 +423,4 @@ fn remove_untracked_overlay_windows(cx: &mut App) {
     for overlay in overlays {
         let _ = overlay.update(cx, |_view, window, _cx| window.remove_window());
     }
-}
-
-fn hash_text(text: &str) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in text.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-#[inline]
-fn mix_hash(seed: u64, value: u64) -> u64 {
-    (seed ^ value).wrapping_mul(0x0000_0100_0000_01b3)
 }
