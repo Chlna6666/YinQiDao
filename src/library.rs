@@ -554,7 +554,7 @@ fn upsert_track(
 }
 
 fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
-    Ok(Track {
+    Ok(Track::new(crate::model::TrackData {
         id: row.get(0)?,
         path: PathBuf::from(row.get::<_, String>(1)?),
         title: row.get(2)?,
@@ -567,7 +567,7 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         sample_rate: row.get(9)?,
         channels: row.get(10)?,
         artwork_key: row.get(11)?,
-    })
+    }))
 }
 
 fn normalize_path(path: &Path) -> String {
