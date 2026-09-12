@@ -1078,7 +1078,7 @@ mod tests {
     use super::*;
 
     fn track(title: &str, artist: &str, album: &str) -> Track {
-        Track {
+        Track::new(crate::model::TrackData {
             id: 1,
             path: PathBuf::from("song.mp3"),
             title: title.into(),
@@ -1091,7 +1091,7 @@ mod tests {
             sample_rate: 44_100,
             channels: 2,
             artwork_key: None,
-        }
+        })
     }
 
     #[test]
