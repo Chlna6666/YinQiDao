@@ -242,49 +242,65 @@ fn metadata_fingerprint(track: Option<&Track>) -> u64 {
 
 #[cfg(target_os = "windows")]
 mod win32 {
-    use std::ffi::c_void;
-    use std::ptr::null_mut;
+    use std::{ffi::c_void, ptr::null_mut};
+
+    struct WindowSearch {
+        process_id: u32,
+        visible: *mut c_void,
+        fallback: *mut c_void,
+    }
 
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn GetActiveWindow() -> *mut c_void;
-        fn GetCurrentThreadId() -> u32;
-        fn EnumThreadWindows(
-            thread_id: u32,
+        fn EnumWindows(
             callback: unsafe extern "system" fn(*mut c_void, isize) -> i32,
             lparam: isize,
         ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, process_id: *mut u32) -> u32;
         fn IsWindow(hwnd: *mut c_void) -> i32;
         fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     }
 
     unsafe extern "system" fn enum_proc(hwnd: *mut c_void, lparam: isize) -> i32 {
         unsafe {
-            let out = lparam as *mut *mut c_void;
-            if IsWindow(hwnd) != 0 {
-                *out = hwnd;
-                if IsWindowVisible(hwnd) != 0 {
-                    return 0;
-                }
+            if IsWindow(hwnd) == 0 {
+                return 1;
+            }
+
+            let search = &mut *(lparam as *mut WindowSearch);
+            let mut process_id = 0_u32;
+            GetWindowThreadProcessId(hwnd, &mut process_id);
+            if process_id != search.process_id {
+                return 1;
+            }
+
+            if search.fallback.is_null() {
+                search.fallback = hwnd;
+            }
+            if IsWindowVisible(hwnd) != 0 {
+                search.visible = hwnd;
+                return 0;
             }
         }
         1
     }
 
     pub fn get_app_hwnd() -> Option<*mut c_void> {
+        let mut search = WindowSearch {
+            process_id: std::process::id(),
+            visible: null_mut(),
+            fallback: null_mut(),
+        };
         unsafe {
-            let active = GetActiveWindow();
-            if !active.is_null() && IsWindow(active) != 0 {
-                return Some(active);
-            }
-            let mut found: *mut c_void = null_mut();
-            let thread_id = GetCurrentThreadId();
-            EnumThreadWindows(thread_id, enum_proc, &mut found as *mut _ as isize);
-            if !found.is_null() && IsWindow(found) != 0 {
-                return Some(found);
-            }
-            None
+            EnumWindows(enum_proc, &mut search as *mut _ as isize);
         }
+
+        let hwnd = if search.visible.is_null() {
+            search.fallback
+        } else {
+            search.visible
+        };
+        (!hwnd.is_null()).then_some(hwnd)
     }
 }
 
