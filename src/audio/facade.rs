@@ -1,7 +1,7 @@
 use std::{
     f32::consts::FRAC_PI_2,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
     },
     thread,
@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender, bounded};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::model::{EqSettings, PlaybackState, PlayerSnapshot, SpatialSettings, Track};
 
@@ -18,25 +19,29 @@ use super::engine::{
 };
 
 const REQUEST_QUEUE_CAPACITY: usize = 128;
-const EVENT_QUEUE_CAPACITY: usize = 256;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
 const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(800);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 const NO_POSITION_OVERRIDE: u64 = u64::MAX;
 const SEEK_ACK_TOLERANCE_MS: u64 = 50;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioUiEvent {
+    SnapshotChanged,
+    Error(String),
+}
+
 /// UI-facing audio facade.
 ///
 /// The decoder/output engine owns blocking locks internally. None of those locks are ever touched
 /// from GPUI after construction: commands cross a bounded non-blocking mailbox, hot playback
-/// progress is published through atomics, and structural snapshots are double-buffered by a
-/// dedicated bridge thread. A stalled decoder therefore cannot stall input, hover, layout or paint
-/// on the application thread.
+/// progress is published through atomics, structural snapshots are double-buffered by a dedicated
+/// bridge thread, and only structural changes are forwarded to the GPUI event bridge.
 pub struct AudioEngine {
     request_tx: Sender<EngineRequest>,
-    event_rx: Receiver<PlayerEvent>,
     snapshot: Arc<SnapshotCache>,
     running: Arc<AtomicBool>,
+    ui_event_rx: Mutex<Option<UnboundedReceiver<AudioUiEvent>>>,
 }
 
 enum EngineRequest {
@@ -71,8 +76,6 @@ impl SnapshotCache {
     fn store(&self, snapshot: PlayerSnapshot) {
         self.store_progress(snapshot.state, snapshot.position_ms, snapshot.duration_ms);
 
-        // PlayerSnapshot::queue is Arc-backed, so structural snapshots share the decoder queue
-        // without copying the entire TrackId array on every bridge refresh.
         let current = self.active.load(Ordering::Acquire) & 1;
         let inactive = 1 - current;
         if let Ok(mut slot) = self.slots[inactive].write() {
@@ -93,11 +96,6 @@ impl SnapshotCache {
                 .store(NO_STATE_OVERRIDE, Ordering::Release);
         }
 
-        // A seek is published optimistically as soon as it enters the non-blocking bridge queue.
-        // Ignore stale progress samples from before that request until the blocking engine reports
-        // the requested position. This prevents every progress view from snapping backwards while
-        // the bridge/decoder catches up, including rapid consecutive seeks where old acknowledgments
-        // must not replace the newest target.
         let desired_position = self.position_override_ms.load(Ordering::Acquire);
         if desired_position != NO_POSITION_OVERRIDE
             && position_ms.abs_diff(desired_position) <= SEEK_ACK_TOLERANCE_MS
@@ -270,10 +268,6 @@ enum FadeCompletion {
     Stop,
 }
 
-/// Bridge-thread-only transport envelope. The blocking engine already applies a perceptual
-/// `volume^2` master gain, so the temporary control value uses `sqrt(envelope)` to keep the
-/// transport fade itself linear in amplitude. The sin² interpolation gives zero slope at both
-/// endpoints and can be reversed mid-fade without a discontinuity.
 struct TransportFade {
     master_volume: f32,
     current_gain: f32,
@@ -386,7 +380,7 @@ impl AudioEngine {
         spatial: SpatialSettings,
     ) -> Result<Self> {
         let (request_tx, request_rx) = bounded::<EngineRequest>(REQUEST_QUEUE_CAPACITY);
-        let (event_tx, event_rx) = bounded::<PlayerEvent>(EVENT_QUEUE_CAPACITY);
+        let (ui_event_tx, ui_event_rx) = unbounded_channel::<AudioUiEvent>();
         let (init_tx, init_rx) = bounded::<Result<()>>(1);
         let snapshot = Arc::new(SnapshotCache::new(PlayerSnapshot {
             volume: volume.clamp(0.0, 1.0),
@@ -414,13 +408,14 @@ impl AudioEngine {
                 };
 
                 worker_snapshot.store(engine.snapshot());
+                let _ = ui_event_tx.send(AudioUiEvent::SnapshotChanged);
                 if init_tx.send(Ok(())).is_err() {
                     return;
                 }
                 run_bridge(
                     engine,
                     request_rx,
-                    event_tx,
+                    ui_event_tx,
                     worker_snapshot,
                     worker_running,
                     volume,
@@ -431,9 +426,9 @@ impl AudioEngine {
         match init_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 request_tx,
-                event_rx,
                 snapshot,
                 running,
+                ui_event_rx: Mutex::new(Some(ui_event_rx)),
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(anyhow!("音频 UI 桥接线程在初始化完成前退出")),
@@ -445,17 +440,12 @@ impl AudioEngine {
         if tracks.is_empty() {
             return;
         }
-        // Registration can include thousands of Track values. Moving the Vec into a bounded
-        // mailbox is O(1); the engine-side HashMap mutation happens only on the bridge thread.
         let _ = self
             .request_tx
             .try_send(EngineRequest::RegisterTracks(tracks));
     }
 
     pub fn try_send(&self, command: PlayerCommand) -> bool {
-        // Publish a seek target before enqueueing it. The bridge can process a request immediately,
-        // so publishing after enqueue leaves a race where the confirmed position is written first
-        // and the late override then pins the UI to a stale target forever.
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
         let position_override_update = optimistic_position_ms
@@ -490,8 +480,8 @@ impl AudioEngine {
         }
     }
 
-    pub fn drain_events(&self) -> Vec<PlayerEvent> {
-        self.event_rx.try_iter().collect()
+    pub fn take_ui_event_receiver(&self) -> Option<UnboundedReceiver<AudioUiEvent>> {
+        self.ui_event_rx.lock().ok()?.take()
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
@@ -521,7 +511,7 @@ impl Drop for AudioEngine {
 fn run_bridge(
     engine: BlockingAudioEngine,
     request_rx: Receiver<EngineRequest>,
-    event_tx: Sender<PlayerEvent>,
+    ui_event_tx: UnboundedSender<AudioUiEvent>,
     snapshot: Arc<SnapshotCache>,
     running: Arc<AtomicBool>,
     initial_volume: f32,
@@ -542,7 +532,6 @@ fn run_bridge(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Drain a bounded burst so transport input cannot starve progress/event publication.
         for _ in 0..32 {
             let Ok(request) = request_rx.try_recv() else {
                 break;
@@ -557,10 +546,14 @@ fn run_bridge(
         refresh_snapshot |= transport_fade.tick(&engine);
 
         for event in engine.drain_events() {
-            if !matches!(event, PlayerEvent::PositionChanged(_)) {
-                refresh_snapshot = true;
+            match event {
+                PlayerEvent::PositionChanged(_) => {}
+                PlayerEvent::Error(error) => {
+                    refresh_snapshot = true;
+                    let _ = ui_event_tx.send(AudioUiEvent::Error(error.to_string()));
+                }
+                _ => refresh_snapshot = true,
             }
-            let _ = event_tx.try_send(event);
         }
 
         if last_progress.elapsed() >= PROGRESS_INTERVAL {
@@ -571,10 +564,9 @@ fn run_bridge(
 
         if refresh_snapshot {
             let mut current = engine.snapshot();
-            // The blocking engine sees the temporary transport control volume while fading. Keep
-            // the UI-facing structural snapshot pinned to the user's real master-volume setting.
             current.volume = transport_fade.master_volume;
             snapshot.store(current);
+            let _ = ui_event_tx.send(AudioUiEvent::SnapshotChanged);
         }
     }
 }

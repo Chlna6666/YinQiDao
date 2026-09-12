@@ -21,7 +21,7 @@ pub use debug::{
 };
 pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
-pub use facade::AudioEngine;
+pub use facade::{AudioEngine, AudioUiEvent};
 pub(crate) use fingerprint::fingerprint_file;
 pub use head_tracking::{
     HeadTrackingBridge, HeadTrackingCalibration, HeadTrackingEulerPose, HeadTrackingProvider,
