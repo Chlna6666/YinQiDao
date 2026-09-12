@@ -98,6 +98,7 @@ impl AppleFluidView {
         self.stage_visible = stage_visible;
         if changed {
             self.last_tick_at = Instant::now();
+            self.start_timer(cx);
             cx.notify();
         }
     }
@@ -108,11 +109,20 @@ impl AppleFluidView {
         }
         self.playing = playing;
         self.last_tick_at = Instant::now();
+        self.start_timer(cx);
         cx.notify();
     }
 
+    #[inline]
+    fn should_animate(&self, now: Instant) -> bool {
+        self.stage_visible
+            && self.playing
+            && self.shader_available
+            && now.saturating_duration_since(self.last_render_at) <= FLUID_MOUNT_LIVENESS
+    }
+
     fn start_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
+        if self.timer_started || !self.stage_visible || !self.playing || !self.shader_available {
             return;
         }
         self.timer_started = true;
@@ -120,27 +130,27 @@ impl AppleFluidView {
         cx.spawn(async move |this, cx| -> Result<()> {
             loop {
                 Timer::after(FLUID_FRAME_INTERVAL).await;
-                if this
-                    .update(cx, |this, cx| {
-                        let now = Instant::now();
-                        let mounted = now.saturating_duration_since(this.last_render_at)
-                            <= FLUID_MOUNT_LIVENESS;
-                        let should_animate =
-                            this.stage_visible && this.playing && mounted && this.shader_available;
+                let keep_running = match this.update(cx, |this, cx| {
+                    let now = Instant::now();
+                    if !this.should_animate(now) {
+                        this.timer_started = false;
+                        return false;
+                    }
 
-                        if should_animate {
-                            let delta = now
-                                .saturating_duration_since(this.last_tick_at)
-                                .as_secs_f32()
-                                .min(0.05);
-                            this.animation_seconds =
-                                (this.animation_seconds + delta).rem_euclid(21_600.0);
-                            cx.notify();
-                        }
-                        this.last_tick_at = now;
-                    })
-                    .is_err()
-                {
+                    let delta = now
+                        .saturating_duration_since(this.last_tick_at)
+                        .as_secs_f32()
+                        .min(0.05);
+                    this.animation_seconds =
+                        (this.animation_seconds + delta).rem_euclid(21_600.0);
+                    this.last_tick_at = now;
+                    cx.notify();
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => break,
+                };
+                if !keep_running {
                     break;
                 }
             }
@@ -152,8 +162,8 @@ impl AppleFluidView {
 
 impl Render for AppleFluidView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.start_timer(cx);
         self.last_render_at = Instant::now();
+        self.start_timer(cx);
 
         match apple_fluid_program() {
             Ok(program) => {
