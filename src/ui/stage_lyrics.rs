@@ -881,12 +881,8 @@ fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option
         .checked_sub(1)
 }
 
-fn lyric_word_highlight(
-    fade_out: Option<f32>,
-    font_weight: Option<gpui::FontWeight>,
-) -> gpui::HighlightStyle {
+fn lyric_word_highlight(fade_out: Option<f32>) -> gpui::HighlightStyle {
     gpui::HighlightStyle {
-        font_weight,
         fade_out,
         ..gpui::HighlightStyle::default()
     }
@@ -907,42 +903,29 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    let mut highlights = Vec::with_capacity(3);
-    if let Some(current) = current_word.and_then(|index| line.words.get(index)) {
-        if current.byte_start > 0 {
-            highlights.push((
-                0..current.byte_start,
-                lyric_word_highlight(Some(0.12), None),
-            ));
-        }
+    // Keep one fixed run per source word. Only alpha changes as playback advances, so GPUI's
+    // TextLayout geometry key remains stable and the word transition is handled as a paint-only
+    // decoration refresh instead of reshaping/re-wrapping the entire active line.
+    let mut highlights = Vec::with_capacity(line.words.len());
+    for (index, word) in line.words.iter().enumerate() {
+        let fade_out = match current_word {
+            Some(current) if index < current => Some(0.12),
+            Some(current) if index == current => None,
+            Some(_) => Some(0.58),
+            None if index == 0 => Some(0.10),
+            None => Some(0.58),
+        };
         highlights.push((
-            current.byte_start..current.byte_end,
-            lyric_word_highlight(None, Some(gpui::FontWeight::BOLD)),
+            word.byte_start..word.byte_end,
+            lyric_word_highlight(fade_out),
         ));
-        if current.byte_end < line.text.len() {
-            highlights.push((
-                current.byte_end..line.text.len(),
-                lyric_word_highlight(Some(0.58), None),
-            ));
-        }
-    } else if let Some(first) = line.words.first() {
-        highlights.push((
-            first.byte_start..first.byte_end,
-            lyric_word_highlight(Some(0.10), Some(gpui::FontWeight::BOLD)),
-        ));
-        if first.byte_end < line.text.len() {
-            highlights.push((
-                first.byte_end..line.text.len(),
-                lyric_word_highlight(Some(0.58), None),
-            ));
-        }
     }
 
     div()
         .w_full()
         .min_w(px(0.0))
         .text_size(px(28.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(gpui::FontWeight::BOLD)
         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
         .child(gpui::StyledText::new(line.text.clone()).with_highlights(highlights))
         .into_any_element()
