@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, interactive_slider},
+    components::{SliderStyle, slider::InteractiveSliderState},
     player_stage::{PlaybackProgress, PlaybackTime},
     shell::{DragTarget, MusicApp},
     theme::{
@@ -75,10 +75,12 @@ pub(super) fn view(
         if let Some(view) = &cache.view {
             return view.clone();
         }
+        let volume_slider = mini_volume_slider(parent.clone());
         let view = cx.new(move |_| MiniPlayerView {
             parent,
             playback_progress: initial_progress,
             playback_time: initial_time,
+            volume_slider,
             track: MiniTrackRenderData::default(),
             key: MiniPlayerRenderKey {
                 track_id: None,
@@ -151,6 +153,7 @@ pub(super) struct MiniPlayerView {
     parent: WeakEntity<MusicApp>,
     playback_progress: Entity<PlaybackProgress>,
     playback_time: Entity<PlaybackTime>,
+    volume_slider: InteractiveSliderState,
     track: MiniTrackRenderData,
     key: MiniPlayerRenderKey,
     slider_volume: f32,
@@ -462,84 +465,64 @@ impl Render for MiniPlayerView {
                                             }),
                                     )
                                     .child(
-                                        interactive_slider(
-                                            "mini-volume-bar",
-                                            slider_volume,
-                                            SliderStyle::mini_volume(),
-                                            {
+                                        self.volume_slider
+                                            .render(slider_volume, SliderStyle::mini_volume())
+                                            .w(px(72.0))
+                                            .on_scroll_wheel({
                                                 let parent = parent.clone();
-                                                move |ratio, cx| {
+                                                move |event: &gpui::ScrollWheelEvent, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    let delta = event.delta.pixel_delta(px(48.0)).y;
                                                     let _ = parent.update(cx, |app, app_cx| {
-                                                        app.pending_volume_ratio = None;
-                                                        app.set_app_volume(ratio, app_cx);
-                                                    });
-                                                }
-                                            },
-                                            {
-                                                let parent = parent.clone();
-                                                move |ratio, cx| {
-                                                    let _ = parent.update(cx, |app, app_cx| {
-                                                        if app.drag_target == Some(DragTarget::Volume) {
-                                                            app.update_drag_ratio(
-                                                                DragTarget::Volume,
-                                                                ratio,
-                                                                app_cx,
-                                                            );
-                                                        } else {
-                                                            app.begin_drag(
-                                                                DragTarget::Volume,
-                                                                ratio,
-                                                                app_cx,
-                                                            );
+                                                        if delta < px(0.0) {
+                                                            app.adjust_volume(0.04, app_cx);
+                                                        } else if delta > px(0.0) {
+                                                            app.adjust_volume(-0.04, app_cx);
                                                         }
-                                                        app.send(PlayerCommand::SetVolume(ratio));
                                                     });
                                                 }
-                                            },
-                                            {
-                                                let parent = parent.clone();
-                                                move |ratio, cx| {
-                                                    let _ = parent.update(cx, |app, app_cx| {
-                                                        if app.drag_target == Some(DragTarget::Volume) {
-                                                            app.update_drag_ratio(
-                                                                DragTarget::Volume,
-                                                                ratio,
-                                                                app_cx,
-                                                            );
-                                                        } else {
-                                                            app.begin_drag(
-                                                                DragTarget::Volume,
-                                                                ratio,
-                                                                app_cx,
-                                                            );
-                                                        }
-                                                        app.commit_drag(app_cx);
-                                                        app.pending_volume_ratio = None;
-                                                    });
-                                                }
-                                            },
-                                        )
-                                        .w(px(72.0))
-                                        .on_scroll_wheel({
-                                            let parent = parent.clone();
-                                            move |event: &gpui::ScrollWheelEvent, _window, cx| {
-                                                cx.stop_propagation();
-                                                let delta = event.delta.pixel_delta(px(48.0)).y;
-                                                let _ = parent.update(cx, |app, app_cx| {
-                                                    if delta < px(0.0) {
-                                                        app.adjust_volume(0.04, app_cx);
-                                                    } else if delta > px(0.0) {
-                                                        app.adjust_volume(-0.04, app_cx);
-                                                    }
-                                                });
-                                            }
-                                        }),
+                                            }),
                                     ),
                             ),
                     ),
             )
             .child(self.playback_progress.clone())
     }
+}
+
+fn mini_volume_slider(parent: WeakEntity<MusicApp>) -> InteractiveSliderState {
+    let click_parent = parent.clone();
+    let drag_parent = parent.clone();
+    InteractiveSliderState::new(
+        "mini-volume-bar",
+        move |ratio, cx| {
+            let _ = click_parent.update(cx, |app, app_cx| {
+                app.pending_volume_ratio = None;
+                app.set_app_volume(ratio, app_cx);
+            });
+        },
+        move |ratio, cx| {
+            let _ = drag_parent.update(cx, |app, app_cx| {
+                if app.drag_target == Some(DragTarget::Volume) {
+                    app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
+                } else {
+                    app.begin_drag(DragTarget::Volume, ratio, app_cx);
+                }
+                app.send(PlayerCommand::SetVolume(ratio));
+            });
+        },
+        move |ratio, cx| {
+            let _ = parent.update(cx, |app, app_cx| {
+                if app.drag_target == Some(DragTarget::Volume) {
+                    app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
+                } else {
+                    app.begin_drag(DragTarget::Volume, ratio, app_cx);
+                }
+                app.commit_drag(app_cx);
+                app.pending_volume_ratio = None;
+            });
+        },
+    )
 }
 
 fn control_button(
