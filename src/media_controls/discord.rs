@@ -315,10 +315,7 @@ impl DiscordPresence {
     }
 
     fn write_json_frame(&mut self, opcode: u32, payload: &Value) -> io::Result<()> {
-        let bytes = serde_json::to_vec(payload)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let len = u32::try_from(bytes.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Discord IPC 帧过大"))?;
+        let frame = encode_json_frame(opcode, payload)?;
         let Some(stream) = self.stream.as_mut() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -326,9 +323,9 @@ impl DiscordPresence {
             ));
         };
         stream.drain_responses()?;
-        stream.write_all(&opcode.to_le_bytes())?;
-        stream.write_all(&len.to_le_bytes())?;
-        stream.write_all(&bytes)?;
+        // Discord's IPC transport treats each named-pipe write as a message boundary on Windows.
+        // Header and JSON therefore must be submitted as one contiguous write.
+        stream.write_all(&frame)?;
         stream.flush()?;
         stream.drain_responses()
     }
@@ -338,6 +335,18 @@ impl DiscordPresence {
         self.published = None;
         self.retry_after = Instant::now() + RETRY_BACKOFF;
     }
+}
+
+fn encode_json_frame(opcode: u32, payload: &Value) -> io::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Discord IPC 帧过大"))?;
+    let mut frame = Vec::with_capacity(8 + bytes.len());
+    frame.extend_from_slice(&opcode.to_le_bytes());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&bytes);
+    Ok(frame)
 }
 
 fn activity_timestamps(position_ms: u64, duration_ms: u64) -> Option<(u64, u64)> {
@@ -357,7 +366,7 @@ fn connect_ipc() -> io::Result<IpcStream> {
 
     let mut last_error = None;
     for slot in 0..10_u8 {
-        let path = format!(r"\\.\pipe\discord-ipc-{slot}");
+        let path = format!(r"\\?\pipe\discord-ipc-{slot}");
         match OpenOptions::new().read(true).write(true).open(path) {
             Ok(stream) => return Ok(IpcStream(stream)),
             Err(error) => last_error = Some(error),
@@ -431,5 +440,17 @@ mod tests {
             .expect("clock")
             .as_secs();
         assert!(now.abs_diff(start.saturating_add(30)) <= 1);
+    }
+
+    #[test]
+    fn discord_frame_is_one_little_endian_packet() {
+        let payload = json!({ "v": 1, "client_id": "123" });
+        let frame = encode_json_frame(IPC_OPCODE_HANDSHAKE, &payload).expect("frame");
+        assert!(frame.len() >= 8);
+        assert_eq!(&frame[..4], &IPC_OPCODE_HANDSHAKE.to_le_bytes());
+        let payload_len = u32::from_le_bytes(frame[4..8].try_into().expect("length")) as usize;
+        assert_eq!(payload_len, frame.len() - 8);
+        let decoded: Value = serde_json::from_slice(&frame[8..]).expect("json");
+        assert_eq!(decoded, payload);
     }
 }
