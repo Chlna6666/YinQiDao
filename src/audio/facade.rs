@@ -246,18 +246,19 @@ fn tracks_equal(left: Option<&Track>, right: Option<&Track>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
-            left.id == right.id
-                && left.path == right.path
-                && left.title == right.title
-                && left.artist == right.artist
-                && left.album == right.album
-                && left.year == right.year
-                && left.genre == right.genre
-                && left.duration_ms == right.duration_ms
-                && left.codec == right.codec
-                && left.sample_rate == right.sample_rate
-                && left.channels == right.channels
-                && left.artwork_key == right.artwork_key
+            left.ptr_eq(right)
+                || (left.id == right.id
+                    && left.path == right.path
+                    && left.title == right.title
+                    && left.artist == right.artist
+                    && left.album == right.album
+                    && left.year == right.year
+                    && left.genre == right.genre
+                    && left.duration_ms == right.duration_ms
+                    && left.codec == right.codec
+                    && left.sample_rate == right.sample_rate
+                    && left.channels == right.channels
+                    && left.artwork_key == right.artwork_key)
         }
         _ => false,
     }
