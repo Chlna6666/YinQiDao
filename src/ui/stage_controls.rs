@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, interactive_slider},
+    components::{SliderStyle, interactive_slider, slider::InteractiveSliderState},
     shell::{DragTarget, MusicApp},
     theme::{ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
@@ -517,6 +517,7 @@ struct StageProgressView {
     stage_active: bool,
     controls_visible: bool,
     drag_progress_ratio: Option<f32>,
+    slider: Option<InteractiveSliderState>,
 }
 
 impl StageProgressView {
@@ -537,6 +538,7 @@ impl StageProgressView {
             stage_active,
             controls_visible,
             drag_progress_ratio,
+            slider: None,
         }
     }
 
@@ -568,6 +570,74 @@ impl StageProgressView {
             cx.notify();
         }
     }
+
+    fn ensure_slider(&mut self, cx: &mut Context<Self>) {
+        if self.slider.is_some() {
+            return;
+        }
+
+        let parent = self.parent.clone();
+        let click_parent = parent.clone();
+        let drag_parent = parent.clone();
+        let this_click = cx.entity().downgrade();
+        let this_drag = this_click.clone();
+        let this_commit = this_click.clone();
+
+        self.slider = Some(InteractiveSliderState::new(
+            "stage-progress-track",
+            move |ratio, cx| {
+                let _ = click_parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    app.seek_to_ratio(ratio, app_cx);
+                });
+                let _ = this_click.update(cx, |this, cx| {
+                    this.drag_progress_ratio = None;
+                    let _ = this.owner.update(cx, |owner, cx| {
+                        owner.drag_progress_ratio = None;
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            },
+            move |ratio, cx| {
+                let _ = drag_parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    if app.drag_target == Some(DragTarget::Progress) {
+                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                    } else {
+                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                    }
+                });
+                let _ = this_drag.update(cx, |this, cx| {
+                    this.drag_progress_ratio = Some(ratio);
+                    let _ = this.owner.update(cx, |owner, cx| {
+                        owner.drag_progress_ratio = Some(ratio);
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            },
+            move |ratio, cx| {
+                let _ = parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    if app.drag_target == Some(DragTarget::Progress) {
+                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                    } else {
+                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                    }
+                    app.commit_drag(app_cx);
+                });
+                let _ = this_commit.update(cx, |this, cx| {
+                    this.drag_progress_ratio = None;
+                    let _ = this.owner.update(cx, |owner, cx| {
+                        owner.drag_progress_ratio = None;
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            },
+        ));
+    }
 }
 
 impl Render for StageProgressView {
@@ -595,76 +665,14 @@ impl Render for StageProgressView {
             window.request_animation_frame();
         }
 
-        let parent = self.parent.clone();
-        let this_click = cx.entity().downgrade();
-        let this_drag = this_click.clone();
-        let this_commit = this_click.clone();
-
-        interactive_slider(
-            "stage-progress-track",
-            progress_ratio,
-            SliderStyle::stage_progress(),
-            {
-                let parent = parent.clone();
-                move |ratio, cx| {
-                    let _ = parent.update(cx, |app, app_cx| {
-                        app.wake_stage_controls_immediately(app_cx);
-                        app.seek_to_ratio(ratio, app_cx);
-                    });
-                    let _ = this_click.update(cx, |this, cx| {
-                        this.drag_progress_ratio = None;
-                        let _ = this.owner.update(cx, |owner, cx| {
-                            owner.drag_progress_ratio = None;
-                            cx.notify();
-                        });
-                        cx.notify();
-                    });
-                }
-            },
-            {
-                let parent = parent.clone();
-                move |ratio, cx| {
-                    let _ = parent.update(cx, |app, app_cx| {
-                        app.wake_stage_controls_immediately(app_cx);
-                        if app.drag_target == Some(DragTarget::Progress) {
-                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                        } else {
-                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                        }
-                    });
-                    let _ = this_drag.update(cx, |this, cx| {
-                        this.drag_progress_ratio = Some(ratio);
-                        let _ = this.owner.update(cx, |owner, cx| {
-                            owner.drag_progress_ratio = Some(ratio);
-                            cx.notify();
-                        });
-                        cx.notify();
-                    });
-                }
-            },
-            move |ratio, cx| {
-                let _ = parent.update(cx, |app, app_cx| {
-                    app.wake_stage_controls_immediately(app_cx);
-                    if app.drag_target == Some(DragTarget::Progress) {
-                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                    } else {
-                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                    }
-                    app.commit_drag(app_cx);
-                });
-                let _ = this_commit.update(cx, |this, cx| {
-                    this.drag_progress_ratio = None;
-                    let _ = this.owner.update(cx, |owner, cx| {
-                        owner.drag_progress_ratio = None;
-                        cx.notify();
-                    });
-                    cx.notify();
-                });
-            },
-        )
-        .flex_1()
-        .min_w(px(80.0))
-        .into_any_element()
+        self.ensure_slider(cx);
+        self.slider
+            .as_ref()
+            .expect("stage progress slider must be initialized")
+            .render(progress_ratio, SliderStyle::stage_progress())
+            .flex_1()
+            .min_w(px(80.0))
+            .into_any_element()
     }
 }
 
