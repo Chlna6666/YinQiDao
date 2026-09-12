@@ -2,6 +2,10 @@ use std::{fs, path::Path, sync::Arc};
 
 use lofty::{prelude::TaggedFileExt, tag::ItemKey};
 
+mod formats;
+
+use formats::{SyncedLyricsFormat, detect_synced_format, parse_synced_lyrics};
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LyricsDocument {
     pub plain: Option<String>,
@@ -13,11 +17,10 @@ pub struct LyricsDocument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LyricWord {
-    /// Absolute transport timestamp for the beginning of this enhanced-LRC segment.
+    /// Absolute transport timestamp for the beginning of this authored lyric segment.
     pub timestamp_ms: u64,
-    /// Segment text exactly as it appeared between two inline timestamps. Leading/trailing
-    /// whitespace is intentionally preserved so the UI can rebuild the authored line without
-    /// inserting synthetic gaps between CJK/Latin segments.
+    /// Segment text exactly as authored by the source format. Leading/trailing whitespace is
+    /// intentionally preserved so the UI can rebuild CJK/Latin lines without synthetic gaps.
     pub text: String,
 }
 
@@ -26,8 +29,8 @@ pub struct LyricLine {
     pub timestamp_ms: u64,
     pub text: String,
     pub translation: Option<String>,
-    /// Enhanced-LRC inline timing (`<mm:ss.xx>word`) when the source provides it. A plain LRC line
-    /// leaves this empty; consumers must not invent word timing from character count.
+    /// Authored word/syllable timing from Enhanced LRC, QRC, YRC or TTML. A line-only source leaves
+    /// this empty; consumers must never manufacture word timing from character count.
     pub words: Arc<[LyricWord]>,
 }
 
@@ -40,12 +43,15 @@ impl LyricsDocument {
     ) -> Self {
         let source = source.into();
         let timed = match (synced.as_deref(), translation.as_deref()) {
-            (Some(original), Some(translated)) => pair_translated_lrc(original, translated),
-            (Some(original), None) if is_legacy_bilingual_source(&source) => {
+            (Some(original), Some(translated)) => pair_translated_synced(original, translated),
+            (Some(original), None)
+                if is_legacy_bilingual_source(&source)
+                    && detect_synced_format(original) == SyncedLyricsFormat::Lrc =>
+            {
                 collapse_legacy_bilingual_lrc(original)
             }
-            (Some(original), None) => parse_lrc(original),
-            (None, Some(translated)) => parse_lrc(translated),
+            (Some(original), None) => parse_synced_lyrics(original),
+            (None, Some(translated)) => parse_synced_lyrics(translated),
             (None, None) => Vec::new(),
         }
         .into();
@@ -84,31 +90,48 @@ pub fn decode_bytes_to_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    // 1. 优先检查 BOM 头 (UTF-8 / UTF-16)
     if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
         let (cow, _, _) = encoding.decode(&bytes[bom_len..]);
         return cow.into_owned();
     }
-    // 2. 尝试原生 UTF-8 解码
     if let Ok(utf8_str) = std::str::from_utf8(bytes) {
         return utf8_str.to_owned();
     }
-    // 3. 回退至 GB18030（兼容并完整覆盖 GBK 与 GB2312）
     let (cow, _, _) = encoding_rs::GB18030.decode(bytes);
     cow.into_owned()
 }
 
 pub fn read_local(path: &Path) -> Option<LyricsDocument> {
-    let sidecar = path.with_extension("lrc");
-    if let Ok(bytes) = fs::read(&sidecar) {
+    const SIDECARS: [(&str, &str); 4] = [
+        ("ttml", "本地 TTML"),
+        ("qrc", "本地 QRC"),
+        ("yrc", "本地 YRC"),
+        ("lrc", "本地 LRC"),
+    ];
+
+    for (extension, source) in SIDECARS {
+        let sidecar = path.with_extension(extension);
+        let Ok(bytes) = fs::read(&sidecar) else {
+            continue;
+        };
         let text = decode_bytes_to_string(&bytes);
-        if !text.trim().is_empty() {
-            let synced = (!parse_lrc(&text).is_empty()).then(|| text.clone());
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !parse_synced_lyrics(&text).is_empty() {
             return Some(LyricsDocument::from_sources(
-                synced.is_none().then_some(text),
-                synced,
                 None,
-                "本地 LRC",
+                Some(text),
+                None,
+                source,
+            ));
+        }
+        if extension == "lrc" {
+            return Some(LyricsDocument::from_sources(
+                Some(text),
+                None,
+                None,
+                source,
             ));
         }
     }
@@ -123,7 +146,7 @@ pub fn read_local(path: &Path) -> Option<LyricsDocument> {
     if lyrics.is_empty() {
         return None;
     }
-    let synced = (!parse_lrc(&lyrics).is_empty()).then(|| lyrics.clone());
+    let synced = (!parse_synced_lyrics(&lyrics).is_empty()).then(|| lyrics.clone());
     Some(LyricsDocument::from_sources(
         synced.is_none().then_some(lyrics.clone()),
         synced,
@@ -134,15 +157,10 @@ pub fn read_local(path: &Path) -> Option<LyricsDocument> {
 
 const TRANSLATION_SYNC_TOLERANCE_MS: u64 = 1_500;
 
-fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
-    let mut primary = parse_lrc(original);
-    let translations = parse_lrc(translated);
+fn pair_translated_synced(original: &str, translated: &str) -> Vec<LyricLine> {
+    let mut primary = parse_synced_lyrics(original);
+    let translations = parse_synced_lyrics(translated);
 
-    // Provider translation tracks are authored as a parallel sequence. When both parsed streams
-    // contain the same number of timed rows, sequence identity is stronger than timestamp equality:
-    // some services apply a different global offset or round timestamps independently. Pairing by
-    // index keeps the Chinese subtitle attached to the authored primary line instead of silently
-    // dropping it because the clocks drift by more than the proximity tolerance.
     if primary.len() == translations.len() {
         for (line, translation) in primary.iter_mut().zip(&translations) {
             attach_translation(line, translation);
@@ -150,9 +168,6 @@ fn pair_translated_lrc(original: &str, translated: &str) -> Vec<LyricLine> {
         return primary;
     }
 
-    // If one provider omits/adds a few timed rows, fall back to one-to-one nearest-timestamp
-    // matching. Never inject an unmatched translation as a new primary lyric row: doing so changes
-    // the playback timeline and makes the immersive view alternate between original/translation.
     let mut used = vec![false; translations.len()];
     for line in &mut primary {
         let best = translations
@@ -239,9 +254,6 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
         } else {
             clean_inline_tags(&enhanced_text)
         };
-        // Inline timestamps are absolute transport times. If an LRC line contains multiple outer
-        // timestamps, the same inline timeline cannot truthfully describe all repeated instances;
-        // retain the line text but deliberately drop ambiguous word timing for those copies.
         let words: Arc<[LyricWord]> = if timestamps.len() == 1 {
             enhanced_words.into()
         } else {
@@ -342,11 +354,9 @@ fn parse_timestamp(value: &str) -> Option<u64> {
         3 => {
             if let (Ok(p0), Ok(p1)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
                 if parts[2].contains('.') {
-                    // hh:mm:ss.xx
                     let (sec, ms) = parse_seconds_and_fraction(parts[2])?;
                     (p1 < 60 && sec < 60).then(|| p0 * 3_600_000 + p1 * 60_000 + sec * 1_000 + ms)
                 } else if let Ok(frac) = parts[2].parse::<u64>() {
-                    // mm:ss:xx (分:秒:毫秒/百分秒)
                     let ms = if parts[2].len() == 2 {
                         frac * 10
                     } else if parts[2].len() == 1 {
@@ -417,10 +427,8 @@ mod tests {
         let input = "[offset:500]\n[01:10:50]冒号百分秒测试\n[01:20.250]三位毫秒";
         let lines = parse_lrc(input);
         assert_eq!(lines.len(), 2);
-        // 01:10:50 = 70500 + 500 = 71000ms
         assert_eq!(lines[0].timestamp_ms, 71_000);
         assert_eq!(lines[0].text, "冒号百分秒测试");
-        // 01:20.250 = 80250 + 500 = 80750ms
         assert_eq!(lines[1].timestamp_ms, 80_750);
     }
 
@@ -454,14 +462,13 @@ mod tests {
 
     #[test]
     fn decode_bytes_detects_gbk() {
-        // "你好" in GBK is [0xC4, 0xE3, 0xBA, 0xC3]
         let gbk_bytes = [0xC4, 0xE3, 0xBA, 0xC3];
         let decoded = decode_bytes_to_string(&gbk_bytes);
         assert_eq!(decoded, "你好");
     }
 
     #[test]
-    fn translated_lrc_is_paired_on_the_same_timeline() {
+    fn translated_synced_lyrics_are_paired_on_the_same_timeline() {
         let document = LyricsDocument::from_sources(
             None,
             Some("[00:01.00]Hello\n[00:02.00]Goodbye".into()),
@@ -470,15 +477,9 @@ mod tests {
         );
         assert_eq!(document.timed_lines().len(), 2);
         assert_eq!(document.timed_lines()[0].text, "Hello");
-        assert_eq!(
-            document.timed_lines()[0].translation.as_deref(),
-            Some("你好")
-        );
+        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
         assert_eq!(document.timed_lines()[1].text, "Goodbye");
-        assert_eq!(
-            document.timed_lines()[1].translation.as_deref(),
-            Some("再见")
-        );
+        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("再见"));
         assert!(document.has_translation());
     }
 
@@ -519,9 +520,6 @@ mod tests {
         );
         assert_eq!(document.timed_lines().len(), 1);
         assert_eq!(document.timed_lines()[0].text, "Hello");
-        assert_eq!(
-            document.timed_lines()[0].translation.as_deref(),
-            Some("你好")
-        );
+        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
     }
 }
