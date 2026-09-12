@@ -39,7 +39,8 @@ impl Global for StageLyricsViewCache {}
 #[derive(Clone)]
 struct StageLyricWord {
     timestamp_ms: u64,
-    text: SharedString,
+    byte_start: usize,
+    byte_end: usize,
 }
 
 #[derive(Clone)]
@@ -54,12 +55,18 @@ struct StageLyricLine {
 
 impl StageLyricLine {
     fn from_source(line: &LyricLine) -> Self {
+        let mut byte_offset = 0;
         let words = line
             .words
             .iter()
-            .map(|word| StageLyricWord {
-                timestamp_ms: word.timestamp_ms,
-                text: SharedString::from(word.text.clone()),
+            .map(|word| {
+                let byte_start = byte_offset;
+                byte_offset += word.text.len();
+                StageLyricWord {
+                    timestamp_ms: word.timestamp_ms,
+                    byte_start,
+                    byte_end: byte_offset,
+                }
             })
             .collect::<Vec<_>>()
             .into();
@@ -874,6 +881,17 @@ fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option
         .checked_sub(1)
 }
 
+fn lyric_word_highlight(
+    fade_out: Option<f32>,
+    font_weight: Option<gpui::FontWeight>,
+) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        font_weight,
+        fade_out,
+        ..gpui::HighlightStyle::default()
+    }
+}
+
 fn stage_primary_lyric(
     line: &StageLyricLine,
     karaoke_active: bool,
@@ -889,36 +907,45 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    let mut row = div()
+    let mut highlights = Vec::with_capacity(3);
+    if let Some(current) = current_word.and_then(|index| line.words.get(index)) {
+        if current.byte_start > 0 {
+            highlights.push((
+                0..current.byte_start,
+                lyric_word_highlight(Some(0.12), None),
+            ));
+        }
+        highlights.push((
+            current.byte_start..current.byte_end,
+            lyric_word_highlight(None, Some(gpui::FontWeight::BOLD)),
+        ));
+        if current.byte_end < line.text.len() {
+            highlights.push((
+                current.byte_end..line.text.len(),
+                lyric_word_highlight(Some(0.58), None),
+            ));
+        }
+    } else if let Some(first) = line.words.first() {
+        highlights.push((
+            first.byte_start..first.byte_end,
+            lyric_word_highlight(Some(0.10), Some(gpui::FontWeight::BOLD)),
+        ));
+        if first.byte_end < line.text.len() {
+            highlights.push((
+                first.byte_end..line.text.len(),
+                lyric_word_highlight(Some(0.58), None),
+            ));
+        }
+    }
+
+    div()
         .w_full()
         .min_w(px(0.0))
-        .flex()
-        .flex_wrap()
-        .items_baseline()
-        .text_size(px(28.0));
-
-    for (index, word) in line.words.iter().enumerate() {
-        let alpha = match current_word {
-            Some(current) if index < current => 0.88,
-            Some(current) if index == current => 1.0,
-            Some(_) => 0.42,
-            None if index == 0 => 0.90,
-            None => 0.42,
-        };
-        row = row.child(
-            div()
-                .flex_none()
-                .font_weight(if current_word == Some(index) || (current_word.is_none() && index == 0)
-                {
-                    gpui::FontWeight::BOLD
-                } else {
-                    gpui::FontWeight::SEMIBOLD
-                })
-                .text_color(hsla(0.0, 0.0, 1.0, alpha))
-                .child(word.text.clone()),
-        );
-    }
-    row.into_any_element()
+        .text_size(px(28.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+        .child(gpui::StyledText::new(line.text.clone()).with_highlights(highlights))
+        .into_any_element()
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1042,5 +1069,9 @@ mod tests {
         assert_eq!(active_enhanced_word_index(&line, 1_000), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_499), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_500), Some(1));
+        assert_eq!(line.words[0].byte_start, 0);
+        assert_eq!(line.words[0].byte_end, "你好 ".len());
+        assert_eq!(line.words[1].byte_start, "你好 ".len());
+        assert_eq!(line.words[1].byte_end, line.text.len());
     }
 }
