@@ -25,7 +25,6 @@ const LIST_OVERDRAW_PX: f32 = 180.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(320);
 const SCROLL_SETTLE_PX: f32 = 0.30;
-const TRANSPORT_IDLE_POLL: Duration = Duration::from_millis(500);
 const TRANSPORT_MAX_SLEEP: u64 = 1_000;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 
@@ -149,6 +148,7 @@ pub(super) struct StageLyricsView {
     scroll_epoch: u64,
     stage_active: bool,
     timer_started: bool,
+    timer_epoch: u64,
 }
 
 impl StageLyricsView {
@@ -174,6 +174,7 @@ impl StageLyricsView {
             scroll_epoch: 0,
             stage_active: false,
             timer_started: false,
+            timer_epoch: 0,
         }
     }
 
@@ -201,6 +202,10 @@ impl StageLyricsView {
         let source_changed = self.track_id != track_id
             || self.source_ptr != source_ptr
             || self.source_len != source_len;
+        let playback_state_changed = self.playback_state != app.snapshot.state;
+        let stage_active_changed = self.stage_active != stage_active;
+        let timer_policy_changed =
+            engine_changed || source_changed || playback_state_changed || stage_active_changed;
 
         let mut changed = engine_changed;
         if source_changed {
@@ -237,11 +242,11 @@ impl StageLyricsView {
             // because another 100 ms of audio elapsed. Rendering changes only at line/word edges.
             self.position_ms = position_ms;
         }
-        if self.playback_state != app.snapshot.state {
+        if playback_state_changed {
             self.playback_state = app.snapshot.state;
             changed = true;
         }
-        if self.stage_active != stage_active {
+        if stage_active_changed {
             self.stage_active = stage_active;
             if stage_active {
                 if !self.is_reading() {
@@ -251,6 +256,10 @@ impl StageLyricsView {
                 self.cancel_scroll_animation();
             }
             changed = true;
+        }
+        if timer_policy_changed {
+            self.timer_epoch = self.timer_epoch.wrapping_add(1);
+            self.timer_started = false;
         }
 
         let active_changed = self.update_active_index();
@@ -307,23 +316,25 @@ impl StageLyricsView {
         active_enhanced_word_index(line, self.position_ms)
     }
 
+    #[inline]
+    fn transport_should_run(&self) -> bool {
+        self.stage_active
+            && self.playback_state == PlaybackState::Playing
+            && self.engine.is_some()
+            && !self.lines.is_empty()
+    }
+
     fn next_transport_delay(&self) -> Duration {
-        if !self.stage_active || self.playback_state != PlaybackState::Playing {
-            return TRANSPORT_IDLE_POLL;
-        }
-        let Some(engine) = &self.engine else {
-            return TRANSPORT_IDLE_POLL;
-        };
-        let (_, position_ms, _) = engine.progress();
-        let active = if self.lines.is_empty() {
-            None
-        } else {
-            Some(
-                self.lines
-                    .partition_point(|line| line.timestamp_ms <= position_ms)
-                    .saturating_sub(1),
-            )
-        };
+        let (_, position_ms, _) = self
+            .engine
+            .as_ref()
+            .expect("stage lyric transport requires an audio engine")
+            .progress();
+        let active = Some(
+            self.lines
+                .partition_point(|line| line.timestamp_ms <= position_ms)
+                .saturating_sub(1),
+        );
 
         let mut next_timestamp = active
             .and_then(|index| self.lines.get(index + 1))
@@ -346,7 +357,7 @@ impl StageLyricsView {
     }
 
     fn refresh_transport(&mut self, cx: &mut Context<Self>) {
-        if !self.stage_active || self.playback_state != PlaybackState::Playing {
+        if !self.transport_should_run() {
             return;
         }
         let Some(engine) = &self.engine else {
@@ -371,21 +382,36 @@ impl StageLyricsView {
     }
 
     fn ensure_transport_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
+        if self.timer_started || !self.transport_should_run() {
             return;
         }
         self.timer_started = true;
+        let epoch = self.timer_epoch;
         cx.spawn(async move |this, cx| -> Result<()> {
             loop {
-                let delay = match this.update(cx, |this, _cx| this.next_transport_delay()) {
-                    Ok(delay) => delay,
-                    Err(_) => break,
+                let delay = match this.update(cx, |this, _cx| {
+                    (this.timer_epoch == epoch && this.transport_should_run())
+                        .then(|| this.next_transport_delay())
+                }) {
+                    Ok(Some(delay)) => delay,
+                    _ => break,
                 };
                 Timer::after(delay).await;
-                if this
-                    .update(cx, |this, cx| this.refresh_transport(cx))
-                    .is_err()
-                {
+                let keep_running = match this.update(cx, |this, cx| {
+                    if this.timer_epoch != epoch {
+                        return false;
+                    }
+                    if !this.transport_should_run() {
+                        this.timer_started = false;
+                        return false;
+                    }
+                    this.refresh_transport(cx);
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => break,
+                };
+                if !keep_running {
                     break;
                 }
             }
