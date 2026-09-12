@@ -39,7 +39,7 @@ fn test_worker(
 }
 
 fn test_track(id: TrackId, path: std::path::PathBuf) -> Track {
-    Track {
+    Track::new(crate::model::TrackData {
         id,
         path,
         title: format!("Track {id}"),
@@ -52,7 +52,7 @@ fn test_track(id: TrackId, path: std::path::PathBuf) -> Track {
         sample_rate: 8_000,
         channels: 1,
         artwork_key: None,
-    }
+    })
 }
 
 fn pcm_wav() -> Vec<u8> {
