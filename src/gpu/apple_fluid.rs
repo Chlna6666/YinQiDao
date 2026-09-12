@@ -1,18 +1,15 @@
 use std::{
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use anyhow::Result;
-use gpui::{Context, IntoElement, Render, Timer, Window, div, prelude::*, rgb};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
 
 use crate::artwork::ArtworkPalette;
 
 use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
 
 const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
-const FLUID_FRAME_INTERVAL: Duration = Duration::from_millis(33);
-const FLUID_MOUNT_LIVENESS: Duration = Duration::from_millis(160);
 
 pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
     static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
@@ -60,24 +57,19 @@ pub(crate) struct AppleFluidView {
     stage_visible: bool,
     playing: bool,
     animation_seconds: f32,
-    last_tick_at: Instant,
-    last_render_at: Instant,
-    timer_started: bool,
+    last_frame_at: Instant,
     shader_available: bool,
 }
 
 impl AppleFluidView {
     pub(crate) fn new() -> Self {
-        let now = Instant::now();
         Self {
             track_id: 0,
             palette: None,
             stage_visible: false,
             playing: false,
             animation_seconds: 0.0,
-            last_tick_at: now,
-            last_render_at: now,
-            timer_started: false,
+            last_frame_at: Instant::now(),
             shader_available: true,
         }
     }
@@ -97,8 +89,7 @@ impl AppleFluidView {
         self.palette = palette;
         self.stage_visible = stage_visible;
         if changed {
-            self.last_tick_at = Instant::now();
-            self.start_timer(cx);
+            self.last_frame_at = Instant::now();
             cx.notify();
         }
     }
@@ -108,66 +99,31 @@ impl AppleFluidView {
             return;
         }
         self.playing = playing;
-        self.last_tick_at = Instant::now();
-        self.start_timer(cx);
+        self.last_frame_at = Instant::now();
         cx.notify();
-    }
-
-    #[inline]
-    fn should_animate(&self, now: Instant) -> bool {
-        self.stage_visible
-            && self.playing
-            && self.shader_available
-            && now.saturating_duration_since(self.last_render_at) <= FLUID_MOUNT_LIVENESS
-    }
-
-    fn start_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started || !self.stage_visible || !self.playing || !self.shader_available {
-            return;
-        }
-        self.timer_started = true;
-
-        cx.spawn(async move |this, cx| -> Result<()> {
-            loop {
-                Timer::after(FLUID_FRAME_INTERVAL).await;
-                let keep_running = match this.update(cx, |this, cx| {
-                    let now = Instant::now();
-                    if !this.should_animate(now) {
-                        this.timer_started = false;
-                        return false;
-                    }
-
-                    let delta = now
-                        .saturating_duration_since(this.last_tick_at)
-                        .as_secs_f32()
-                        .min(0.05);
-                    this.animation_seconds =
-                        (this.animation_seconds + delta).rem_euclid(21_600.0);
-                    this.last_tick_at = now;
-                    cx.notify();
-                    true
-                }) {
-                    Ok(keep_running) => keep_running,
-                    Err(_) => break,
-                };
-                if !keep_running {
-                    break;
-                }
-            }
-            Ok(())
-        })
-        .detach();
     }
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.last_render_at = Instant::now();
-        self.start_timer(cx);
-
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match apple_fluid_program() {
             Ok(program) => {
                 self.shader_available = true;
+                let now = window.animation_time();
+                if self.stage_visible && self.playing {
+                    let delta = now
+                        .saturating_duration_since(self.last_frame_at)
+                        .as_secs_f32()
+                        .min(0.05);
+                    self.animation_seconds =
+                        (self.animation_seconds + delta).rem_euclid(21_600.0);
+                    // The pinned GPUI fork targets request_animation_frame() at the currently
+                    // rendering Entity. Fluid therefore follows the display's real vsync cadence
+                    // without waking MusicApp or imposing a fixed 30 Hz software timer.
+                    window.request_animation_frame();
+                }
+                self.last_frame_at = now;
+
                 return shader_effect_canvas(
                     program,
                     apple_fluid_params(
