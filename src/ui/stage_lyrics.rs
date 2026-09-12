@@ -3,12 +3,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, IntoElement, ListAlignment,
-    ListOffset, ListState, Render, SharedString, Timer, Transition, TransitionProperty, WeakEntity,
-    Window, div, hsla, list, point, prelude::*, px,
+    ListOffset, ListState, Render, SharedString, Transition, TransitionProperty, WeakEntity, Window,
+    div, hsla, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -25,7 +24,6 @@ const LIST_OVERDRAW_PX: f32 = 180.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(320);
 const SCROLL_SETTLE_PX: f32 = 0.30;
-const TRANSPORT_MAX_SLEEP: u64 = 1_000;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 
 #[derive(Default)]
@@ -142,13 +140,10 @@ pub(super) struct StageLyricsView {
     hovered_index: Option<usize>,
     motion_epoch: u64,
     reading_until: Option<Instant>,
-    reading_epoch: u64,
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
     scroll_epoch: u64,
     stage_active: bool,
-    timer_started: bool,
-    timer_epoch: u64,
 }
 
 impl StageLyricsView {
@@ -168,13 +163,10 @@ impl StageLyricsView {
             hovered_index: None,
             motion_epoch: 0,
             reading_until: None,
-            reading_epoch: 0,
             scroll_target: None,
             scroll_animation: None,
             scroll_epoch: 0,
             stage_active: false,
-            timer_started: false,
-            timer_epoch: 0,
         }
     }
 
@@ -204,8 +196,6 @@ impl StageLyricsView {
             || self.source_len != source_len;
         let playback_state_changed = self.playback_state != app.snapshot.state;
         let stage_active_changed = self.stage_active != stage_active;
-        let timer_policy_changed =
-            engine_changed || source_changed || playback_state_changed || stage_active_changed;
 
         let mut changed = engine_changed;
         if source_changed {
@@ -238,8 +228,6 @@ impl StageLyricsView {
         let previous_word = self.active_word_index;
         let position_changed = self.position_ms != position_ms;
         if position_changed {
-            // Keep the hot transport sample locally, but do not invalidate the lyric view merely
-            // because another 100 ms of audio elapsed. Rendering changes only at line/word edges.
             self.position_ms = position_ms;
         }
         if playback_state_changed {
@@ -257,10 +245,6 @@ impl StageLyricsView {
             }
             changed = true;
         }
-        if timer_policy_changed {
-            self.timer_epoch = self.timer_epoch.wrapping_add(1);
-            self.timer_started = false;
-        }
 
         let active_changed = self.update_active_index();
         let next_word = self.compute_active_word_index();
@@ -276,8 +260,6 @@ impl StageLyricsView {
         if source_changed
             && let Some(active) = self.active_index
         {
-            // Start close to the current lyric even before the first variable-height measurement.
-            // This avoids measuring every preceding row just to warm an offscreen Stage.
             self.list_state.scroll_to(ListOffset {
                 item_ix: active.saturating_sub(2),
                 offset_in_item: px(0.0),
@@ -324,12 +306,8 @@ impl StageLyricsView {
             && !self.lines.is_empty()
     }
 
-    fn next_transport_delay(&self) -> Duration {
-        let (_, position_ms, _) = self
-            .engine
-            .as_ref()
-            .expect("stage lyric transport requires an audio engine")
-            .progress();
+    fn next_transport_delay(&self) -> Option<Duration> {
+        let (_, position_ms, _) = self.engine.as_ref()?.progress();
         let active = Some(
             self.lines
                 .partition_point(|line| line.timestamp_ms <= position_ms)
@@ -349,14 +327,15 @@ impl StageLyricsView {
             }));
         }
 
-        let delay_ms = next_timestamp
-            .map(|timestamp| timestamp.saturating_sub(position_ms))
-            .unwrap_or(TRANSPORT_MAX_SLEEP)
-            .clamp(TRANSPORT_MIN_SLEEP, TRANSPORT_MAX_SLEEP);
-        Duration::from_millis(delay_ms)
+        let timestamp = next_timestamp?;
+        Some(Duration::from_millis(
+            timestamp
+                .saturating_sub(position_ms)
+                .max(TRANSPORT_MIN_SLEEP),
+        ))
     }
 
-    fn refresh_transport(&mut self, cx: &mut Context<Self>) {
+    fn refresh_transport(&mut self) {
         if !self.transport_should_run() {
             return;
         }
@@ -368,56 +347,15 @@ impl StageLyricsView {
             return;
         }
 
-        let previous_word = self.active_word_index;
         self.position_ms = position_ms;
+        let previous_word = self.active_word_index;
         let active_changed = self.update_active_index();
         let next_word = self.compute_active_word_index();
-        let word_changed = !active_changed && previous_word != next_word;
-        self.active_word_index = next_word;
-        if active_changed || word_changed {
-            // Text shaping happens only at semantic lyric boundaries. Vertical movement is handed
-            // to one retained compositor translation instead of rerunning List layout per frame.
-            cx.notify();
+        if active_changed || previous_word != next_word {
+            self.active_word_index = next_word;
+        } else {
+            self.active_word_index = next_word;
         }
-    }
-
-    fn ensure_transport_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started || !self.transport_should_run() {
-            return;
-        }
-        self.timer_started = true;
-        let epoch = self.timer_epoch;
-        cx.spawn(async move |this, cx| -> Result<()> {
-            loop {
-                let delay = match this.update(cx, |this, _cx| {
-                    (this.timer_epoch == epoch && this.transport_should_run())
-                        .then(|| this.next_transport_delay())
-                }) {
-                    Ok(Some(delay)) => delay,
-                    _ => break,
-                };
-                Timer::after(delay).await;
-                let keep_running = match this.update(cx, |this, cx| {
-                    if this.timer_epoch != epoch {
-                        return false;
-                    }
-                    if !this.transport_should_run() {
-                        this.timer_started = false;
-                        return false;
-                    }
-                    this.refresh_transport(cx);
-                    true
-                }) {
-                    Ok(keep_running) => keep_running,
-                    Err(_) => break,
-                };
-                if !keep_running {
-                    break;
-                }
-            }
-            Ok(())
-        })
-        .detach();
     }
 
     #[inline]
@@ -435,68 +373,64 @@ impl StageLyricsView {
             .map_or(0.0, |animation| animation.offset_at(now))
     }
 
-    fn start_scroll_animation(
-        &mut self,
-        from_y: f32,
-        started_at: Instant,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_scroll_animation(&mut self, from_y: f32, started_at: Instant) {
         if !from_y.is_finite() || from_y.abs() <= SCROLL_SETTLE_PX {
             self.cancel_scroll_animation();
             return;
         }
 
         self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
-        let epoch = self.scroll_epoch;
         self.scroll_animation = Some(LyricScrollAnimation {
-            epoch,
+            epoch: self.scroll_epoch,
             from_y,
             started_at,
         });
-
-        cx.spawn(async move |this, cx| -> Result<()> {
-            Timer::after(SCROLL_ANIMATION_DURATION).await;
-            this.update(cx, |this, cx| {
-                if this
-                    .scroll_animation
-                    .is_some_and(|animation| animation.epoch == epoch)
-                {
-                    this.scroll_animation = None;
-                    cx.notify();
-                }
-            })?;
-            Ok(())
-        })
-        .detach();
     }
 
     fn begin_reading_mode(&mut self, cx: &mut Context<Self>) {
-        self.reading_epoch = self.reading_epoch.wrapping_add(1);
-        let epoch = self.reading_epoch;
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
         self.active_word_index = None;
         self.scroll_target = None;
         self.hovered_index = None;
         self.cancel_scroll_animation();
         cx.notify();
-
-        cx.spawn(async move |this, cx| -> Result<()> {
-            Timer::after(READING_MODE_DURATION).await;
-            this.update(cx, |this, cx| {
-                if this.reading_epoch != epoch {
-                    return;
-                }
-                this.reading_until = None;
-                this.active_word_index = this.compute_active_word_index();
-                this.scroll_target = this.active_index;
-                cx.notify();
-            })?;
-            Ok(())
-        })
-        .detach();
     }
 
-    fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn expire_deadlines(&mut self, now: Instant) {
+        if self.reading_until.is_some_and(|until| until <= now) {
+            self.reading_until = None;
+            self.active_word_index = self.compute_active_word_index();
+            self.scroll_target = self.active_index;
+        }
+        if self
+            .scroll_animation
+            .is_some_and(|animation| animation.started_at + SCROLL_ANIMATION_DURATION <= now)
+        {
+            self.scroll_animation = None;
+        }
+    }
+
+    fn schedule_deadlines(&self, window: &mut Window, cx: &Context<Self>) {
+        let now = Instant::now();
+        if self.transport_should_run()
+            && let Some(delay) = self.next_transport_delay()
+        {
+            window.request_invalidation_at(now + delay, cx);
+        }
+        if let Some(until) = self.reading_until
+            && until > now
+        {
+            window.request_invalidation_at(until, cx);
+        }
+        if let Some(animation) = self.scroll_animation {
+            let deadline = animation.started_at + SCROLL_ANIMATION_DURATION;
+            if deadline > now {
+                window.request_invalidation_at(deadline, cx);
+            }
+        }
+    }
+
+    fn prepare_scroll_animation(&mut self, window: &mut Window) {
         if !self.stage_active || self.is_reading() {
             return;
         }
@@ -506,8 +440,6 @@ impl StageLyricsView {
 
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 {
-            // The first active render may precede List's initial prepaint. One local wake is enough
-            // to obtain variable-height measurements; the actual transition is compositor-driven.
             window.request_animation_frame();
             return;
         }
@@ -522,8 +454,6 @@ impl StageLyricsView {
             } else {
                 self.list_state.scroll_to_reveal_item(target);
             }
-            // Measurement recovery can require one more layout. Do not keep a stale compositor
-            // translation while the logical list is being repositioned to discover the row.
             self.cancel_scroll_animation();
             window.request_animation_frame();
             return;
@@ -551,17 +481,14 @@ impl StageLyricsView {
             return;
         }
 
-        // scroll_by() jumps layout to its final location. The inverse visual offset keeps the first
-        // compositor frame exactly where the previous frame was. If a new lyric arrives while the
-        // previous transition is still running, carry its current residual transform into the new
-        // start value so retargeting remains continuous.
-        self.start_scroll_animation(carry + applied, now, cx);
+        self.start_scroll_animation(carry + applied, now);
     }
 }
 
 impl Render for StageLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_transport_timer(cx);
+        self.expire_deadlines(Instant::now());
+        self.refresh_transport();
 
         if self.lines.is_empty() {
             return div()
@@ -594,20 +521,14 @@ impl Render for StageLyricsView {
                 );
         }
 
-        if self.reading_until.is_some_and(|until| until <= Instant::now()) {
-            self.reading_until = None;
-            self.active_word_index = self.compute_active_word_index();
-            self.scroll_target = self.active_index;
-        }
-        self.prepare_scroll_animation(window, cx);
+        self.prepare_scroll_animation(window);
+        self.schedule_deadlines(window, cx);
 
         let active = self.active_index.unwrap_or(0);
         let active_word_index = self.active_word_index;
         let reading_mode = self.is_reading();
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        // Element blur captures an offscreen Scene per blurred row. Keep it out of the one capture
-        // used for vertical movement, then restore the depth cue after the compositor settles.
         let depth_blur_active = self.playback_state == PlaybackState::Playing
             && !reading_mode
             && !scroll_animating;
@@ -674,17 +595,14 @@ impl Render for StageLyricsView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                {
-                    let parent = self.parent.clone();
-                    move |_, _, cx| {
-                        let _ = parent.update(cx, |app, cx| {
-                            app.wake_stage_controls_immediately(cx);
-                        });
-                    }
-                },
-            )
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let parent = self.parent.clone();
+                move |_, _, cx| {
+                    let _ = parent.update(cx, |app, cx| {
+                        app.wake_stage_controls_immediately(cx);
+                    });
+                }
+            })
             .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _, cx| {
                 this.begin_reading_mode(cx);
                 let _ = this.parent.update(cx, |app, cx| app.wake_stage_controls(cx));
@@ -790,8 +708,6 @@ fn render_lyric_row(
         let hover_enter = view.clone();
         let hover_leave = view.clone();
         row = row
-            // Enter only on real pointer motion. A stationary pointer must not hand the badge to a
-            // different row merely because automatic scrolling moved that row underneath it.
             .on_mouse_move(move |_: &gpui::MouseMoveEvent, _, cx| {
                 let _ = hover_enter.update(cx, |this, cx| {
                     if this.hovered_index != Some(index) {
@@ -849,7 +765,6 @@ fn render_lyric_row(
     row.on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
         cx.stop_propagation();
         let _ = local.update(cx, |this, cx| {
-            this.reading_epoch = this.reading_epoch.wrapping_add(1);
             this.reading_until = None;
             this.hovered_index = None;
             this.position_ms = timestamp;
@@ -929,9 +844,6 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    // Keep one fixed run per source word. Only alpha changes as playback advances, so GPUI's
-    // TextLayout geometry key remains stable and the word transition is handled as a paint-only
-    // decoration refresh instead of reshaping/re-wrapping the entire active line.
     let mut highlights = Vec::with_capacity(line.words.len());
     for (index, word) in line.words.iter().enumerate() {
         let fade_out = match current_word {
