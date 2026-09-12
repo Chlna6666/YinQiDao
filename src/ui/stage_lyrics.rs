@@ -6,8 +6,9 @@ use std::{
 use anyhow::Result;
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _, Context,
-    Easing, Entity, Global, IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
-    Timer, Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px,
+    Easing, ElementId, Entity, Global, IntoElement, ListAlignment, ListOffset, ListState, Render,
+    SharedString, Timer, Transition, TransitionProperty, WeakEntity, Window, div, hsla, list,
+    prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -35,6 +36,48 @@ struct StageLyricsViewCache {
 
 impl Global for StageLyricsViewCache {}
 
+#[derive(Clone)]
+struct StageLyricWord {
+    timestamp_ms: u64,
+    text: SharedString,
+}
+
+#[derive(Clone)]
+struct StageLyricLine {
+    timestamp_ms: u64,
+    text: SharedString,
+    translation: Option<SharedString>,
+    words: Arc<[StageLyricWord]>,
+    enhanced_complete: bool,
+    time_label: SharedString,
+}
+
+impl StageLyricLine {
+    fn from_source(line: &LyricLine) -> Self {
+        let words = line
+            .words
+            .iter()
+            .map(|word| StageLyricWord {
+                timestamp_ms: word.timestamp_ms,
+                text: SharedString::from(word.text.clone()),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            timestamp_ms: line.timestamp_ms,
+            text: SharedString::from(line.text.clone()),
+            translation: line
+                .translation
+                .as_deref()
+                .filter(|translation| !translation.trim().is_empty())
+                .map(|translation| SharedString::from(translation.to_owned())),
+            words,
+            enhanced_complete: enhanced_words_cover_primary_text(line),
+            time_label: SharedString::from(format_lyric_time(line.timestamp_ms)),
+        }
+    }
+}
+
 pub(super) fn view(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
@@ -59,7 +102,7 @@ pub(super) struct StageLyricsView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
     list_state: ListState,
-    lines: Arc<[LyricLine]>,
+    lines: Arc<[StageLyricLine]>,
     track_id: Option<TrackId>,
     source_ptr: usize,
     source_len: usize,
@@ -82,7 +125,7 @@ impl StageLyricsView {
             parent,
             engine,
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX)),
-            lines: Arc::from(Vec::<LyricLine>::new()),
+            lines: Arc::from(Vec::<StageLyricLine>::new()),
             track_id: None,
             source_ptr: 0,
             source_len: 0,
@@ -130,7 +173,11 @@ impl StageLyricsView {
             self.track_id = track_id;
             self.source_ptr = source_ptr;
             self.source_len = source_len;
-            self.lines = Arc::from(source.to_vec());
+            self.lines = source
+                .iter()
+                .map(StageLyricLine::from_source)
+                .collect::<Vec<_>>()
+                .into();
             self.list_state.reset(source_len);
             self.active_index = None;
             self.hovered_index = None;
@@ -218,7 +265,7 @@ impl StageLyricsView {
             return None;
         }
         let line = self.active_index.and_then(|index| self.lines.get(index))?;
-        if !enhanced_words_cover_primary_text(line) {
+        if !line.enhanced_complete {
             return None;
         }
         let count = line
@@ -250,7 +297,7 @@ impl StageLyricsView {
             .map(|line| line.timestamp_ms);
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && enhanced_words_cover_primary_text(line)
+            && line.enhanced_complete
             && let Some(word) = line.words.iter().find(|word| word.timestamp_ms > position_ms)
         {
             next_timestamp = Some(next_timestamp.map_or(word.timestamp_ms, |current| {
@@ -441,8 +488,17 @@ impl Render for StageLyricsView {
 
         let active = self.active_index.unwrap_or(0);
         let reading_mode = self.is_reading();
-        let depth_blur_active = self.playback_state == PlaybackState::Playing && !reading_mode;
-        let blur_capture_mode = if depth_blur_active { "blur" } else { "direct" };
+        let scroll_animating = self.scroll_target.is_some() && !reading_mode;
+        // Element blur captures an offscreen Scene per blurred row. Avoid rebuilding those captures
+        // on every auto-scroll frame; restore the depth cue immediately after the row settles.
+        let depth_blur_active = self.playback_state == PlaybackState::Playing
+            && !reading_mode
+            && !scroll_animating;
+        let text_id = if depth_blur_active {
+            "lyric-text-blur"
+        } else {
+            "lyric-text-direct"
+        };
         let position_ms = self.position_ms;
         let motion_epoch = self.motion_epoch;
         let hovered_index = self.hovered_index;
@@ -458,7 +514,7 @@ impl Render for StageLyricsView {
                 position_ms,
                 reading_mode,
                 depth_blur_active,
-                blur_capture_mode,
+                text_id,
                 hovered_index == Some(index),
                 motion_epoch,
                 view.clone(),
@@ -499,13 +555,13 @@ impl Render for StageLyricsView {
 
 #[allow(clippy::too_many_arguments)]
 fn render_lyric_row(
-    line: &LyricLine,
+    line: &StageLyricLine,
     index: usize,
     active: usize,
     position_ms: u64,
     reading_mode: bool,
     depth_blur_active: bool,
-    blur_capture_mode: &'static str,
+    text_id: &'static str,
     hovered: bool,
     motion_epoch: u64,
     view: WeakEntity<StageLyricsView>,
@@ -524,9 +580,7 @@ fn render_lyric_row(
     let karaoke_active = index == active && !reading_mode;
 
     let mut text = div()
-        .id(SharedString::from(format!(
-            "lyric-text-{index}-{blur_capture_mode}"
-        )))
+        .id(ElementId::named_usize(text_id, index))
         .w_full()
         .min_w(px(0.0))
         .flex()
@@ -535,18 +589,14 @@ fn render_lyric_row(
         .font_weight(weight)
         .child(stage_primary_lyric(line, position_ms, karaoke_active));
 
-    if let Some(translation) = line
-        .translation
-        .as_deref()
-        .filter(|translation| !translation.trim().is_empty())
-    {
+    if let Some(translation) = &line.translation {
         text = text.child(
             div()
                 .w_full()
                 .min_w(px(0.0))
                 .text_size(px(17.0))
                 .text_color(hsla(0.0, 0.0, 1.0, 0.72))
-                .child(translation.to_owned()),
+                .child(translation.clone()),
         );
     }
 
@@ -562,8 +612,14 @@ fn render_lyric_row(
             AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
         )
         .with_property(AnimationProperty::opacity(0.80, 1.0));
+        let animation_key = motion_epoch
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(index as u64);
         text.with_animation(
-            SharedString::from(format!("lyric-active-focus-{index}-{motion_epoch}")),
+            ElementId::NamedInteger(
+                SharedString::new_static("lyric-active-focus"),
+                animation_key,
+            ),
             active_focus,
             |element, _| element,
         )
@@ -575,7 +631,7 @@ fn render_lyric_row(
     let hover_enter = view.clone();
     let hover_leave = view.clone();
     let mut row = div()
-        .id(SharedString::from(format!("lyric-line-{index}")))
+        .id(ElementId::named_usize("lyric-line", index))
         .relative()
         .w_full()
         .min_w(px(0.0))
@@ -611,7 +667,7 @@ fn render_lyric_row(
     if !reading_mode {
         row = row.child(
             div()
-                .id(SharedString::from(format!("lyric-time-{index}")))
+                .id(ElementId::named_usize("lyric-time", index))
                 .absolute()
                 .right(px(10.0))
                 .top(px(13.0))
@@ -632,7 +688,7 @@ fn render_lyric_row(
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(hsla(0.0, 0.0, 1.0, 0.92))
-                .child(SharedString::from(format_lyric_time(timestamp))),
+                .child(line.time_label.clone()),
         );
     }
 
@@ -690,11 +746,11 @@ fn lyric_focus_profile(
 }
 
 fn stage_primary_lyric(
-    line: &LyricLine,
+    line: &StageLyricLine,
     position_ms: u64,
     karaoke_active: bool,
 ) -> gpui::AnyElement {
-    if !karaoke_active || !enhanced_words_cover_primary_text(line) {
+    if !karaoke_active || !line.enhanced_complete {
         return div()
             .w_full()
             .min_w(px(0.0))
