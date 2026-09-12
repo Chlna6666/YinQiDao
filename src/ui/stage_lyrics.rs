@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use gpui::{
@@ -47,7 +50,7 @@ pub(super) fn view(
     view
 }
 
-struct StageLyricsView {
+pub(super) struct StageLyricsView {
     parent: WeakEntity<MusicApp>,
     list_state: ListState,
     lines: Arc<[LyricLine]>,
@@ -71,7 +74,7 @@ impl StageLyricsView {
         Self {
             parent,
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX)),
-            lines: Arc::from([]),
+            lines: Arc::from(Vec::<LyricLine>::new()),
             track_id: None,
             source_ptr: 0,
             source_len: 0,
@@ -136,9 +139,8 @@ impl StageLyricsView {
 
         let active = (!self.lines.is_empty()).then(|| {
             self.lines
-                .iter()
-                .rposition(|line| line.timestamp_ms <= self.position_ms)
-                .unwrap_or(0)
+                .partition_point(|line| line.timestamp_ms <= self.position_ms)
+                .saturating_sub(1)
         });
         if self.active_index != active {
             self.active_index = active;
@@ -210,6 +212,9 @@ impl StageLyricsView {
 
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 {
+            // The first active render may precede List's initial prepaint. Keep the wake local to
+            // this entity so the next frame can use the measured viewport without invalidating Stage.
+            window.request_animation_frame();
             return;
         }
 
