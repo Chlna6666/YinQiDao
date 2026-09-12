@@ -8,6 +8,7 @@ mod home;
 mod library;
 pub(crate) mod lyrics_overlay;
 mod mini_player_lyrics;
+mod mini_player_view;
 mod player_facade;
 #[allow(dead_code)]
 mod player_legacy;
