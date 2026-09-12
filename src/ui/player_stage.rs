@@ -93,10 +93,7 @@ pub(super) fn render(
         artwork_ptr: artwork.as_ref().map_or(0, |bytes| bytes.as_ptr() as usize),
         artwork_len: artwork.as_ref().map_or(0, |bytes| bytes.len()),
     };
-
-    fluid_background.update(cx, |view, cx| {
-        view.set_playing(app.snapshot.state == PlaybackState::Playing, cx)
-    });
+    let playing = app.snapshot.state == PlaybackState::Playing;
 
     let initial_fluid = fluid_background.clone();
     let initial_lyrics = lyrics.clone();
@@ -112,6 +109,7 @@ pub(super) fn render(
             controls: initial_controls,
             cover: StageCoverRenderData::default(),
             key: StagePlayerRenderKey::default(),
+            playing: false,
         });
         cache.view = Some(view.clone());
         view
@@ -119,6 +117,7 @@ pub(super) fn render(
 
     stage.update(cx, |stage, cx| {
         let mut changed = false;
+        let fluid_changed = stage.fluid_background != fluid_background;
         if stage.key != key {
             stage.key = key;
             stage.cover = StageCoverRenderData::from_track(
@@ -127,9 +126,14 @@ pub(super) fn render(
             );
             changed = true;
         }
-        if stage.fluid_background != fluid_background {
+        if fluid_changed {
             stage.fluid_background = fluid_background.clone();
             changed = true;
+        }
+        if stage.playing != playing || fluid_changed {
+            stage.playing = playing;
+            let fluid = stage.fluid_background.clone();
+            fluid.update(cx, |view, cx| view.set_playing(playing, cx));
         }
         if stage.lyrics != lyrics {
             stage.lyrics = lyrics.clone();
@@ -154,6 +158,7 @@ struct StagePlayerView {
     controls: Entity<stage_controls::StageControlsView>,
     cover: StageCoverRenderData,
     key: StagePlayerRenderKey,
+    playing: bool,
 }
 
 impl Render for StagePlayerView {
@@ -270,7 +275,8 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
         .with_animation(
             ElementId::NamedInteger(
                 SharedString::new_static("stage-cover-enter"),
-                data.track_id.map_or(u64::MAX, |id| id as u64),
+                data.track_id
+                    .map_or(u64::MAX, |id| u64::from_ne_bytes(id.to_ne_bytes())),
             ),
             cover_enter,
             |element, _| element,
@@ -320,11 +326,12 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
 }
 
 fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElement {
+    let fluid = AnyView::from(fluid_background).cached(StyleRefinement::default().size_full());
     div()
         .absolute()
         .inset_0()
         .overflow_hidden()
         .bg(rgb(0x0e0f16))
-        .child(fluid_background)
+        .child(fluid)
         .into_any_element()
 }
