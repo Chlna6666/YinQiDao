@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, interactive_slider, slider::InteractiveSliderState},
+    components::{SliderStyle, slider::InteractiveSliderState},
     shell::{DragTarget, MusicApp},
     theme::{ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
@@ -84,6 +84,7 @@ fn transport_view(
 pub(super) struct StageControlsView {
     parent: WeakEntity<MusicApp>,
     transport: Entity<StageTransportView>,
+    volume_slider: InteractiveSliderState,
     stage_active: bool,
     visibility: f32,
     playback_state: PlaybackState,
@@ -92,9 +93,47 @@ pub(super) struct StageControlsView {
 
 impl StageControlsView {
     fn new(parent: WeakEntity<MusicApp>, transport: Entity<StageTransportView>) -> Self {
+        let click_parent = parent.clone();
+        let drag_parent = parent.clone();
+        let commit_parent = parent.clone();
+        let volume_slider = InteractiveSliderState::new(
+            "stage-volume-track",
+            move |ratio, cx| {
+                let _ = click_parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    app.pending_volume_ratio = None;
+                    app.set_app_volume(ratio, app_cx);
+                });
+            },
+            move |ratio, cx| {
+                let _ = drag_parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    if app.drag_target == Some(DragTarget::Volume) {
+                        app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
+                    } else {
+                        app.begin_drag(DragTarget::Volume, ratio, app_cx);
+                    }
+                    app.send(PlayerCommand::SetVolume(ratio));
+                });
+            },
+            move |ratio, cx| {
+                let _ = commit_parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    if app.drag_target == Some(DragTarget::Volume) {
+                        app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
+                    } else {
+                        app.begin_drag(DragTarget::Volume, ratio, app_cx);
+                    }
+                    app.commit_drag(app_cx);
+                    app.pending_volume_ratio = None;
+                });
+            },
+        );
+
         Self {
             parent,
             transport,
+            volume_slider,
             stage_active: false,
             visibility: 1.0,
             playback_state: PlaybackState::Paused,
@@ -254,66 +293,24 @@ impl Render for StageControlsView {
                             }),
                     )
                     .child(
-                        interactive_slider(
-                            "stage-volume-track",
-                            volume,
-                            SliderStyle::stage_volume(),
-                            {
+                        self.volume_slider
+                            .render(volume, SliderStyle::stage_volume())
+                            .w(px(72.0))
+                            .on_scroll_wheel({
                                 let parent = parent.clone();
-                                move |ratio, cx| {
+                                move |event: &gpui::ScrollWheelEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let delta = event.delta.pixel_delta(px(48.0)).y;
                                     let _ = parent.update(cx, |app, app_cx| {
-                                        app.wake_stage_controls_immediately(app_cx);
-                                        app.pending_volume_ratio = None;
-                                        app.set_app_volume(ratio, app_cx);
-                                    });
-                                }
-                            },
-                            {
-                                let parent = parent.clone();
-                                move |ratio, cx| {
-                                    let _ = parent.update(cx, |app, app_cx| {
-                                        app.wake_stage_controls_immediately(app_cx);
-                                        if app.drag_target == Some(DragTarget::Volume) {
-                                            app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                                        } else {
-                                            app.begin_drag(DragTarget::Volume, ratio, app_cx);
+                                        if delta < px(0.0) {
+                                            app.adjust_volume(0.04, app_cx);
+                                        } else if delta > px(0.0) {
+                                            app.adjust_volume(-0.04, app_cx);
                                         }
-                                        app.send(PlayerCommand::SetVolume(ratio));
-                                    });
-                                }
-                            },
-                            {
-                                let parent = parent.clone();
-                                move |ratio, cx| {
-                                    let _ = parent.update(cx, |app, app_cx| {
                                         app.wake_stage_controls_immediately(app_cx);
-                                        if app.drag_target == Some(DragTarget::Volume) {
-                                            app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                                        } else {
-                                            app.begin_drag(DragTarget::Volume, ratio, app_cx);
-                                        }
-                                        app.commit_drag(app_cx);
-                                        app.pending_volume_ratio = None;
                                     });
                                 }
-                            },
-                        )
-                        .w(px(72.0))
-                        .on_scroll_wheel({
-                            let parent = parent.clone();
-                            move |event: &gpui::ScrollWheelEvent, _, cx| {
-                                cx.stop_propagation();
-                                let delta = event.delta.pixel_delta(px(48.0)).y;
-                                let _ = parent.update(cx, |app, app_cx| {
-                                    if delta < px(0.0) {
-                                        app.adjust_volume(0.04, app_cx);
-                                    } else if delta > px(0.0) {
-                                        app.adjust_volume(-0.04, app_cx);
-                                    }
-                                    app.wake_stage_controls_immediately(app_cx);
-                                });
-                            }
-                        }),
+                            }),
                     ),
             )
             .into_any_element()
