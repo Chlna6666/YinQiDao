@@ -1,7 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -292,7 +292,12 @@ impl AppPage {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+fn empty_track_queue() -> Arc<Vec<TrackId>> {
+    static EMPTY: OnceLock<Arc<Vec<TrackId>>> = OnceLock::new();
+    EMPTY.get_or_init(|| Arc::new(Vec::new())).clone()
+}
+
+#[derive(Clone, Debug)]
 pub struct PlayerSnapshot {
     pub state: PlaybackState,
     pub current_track: Option<Track>,
@@ -303,6 +308,22 @@ pub struct PlayerSnapshot {
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub error: Option<String>,
+}
+
+impl Default for PlayerSnapshot {
+    fn default() -> Self {
+        Self {
+            state: PlaybackState::default(),
+            current_track: None,
+            position_ms: 0,
+            duration_ms: 0,
+            volume: 0.0,
+            queue: empty_track_queue(),
+            repeat: RepeatMode::default(),
+            shuffle: false,
+            error: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +362,18 @@ mod tests {
         assert_eq!(original.duration_ms, 180_000);
         assert_eq!(edited.title, "Edited");
         assert_eq!(edited.duration_ms, 181_000);
+    }
+
+    #[test]
+    fn default_snapshots_share_empty_queue_until_first_write() {
+        let first = PlayerSnapshot::default();
+        let mut second = PlayerSnapshot::default();
+
+        assert!(Arc::ptr_eq(&first.queue, &second.queue));
+        Arc::make_mut(&mut second.queue).push(7);
+
+        assert!(first.queue.is_empty());
+        assert_eq!(second.queue.as_slice(), &[7]);
+        assert!(!Arc::ptr_eq(&first.queue, &second.queue));
     }
 }
