@@ -21,6 +21,7 @@ use super::{
 const TRANSPORT_IDLE_POLL: Duration = Duration::from_millis(500);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
+const STAGE_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Default)]
 struct StageControlsViewCache {
@@ -460,7 +461,7 @@ impl StageTransportView {
                             && this.playback_state == PlaybackState::Playing
                         {
                             // The text changes only on second boundaries. The progress rail has its
-                            // own animation-frame entity and does not force these strings to reshape.
+                            // own transport-sample entity and does not force these strings to reshape.
                             cx.notify();
                         }
                     })
@@ -518,6 +519,10 @@ struct StageProgressView {
     controls_visible: bool,
     drag_progress_ratio: Option<f32>,
     slider: Option<InteractiveSliderState>,
+    timer_started: bool,
+    timer_epoch: u64,
+    last_rendered_position_ms: u64,
+    last_rendered_duration_ms: u64,
 }
 
 impl StageProgressView {
@@ -539,6 +544,10 @@ impl StageProgressView {
             controls_visible,
             drag_progress_ratio,
             slider: None,
+            timer_started: false,
+            timer_epoch: 0,
+            last_rendered_position_ms: 0,
+            last_rendered_duration_ms: 0,
         }
     }
 
@@ -556,16 +565,22 @@ impl StageProgressView {
             (None, None) => false,
             _ => true,
         };
-        let changed = engine_changed
+        let timer_policy_changed = engine_changed
             || self.playback_state != playback_state
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
+            || self.drag_progress_ratio.is_some() != drag_progress_ratio.is_some();
+        let changed = timer_policy_changed
             || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
         self.engine = engine;
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
         self.drag_progress_ratio = drag_progress_ratio;
+        if timer_policy_changed {
+            self.timer_epoch = self.timer_epoch.wrapping_add(1);
+            self.timer_started = false;
+        }
         if changed {
             cx.notify();
         }
@@ -610,6 +625,8 @@ impl StageProgressView {
                 });
                 let _ = this_drag.update(cx, |this, cx| {
                     this.drag_progress_ratio = Some(ratio);
+                    this.timer_epoch = this.timer_epoch.wrapping_add(1);
+                    this.timer_started = false;
                     let _ = this.owner.update(cx, |owner, cx| {
                         owner.drag_progress_ratio = Some(ratio);
                         cx.notify();
@@ -629,6 +646,8 @@ impl StageProgressView {
                 });
                 let _ = this_commit.update(cx, |this, cx| {
                     this.drag_progress_ratio = None;
+                    this.timer_epoch = this.timer_epoch.wrapping_add(1);
+                    this.timer_started = false;
                     let _ = this.owner.update(cx, |owner, cx| {
                         owner.drag_progress_ratio = None;
                         cx.notify();
@@ -638,14 +657,69 @@ impl StageProgressView {
             },
         ));
     }
+
+    fn ensure_progress_timer(&mut self, cx: &mut Context<Self>) {
+        if self.timer_started
+            || !self.stage_active
+            || !self.controls_visible
+            || self.playback_state != PlaybackState::Playing
+            || self.drag_progress_ratio.is_some()
+            || self.engine.is_none()
+        {
+            return;
+        }
+
+        self.timer_started = true;
+        let epoch = self.timer_epoch;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            loop {
+                Timer::after(STAGE_PROGRESS_REFRESH_INTERVAL).await;
+                let keep_running = match this.update(cx, |this, cx| {
+                    if this.timer_epoch != epoch {
+                        return false;
+                    }
+                    if !this.stage_active
+                        || !this.controls_visible
+                        || this.playback_state != PlaybackState::Playing
+                        || this.drag_progress_ratio.is_some()
+                    {
+                        this.timer_started = false;
+                        return false;
+                    }
+                    let Some(engine) = &this.engine else {
+                        this.timer_started = false;
+                        return false;
+                    };
+                    let (_, position_ms, duration_ms) = engine.progress();
+                    if position_ms != this.last_rendered_position_ms
+                        || duration_ms != this.last_rendered_duration_ms
+                    {
+                        cx.notify();
+                    }
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => break,
+                };
+                if !keep_running {
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .detach();
+    }
 }
 
 impl Render for StageProgressView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_progress_timer(cx);
         let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
             (PlaybackState::Stopped, 0, 0),
             |engine| engine.progress(),
         );
+        self.last_rendered_position_ms = live_position_ms;
+        self.last_rendered_duration_ms = duration_ms;
         let drag_progress_ratio = self.drag_progress_ratio;
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
@@ -654,16 +728,6 @@ impl Render for StageProgressView {
                 (live_position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
             }
         });
-
-        if self.stage_active
-            && self.controls_visible
-            && self.playback_state == PlaybackState::Playing
-            && drag_progress_ratio.is_none()
-        {
-            // request_animation_frame() is scoped to StageProgressView in this GPUI fork. Only the
-            // rail follows the display refresh; labels/buttons/volume remain retained.
-            window.request_animation_frame();
-        }
 
         self.ensure_slider(cx);
         self.slider
