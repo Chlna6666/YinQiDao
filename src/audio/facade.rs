@@ -20,7 +20,6 @@ use super::engine::{
 const REQUEST_QUEUE_CAPACITY: usize = 128;
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
-const STRUCTURAL_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(800);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 const NO_POSITION_OVERRIDE: u64 = u64::MAX;
@@ -129,7 +128,7 @@ impl SnapshotCache {
             snapshot.volume = slot.volume;
             snapshot.repeat = slot.repeat;
             snapshot.shuffle = slot.shuffle;
-            if snapshot.error != slot.error {
+            if snapshot.error.as_deref() != slot.error.as_deref() {
                 snapshot.error.clone_from(&slot.error);
             }
         }
@@ -527,7 +526,6 @@ fn run_bridge(
     initial_volume: f32,
 ) {
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
-    let mut last_snapshot = Instant::now() - STRUCTURAL_SNAPSHOT_INTERVAL;
     let mut transport_fade = TransportFade::new(initial_volume);
 
     while running.load(Ordering::Acquire) {
@@ -570,13 +568,12 @@ fn run_bridge(
             last_progress = Instant::now();
         }
 
-        if refresh_snapshot || last_snapshot.elapsed() >= STRUCTURAL_SNAPSHOT_INTERVAL {
+        if refresh_snapshot {
             let mut current = engine.snapshot();
             // The blocking engine sees the temporary transport control volume while fading. Keep
             // the UI-facing structural snapshot pinned to the user's real master-volume setting.
             current.volume = transport_fade.master_volume;
             snapshot.store(current);
-            last_snapshot = Instant::now();
         }
     }
 }
@@ -818,7 +815,13 @@ mod tests {
             ..PlayerSnapshot::default()
         });
         cache.sync_snapshot(&mut target);
-        assert_eq!(target.current_track.as_ref().map(|track| track.title.as_str()), Some("new"));
+        assert_eq!(
+            target
+                .current_track
+                .as_ref()
+                .map(|track| track.title.as_str()),
+            Some("new")
+        );
     }
 
     #[test]
