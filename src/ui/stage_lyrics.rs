@@ -12,6 +12,7 @@ use gpui::{
 use lucide_gpui::icon;
 
 use crate::{
+    audio::AudioEngine,
     lyrics::LyricLine,
     model::{PlaybackState, TrackId},
 };
@@ -23,6 +24,9 @@ const LIST_OVERDRAW_PX: f32 = 180.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const SCROLL_EASING_RATE: f32 = 12.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
+const TRANSPORT_IDLE_POLL: Duration = Duration::from_millis(500);
+const TRANSPORT_MAX_SLEEP: u64 = 1_000;
+const TRANSPORT_MIN_SLEEP: u64 = 8;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -36,11 +40,12 @@ pub(super) fn view(
     cx: &mut Context<MusicApp>,
 ) -> Entity<StageLyricsView> {
     let parent = cx.entity().downgrade();
+    let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageLyricsViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StageLyricsView::new(parent));
+        let view = cx.new(move |_| StageLyricsView::new(parent, engine));
         cache.view = Some(view.clone());
         view
     });
@@ -52,6 +57,7 @@ pub(super) fn view(
 
 pub(super) struct StageLyricsView {
     parent: WeakEntity<MusicApp>,
+    engine: Option<Arc<AudioEngine>>,
     list_state: ListState,
     lines: Arc<[LyricLine]>,
     track_id: Option<TrackId>,
@@ -67,12 +73,14 @@ pub(super) struct StageLyricsView {
     scroll_target: Option<usize>,
     last_scroll_frame: Option<Instant>,
     stage_active: bool,
+    timer_started: bool,
 }
 
 impl StageLyricsView {
-    fn new(parent: WeakEntity<MusicApp>) -> Self {
+    fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
         Self {
             parent,
+            engine,
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX)),
             lines: Arc::from(Vec::<LyricLine>::new()),
             track_id: None,
@@ -88,6 +96,7 @@ impl StageLyricsView {
             scroll_target: None,
             last_scroll_frame: None,
             stage_active: false,
+            timer_started: false,
         }
     }
 
@@ -97,6 +106,15 @@ impl StageLyricsView {
         stage_active: bool,
         cx: &mut Context<Self>,
     ) {
+        let engine_changed = match (&self.engine, &app.engine) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if engine_changed {
+            self.engine = app.engine.clone();
+        }
+
         let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
         let source = track_id
             .and_then(|id| app.lyrics.get(&id))
@@ -107,7 +125,7 @@ impl StageLyricsView {
             || self.source_ptr != source_ptr
             || self.source_len != source_len;
 
-        let mut changed = false;
+        let mut changed = engine_changed;
         if source_changed {
             self.track_id = track_id;
             self.source_ptr = source_ptr;
@@ -123,7 +141,13 @@ impl StageLyricsView {
             changed = true;
         }
 
-        let position_ms = app.displayed_position_ms();
+        let live_position_ms = self
+            .engine
+            .as_ref()
+            .map_or(app.snapshot.position_ms, |engine| engine.progress().1);
+        let position_ms = app.drag_progress_ratio.map_or(live_position_ms, |ratio| {
+            (app.snapshot.duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
+        });
         if self.position_ms != position_ms {
             self.position_ms = position_ms;
             changed = true;
@@ -137,19 +161,7 @@ impl StageLyricsView {
             changed = true;
         }
 
-        let active = (!self.lines.is_empty()).then(|| {
-            self.lines
-                .partition_point(|line| line.timestamp_ms <= self.position_ms)
-                .saturating_sub(1)
-        });
-        if self.active_index != active {
-            self.active_index = active;
-            self.hovered_index = None;
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
-            if !self.is_reading() {
-                self.scroll_target = active;
-                self.last_scroll_frame = None;
-            }
+        if self.update_active_index() {
             changed = true;
         }
 
@@ -168,6 +180,125 @@ impl StageLyricsView {
         if changed {
             cx.notify();
         }
+    }
+
+    fn update_active_index(&mut self) -> bool {
+        let active = (!self.lines.is_empty()).then(|| {
+            self.lines
+                .partition_point(|line| line.timestamp_ms <= self.position_ms)
+                .saturating_sub(1)
+        });
+        if self.active_index == active {
+            return false;
+        }
+        self.active_index = active;
+        self.hovered_index = None;
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        if !self.is_reading() {
+            self.scroll_target = active;
+            self.last_scroll_frame = None;
+        }
+        true
+    }
+
+    fn active_word_index(&self) -> Option<usize> {
+        if self.is_reading() {
+            return None;
+        }
+        let line = self.active_index.and_then(|index| self.lines.get(index))?;
+        if !enhanced_words_cover_primary_text(line) {
+            return None;
+        }
+        let count = line
+            .words
+            .partition_point(|word| word.timestamp_ms <= self.position_ms);
+        count.checked_sub(1)
+    }
+
+    fn next_transport_delay(&self) -> Duration {
+        if !self.stage_active || self.playback_state != PlaybackState::Playing {
+            return TRANSPORT_IDLE_POLL;
+        }
+        let Some(engine) = &self.engine else {
+            return TRANSPORT_IDLE_POLL;
+        };
+        let (_, position_ms, _) = engine.progress();
+        let active = if self.lines.is_empty() {
+            None
+        } else {
+            Some(
+                self.lines
+                    .partition_point(|line| line.timestamp_ms <= position_ms)
+                    .saturating_sub(1),
+            )
+        };
+
+        let mut next_timestamp = active
+            .and_then(|index| self.lines.get(index + 1))
+            .map(|line| line.timestamp_ms);
+        if !self.is_reading()
+            && let Some(line) = active.and_then(|index| self.lines.get(index))
+            && enhanced_words_cover_primary_text(line)
+            && let Some(word) = line.words.iter().find(|word| word.timestamp_ms > position_ms)
+        {
+            next_timestamp = Some(next_timestamp.map_or(word.timestamp_ms, |current| {
+                current.min(word.timestamp_ms)
+            }));
+        }
+
+        let delay_ms = next_timestamp
+            .map(|timestamp| timestamp.saturating_sub(position_ms))
+            .unwrap_or(TRANSPORT_MAX_SLEEP)
+            .clamp(TRANSPORT_MIN_SLEEP, TRANSPORT_MAX_SLEEP);
+        Duration::from_millis(delay_ms)
+    }
+
+    fn refresh_transport(&mut self, cx: &mut Context<Self>) {
+        if !self.stage_active || self.playback_state != PlaybackState::Playing {
+            return;
+        }
+        let Some(engine) = &self.engine else {
+            return;
+        };
+        let (_, position_ms, _) = engine.progress();
+        if position_ms == self.position_ms {
+            return;
+        }
+
+        let previous_active = self.active_index;
+        let previous_word = self.active_word_index();
+        self.position_ms = position_ms;
+        let active_changed = self.update_active_index();
+        let word_changed = !active_changed && previous_word != self.active_word_index();
+        if active_changed || word_changed || previous_active != self.active_index {
+            // Text shaping and blur/list item invalidation happen only at semantic lyric boundaries;
+            // the smooth vertical motion itself remains driven by request_animation_frame().
+            cx.notify();
+        }
+    }
+
+    fn ensure_transport_timer(&mut self, cx: &mut Context<Self>) {
+        if self.timer_started {
+            return;
+        }
+        self.timer_started = true;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            loop {
+                let delay = match this.update(cx, |this, _cx| this.next_transport_delay()) {
+                    Ok(delay) => delay,
+                    Err(_) => break,
+                };
+                Timer::after(delay).await;
+                if this
+                    .update(cx, |this, cx| this.refresh_transport(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .detach();
     }
 
     #[inline]
@@ -258,6 +389,8 @@ impl StageLyricsView {
 
 impl Render for StageLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_transport_timer(cx);
+
         if self.lines.is_empty() {
             return div()
                 .id("stage-lyrics-view")
@@ -499,6 +632,7 @@ fn render_lyric_row(
             this.reading_epoch = this.reading_epoch.wrapping_add(1);
             this.reading_until = None;
             this.hovered_index = None;
+            this.position_ms = timestamp;
             this.active_index = Some(index);
             this.motion_epoch = this.motion_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
