@@ -327,6 +327,7 @@ fn stage_lyrics(
                 this.lyrics_user_scrolling_until =
                     Some(Instant::now() + Duration::from_secs(3));
                 this.lyrics_scroll_target_y = None;
+                this.hovered_lyric_index = None;
                 this.wake_stage_controls(cx);
             },
         ));
@@ -335,6 +336,7 @@ fn stage_lyrics(
         let distance = index.abs_diff(active);
         let (alpha, blur_sigma) = lyric_focus_profile(distance, reading_mode, depth_blur_active);
         let timestamp = line.timestamp_ms;
+        let hovered = app.hovered_lyric_index == Some(index);
         let weight = if index == active {
             gpui::FontWeight::BOLD
         } else if distance == 1 {
@@ -343,10 +345,6 @@ fn stage_lyrics(
             gpui::FontWeight::MEDIUM
         };
         let karaoke_active = index == active && !reading_mode;
-        let hover_group = format!("lyric-hover-{index}");
-        let hover_group_for_text = hover_group.clone();
-        let hover_group_for_blur = hover_group.clone();
-        let hover_group_for_time = hover_group.clone();
 
         // Switching between direct ClearType text and a grayscale element-blur capture changes the
         // render target and blend pipeline. Give the text subtree a mode-specific identity so GPUI's
@@ -380,22 +378,36 @@ fn stage_lyrics(
             );
         }
 
-        // Enter/leave the blur capture directly. Interpolating Blur across the transition used to
-        // bridge a direct ClearType text scene and a grayscale offscreen capture for ~220 ms, which
-        // could expose a stale capture quad on the first frame after Play. Opacity remains a cheap
-        // renderer-owned transition, while Gaussian depth itself switches atomically.
-        if blur_sigma > 0.0 {
-            text = text
-                .blur(px(blur_sigma))
-                .group_hover(hover_group_for_blur, |style| style.blur(px(0.0)));
+        // Hover is explicit and pointer-move driven instead of style-group driven. Automatic lyric
+        // scrolling must not transfer a stationary cursor's timestamp badge to the next row.
+        if blur_sigma > 0.0 && !hovered {
+            text = text.blur(px(blur_sigma));
         }
         text = text
-            .opacity(alpha)
-            .transition(lyric_focus_transition())
-            .group_hover(hover_group_for_text, |style| style.opacity(1.0));
+            .opacity(if hovered { 1.0 } else { alpha })
+            .transition(lyric_focus_transition());
+
+        // Animate only the text subtree. The timestamp badge keeps fixed geometry and therefore no
+        // longer scales/jitters when the active lyric changes.
+        let text = if index == active && !reading_mode {
+            let active_focus = Animation::from_spec(
+                AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
+            )
+            .with_property(AnimationProperty::opacity(0.80, 1.0));
+            text.with_animation(
+                SharedString::from(format!(
+                    "lyric-active-focus-{index}-{}",
+                    app.lyric_motion_epoch
+                )),
+                active_focus,
+                |element, _| element,
+            )
+            .into_any_element()
+        } else {
+            text.into_any_element()
+        };
 
         let mut line_element = div()
-            .group(hover_group)
             .id(SharedString::from(format!("lyric-line-{index}")))
             .relative()
             .w_full()
@@ -406,11 +418,16 @@ fn stage_lyrics(
             .py(px(11.0))
             .mb(px(10.0))
             .cursor_pointer()
-            .child(text);
+            .child(text)
+            .on_mouse_move(cx.listener(
+                move |this, _: &gpui::MouseMoveEvent, _window, cx| {
+                    if this.hovered_lyric_index != Some(index) {
+                        this.hovered_lyric_index = Some(index);
+                        cx.notify();
+                    }
+                },
+            ));
 
-        // Keep badge glyphs and background at their real colors and control visibility through one
-        // parent opacity. This binds both pieces to the same lyric hover state and avoids the former
-        // epsilon-alpha split where the retained background could become visible without its text.
         if !reading_mode {
             line_element = line_element.child(
                 div()
@@ -425,12 +442,16 @@ fn stage_lyrics(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .opacity(0.0)
+                    .opacity(if hovered { 1.0 } else { 0.0 })
+                    .transition(
+                        Transition::new(Duration::from_millis(80))
+                            .ease(Easing::OutCubic)
+                            .properties([TransitionProperty::Opacity]),
+                    )
                     .bg(hsla(0.0, 0.0, 0.0, 0.28))
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(hsla(0.0, 0.0, 1.0, 0.92))
-                    .group_hover(hover_group_for_time, |style| style.opacity(1.0))
                     .child(SharedString::from(format_lyric_time(timestamp))),
             );
         }
@@ -441,6 +462,7 @@ fn stage_lyrics(
                 cx.stop_propagation();
                 this.seek_to_ms(timestamp, cx);
                 this.lyrics_user_scrolling_until = None;
+                this.hovered_lyric_index = None;
                 if this.last_lyric_index != Some(index) {
                     this.last_lyric_index = Some(index);
                     this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
@@ -450,34 +472,6 @@ fn stage_lyrics(
                 this.wake_stage_controls_immediately(cx);
             }),
         );
-
-        // The viewport owns the geometric scroll. Give only the newly active row a short
-        // renderer-owned focus pulse so a lyric boundary has continuity without starting another
-        // layout animation or competing with the scroll easing.
-        let line_element = if index == active && !reading_mode {
-            let active_focus = Animation::from_spec(
-                AnimationSpec::new(Duration::from_millis(180)).ease(Easing::OutCubic),
-            )
-            .with_property(AnimationProperty::scale_opacity(
-                0.988,
-                1.0,
-                0.78,
-                1.0,
-                gpui::TransformOrigin::CENTER,
-            ));
-            line_element
-                .with_animation(
-                    SharedString::from(format!(
-                        "lyric-active-focus-{index}-{}",
-                        app.lyric_motion_epoch
-                    )),
-                    active_focus,
-                    |element, _| element,
-                )
-                .into_any_element()
-        } else {
-            line_element.into_any_element()
-        };
 
         viewport = viewport.child(line_element);
     }

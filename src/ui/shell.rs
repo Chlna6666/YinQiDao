@@ -11,8 +11,9 @@ use std::{
 use anyhow::Result;
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
-    Context, Easing, Entity, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Timer,
-    WeakEntity, Window, WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
+    CompositeLayerExt as _, Context, Easing, Entity, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowOptions, div, hsla,
+    point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -97,10 +98,12 @@ pub struct MusicApp {
     pub(crate) lyrics_scroll_handle: gpui::ScrollHandle,
     pub(crate) last_lyric_index: Option<usize>,
     pub(crate) lyric_motion_epoch: u64,
+    pub(crate) hovered_lyric_index: Option<usize>,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
     stage_transition_epoch: u64,
+    stage_prepared: bool,
     pub(crate) last_frame_instant: Option<std::time::Instant>,
     pub(crate) stage_controls_visibility: f32,
     pub(crate) stage_last_user_activity: std::time::Instant,
@@ -425,10 +428,12 @@ impl MusicApp {
             lyrics_scroll_handle: gpui::ScrollHandle::new(),
             last_lyric_index: None,
             lyric_motion_epoch: 0,
+            hovered_lyric_index: None,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
             stage_transition_epoch: 0,
+            stage_prepared: false,
             last_frame_instant: None,
             stage_controls_visibility: 1.0,
             stage_last_user_activity: std::time::Instant::now(),
@@ -496,12 +501,23 @@ impl MusicApp {
     }
 
     fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.stage_open == open {
+            if self.stage_animating
+                || (!self.stage_animating
+                    && ((open && self.stage_progress >= 0.999)
+                        || (!open && self.stage_progress <= 0.001)))
+            {
+                return;
+            }
+        }
+
         self.stage_transition_epoch = self.stage_transition_epoch.wrapping_add(1);
         let epoch = self.stage_transition_epoch;
         self.stage_open = open;
-        // The drawer stays fully laid out for the whole transition. GPUI owns only the visual
-        // translation, so children keep stable geometry and the app does not relayout the stage on
-        // every display tick.
+        self.hovered_lyric_index = None;
+        // Keep one stable full-screen layout through the transition. GPUI moves only the retained
+        // composite in presentation, so the titlebar, lyrics, cover and fluid background share the
+        // exact same visual transform instead of being animated as independent primitive groups.
         self.stage_progress = 1.0;
         self.stage_animating = true;
         cx.spawn(async move |this, cx| -> Result<()> {
@@ -512,6 +528,9 @@ impl MusicApp {
                 }
                 this.stage_animating = false;
                 this.stage_progress = if this.stage_open { 1.0 } else { 0.0 };
+                if !this.stage_open {
+                    this.hovered_lyric_index = None;
+                }
                 cx.notify();
             })?;
             Ok(())
@@ -553,6 +572,7 @@ impl MusicApp {
         self.last_frame_instant = None;
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
+        self.hovered_lyric_index = None;
         let return_page = if self.previous_page == AppPage::Player {
             AppPage::Home
         } else {
@@ -840,7 +860,7 @@ impl MusicApp {
         if is_at_start
             && self.config.repeat == RepeatMode::Off
             && self.snapshot.position_ms < 3_000
-            && let Some(last) = self.config.queue.first().copied()
+            && let Some(last) = self.config.queue.last().copied()
         {
             self.play_track(last, cx);
             return;
@@ -882,6 +902,7 @@ impl MusicApp {
         }
         self.last_lyric_index = None;
         self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
+        self.hovered_lyric_index = None;
         self.lyrics_scroll_handle.scroll_to_item(0);
         cx.notify();
     }
@@ -1053,7 +1074,6 @@ impl MusicApp {
             .await
             .map_err(|_| anyhow::anyhow!("音频设备切换任务异常退出"))?
         });
-        self.status = format!("正在切换输出设备：{device}");
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -1498,6 +1518,7 @@ impl MusicApp {
                 self.last_polled_track_id = curr_track_id;
                 self.last_lyric_index = None;
                 self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
+                self.hovered_lyric_index = None;
                 self.lyrics_user_scrolling_until = None;
                 self.lyrics_scroll_target_y = None;
                 self.lyrics_scroll_handle.scroll_to_item(0);
@@ -1517,6 +1538,9 @@ impl MusicApp {
                     if self.last_lyric_index != Some(current_idx) {
                         self.last_lyric_index = Some(current_idx);
                         self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
+                        // A stationary pointer must not transfer its timestamp badge to whichever row
+                        // scrolls underneath it after the active lyric changes.
+                        self.hovered_lyric_index = None;
                         let in_user_scroll = self
                             .lyrics_user_scrolling_until
                             .is_some_and(|until| std::time::Instant::now() < until);
@@ -2337,6 +2361,15 @@ impl Render for MusicApp {
             .clamp(0.001, 0.1);
         self.last_frame_instant = Some(now);
 
+        let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
+        if stage_prewarm {
+            // Materialize the expensive stage subtree once while it is still below the viewport.
+            // Text shaping, image decode/upload and composite setup are then hot before the user's
+            // first visible open. A second frame immediately removes this hidden warm-up tree.
+            self.stage_prepared = true;
+            cx.notify();
+        }
+
         let is_idle = self.stage_open
             && self.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
             && !self.seeking
@@ -2365,7 +2398,7 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        let fluid_active = self.stage_progress > 0.001;
+        let fluid_active = (self.stage_open || self.stage_animating) && !stage_prewarm;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
             view.sync(
@@ -2400,7 +2433,7 @@ impl Render for MusicApp {
         let home_page = self.ensure_home_page(cx);
         let library_page = self.ensure_library_page(cx);
 
-        let content = if self.stage_progress >= 0.999 && !self.stage_animating {
+        let content = if self.stage_open && self.stage_progress >= 0.999 && !self.stage_animating {
             div().into_any_element()
         } else {
             match main_page {
@@ -2411,92 +2444,104 @@ impl Render for MusicApp {
             }
         };
 
-        let stage_drawer = if self.stage_progress > 0.001 {
+        let stage_drawer = if self.stage_progress > 0.001 || stage_prewarm {
             let viewport_height = window.viewport_size().height;
             let zero = point(px(0.0), px(0.0));
             let below_viewport = point(px(0.0), viewport_height);
-            let motion = if self.stage_open {
+            let motion = if stage_prewarm {
+                AnimationProperty::translation(below_viewport, below_viewport)
+            } else if self.stage_open {
                 AnimationProperty::translation(below_viewport, zero)
             } else {
                 AnimationProperty::translation(zero, below_viewport)
             };
+            let duration = if stage_prewarm {
+                Duration::from_millis(1)
+            } else {
+                STAGE_TRANSITION_DURATION
+            };
             let transition = Animation::from_spec(
-                AnimationSpec::new(STAGE_TRANSITION_DURATION).ease(Easing::InOutCubic),
+                AnimationSpec::new(duration).ease(Easing::InOutCubic),
             )
             .with_property(motion);
-            Some(
-                div()
-                    .id("stage-drawer-root")
-                    .absolute()
-                    .inset_0()
-                    .overflow_hidden()
-                    .occlude()
-                    .bg(rgb(0x0e0f16))
-                    .text_color(theme::TEXT_WHITE)
-                    .on_mouse_move(cx.listener(
-                        |this, event: &gpui::MouseMoveEvent, _window, cx| {
-                            this.handle_stage_mouse_move(event.position, cx);
-                        },
-                    ))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            this.wake_stage_controls_immediately(cx);
-                        }),
-                    )
-                    .on_mouse_up(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            if this.drag_target.is_some() {
-                                this.commit_drag(cx);
-                            }
-                        }),
-                    )
-                    .on_mouse_up_out(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            if this.drag_target.is_some() {
-                                this.commit_drag(cx);
-                            }
-                        }),
-                    )
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+
+            // Capture player + immersive titlebar into one retained layer first, then move that
+            // single layer. This prevents unsupported/text/window-control primitives from drifting
+            // relative to the fluid background during open/close.
+            let stage_surface = div()
+                .id("stage-drawer-root")
+                .absolute()
+                .inset_0()
+                .overflow_hidden()
+                .bg(rgb(0x0e0f16))
+                .text_color(theme::TEXT_WHITE)
+                .on_mouse_move(cx.listener(
+                    |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                        this.handle_stage_mouse_move(event.position, cx);
+                    },
+                ))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
                         this.wake_stage_controls_immediately(cx);
-                        let key = event.keystroke.key.as_str();
-                        if key == "escape" {
-                            this.close_stage(cx);
-                        } else if key == "space" {
-                            this.toggle_play(cx);
-                        } else if key == "left" {
-                            this.seek_relative(-10_000, cx);
-                        } else if key == "right" {
-                            this.seek_relative(10_000, cx);
+                    }),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        if this.drag_target.is_some() {
+                            this.commit_drag(cx);
                         }
-                    }))
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .overflow_hidden()
-                            .child(player::render(self, cx, fluid_background.clone())),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(0.0))
-                            .left(px(0.0))
-                            .right(px(0.0))
-                            .child(self.stage_titlebar(window, cx)),
-                    )
-                    .with_animation(
-                        SharedString::from(format!(
-                            "stage-drawer-motion-{}",
-                            self.stage_transition_epoch
-                        )),
-                        transition,
-                        |element, _| element,
-                    ),
-            )
+                    }),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        if this.drag_target.is_some() {
+                            this.commit_drag(cx);
+                        }
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                    this.wake_stage_controls_immediately(cx);
+                    let key = event.keystroke.key.as_str();
+                    if key == "escape" {
+                        this.close_stage(cx);
+                    } else if key == "space" {
+                        this.toggle_play(cx);
+                    } else if key == "left" {
+                        this.seek_relative(-10_000, cx);
+                    } else if key == "right" {
+                        this.seek_relative(10_000, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .overflow_hidden()
+                        .child(player::render(self, cx, fluid_background.clone())),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .child(self.stage_titlebar(window, cx)),
+                )
+                .composite_layer()
+                .with_animation(
+                    SharedString::from(if stage_prewarm {
+                        "stage-drawer-prewarm".to_string()
+                    } else {
+                        format!("stage-drawer-motion-{}", self.stage_transition_epoch)
+                    }),
+                    transition,
+                    |element, _| element,
+                )
+                .into_any_element();
+            Some(stage_surface)
         } else {
             None
         };
