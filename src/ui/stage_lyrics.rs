@@ -132,6 +132,7 @@ pub(super) struct StageLyricsView {
     position_ms: u64,
     playback_state: PlaybackState,
     active_index: Option<usize>,
+    active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     motion_epoch: u64,
     reading_until: Option<Instant>,
@@ -156,6 +157,7 @@ impl StageLyricsView {
             position_ms: 0,
             playback_state: PlaybackState::Paused,
             active_index: None,
+            active_word_index: None,
             hovered_index: None,
             motion_epoch: 0,
             reading_until: None,
@@ -205,6 +207,7 @@ impl StageLyricsView {
                 .into();
             self.list_state.reset(source_len);
             self.active_index = None;
+            self.active_word_index = None;
             self.hovered_index = None;
             self.motion_epoch = self.motion_epoch.wrapping_add(1);
             self.reading_until = None;
@@ -220,11 +223,7 @@ impl StageLyricsView {
         let position_ms = app.drag_progress_ratio.map_or(live_position_ms, |ratio| {
             (app.snapshot.duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
         });
-        let previous_word = if source_changed {
-            None
-        } else {
-            self.active_word_index()
-        };
+        let previous_word = self.active_word_index;
         let position_changed = self.position_ms != position_ms;
         if position_changed {
             // Keep the hot transport sample locally, but do not invalidate the lyric view merely
@@ -248,10 +247,12 @@ impl StageLyricsView {
         }
 
         let active_changed = self.update_active_index();
+        let next_word = self.compute_active_word_index();
         let word_changed = position_changed
             && !source_changed
             && !active_changed
-            && previous_word != self.active_word_index();
+            && previous_word != next_word;
+        self.active_word_index = next_word;
         if active_changed || word_changed {
             changed = true;
         }
@@ -291,18 +292,12 @@ impl StageLyricsView {
         true
     }
 
-    fn active_word_index(&self) -> Option<usize> {
+    fn compute_active_word_index(&self) -> Option<usize> {
         if self.is_reading() {
             return None;
         }
         let line = self.active_index.and_then(|index| self.lines.get(index))?;
-        if !line.enhanced_complete {
-            return None;
-        }
-        let count = line
-            .words
-            .partition_point(|word| word.timestamp_ms <= self.position_ms);
-        count.checked_sub(1)
+        active_enhanced_word_index(line, self.position_ms)
     }
 
     fn next_transport_delay(&self) -> Duration {
@@ -355,10 +350,12 @@ impl StageLyricsView {
             return;
         }
 
-        let previous_word = self.active_word_index();
+        let previous_word = self.active_word_index;
         self.position_ms = position_ms;
         let active_changed = self.update_active_index();
-        let word_changed = !active_changed && previous_word != self.active_word_index();
+        let next_word = self.compute_active_word_index();
+        let word_changed = !active_changed && previous_word != next_word;
+        self.active_word_index = next_word;
         if active_changed || word_changed {
             // Text shaping happens only at semantic lyric boundaries. Vertical movement is handed
             // to one retained compositor translation instead of rerunning List layout per frame.
@@ -444,6 +441,7 @@ impl StageLyricsView {
         self.reading_epoch = self.reading_epoch.wrapping_add(1);
         let epoch = self.reading_epoch;
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
+        self.active_word_index = None;
         self.scroll_target = None;
         self.hovered_index = None;
         self.cancel_scroll_animation();
@@ -456,6 +454,7 @@ impl StageLyricsView {
                     return;
                 }
                 this.reading_until = None;
+                this.active_word_index = this.compute_active_word_index();
                 this.scroll_target = this.active_index;
                 cx.notify();
             })?;
@@ -564,11 +563,13 @@ impl Render for StageLyricsView {
 
         if self.reading_until.is_some_and(|until| until <= Instant::now()) {
             self.reading_until = None;
+            self.active_word_index = self.compute_active_word_index();
             self.scroll_target = self.active_index;
         }
         self.prepare_scroll_animation(window, cx);
 
         let active = self.active_index.unwrap_or(0);
+        let active_word_index = self.active_word_index;
         let reading_mode = self.is_reading();
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
@@ -582,7 +583,6 @@ impl Render for StageLyricsView {
         } else {
             "lyric-text-direct"
         };
-        let position_ms = self.position_ms;
         let motion_epoch = self.motion_epoch;
         let hovered_index = self.hovered_index;
         let lines = self.lines.clone();
@@ -594,7 +594,7 @@ impl Render for StageLyricsView {
                 &lines[index],
                 index,
                 active,
-                position_ms,
+                active_word_index,
                 reading_mode,
                 depth_blur_active,
                 text_id,
@@ -665,7 +665,7 @@ fn render_lyric_row(
     line: &StageLyricLine,
     index: usize,
     active: usize,
-    position_ms: u64,
+    active_word_index: Option<usize>,
     reading_mode: bool,
     depth_blur_active: bool,
     text_id: &'static str,
@@ -695,7 +695,11 @@ fn render_lyric_row(
         .flex_col()
         .gap_1()
         .font_weight(weight)
-        .child(stage_primary_lyric(line, position_ms, karaoke_active));
+        .child(stage_primary_lyric(
+            line,
+            karaoke_active,
+            active_word_index,
+        ));
 
     if let Some(translation) = &line.translation {
         text = text.child(
@@ -817,6 +821,7 @@ fn render_lyric_row(
             this.hovered_index = None;
             this.position_ms = timestamp;
             this.active_index = Some(index);
+            this.active_word_index = this.compute_active_word_index();
             this.motion_epoch = this.motion_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
             cx.notify();
@@ -860,10 +865,19 @@ fn lyric_focus_profile(
     (alpha, blur_sigma)
 }
 
+fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
+    if !line.enhanced_complete {
+        return None;
+    }
+    line.words
+        .partition_point(|word| word.timestamp_ms <= position_ms)
+        .checked_sub(1)
+}
+
 fn stage_primary_lyric(
     line: &StageLyricLine,
-    position_ms: u64,
     karaoke_active: bool,
+    current_word: Option<usize>,
 ) -> gpui::AnyElement {
     if !karaoke_active || !line.enhanced_complete {
         return div()
@@ -875,10 +889,6 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    let current_word = line
-        .words
-        .iter()
-        .rposition(|word| word.timestamp_ms <= position_ms);
     let mut row = div()
         .w_full()
         .min_w(px(0.0))
@@ -1008,5 +1018,29 @@ mod tests {
             }]),
         };
         assert!(!enhanced_words_cover_primary_text(&incomplete));
+    }
+
+    #[test]
+    fn active_enhanced_word_uses_cached_semantic_boundary() {
+        let source = LyricLine {
+            timestamp_ms: 1_000,
+            text: "你好 世界".into(),
+            translation: None,
+            words: Arc::from([
+                LyricWord {
+                    timestamp_ms: 1_000,
+                    text: "你好 ".into(),
+                },
+                LyricWord {
+                    timestamp_ms: 1_500,
+                    text: "世界".into(),
+                },
+            ]),
+        };
+        let line = StageLyricLine::from_source(&source);
+        assert_eq!(active_enhanced_word_index(&line, 999), None);
+        assert_eq!(active_enhanced_word_index(&line, 1_000), Some(0));
+        assert_eq!(active_enhanced_word_index(&line, 1_499), Some(0));
+        assert_eq!(active_enhanced_word_index(&line, 1_500), Some(1));
     }
 }
