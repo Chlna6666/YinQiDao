@@ -19,7 +19,7 @@ pub(super) fn mini_player(
     // close transition starts `stage_open` becomes false, so the underlying mini-player is restored
     // before the Stage translates away.
     if app.stage_open && !app.stage_animating && app.stage_progress >= 0.999 {
-        return div().id("mini-player-stage-covered").into_any_element();
+        return div().into_any_element();
     }
 
     player_stage::mini_player(app, cx, playback_progress, playback_time).into_any_element()
