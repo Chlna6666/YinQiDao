@@ -52,6 +52,7 @@ pub(super) struct StageControlsView {
     engine: Option<Arc<AudioEngine>>,
     stage_active: bool,
     controls_visible: bool,
+    visibility: f32,
     timer_started: bool,
 }
 
@@ -62,6 +63,7 @@ impl StageControlsView {
             engine,
             stage_active: false,
             controls_visible: true,
+            visibility: 1.0,
             timer_started: false,
         }
     }
@@ -77,17 +79,22 @@ impl StageControlsView {
             (None, None) => false,
             _ => true,
         };
-        let controls_visible = app.stage_controls_visibility > 0.005
-            || matches!(app.drag_target, Some(DragTarget::Progress | DragTarget::Volume));
+        let visibility = app.stage_controls_visibility.clamp(0.0, 1.0);
+        let controls_visible = visibility > 0.005 || app.drag_target.is_some();
+        let visibility_changed = (self.visibility - visibility).abs() > 0.0005;
         let changed = engine_changed
             || self.stage_active != stage_active
-            || self.controls_visible != controls_visible;
+            || self.controls_visible != controls_visible
+            || visibility_changed;
         if engine_changed {
             self.engine = app.engine.clone();
         }
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
+        self.visibility = visibility;
         if changed {
+            // MusicApp owns the idle-policy clock, but only this small entity needs the sampled
+            // visibility value. Lyrics, cover and fluid remain retained during chrome fades.
             cx.notify();
         }
     }
@@ -131,15 +138,15 @@ impl Render for StageControlsView {
         let Some(parent_entity) = self.parent.upgrade() else {
             return div().into_any_element();
         };
-        let (transport_state, drag_progress_ratio, volume, visibility) = {
+        let (transport_state, drag_progress_ratio, volume) = {
             let app = parent_entity.read(cx);
             (
                 app.snapshot.state,
                 app.drag_progress_ratio,
                 app.displayed_volume_ratio(),
-                app.stage_controls_visibility,
             )
         };
+        let visibility = self.visibility;
         let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
             (PlaybackState::Stopped, 0, 0),
             |engine| engine.progress(),
