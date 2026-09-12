@@ -4,10 +4,10 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _, Context,
-    Easing, EncodedImageBytes, Entity, Global, ImageFormat, IntoElement, ObjectFit, Render,
-    SharedString, StatefulInteractiveElement as _, WeakEntity, Window, div, hsla, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView,
+    BorrowAppContext as _, Context, Easing, EncodedImageBytes, Entity, Global, ImageFormat,
+    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -122,6 +122,13 @@ impl Render for StagePlayerView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let parent_move = self.parent.clone();
         let parent_down = self.parent.clone();
+        let lyrics = AnyView::from(self.lyrics.clone()).cached(
+            StyleRefinement::default()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .min_h(px(0.0)),
+        );
         div()
             .id("stage-player-root")
             .size_full()
@@ -171,7 +178,7 @@ impl Render for StagePlayerView {
                             .gap_12()
                             .items_center()
                             .child(stage_cover(self.track.as_ref(), self.artwork.clone()))
-                            .child(self.lyrics.clone()),
+                            .child(lyrics),
                     )
                     .child(self.controls.clone()),
             )
