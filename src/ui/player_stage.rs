@@ -5,22 +5,21 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing,
-    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Transition,
-    TransitionProperty, StatefulInteractiveElement as _, div, hsla, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb,
+    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString,
+    StatefulInteractiveElement as _, div, hsla, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
 use crate::{
     audio::PlayerCommand,
     gpu::AppleFluidView,
-    lyrics::LyricLine,
     model::{PlaybackState, Track},
 };
 
 use super::{
     components::{SliderStyle, interactive_slider},
-    player_legacy,
+    player_legacy, stage_lyrics,
     shell::{DragTarget, MusicApp},
     theme::{
         ACCENT_RED, TEXT_WHITE, elegant_gradient_for, format_remaining_time, format_time,
@@ -39,9 +38,6 @@ pub(super) fn render(
     let track = snapshot.current_track.as_ref();
     let id = track.map(|track| track.id);
     let artwork = id.and_then(|id| app.artworks.get(&id).cloned());
-    let lyrics = id
-        .and_then(|id| app.lyrics.get(&id))
-        .map_or(&[][..], |document| document.timed_lines());
     // Position/duration come from the hot atomic transport clock, but play/pause presentation must
     // follow MusicApp's optimistic UI snapshot. `toggle_play()` updates that snapshot immediately;
     // reading the engine state again here can briefly resurrect the pre-fade state and render the
@@ -56,6 +52,7 @@ pub(super) fn render(
     );
     let fluid_playing = transport_state == PlaybackState::Playing;
     fluid_background.update(cx, |view, cx| view.set_playing(fluid_playing, cx));
+    let lyrics_view = stage_lyrics::view(app, cx);
 
     div()
         .id("stage-player-root")
@@ -105,12 +102,7 @@ pub(super) fn render(
                         .gap_12()
                         .items_center()
                         .child(stage_cover(track, artwork))
-                        .child(stage_lyrics(
-                            app,
-                            lyrics,
-                            displayed_position_ms,
-                            cx,
-                        )),
+                        .child(lyrics_view),
                 )
                 .child(stage_controls(
                     app,
@@ -255,357 +247,6 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
                         .child(album.to_owned()),
                 ),
         )
-}
-
-fn stage_lyrics(
-    app: &MusicApp,
-    lyrics: &[LyricLine],
-    position_ms: u64,
-    cx: &mut Context<MusicApp>,
-) -> impl IntoElement {
-    if lyrics.is_empty() {
-        return div()
-            .flex_1()
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child(themed_icon(
-                icon!(music),
-                36.0,
-                hsla(0.0, 0.0, 1.0, 0.25),
-            ))
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.50))
-                    .child("暂无同步滚动歌词"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.30))
-                    .child("支持内嵌 LRC 或联网自动检索"),
-            )
-            .into_any_element();
-    }
-
-    let active = lyrics
-        .iter()
-        .rposition(|line| line.timestamp_ms <= position_ms)
-        .unwrap_or(0);
-    let reading_mode = app
-        .lyrics_user_scrolling_until
-        .is_some_and(|until| until > Instant::now());
-    // Only active playback uses the depth-of-field blur. Pausing keeps the exact lyric/word timing
-    // frozen but removes Gaussian blur immediately, while explicit scrolling additionally flattens
-    // opacity so the viewport becomes a clean reading surface.
-    let depth_blur_active = app.snapshot.state == PlaybackState::Playing && !reading_mode;
-    let blur_capture_mode = if depth_blur_active { "blur" } else { "direct" };
-
-    let mut viewport = div()
-        .id("stage-lyrics-viewport")
-        .relative()
-        .flex_1()
-        .h_full()
-        .min_w(px(0.0))
-        .min_h(px(0.0))
-        .overflow_y_scroll()
-        .scrollbar_width(px(0.0))
-        .track_scroll(&app.lyrics_scroll_handle)
-        .pt(px(96.0))
-        .pb(px(112.0))
-        .pr(px(8.0))
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.wake_stage_controls_immediately(cx)),
-        )
-        .on_scroll_wheel(cx.listener(
-            |this, _: &gpui::ScrollWheelEvent, _, cx| {
-                this.lyrics_user_scrolling_until =
-                    Some(Instant::now() + Duration::from_secs(3));
-                this.lyrics_scroll_target_y = None;
-                this.hovered_lyric_index = None;
-                this.wake_stage_controls(cx);
-            },
-        ));
-
-    for (index, line) in lyrics.iter().enumerate() {
-        let distance = index.abs_diff(active);
-        let (alpha, blur_sigma) = lyric_focus_profile(distance, reading_mode, depth_blur_active);
-        let timestamp = line.timestamp_ms;
-        let hovered = app.hovered_lyric_index == Some(index);
-        let weight = if index == active {
-            gpui::FontWeight::BOLD
-        } else if distance == 1 {
-            gpui::FontWeight::SEMIBOLD
-        } else {
-            gpui::FontWeight::MEDIUM
-        };
-        let karaoke_active = index == active && !reading_mode;
-
-        // Switching between direct ClearType text and a grayscale element-blur capture changes the
-        // render target and blend pipeline. Give the text subtree a mode-specific identity so GPUI's
-        // retained reconciliation cannot replay the pre-Play direct-text node inside a newly-created
-        // blur capture. This is intentionally keyed only by capture mode: normal playback position
-        // ticks keep the same retained subtree and do not rebuild lyrics every 100 ms.
-        let mut text = div()
-            .id(SharedString::from(format!(
-                "lyric-text-{index}-{blur_capture_mode}"
-            )))
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .font_weight(weight)
-            .child(stage_primary_lyric(line, position_ms, karaoke_active));
-
-        if let Some(translation) = line
-            .translation
-            .as_deref()
-            .filter(|translation| !translation.trim().is_empty())
-        {
-            text = text.child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(17.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.72))
-                    .child(translation.to_owned()),
-            );
-        }
-
-        // Hover ownership is explicit per row. This decouples the timestamp from style-group
-        // hit-testing as lyrics move underneath a stationary pointer during automatic scrolling.
-        if blur_sigma > 0.0 && !hovered {
-            text = text.blur(px(blur_sigma));
-        }
-        text = text
-            .opacity(if hovered { 1.0 } else { alpha })
-            .transition(lyric_focus_transition());
-
-        // Animate only the text subtree. The timestamp badge keeps fixed geometry and therefore no
-        // longer scales/jitters when the active lyric changes.
-        let text = if index == active && !reading_mode {
-            let active_focus = Animation::from_spec(
-                AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
-            )
-            .with_property(AnimationProperty::opacity(0.80, 1.0));
-            text.with_animation(
-                SharedString::from(format!(
-                    "lyric-active-focus-{index}-{}",
-                    app.lyric_motion_epoch
-                )),
-                active_focus,
-                |element, _| element,
-            )
-            .into_any_element()
-        } else {
-            text.into_any_element()
-        };
-
-        let mut line_element = div()
-            .id(SharedString::from(format!("lyric-line-{index}")))
-            .relative()
-            .w_full()
-            .min_w(px(0.0))
-            .flex_none()
-            .pl(px(16.0))
-            .pr(px(104.0))
-            .py(px(11.0))
-            .mb(px(10.0))
-            .cursor_pointer()
-            .child(text)
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                let next = if *hovered {
-                    Some(index)
-                } else if this.hovered_lyric_index == Some(index) {
-                    None
-                } else {
-                    return;
-                };
-                if this.hovered_lyric_index != next {
-                    this.hovered_lyric_index = next;
-                    cx.notify();
-                }
-            }));
-
-        if !reading_mode {
-            line_element = line_element.child(
-                div()
-                    .id(SharedString::from(format!("lyric-time-{index}")))
-                    .absolute()
-                    .right(px(10.0))
-                    .top(px(13.0))
-                    .min_w(px(88.0))
-                    .px_2p5()
-                    .py_1()
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .opacity(if hovered { 1.0 } else { 0.0 })
-                    .transition(
-                        Transition::new(Duration::from_millis(80))
-                            .ease(Easing::OutCubic)
-                            .properties([TransitionProperty::Opacity]),
-                    )
-                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.92))
-                    .child(SharedString::from(format_lyric_time(timestamp))),
-            );
-        }
-
-        let line_element = line_element.on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.seek_to_ms(timestamp, cx);
-                this.lyrics_user_scrolling_until = None;
-                this.hovered_lyric_index = None;
-                if this.last_lyric_index != Some(index) {
-                    this.last_lyric_index = Some(index);
-                    this.lyric_motion_epoch = this.lyric_motion_epoch.wrapping_add(1);
-                }
-                this.lyrics_scroll_target_y =
-                    Some(f32::from(this.lyrics_scroll_handle.offset().y));
-                this.wake_stage_controls_immediately(cx);
-            }),
-        );
-
-        viewport = viewport.child(line_element);
-    }
-
-    viewport.into_any_element()
-}
-
-fn lyric_focus_profile(
-    distance: usize,
-    reading_mode: bool,
-    depth_blur_active: bool,
-) -> (f32, f32) {
-    if reading_mode {
-        return (1.0, 0.0);
-    }
-
-    // The active line must be visually unambiguous. Nearby context stays readable but is no longer
-    // almost as white as the lyric currently being sung.
-    let alpha = match distance {
-        0 => 1.0,
-        1 => 0.56,
-        2 => 0.42,
-        3 => 0.32,
-        _ => 0.26,
-    };
-    let blur_sigma = if depth_blur_active {
-        match distance {
-            0 => 0.0,
-            1 => 0.40,
-            2 => 0.80,
-            3 => 1.15,
-            4 => 1.40,
-            // Only the local focus field needs a Gaussian capture. Far rows are contextual and are
-            // dimmed without allocating additional two-pass offscreen blur surfaces.
-            _ => 0.0,
-        }
-    } else {
-        0.0
-    };
-
-    (alpha, blur_sigma)
-}
-
-fn stage_primary_lyric(
-    line: &LyricLine,
-    position_ms: u64,
-    karaoke_active: bool,
-) -> gpui::AnyElement {
-    // Enhanced-LRC is only safe to render segment-by-segment when those segments reconstruct the
-    // complete primary line. Some providers leave an untimed prefix/suffix around inline stamps;
-    // rendering only `words` made that text disappear while the line was active.
-    if !karaoke_active || !enhanced_words_cover_primary_text(line) {
-        return div()
-            .w_full()
-            .min_w(px(0.0))
-            .text_size(px(28.0))
-            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-            .child(line.text.clone())
-            .into_any_element();
-    }
-
-    let current_word = line
-        .words
-        .iter()
-        .rposition(|word| word.timestamp_ms <= position_ms);
-    let mut row = div()
-        .w_full()
-        .min_w(px(0.0))
-        .flex()
-        .flex_wrap()
-        .items_baseline()
-        .text_size(px(28.0));
-
-    for (index, word) in line.words.iter().enumerate() {
-        let alpha = match current_word {
-            Some(current) if index < current => 0.88,
-            Some(current) if index == current => 1.0,
-            Some(_) => 0.42,
-            None if index == 0 => 0.90,
-            None => 0.42,
-        };
-        row = row.child(
-            div()
-                .flex_none()
-                .font_weight(if current_word == Some(index) || (current_word.is_none() && index == 0)
-                {
-                    gpui::FontWeight::BOLD
-                } else {
-                    gpui::FontWeight::SEMIBOLD
-                })
-                .text_color(hsla(0.0, 0.0, 1.0, alpha))
-                .child(word.text.clone()),
-        );
-    }
-
-    row.into_any_element()
-}
-
-fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
-    if line.words.is_empty() || line.text.is_empty() {
-        return false;
-    }
-    let mut remaining = line.text.as_str();
-    for word in line.words.iter() {
-        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
-            return false;
-        };
-        remaining = rest;
-    }
-    remaining.is_empty()
-}
-
-fn format_lyric_time(ms: u64) -> String {
-    let total_secs = ms / 1_000;
-    let millis = ms % 1_000;
-    let hours = total_secs / 3_600;
-    let minutes = (total_secs / 60) % 60;
-    let seconds = total_secs % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
-    } else {
-        format!("{minutes:02}:{seconds:02}.{millis:03}")
-    }
-}
-
-fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(120))
-        .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity])
 }
 
 fn stage_controls(
@@ -881,57 +522,4 @@ fn ambient_background(fluid_background: gpui::Entity<AppleFluidView>) -> gpui::A
         .bg(rgb(0x0e0f16))
         .child(fluid_background)
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lyrics::LyricWord;
-
-    #[test]
-    fn precise_lyric_time_keeps_subsecond_timing() {
-        assert_eq!(format_lyric_time(62_345), "01:02.345");
-        assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
-    }
-
-    #[test]
-    fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
-        assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 0.40));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.15));
-        assert_eq!(lyric_focus_profile(5, false, true), (0.26, 0.0));
-        assert_eq!(lyric_focus_profile(2, false, false), (0.42, 0.0));
-        assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
-    }
-
-    #[test]
-    fn incomplete_enhanced_lrc_falls_back_to_full_line() {
-        let complete = LyricLine {
-            timestamp_ms: 1_000,
-            text: "你好 世界".into(),
-            translation: None,
-            words: Arc::from([
-                LyricWord {
-                    timestamp_ms: 1_000,
-                    text: "你好 ".into(),
-                },
-                LyricWord {
-                    timestamp_ms: 1_500,
-                    text: "世界".into(),
-                },
-            ]),
-        };
-        assert!(enhanced_words_cover_primary_text(&complete));
-
-        let incomplete = LyricLine {
-            timestamp_ms: 1_000,
-            text: "前缀你好".into(),
-            translation: None,
-            words: Arc::from([LyricWord {
-                timestamp_ms: 1_200,
-                text: "你好".into(),
-            }]),
-        };
-        assert!(!enhanced_words_cover_primary_text(&incomplete));
-    }
 }

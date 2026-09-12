@@ -13,6 +13,7 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+mod stage_lyrics;
 use player_facade as player;
 pub mod route;
 mod settings;
