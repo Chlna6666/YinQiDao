@@ -574,7 +574,13 @@ fn run_bridge(
 fn request_refreshes_snapshot(request: &EngineRequest) -> bool {
     match request {
         EngineRequest::Command(
-            PlayerCommand::Seek(_) | PlayerCommand::SetEq(_) | PlayerCommand::SetSpatial(_),
+            PlayerCommand::Seek(_)
+                | PlayerCommand::SetVolume(_)
+                | PlayerCommand::SetEq(_)
+                | PlayerCommand::SetSpatial(_)
+                | PlayerCommand::SetSmartAudio(_)
+                | PlayerCommand::SetTransition(_)
+                | PlayerCommand::SetOutputDevice(_),
         )
         | EngineRequest::RegisterTracks(_)
         | EngineRequest::Shutdown => false,

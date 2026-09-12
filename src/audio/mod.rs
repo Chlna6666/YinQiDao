@@ -39,13 +39,6 @@ pub use yinqidao_audio_spatial::{
 };
 
 impl AudioEngine {
-    /// Temporary compatibility surface while MusicApp is being moved from polling to AudioUiEvent.
-    /// Structural/error delivery now lives on `take_ui_event_receiver`; the root poll must not
-    /// manufacture another event stream from hot progress samples.
-    pub fn drain_events(&self) -> Vec<PlayerEvent> {
-        Vec::new()
-    }
-
     /// Publish a high-rate listener/head pose directly to the spatial DSP without entering the
     /// bounded PlayerCommand mailbox. The spatial engines consume the latest coherent pose once per
     /// internal render block, so head tracking cannot queue stale orientation updates behind decoder

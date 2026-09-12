@@ -20,14 +20,14 @@ use lucide_gpui::icon;
 use crate::lyrics::LyricsDocument;
 use crate::{
     artwork::ArtworkCache,
-    audio::{AudioEngine, EqPreset, PlayerCommand, PlayerEvent},
+    audio::{AudioEngine, EqPreset, PlayerCommand},
     library::{Library, ScanReport},
     model::{AppPage, LibraryTab, PlaybackState, PlayerSnapshot, RepeatMode, Track, TrackId},
     settings::{AppConfig, ConfigStore},
 };
 
 use super::{
-    home, library as library_page, player,
+    app_runtime_events, home, library as library_page, player,
     player::NowPlaying,
     route::{self, AppRoute},
     settings as settings_page, theme,
@@ -94,10 +94,6 @@ pub struct MusicApp {
     pub(crate) pending_volume_ratio: Option<f32>,
     lyrics_checked: HashSet<TrackId>,
     last_polled_track_id: Option<TrackId>,
-    pub(crate) lyrics_scroll_handle: gpui::ScrollHandle,
-    pub(crate) last_lyric_index: Option<usize>,
-    pub(crate) lyric_motion_epoch: u64,
-    pub(crate) hovered_lyric_index: Option<usize>,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -113,8 +109,6 @@ pub struct MusicApp {
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
-    pub(crate) lyrics_user_scrolling_until: Option<std::time::Instant>,
-    pub(crate) lyrics_scroll_target_y: Option<f32>,
     pub(crate) fluid_background: Option<Entity<crate::gpu::AppleFluidView>>,
     pub(crate) artwork_online_fallback_requested: HashSet<TrackId>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
@@ -122,8 +116,7 @@ pub struct MusicApp {
     background_started: bool,
     library_refresh_request: u64,
     queue_matches_tracks: bool,
-    timer_started: bool,
-    polling_player: bool,
+    runtime_events_started: bool,
     last_saved_position_ms: u64,
     last_saved_at: std::time::Instant,
     config_save_dirty: bool,
@@ -438,10 +431,6 @@ impl MusicApp {
             pending_volume_ratio: None,
             lyrics_checked: HashSet::new(),
             last_polled_track_id: None,
-            lyrics_scroll_handle: gpui::ScrollHandle::new(),
-            last_lyric_index: None,
-            lyric_motion_epoch: 0,
-            hovered_lyric_index: None,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -457,8 +446,6 @@ impl MusicApp {
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
-            lyrics_user_scrolling_until: None,
-            lyrics_scroll_target_y: None,
             fluid_background: None,
             artwork_online_fallback_requested: HashSet::new(),
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
@@ -466,8 +453,7 @@ impl MusicApp {
             background_started: false,
             library_refresh_request: 0,
             queue_matches_tracks,
-            timer_started: false,
-            polling_player: false,
+            runtime_events_started: false,
             last_saved_position_ms: initial_position,
             last_saved_at: std::time::Instant::now(),
             config_save_dirty: false,
@@ -548,9 +534,6 @@ impl MusicApp {
             self.stage_progress = self.stage_transition_to;
             self.stage_animating = false;
             self.stage_transition_started_at = None;
-            if self.stage_progress <= 0.001 {
-                self.hovered_lyric_index = None;
-            }
         }
     }
 
@@ -571,7 +554,6 @@ impl MusicApp {
         self.stage_transition_epoch = self.stage_transition_epoch.wrapping_add(1);
         let epoch = self.stage_transition_epoch;
         self.stage_open = open;
-        self.hovered_lyric_index = None;
         self.stage_progress = current;
         self.stage_transition_from = current;
         self.stage_transition_to = target;
@@ -642,7 +624,6 @@ impl MusicApp {
         self.last_frame_instant = None;
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
-        self.hovered_lyric_index = None;
         let return_page = if self.previous_page == AppPage::Player {
             AppPage::Home
         } else {
@@ -692,8 +673,6 @@ impl MusicApp {
             .unwrap_or(now);
         self.stage_controls_hovered = false;
         self.stage_last_mouse_pos = Some(pointer_pos);
-        // Presence of this marker means the user explicitly entered clean/immersive mode. It is
-        // released by a meaningful pointer movement or an explicit action, not by a short timer.
         self.stage_suppress_wake_until = Some(now);
         cx.notify();
     }
@@ -935,10 +914,6 @@ impl MusicApp {
         } else {
             self.status = "音频命令队列繁忙，请稍后重试".into();
         }
-        self.last_lyric_index = None;
-        self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
-        self.hovered_lyric_index = None;
-        self.lyrics_scroll_handle.scroll_to_item(0);
         cx.notify();
     }
 
@@ -1320,6 +1295,21 @@ impl MusicApp {
         });
     }
 
+    fn start_runtime_events(&mut self, cx: &mut Context<Self>) {
+        if self.runtime_events_started {
+            return;
+        }
+        self.runtime_events_started = true;
+
+        let (_discard_library_tx, discard_library_rx) = std::sync::mpsc::channel();
+        let library_events = std::mem::replace(&mut self.library_update_rx, discard_library_rx);
+        let (_discard_media_tx, discard_media_rx) = std::sync::mpsc::channel();
+        let media_events = std::mem::replace(&mut self.media_event_rx, discard_media_rx);
+        app_runtime_events::attach_root_sources(self, library_events, media_events, cx);
+        self.ensure_system_media_async(cx);
+        self.update_system_media_async(cx);
+    }
+
     fn start_background_work(&mut self, cx: &mut Context<Self>) {
         if self.background_started {
             return;
@@ -1453,151 +1443,121 @@ impl MusicApp {
         .detach();
     }
 
-    fn poll_player(&mut self, cx: &mut Context<MusicApp>) {
-        if self.polling_player {
+    pub(crate) fn sync_audio_snapshot_event(&mut self, cx: &mut Context<MusicApp>) {
+        let Some(engine) = self.engine.clone() else {
             return;
+        };
+        self.snapshot = engine.snapshot();
+        if self.drag_target.is_none() {
+            self.position_ms = self.snapshot.position_ms;
+            self.config.position_ms = self.position_ms;
         }
-        self.polling_player = true;
 
-        let sys_events = self.media_event_rx.try_iter().collect::<Vec<_>>();
-        for ev in sys_events {
-            match ev {
-                crate::media_controls::SystemMediaEvent::Play => {
-                    if self.snapshot.state != PlaybackState::Playing {
-                        self.toggle_play(cx);
+        if let Some(ratio) = self.pending_volume_ratio
+            && (self.config.volume - ratio).abs() < 0.02
+        {
+            self.pending_volume_ratio = None;
+        }
+
+        if self.snapshot.current_track.is_some() {
+            self.config.current_track = self.snapshot.current_track.as_ref().map(|track| track.id);
+        }
+
+        if let Some(track) = &self.snapshot.current_track {
+            let track_id = track.id;
+            let track_path = track.path.clone();
+            if !self.lyrics.contains_key(&track_id) && self.lyrics_checked.insert(track_id) {
+                let task = Tokio::spawn_result(cx, async move {
+                    tokio::task::spawn_blocking(move || crate::lyrics::read_local(&track_path))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                });
+                cx.spawn(async move |this, cx| -> Result<()> {
+                    if let Ok(Some(lrc)) = task.await {
+                        this.update(cx, |this, cx| {
+                            this.cache_lyrics(track_id, lrc);
+                            cx.notify();
+                        })?;
                     }
-                }
-                crate::media_controls::SystemMediaEvent::Pause => {
-                    if self.snapshot.state == PlaybackState::Playing {
-                        self.toggle_play(cx);
-                    }
-                }
-                crate::media_controls::SystemMediaEvent::Toggle => self.toggle_play(cx),
-                crate::media_controls::SystemMediaEvent::Next => self.next(cx),
-                crate::media_controls::SystemMediaEvent::Previous => self.previous(cx),
-                crate::media_controls::SystemMediaEvent::Stop => {
-                    self.send(PlayerCommand::Stop);
-                    cx.notify();
-                }
-                crate::media_controls::SystemMediaEvent::SeekBy(delta_ms) => {
-                    self.seek_relative(delta_ms, cx);
-                }
-                crate::media_controls::SystemMediaEvent::SetPosition(pos) => {
-                    self.seek_to_ms(pos.as_millis() as u64, cx);
-                }
+                    Ok(())
+                })
+                .detach();
             }
         }
 
-        if self.library_update_rx.try_iter().next().is_some() {
-            self.artwork_missing.clear();
-            self.refresh_tracks_async(cx, Some("歌库已更新".into()));
+        let curr_track_id = self.snapshot.current_track.as_ref().map(|track| track.id);
+        if curr_track_id != self.last_polled_track_id {
+            self.last_polled_track_id = curr_track_id;
+            if !self.stage_open && !self.stage_animating {
+                self.stage_prepared = false;
+            }
+            self.request_current_artwork(cx);
+            self.request_current_enrichment(cx);
         }
+
+        self.update_system_media_async(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn runtime_maintenance_tick(&mut self, cx: &mut Context<MusicApp>) {
         if let Some(engine) = &self.engine {
-            for event in engine.drain_events() {
-                if let PlayerEvent::Error(error) = event {
-                    self.status = error.to_string();
-                }
-            }
-            self.snapshot = engine.snapshot();
+            let (state, position_ms, duration_ms) = engine.progress();
+            self.snapshot.position_ms = position_ms;
+            self.snapshot.duration_ms = duration_ms;
             if self.drag_target.is_none() {
-                self.position_ms = self.snapshot.position_ms;
-                self.config.position_ms = self.position_ms;
+                self.position_ms = position_ms;
+                self.config.position_ms = position_ms;
             }
 
-            if let Some(ratio) = self.pending_volume_ratio
-                && (self.config.volume - ratio).abs() < 0.02
-            {
-                self.pending_volume_ratio = None;
-            }
-
-            if self.snapshot.current_track.is_some() {
-                self.config.current_track =
-                    self.snapshot.current_track.as_ref().map(|track| track.id);
-            }
-
-            if self.snapshot.state == PlaybackState::Playing
+            if state == PlaybackState::Playing
                 && self.last_saved_at.elapsed() >= Duration::from_secs(3)
             {
                 let diff = (self.position_ms as i64 - self.last_saved_position_ms as i64).abs();
-                if diff >= 1000 {
+                if diff >= 1_000 {
                     self.last_saved_position_ms = self.position_ms;
                     self.last_saved_at = std::time::Instant::now();
                     self.save_config();
                 }
             }
-
-            if let Some(track) = &self.snapshot.current_track {
-                let track_id = track.id;
-                let track_path = track.path.clone();
-                if !self.lyrics.contains_key(&track_id) && self.lyrics_checked.insert(track_id) {
-                    let task = Tokio::spawn_result(cx, async move {
-                        tokio::task::spawn_blocking(move || crate::lyrics::read_local(&track_path))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))
-                    });
-                    cx.spawn(async move |this, cx| -> Result<()> {
-                        if let Ok(Some(lrc)) = task.await {
-                            this.update(cx, |this, cx| {
-                                this.cache_lyrics(track_id, lrc);
-                                cx.notify();
-                            })?;
-                        }
-                        Ok(())
-                    })
-                    .detach();
-                }
-            }
-
-            let curr_track_id = self.snapshot.current_track.as_ref().map(|t| t.id);
-            if curr_track_id != self.last_polled_track_id {
-                self.last_polled_track_id = curr_track_id;
-                self.last_lyric_index = None;
-                self.lyric_motion_epoch = self.lyric_motion_epoch.wrapping_add(1);
-                self.hovered_lyric_index = None;
-                self.lyrics_user_scrolling_until = None;
-                self.lyrics_scroll_target_y = None;
-                self.lyrics_scroll_handle.scroll_to_item(0);
-                if !self.stage_open && !self.stage_animating {
-                    self.stage_prepared = false;
-                }
-                self.request_current_artwork(cx);
-                self.request_current_enrichment(cx);
-            }
-
-            self.update_system_media_async(cx);
         }
 
-        if self.system_media.is_none()
-            && !self.system_media_init_in_flight
-            && !self.system_media_update_in_flight
-            && self.system_media_init_attempts < 10
+        self.flush_config_save_if_due();
+        self.update_system_media_async(cx);
+        self.ensure_system_media_async(cx);
+    }
+
+    fn ensure_system_media_async(&mut self, cx: &mut Context<MusicApp>) {
+        if self.system_media.is_some()
+            || self.system_media_init_in_flight
+            || self.system_media_update_in_flight
+            || self.system_media_init_attempts >= 10
         {
-            self.system_media_init_attempts += 1;
-            self.system_media_init_in_flight = true;
-            let event_tx = self.media_event_tx.clone();
-            let task = Tokio::spawn_result(cx, async move {
-                tokio::task::spawn_blocking(move || {
-                    crate::media_controls::SystemMediaBridge::try_create(event_tx)
-                        .map_err(anyhow::Error::msg)
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("系统媒体初始化任务异常退出: {error}"))?
-            });
-            cx.spawn(async move |this, cx| -> Result<()> {
-                let result = task.await;
-                this.update(cx, |this, _cx| {
-                    this.system_media_init_in_flight = false;
-                    if let Ok(bridge) = result {
-                        this.system_media = Some(bridge);
-                        this.system_media_sync_dirty = true;
-                    }
-                })?;
-                Ok(())
-            })
-            .detach();
+            return;
         }
 
-        self.polling_player = false;
+        self.system_media_init_attempts += 1;
+        self.system_media_init_in_flight = true;
+        let event_tx = self.media_event_tx.clone();
+        let task = Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                crate::media_controls::SystemMediaBridge::try_create(event_tx)
+                    .map_err(anyhow::Error::msg)
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("系统媒体初始化任务异常退出: {error}"))?
+        });
+        cx.spawn(async move |this, cx| -> Result<()> {
+            let result = task.await;
+            this.update(cx, |this, _cx| {
+                this.system_media_init_in_flight = false;
+                if let Ok(bridge) = result {
+                    this.system_media = Some(bridge);
+                    this.system_media_sync_dirty = true;
+                }
+            })?;
+            Ok(())
+        })
+        .detach();
     }
 
     fn update_system_media_async(&mut self, cx: &mut Context<MusicApp>) {
@@ -1952,59 +1912,6 @@ impl MusicApp {
         cx.notify();
     }
 
-    fn start_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
-            return;
-        }
-        self.timer_started = true;
-        cx.spawn(async move |this, cx| -> Result<()> {
-            let mut is_playing = false;
-            loop {
-                let delay = if is_playing {
-                    Duration::from_millis(100)
-                } else {
-                    Duration::from_millis(200)
-                };
-                Timer::after(delay).await;
-                let res = this.update(cx, |this, cx| {
-                    let old_track_id = this.snapshot.current_track.as_ref().map(|track| track.id);
-                    let old_state = this.snapshot.state;
-                    this.poll_player(cx);
-                    this.flush_config_save_if_due();
-                    let playing = this.snapshot.state == PlaybackState::Playing;
-                    let is_dragging =
-                        this.drag_target.is_some() || this.seeking || this.volume_dragging;
-                    let stage_idle_due = this.stage_open
-                        && this.stage_controls_visibility > 0.005
-                        && this.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
-                        && !this.seeking
-                        && !this.volume_dragging
-                        && !this.stage_controls_hovered;
-                    let should_refresh = should_refresh_main_view(
-                        old_track_id,
-                        this.snapshot.current_track.as_ref().map(|track| track.id),
-                        old_state,
-                        this.snapshot.state,
-                        is_dragging,
-                        stage_idle_due,
-                    );
-                    if should_refresh {
-                        cx.notify();
-                    }
-                    playing
-                });
-                match res {
-                    Ok(playing) => {
-                        is_playing = playing;
-                    }
-                    Err(_) => break,
-                }
-            }
-            Ok(())
-        })
-        .detach();
-    }
-
     fn ensure_playback_progress(
         &mut self,
         cx: &mut Context<Self>,
@@ -2264,10 +2171,7 @@ impl MusicApp {
                                         gpui::MouseButton::Left,
                                         cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
-                                            this.hide_stage_controls_immediately(
-                                                event.position,
-                                                cx,
-                                            );
+                                            this.hide_stage_controls_immediately(event.position, cx);
                                         }),
                                     )
                                     .child(theme::themed_icon(
@@ -2324,20 +2228,6 @@ impl MusicApp {
     }
 }
 
-fn should_refresh_main_view(
-    old_track_id: Option<TrackId>,
-    current_track_id: Option<TrackId>,
-    old_state: PlaybackState,
-    current_state: PlaybackState,
-    is_dragging: bool,
-    stage_idle_due: bool,
-) -> bool {
-    if is_dragging {
-        return false;
-    }
-    old_track_id != current_track_id || old_state != current_state || stage_idle_due
-}
-
 impl Drop for MusicApp {
     fn drop(&mut self) {
         if self.config_save_dirty {
@@ -2350,7 +2240,7 @@ impl Drop for MusicApp {
 impl Render for MusicApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_background_work(cx);
-        self.start_timer(cx);
+        self.start_runtime_events(cx);
         let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
 
         let now = std::time::Instant::now();
@@ -2364,9 +2254,6 @@ impl Render for MusicApp {
 
         let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
         if stage_prewarm {
-            // Materialize the current expensive stage subtree below the viewport without advancing
-            // Fluid. Artwork/lyrics/track changes invalidate this cache so the next visible open is
-            // normally reduced to replaying the retained composite plus its sampled translation.
             self.stage_prepared = true;
             cx.notify();
         }
@@ -2376,6 +2263,20 @@ impl Render for MusicApp {
             && !self.seeking
             && !self.volume_dragging
             && !self.stage_controls_hovered;
+
+        if self.stage_open
+            && self.stage_suppress_wake_until.is_none()
+            && !is_idle
+            && !self.seeking
+            && !self.volume_dragging
+            && !self.stage_controls_hovered
+            && self.stage_controls_visibility >= 0.995
+        {
+            let deadline = self.stage_last_user_activity + STAGE_CONTROLS_IDLE_TIMEOUT;
+            if deadline > now {
+                window.request_invalidation_at(deadline, cx);
+            }
+        }
 
         let target_visibility = if self.stage_suppress_wake_until.is_some() || is_idle {
             0.0
@@ -2397,8 +2298,6 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        // Hidden prewarm and the armed first frame keep Fluid static. Dynamic work begins only after
-        // the sampled Stage has actually moved into view, and continues until close reaches zero.
         let fluid_active = !stage_prewarm && self.stage_progress > 0.001;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
@@ -2456,9 +2355,6 @@ impl Render for MusicApp {
                 self.stage_progress.clamp(0.0, 1.0)
             };
 
-            // Capture Fluid + cover + lyrics + controls + immersive titlebar into one retained
-            // layer, then apply only one caller-sampled renderer translation to that full subtree.
-            // No per-frame layout is involved, and a close/open retarget simply changes progress.
             let stage_surface = div()
                 .id("stage-drawer-root")
                 .absolute()
@@ -2954,50 +2850,6 @@ mod tests {
         assert!((app.displayed_volume_ratio() - 0.8).abs() < 0.001);
         app.pending_volume_ratio = None;
         assert!((app.displayed_volume_ratio() - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn transport_position_is_child_owned() {
-        assert!(!should_refresh_main_view(
-            Some(1),
-            Some(1),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            false,
-            false,
-        ));
-        assert!(should_refresh_main_view(
-            Some(1),
-            Some(2),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            false,
-            false,
-        ));
-        assert!(should_refresh_main_view(
-            Some(1),
-            Some(1),
-            PlaybackState::Paused,
-            PlaybackState::Playing,
-            false,
-            false,
-        ));
-        assert!(!should_refresh_main_view(
-            Some(1),
-            Some(2),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            true,
-            false,
-        ));
-        assert!(should_refresh_main_view(
-            Some(1),
-            Some(1),
-            PlaybackState::Playing,
-            PlaybackState::Playing,
-            false,
-            true,
-        ));
     }
 
     #[test]

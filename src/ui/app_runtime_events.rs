@@ -1,18 +1,21 @@
 use std::{
     sync::{Arc, mpsc::Receiver},
     thread,
+    time::Duration,
 };
 
-use gpui::{Context, Entity, EventEmitter, Global, Subscription};
+use gpui::{Context, Entity, EventEmitter, Global, Subscription, Timer};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::{
-    audio::{AudioEngine, AudioUiEvent, PlayerCommand},
+    audio::{AudioUiEvent, PlayerCommand},
     media_controls::SystemMediaEvent,
     model::PlaybackState,
 };
 
 use super::shell::MusicApp;
+
+const RUNTIME_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) enum AppRuntimeEvent {
     Audio(AudioUiEvent),
@@ -22,6 +25,7 @@ pub(crate) enum AppRuntimeEvent {
 
 pub(crate) struct AppRuntimeEventBridge {
     audio_generation: u64,
+    maintenance_started: bool,
 }
 
 impl EventEmitter<AppRuntimeEvent> for AppRuntimeEventBridge {}
@@ -30,6 +34,7 @@ impl AppRuntimeEventBridge {
     fn new() -> Self {
         Self {
             audio_generation: 0,
+            maintenance_started: false,
         }
     }
 
@@ -113,38 +118,91 @@ impl AppRuntimeEventBridge {
         })
         .detach();
     }
+
+    fn start_maintenance(
+        &mut self,
+        parent: gpui::WeakEntity<MusicApp>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.maintenance_started {
+            return;
+        }
+        self.maintenance_started = true;
+        cx.spawn(async move |_this, cx| {
+            loop {
+                Timer::after(RUNTIME_MAINTENANCE_INTERVAL).await;
+                if parent
+                    .update(cx, |app, cx| app.runtime_maintenance_tick(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
 }
 
 struct AppRuntimeBinding {
     bridge: Entity<AppRuntimeEventBridge>,
     _subscription: Subscription,
     audio_engine_ptr: usize,
+    root_sources_attached: bool,
 }
 
 impl Global for AppRuntimeBinding {}
 
+fn ensure_binding(cx: &mut Context<MusicApp>) -> Entity<AppRuntimeEventBridge> {
+    if let Some(binding) = cx.try_global::<AppRuntimeBinding>() {
+        return binding.bridge.clone();
+    }
+
+    let bridge = cx.new(|_| AppRuntimeEventBridge::new());
+    let subscription = cx.subscribe(&bridge, |app, _bridge, event, cx| {
+        apply_runtime_event(app, event, cx);
+    });
+    cx.set_global(AppRuntimeBinding {
+        bridge: bridge.clone(),
+        _subscription: subscription,
+        audio_engine_ptr: 0,
+        root_sources_attached: false,
+    });
+    bridge
+}
+
+pub(crate) fn attach_root_sources(
+    app: &MusicApp,
+    library_events: Receiver<()>,
+    media_events: Receiver<SystemMediaEvent>,
+    cx: &mut Context<MusicApp>,
+) {
+    let bridge = ensure_binding(cx);
+    let already_attached = cx
+        .try_global::<AppRuntimeBinding>()
+        .is_some_and(|binding| binding.root_sources_attached);
+    if !already_attached {
+        let parent = cx.entity().downgrade();
+        bridge.update(cx, |bridge, cx| {
+            bridge.attach_library_receiver(library_events, cx);
+            bridge.attach_media_receiver(media_events, cx);
+            bridge.start_maintenance(parent, cx);
+        });
+        cx.update_global(|binding: &mut AppRuntimeBinding, _cx| {
+            binding.root_sources_attached = true;
+        });
+    }
+    ensure_audio_runtime(app, cx);
+}
+
 pub(crate) fn ensure_audio_runtime(app: &MusicApp, cx: &mut Context<MusicApp>) {
+    let bridge = ensure_binding(cx);
     let engine_ptr = app
         .engine
         .as_ref()
         .map_or(0, |engine| Arc::as_ptr(engine) as usize);
-
-    if !cx.has_global::<AppRuntimeBinding>() {
-        let bridge = cx.new(|_| AppRuntimeEventBridge::new());
-        let subscription = cx.subscribe(&bridge, |app, _bridge, event, cx| {
-            apply_runtime_event(app, event, cx);
-        });
-        cx.set_global(AppRuntimeBinding {
-            bridge: bridge.clone(),
-            _subscription: subscription,
-            audio_engine_ptr: 0,
-        });
-    }
-
-    let (bridge, current_ptr) = cx
+    let current_ptr = cx
         .try_global::<AppRuntimeBinding>()
-        .map(|binding| (binding.bridge.clone(), binding.audio_engine_ptr))
-        .expect("runtime event binding must exist after initialization");
+        .map_or(0, |binding| binding.audio_engine_ptr);
     if current_ptr == engine_ptr {
         return;
     }
@@ -169,7 +227,9 @@ fn apply_runtime_event(
     cx: &mut Context<MusicApp>,
 ) {
     match event {
-        AppRuntimeEvent::Audio(AudioUiEvent::SnapshotChanged) => sync_audio_snapshot(app, cx),
+        AppRuntimeEvent::Audio(AudioUiEvent::SnapshotChanged) => {
+            app.sync_audio_snapshot_event(cx);
+        }
         AppRuntimeEvent::Audio(AudioUiEvent::Error(error)) => {
             app.status.clone_from(error);
             cx.notify();
@@ -180,36 +240,6 @@ fn apply_runtime_event(
         }
         AppRuntimeEvent::SystemMedia(event) => apply_system_media_event(app, event, cx),
     }
-}
-
-fn sync_audio_snapshot(app: &mut MusicApp, cx: &mut Context<MusicApp>) {
-    let Some(engine) = app.engine.clone() else {
-        return;
-    };
-    let old_track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
-    let snapshot = engine.snapshot();
-
-    if app.drag_target.is_none() {
-        app.position_ms = snapshot.position_ms;
-        app.config.position_ms = snapshot.position_ms;
-    }
-    if let Some(ratio) = app.pending_volume_ratio
-        && (app.config.volume - ratio).abs() < 0.02
-    {
-        app.pending_volume_ratio = None;
-    }
-    if snapshot.current_track.is_some() {
-        app.config.current_track = snapshot.current_track.as_ref().map(|track| track.id);
-    }
-
-    app.snapshot = snapshot;
-    let current_track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
-    if current_track_id != old_track_id {
-        app.request_current_enrichment(cx);
-    }
-
-    // Structural events are intentionally sparse. Hot position samples never enter this path.
-    cx.notify();
 }
 
 fn apply_system_media_event(

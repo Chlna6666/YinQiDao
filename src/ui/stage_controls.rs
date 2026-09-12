@@ -150,13 +150,12 @@ impl Render for StageControlsView {
             .on_hover({
                 let parent = parent.clone();
                 move |hovered: &bool, _, cx| {
-                    let _ = parent.update(cx, |app, _cx| {
+                    let _ = parent.update(cx, |app, app_cx| {
+                        let changed = app.stage_controls_hovered != *hovered;
                         app.stage_controls_hovered = *hovered;
-                        if *hovered
-                            && app.stage_suppress_wake_until.is_none()
-                            && app.stage_controls_visibility >= 0.995
-                        {
+                        if changed && app.stage_suppress_wake_until.is_none() {
                             app.stage_last_user_activity = Instant::now();
+                            app_cx.notify();
                         }
                     });
                 }
