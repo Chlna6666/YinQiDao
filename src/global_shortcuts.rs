@@ -1,8 +1,6 @@
-use gpui::{App, Context, Timer, Window, WindowHandle};
+use gpui::{App, Context, Window, WindowHandle};
 
 use crate::{hotkeys::AppHotkeyAction, ui::MusicApp};
-
-const GLOBAL_SHORTCUT_TICK: std::time::Duration = std::time::Duration::from_millis(40);
 
 impl MusicApp {
     pub(crate) fn toggle_global_shortcuts(&mut self, cx: &mut Context<Self>) {
@@ -58,18 +56,17 @@ impl MusicApp {
 }
 
 pub(crate) fn start_ui_service(main_window: WindowHandle<MusicApp>, cx: &mut App) {
-    cx.spawn(async move |cx| -> anyhow::Result<()> {
-        loop {
-            Timer::after(GLOBAL_SHORTCUT_TICK).await;
-            let actions = crate::hotkeys::drain_app_actions();
-            if actions.is_empty() {
-                continue;
-            }
+    let Some(mut actions) = crate::hotkeys::take_app_action_receiver() else {
+        return;
+    };
 
+    cx.spawn(async move |cx| -> anyhow::Result<()> {
+        while let Some(action) = actions.recv().await {
             let still_open = cx.update(|cx| {
                 main_window
                     .update(cx, |app, window, app_cx| {
-                        for action in actions {
+                        app.apply_app_hotkey(action, window, app_cx);
+                        while let Ok(action) = actions.try_recv() {
                             app.apply_app_hotkey(action, window, app_cx);
                         }
                     })

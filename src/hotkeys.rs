@@ -6,6 +6,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LyricsHotkeyAction {
     ToggleVisible,
@@ -46,7 +48,7 @@ enum HotkeyEvent {
 struct HotkeyService {
     command_tx: Sender<ServiceCommand>,
     lyrics_event_rx: Receiver<LyricsHotkeyAction>,
-    app_event_rx: Receiver<AppHotkeyAction>,
+    app_event_rx: Option<UnboundedReceiver<AppHotkeyAction>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -54,7 +56,7 @@ impl HotkeyService {
     fn new() -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (lyrics_event_tx, lyrics_event_rx) = mpsc::channel();
-        let (app_event_tx, app_event_rx) = mpsc::channel();
+        let (app_event_tx, app_event_rx) = unbounded_channel();
         let worker = thread::Builder::new()
             .name("yinqidao-global-hotkeys".into())
             .spawn(move || platform::run(command_rx, lyrics_event_tx, app_event_tx))
@@ -62,7 +64,7 @@ impl HotkeyService {
         Self {
             command_tx,
             lyrics_event_rx,
-            app_event_rx,
+            app_event_rx: Some(app_event_rx),
             worker,
         }
     }
@@ -89,13 +91,13 @@ pub(crate) fn drain_actions() -> Vec<LyricsHotkeyAction> {
     service.lyrics_event_rx.try_iter().collect()
 }
 
-/// Drain transport and main-window actions. These are dispatched against the main `MusicApp`
-/// entity on the GPUI foreground thread; the Win32 message thread never touches player state.
-pub(crate) fn drain_app_actions() -> Vec<AppHotkeyAction> {
-    let Ok(service) = service().lock() else {
-        return Vec::new();
+/// Take the event-driven transport/main-window action stream. The receiver is single-consumer and
+/// is moved into the GPUI foreground task so no mutex is held across an async wait.
+pub(crate) fn take_app_action_receiver() -> Option<UnboundedReceiver<AppHotkeyAction>> {
+    let Ok(mut service) = service().lock() else {
+        return None;
     };
-    service.app_event_rx.try_iter().collect()
+    service.app_event_rx.take()
 }
 
 pub(crate) fn shutdown() {
@@ -199,7 +201,7 @@ mod platform {
     pub(super) fn run(
         command_rx: Receiver<ServiceCommand>,
         lyrics_event_tx: Sender<LyricsHotkeyAction>,
-        app_event_tx: Sender<AppHotkeyAction>,
+        app_event_tx: tokio::sync::mpsc::UnboundedSender<AppHotkeyAction>,
     ) {
         // RegisterHotKey(NULL, ...) posts WM_HOTKEY to this worker thread. Force creation of the
         // Win32 message queue before registration so the first shortcut cannot be lost at startup.
@@ -374,7 +376,7 @@ mod platform {
     pub(super) fn run(
         command_rx: Receiver<ServiceCommand>,
         _lyrics_event_tx: Sender<LyricsHotkeyAction>,
-        _app_event_tx: Sender<AppHotkeyAction>,
+        _app_event_tx: tokio::sync::mpsc::UnboundedSender<AppHotkeyAction>,
     ) {
         let mut warned = false;
         loop {
