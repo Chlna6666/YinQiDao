@@ -212,20 +212,38 @@ mod platform {
 
         let mut enabled = false;
         loop {
-            match command_rx.recv_timeout(Duration::from_millis(12)) {
-                Ok(ServiceCommand::SetEnabled(next)) => {
-                    if next != enabled {
-                        if next {
-                            register_all();
-                        } else {
+            let command = if enabled {
+                match command_rx.recv_timeout(Duration::from_millis(12)) {
+                    Ok(command) => Some(command),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match command_rx.recv() {
+                    Ok(command) => Some(command),
+                    Err(_) => break,
+                }
+            };
+
+            if let Some(command) = command {
+                match command {
+                    ServiceCommand::SetEnabled(next) => {
+                        if next != enabled {
+                            if next {
+                                register_all();
+                            } else {
+                                unregister_all();
+                            }
+                            enabled = next;
+                        }
+                    }
+                    ServiceCommand::Shutdown => {
+                        if enabled {
                             unregister_all();
                         }
-                        enabled = next;
+                        return;
                     }
                 }
-                Ok(ServiceCommand::Shutdown) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
             }
 
             while let Ok(command) = command_rx.try_recv() {
@@ -366,10 +384,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::{
-        sync::mpsc::{Receiver, Sender},
-        time::Duration,
-    };
+    use std::sync::mpsc::{Receiver, Sender};
 
     use super::{AppHotkeyAction, LyricsHotkeyAction, ServiceCommand};
 
@@ -380,7 +395,7 @@ mod platform {
     ) {
         let mut warned = false;
         loop {
-            match command_rx.recv_timeout(Duration::from_secs(1)) {
+            match command_rx.recv() {
                 Ok(ServiceCommand::SetEnabled(true)) => {
                     if !warned {
                         tracing::warn!("系统级全局快捷键目前仅在 Windows 注册");
@@ -388,11 +403,7 @@ mod platform {
                     }
                 }
                 Ok(ServiceCommand::SetEnabled(false)) => {}
-                Ok(ServiceCommand::Shutdown)
-                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    break;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(ServiceCommand::Shutdown) | Err(_) => break,
             }
         }
     }
