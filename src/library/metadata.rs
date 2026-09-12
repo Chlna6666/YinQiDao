@@ -72,7 +72,7 @@ pub(super) fn read_track(path: &Path) -> Result<Track> {
         format!("{}:{modified}", normalize_path(path))
     });
 
-    Ok(Track {
+    Ok(Track::new(crate::model::TrackData {
         id: 0,
         path: path.to_path_buf(),
         title,
@@ -89,7 +89,7 @@ pub(super) fn read_track(path: &Path) -> Result<Track> {
         sample_rate: properties.sample_rate().unwrap_or_default(),
         channels: properties.channels().unwrap_or_default() as u16,
         artwork_key,
-    })
+    }))
 }
 
 #[inline]
