@@ -1,13 +1,25 @@
 #![allow(unsafe_code)]
 
-use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::Sender,
+    },
+    time::Duration,
+};
 
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
 
 use crate::model::{PlaybackState, Track};
+
+mod discord;
+
+use discord::DiscordPresence;
+
+const NO_MPRIS_VOLUME_REQUEST: u64 = u64::MAX;
 
 pub enum SystemMediaEvent {
     Play,
@@ -18,13 +30,16 @@ pub enum SystemMediaEvent {
     Stop,
     SeekBy(i64),
     SetPosition(Duration),
+    SetVolume(f32),
 }
 
 pub struct SystemMediaBridge {
     controls: Option<MediaControls>,
-    last_track_id: Option<i64>,
+    last_metadata_fingerprint: Option<u64>,
     last_state: Option<PlaybackState>,
     last_position_sec: u64,
+    mpris_volume_request: Arc<AtomicU64>,
+    discord: Option<DiscordPresence>,
     #[cfg(target_os = "windows")]
     _hwnd: Option<*mut std::ffi::c_void>,
 }
@@ -35,7 +50,7 @@ unsafe impl Sync for SystemMediaBridge {}
 impl SystemMediaBridge {
     pub fn try_create(event_tx: Sender<SystemMediaEvent>) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
-        let hwnd = match win32::get_app_or_host_hwnd() {
+        let hwnd = match win32::get_app_hwnd() {
             Some(h) => h,
             None => return Err("未找到可用窗口句柄 (HWND)".to_string()),
         };
@@ -43,19 +58,20 @@ impl SystemMediaBridge {
         #[cfg(target_os = "windows")]
         let config = PlatformConfig {
             display_name: "音栖岛",
-            dbus_name: "org.mpris.MediaPlayer2.yinqidao",
+            dbus_name: "yinqidao",
             hwnd: Some(hwnd),
         };
 
         #[cfg(not(target_os = "windows"))]
         let config = PlatformConfig {
             display_name: "音栖岛",
-            dbus_name: "org.mpris.MediaPlayer2.yinqidao",
+            dbus_name: "yinqidao",
             hwnd: None,
         };
 
         let mut controls = MediaControls::new(config).map_err(|e| format!("{e:?}"))?;
-
+        let mpris_volume_request = Arc::new(AtomicU64::new(NO_MPRIS_VOLUME_REQUEST));
+        let requested_volume = mpris_volume_request.clone();
         let tx = event_tx.clone();
         let _ = controls.attach(move |event| {
             let mapped = match event {
@@ -66,7 +82,7 @@ impl SystemMediaBridge {
                 MediaControlEvent::Previous => Some(SystemMediaEvent::Previous),
                 MediaControlEvent::Stop => Some(SystemMediaEvent::Stop),
                 MediaControlEvent::SeekBy(dir, duration) => {
-                    let delta_ms = duration.as_millis() as i64;
+                    let delta_ms = duration.as_millis().min(i64::MAX as u128) as i64;
                     let signed_delta = match dir {
                         souvlaki::SeekDirection::Forward => delta_ms,
                         souvlaki::SeekDirection::Backward => -delta_ms,
@@ -75,6 +91,11 @@ impl SystemMediaBridge {
                 }
                 MediaControlEvent::SetPosition(MediaPosition(pos)) => {
                     Some(SystemMediaEvent::SetPosition(pos))
+                }
+                MediaControlEvent::SetVolume(volume) if volume.is_finite() => {
+                    let volume = volume.clamp(0.0, 1.0);
+                    requested_volume.store(volume.to_bits(), Ordering::Release);
+                    Some(SystemMediaEvent::SetVolume(volume as f32))
                 }
                 _ => None,
             };
@@ -85,9 +106,11 @@ impl SystemMediaBridge {
 
         Ok(Self {
             controls: Some(controls),
-            last_track_id: None,
+            last_metadata_fingerprint: None,
             last_state: None,
             last_position_sec: 0,
+            mpris_volume_request,
+            discord: DiscordPresence::from_env(),
             #[cfg(target_os = "windows")]
             _hwnd: Some(hwnd),
         })
@@ -97,13 +120,18 @@ impl SystemMediaBridge {
         Self::try_create(event_tx).ok()
     }
 
-    /// 向操作系统同步当前曲目元数据（带状态缓存防抖，避免高频跨进程 COM 调用堵塞 UI 线程）
+    /// 向操作系统与 Discord 同步当前曲目元数据。元数据指纹包含标题/歌手/专辑/时长，
+    /// 因此同一 TrackId 在联网补全后也会重新发布，而不是被旧的 ID-only 缓存吞掉。
     pub fn update_metadata(&mut self, track: Option<&Track>) {
-        let current_id = track.map(|t| t.id);
-        if current_id == self.last_track_id && self.last_track_id.is_some() {
+        let fingerprint = metadata_fingerprint(track);
+        if self.last_metadata_fingerprint == Some(fingerprint) {
             return;
         }
-        self.last_track_id = current_id;
+        self.last_metadata_fingerprint = Some(fingerprint);
+
+        if let Some(discord) = &mut self.discord {
+            discord.update_metadata(track);
+        }
 
         let Some(controls) = &mut self.controls else {
             return;
@@ -123,8 +151,14 @@ impl SystemMediaBridge {
         }
     }
 
-    /// 向操作系统同步当前播放状态与进度时间戳（仅在状态变动或间隔 2 秒以上时同步）
+    /// 同步当前播放状态与进度。系统后端只在状态变化或时间跳变时更新；Discord 自己
+    /// 使用 transport anchor 去除连续播放的 2 秒维护采样，只在曲目/状态/seek 改变时发 IPC。
     pub fn update_playback(&mut self, state: PlaybackState, position_ms: u64) {
+        self.confirm_mpris_volume_request();
+        if let Some(discord) = &mut self.discord {
+            discord.update_playback(state, position_ms);
+        }
+
         let position_sec = position_ms / 1000;
         let state_changed = self.last_state != Some(state);
         let time_jumped = position_sec.abs_diff(self.last_position_sec) >= 2;
@@ -150,6 +184,60 @@ impl SystemMediaBridge {
         };
         let _ = controls.set_playback(playback);
     }
+
+    fn confirm_mpris_volume_request(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let bits = self
+                .mpris_volume_request
+                .swap(NO_MPRIS_VOLUME_REQUEST, Ordering::AcqRel);
+            if bits == NO_MPRIS_VOLUME_REQUEST {
+                return;
+            }
+            let volume = f64::from_bits(bits).clamp(0.0, 1.0);
+            let Some(controls) = &mut self.controls else {
+                self.mpris_volume_request.store(bits, Ordering::Release);
+                return;
+            };
+            if controls.set_volume(volume).is_err() {
+                self.mpris_volume_request.store(bits, Ordering::Release);
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self
+                .mpris_volume_request
+                .swap(NO_MPRIS_VOLUME_REQUEST, Ordering::AcqRel);
+        }
+    }
+}
+
+fn metadata_fingerprint(track: Option<&Track>) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    #[inline]
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(PRIME);
+        }
+    }
+
+    let Some(track) = track else {
+        return OFFSET.wrapping_mul(PRIME);
+    };
+    let mut hash = OFFSET;
+    mix(&mut hash, &track.id.to_le_bytes());
+    mix(&mut hash, track.title.as_bytes());
+    mix(&mut hash, &[0xff]);
+    mix(&mut hash, track.artist.as_bytes());
+    mix(&mut hash, &[0xfe]);
+    mix(&mut hash, track.album.as_bytes());
+    mix(&mut hash, &track.duration_ms.to_le_bytes());
+    hash
 }
 
 #[cfg(target_os = "windows")]
@@ -160,7 +248,6 @@ mod win32 {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn GetActiveWindow() -> *mut c_void;
-        fn GetForegroundWindow() -> *mut c_void;
         fn GetCurrentThreadId() -> u32;
         fn EnumThreadWindows(
             thread_id: u32,
@@ -184,15 +271,11 @@ mod win32 {
         1
     }
 
-    pub fn get_app_or_host_hwnd() -> Option<*mut c_void> {
+    pub fn get_app_hwnd() -> Option<*mut c_void> {
         unsafe {
             let active = GetActiveWindow();
             if !active.is_null() && IsWindow(active) != 0 {
                 return Some(active);
-            }
-            let fg = GetForegroundWindow();
-            if !fg.is_null() && IsWindow(fg) != 0 {
-                return Some(fg);
             }
             let mut found: *mut c_void = null_mut();
             let thread_id = GetCurrentThreadId();
@@ -210,13 +293,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_fingerprint_changes_when_enrichment_changes_text() {
+        let first = Track::new(crate::model::TrackData {
+            id: 7,
+            path: std::path::PathBuf::from("track.flac"),
+            title: "旧标题".into(),
+            artist: "歌手".into(),
+            album: "专辑".into(),
+            year: None,
+            genre: None,
+            duration_ms: 10_000,
+            codec: "flac".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: None,
+        });
+        let mut second = first.clone();
+        second.title = "新标题".into();
+        assert_ne!(
+            metadata_fingerprint(Some(&first)),
+            metadata_fingerprint(Some(&second))
+        );
+    }
+
+    #[test]
     #[ignore = "requires a working interactive desktop media-control bridge"]
     fn test_media_controls_init() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let bridge = SystemMediaBridge::try_create(tx);
         #[cfg(target_os = "windows")]
         {
-            if win32::get_app_or_host_hwnd().is_some() {
+            if win32::get_app_hwnd().is_some() {
                 assert!(
                     bridge.is_ok(),
                     "有可用窗口时 SystemMediaBridge 应初始化成功"

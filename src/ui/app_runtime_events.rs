@@ -296,5 +296,6 @@ fn apply_system_media_event(
         SystemMediaEvent::SetPosition(position) => {
             app.seek_to_ms(position.as_millis() as u64, cx);
         }
+        SystemMediaEvent::SetVolume(volume) => app.set_app_volume(*volume, cx),
     }
 }
