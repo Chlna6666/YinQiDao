@@ -112,18 +112,36 @@ impl SnapshotCache {
         }
     }
 
-    fn snapshot(&self) -> PlayerSnapshot {
+    fn sync_snapshot(&self, snapshot: &mut PlayerSnapshot) {
         let current = self.active.load(Ordering::Acquire) & 1;
         let other = 1 - current;
-        let mut snapshot = self.slots[current]
+        let structural = self.slots[current]
             .try_read()
-            .map(|slot| slot.clone())
-            .or_else(|_| self.slots[other].try_read().map(|slot| slot.clone()))
-            .unwrap_or_default();
+            .or_else(|_| self.slots[other].try_read());
+
+        if let Ok(slot) = structural {
+            if !tracks_equal(snapshot.current_track.as_ref(), slot.current_track.as_ref()) {
+                snapshot.current_track.clone_from(&slot.current_track);
+            }
+            if !Arc::ptr_eq(&snapshot.queue, &slot.queue) {
+                snapshot.queue = slot.queue.clone();
+            }
+            snapshot.volume = slot.volume;
+            snapshot.repeat = slot.repeat;
+            snapshot.shuffle = slot.shuffle;
+            if snapshot.error != slot.error {
+                snapshot.error.clone_from(&slot.error);
+            }
+        }
 
         snapshot.state = self.visible_state();
         snapshot.position_ms = self.visible_position_ms();
         snapshot.duration_ms = self.duration_ms.load(Ordering::Acquire);
+    }
+
+    fn snapshot(&self) -> PlayerSnapshot {
+        let mut snapshot = PlayerSnapshot::default();
+        self.sync_snapshot(&mut snapshot);
         snapshot
     }
 
@@ -222,6 +240,27 @@ impl SnapshotCache {
         } else {
             self.position_ms.load(Ordering::Acquire)
         }
+    }
+}
+
+fn tracks_equal(left: Option<&Track>, right: Option<&Track>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.id == right.id
+                && left.path == right.path
+                && left.title == right.title
+                && left.artist == right.artist
+                && left.album == right.album
+                && left.year == right.year
+                && left.genre == right.genre
+                && left.duration_ms == right.duration_ms
+                && left.codec == right.codec
+                && left.sample_rate == right.sample_rate
+                && left.channels == right.channels
+                && left.artwork_key == right.artwork_key
+        }
+        _ => false,
     }
 }
 
@@ -459,6 +498,10 @@ impl AudioEngine {
         self.snapshot.snapshot()
     }
 
+    pub fn sync_snapshot(&self, snapshot: &mut PlayerSnapshot) {
+        self.snapshot.sync_snapshot(snapshot);
+    }
+
     pub fn progress(&self) -> (PlaybackState, u64, u64) {
         self.snapshot.progress()
     }
@@ -657,6 +700,23 @@ fn decode_state(value: u8) -> PlaybackState {
 mod tests {
     use super::*;
 
+    fn test_track(title: &str) -> Track {
+        Track {
+            id: 7,
+            path: std::path::PathBuf::from("test.flac"),
+            title: title.to_owned(),
+            artist: "artist".into(),
+            album: "album".into(),
+            year: Some(2026),
+            genre: Some("test".into()),
+            duration_ms: 10_000,
+            codec: "flac".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: Some("art".into()),
+        }
+    }
+
     #[test]
     fn optimistic_transport_state_is_visible_without_waiting_for_engine() {
         let cache = SnapshotCache::new(PlayerSnapshot::default());
@@ -744,6 +804,21 @@ mod tests {
         assert_eq!(loaded.state, PlaybackState::Playing);
         assert_eq!(loaded.position_ms, 700);
         assert_eq!(loaded.duration_ms, 1_000);
+    }
+
+    #[test]
+    fn sync_snapshot_refreshes_changed_track_metadata() {
+        let cache = SnapshotCache::new(PlayerSnapshot {
+            current_track: Some(test_track("old")),
+            ..PlayerSnapshot::default()
+        });
+        let mut target = cache.snapshot();
+        cache.store(PlayerSnapshot {
+            current_track: Some(test_track("new")),
+            ..PlayerSnapshot::default()
+        });
+        cache.sync_snapshot(&mut target);
+        assert_eq!(target.current_track.as_ref().map(|track| track.title.as_str()), Some("new"));
     }
 
     #[test]
