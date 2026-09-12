@@ -23,17 +23,27 @@ type PlatformIpc = std::os::unix::net::UnixStream;
 
 struct IpcStream(PlatformIpc);
 
-impl Write for IpcStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
-
 impl IpcStream {
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            let written = self.0.write(frame)?;
+            if written != frame.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "Discord IPC named pipe 发生短写",
+                ));
+            }
+            self.0.flush()
+        }
+
+        #[cfg(unix)]
+        {
+            self.0.write_all(frame)?;
+            self.0.flush()
+        }
+    }
+
     fn drain_responses(&mut self) -> io::Result<()> {
         #[cfg(unix)]
         {
@@ -323,10 +333,7 @@ impl DiscordPresence {
             ));
         };
         stream.drain_responses()?;
-        // Discord's IPC transport treats each named-pipe write as a message boundary on Windows.
-        // Header and JSON therefore must be submitted as one contiguous write.
-        stream.write_all(&frame)?;
-        stream.flush()?;
+        stream.write_frame(&frame)?;
         stream.drain_responses()
     }
 
