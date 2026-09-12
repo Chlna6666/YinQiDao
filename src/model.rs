@@ -299,3 +299,42 @@ pub struct PlayerSnapshot {
     pub shuffle: bool,
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track() -> Track {
+        Track::new(TrackData {
+            id: 1,
+            path: PathBuf::from("song.flac"),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            year: Some(2026),
+            genre: Some("Test".into()),
+            duration_ms: 180_000,
+            codec: "FLAC".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: Some("cover".into()),
+        })
+    }
+
+    #[test]
+    fn track_clone_shares_payload_until_first_write() {
+        let original = track();
+        let mut edited = original.clone();
+
+        assert!(Arc::ptr_eq(&original.0, &edited.0));
+
+        edited.title = "Edited".into();
+        edited.duration_ms = 181_000;
+
+        assert!(!Arc::ptr_eq(&original.0, &edited.0));
+        assert_eq!(original.title, "Song");
+        assert_eq!(original.duration_ms, 180_000);
+        assert_eq!(edited.title, "Edited");
+        assert_eq!(edited.duration_ms, 181_000);
+    }
+}
