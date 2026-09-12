@@ -20,6 +20,16 @@ pub struct Track {
     pub artwork_key: Option<String>,
 }
 
+/// Construction payload for [`Track`]. This is temporarily an alias so call sites can migrate to
+/// `Track::new(TrackData { .. })` without changing runtime behavior before Track becomes shared.
+pub type TrackData = Track;
+
+impl Track {
+    pub fn new(data: TrackData) -> Self {
+        data
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PlaybackState {
     #[default]
