@@ -51,6 +51,7 @@ pub(super) struct StageControlsView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
     stage_active: bool,
+    controls_visible: bool,
     timer_started: bool,
 }
 
@@ -60,6 +61,7 @@ impl StageControlsView {
             parent,
             engine,
             stage_active: false,
+            controls_visible: true,
             timer_started: false,
         }
     }
@@ -75,14 +77,17 @@ impl StageControlsView {
             (None, None) => false,
             _ => true,
         };
-        let active_changed = self.stage_active != stage_active;
+        let controls_visible = app.stage_controls_visibility > 0.005
+            || matches!(app.drag_target, Some(DragTarget::Progress | DragTarget::Volume));
+        let changed = engine_changed
+            || self.stage_active != stage_active
+            || self.controls_visible != controls_visible;
         if engine_changed {
             self.engine = app.engine.clone();
         }
-        if active_changed {
-            self.stage_active = stage_active;
-        }
-        if engine_changed || active_changed {
+        self.stage_active = stage_active;
+        self.controls_visible = controls_visible;
+        if changed {
             cx.notify();
         }
     }
@@ -98,6 +103,7 @@ impl StageControlsView {
                 if this
                     .update(cx, |this, cx| {
                         if this.stage_active
+                            && this.controls_visible
                             && this.engine.as_ref().is_some_and(|engine| {
                                 engine.progress().0 == PlaybackState::Playing
                             })
@@ -168,7 +174,7 @@ impl Render for StageControlsView {
                 let parent = parent.clone();
                 move |hovered: &bool, _, cx| {
                     let _ = parent.update(cx, |app, _cx| {
-                        app.stage_controls_hovered = false;
+                        app.stage_controls_hovered = *hovered;
                         if *hovered
                             && app.stage_suppress_wake_until.is_none()
                             && app.stage_controls_visibility >= 0.995
