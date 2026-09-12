@@ -18,7 +18,6 @@ use super::{
     theme::{ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
 
-const TRANSPORT_IDLE_POLL: Duration = Duration::from_millis(500);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(25);
@@ -332,6 +331,7 @@ struct StageTransportView {
     drag_progress_ratio: Option<f32>,
     progress: Option<Entity<StageProgressView>>,
     timer_started: bool,
+    timer_epoch: u64,
 }
 
 impl StageTransportView {
@@ -345,6 +345,7 @@ impl StageTransportView {
             drag_progress_ratio: None,
             progress: None,
             timer_started: false,
+            timer_epoch: 0,
         }
     }
 
@@ -362,10 +363,11 @@ impl StageTransportView {
         };
         let playback_state = app.snapshot.state;
         let drag_progress_ratio = app.drag_progress_ratio;
-        let changed = engine_changed
+        let timer_policy_changed = engine_changed
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
-            || self.playback_state != playback_state
+            || self.playback_state != playback_state;
+        let changed = timer_policy_changed
             || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
 
         if engine_changed {
@@ -375,6 +377,10 @@ impl StageTransportView {
         self.controls_visible = controls_visible;
         self.playback_state = playback_state;
         self.drag_progress_ratio = drag_progress_ratio;
+        if timer_policy_changed {
+            self.timer_epoch = self.timer_epoch.wrapping_add(1);
+            self.timer_started = false;
+        }
 
         if let Some(progress) = &self.progress {
             let engine = self.engine.clone();
@@ -425,17 +431,20 @@ impl StageTransportView {
         progress
     }
 
+    #[inline]
+    fn clock_should_run(&self) -> bool {
+        self.stage_active
+            && self.controls_visible
+            && self.playback_state == PlaybackState::Playing
+            && self.engine.is_some()
+    }
+
     fn next_clock_delay(&self) -> Duration {
-        if !self.stage_active
-            || !self.controls_visible
-            || self.playback_state != PlaybackState::Playing
-        {
-            return TRANSPORT_IDLE_POLL;
-        }
-        let Some(engine) = &self.engine else {
-            return TRANSPORT_IDLE_POLL;
-        };
-        let (_, position_ms, _) = engine.progress();
+        let (_, position_ms, _) = self
+            .engine
+            .as_ref()
+            .expect("stage transport clock requires an audio engine")
+            .progress();
         let remainder = position_ms % 1_000;
         let delay = (1_000 - remainder)
             .clamp(TRANSPORT_MIN_SLEEP_MS, TRANSPORT_MAX_SLEEP_MS);
@@ -443,30 +452,38 @@ impl StageTransportView {
     }
 
     fn ensure_clock_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
+        if self.timer_started || !self.clock_should_run() {
             return;
         }
         self.timer_started = true;
+        let epoch = self.timer_epoch;
         cx.spawn(async move |this, cx| -> Result<()> {
             loop {
-                let delay = match this.update(cx, |this, _cx| this.next_clock_delay()) {
-                    Ok(delay) => delay,
-                    Err(_) => break,
+                let delay = match this.update(cx, |this, _cx| {
+                    (this.timer_epoch == epoch && this.clock_should_run())
+                        .then(|| this.next_clock_delay())
+                }) {
+                    Ok(Some(delay)) => delay,
+                    _ => break,
                 };
                 Timer::after(delay).await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.stage_active
-                            && this.controls_visible
-                            && this.playback_state == PlaybackState::Playing
-                        {
-                            // The text changes only on second boundaries. The progress rail has its
-                            // own transport-sample entity and does not force these strings to reshape.
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
+                let keep_running = match this.update(cx, |this, cx| {
+                    if this.timer_epoch != epoch {
+                        return false;
+                    }
+                    if !this.clock_should_run() {
+                        this.timer_started = false;
+                        return false;
+                    }
+                    // The text changes only on second boundaries. The progress rail has its own
+                    // transport-sample entity and does not force these strings to reshape.
+                    cx.notify();
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => break,
+                };
+                if !keep_running {
                     break;
                 }
             }
