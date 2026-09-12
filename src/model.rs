@@ -36,6 +36,11 @@ impl Track {
     pub fn new(data: TrackData) -> Self {
         Self(Arc::new(data))
     }
+
+    #[inline]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl Deref for Track {
@@ -326,12 +331,12 @@ mod tests {
         let original = track();
         let mut edited = original.clone();
 
-        assert!(Arc::ptr_eq(&original.0, &edited.0));
+        assert!(original.ptr_eq(&edited));
 
         edited.title = "Edited".into();
         edited.duration_ms = 181_000;
 
-        assert!(!Arc::ptr_eq(&original.0, &edited.0));
+        assert!(!original.ptr_eq(&edited));
         assert_eq!(original.title, "Song");
         assert_eq!(original.duration_ms, 180_000);
         assert_eq!(edited.title, "Edited");
