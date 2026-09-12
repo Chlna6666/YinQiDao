@@ -23,6 +23,7 @@ use super::{
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
+const STAGE_CHROME_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug)]
 struct StageChromeFade {
@@ -143,6 +144,19 @@ struct StageTitlebarViewCache {
 
 impl Global for StageTitlebarViewCache {}
 
+#[inline]
+fn stage_chrome_target_visible(app: &MusicApp) -> bool {
+    if !app.stage_open || app.stage_suppress_wake_until.is_some() {
+        return false;
+    }
+
+    let idle = app.stage_last_user_activity.elapsed() >= STAGE_CHROME_IDLE_TIMEOUT
+        && !app.seeking
+        && !app.volume_dragging
+        && !app.stage_controls_hovered;
+    !idle
+}
+
 pub(super) fn view(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
@@ -196,7 +210,7 @@ fn transport_view(
     });
 
     let stage_active = app.stage_open || app.stage_animating;
-    let controls_visible = app.stage_controls_visibility >= 0.5 || app.drag_target.is_some();
+    let controls_visible = stage_chrome_target_visible(app) || app.drag_target.is_some();
     view.update(cx, |view, cx| {
         view.sync_from_app(app, stage_active, controls_visible, cx)
     });
@@ -269,13 +283,32 @@ impl StageControlsView {
         stage_active: bool,
         cx: &mut Context<Self>,
     ) {
-        let target_visible = app.stage_controls_visibility >= 0.5;
+        let target_visible = stage_chrome_target_visible(app);
         let playback_state = app.snapshot.state;
         let volume = app.displayed_volume_ratio();
         let changed = self.stage_active != stage_active
             || self.playback_state != playback_state
             || (self.volume - volume).abs() > 0.0005;
         let fade_changed = self.fade.set_target(target_visible);
+
+        // shell.rs still owns the legacy float until its final wiring cleanup. Treat that float as
+        // a discrete target and collapse the first legacy interpolation frame back to 0/1. This
+        // prevents MusicApp from requesting RAF for the whole 220 ms chrome fade; subsequent frames
+        // are requested only by this retained Entity.
+        let target_value = if target_visible { 1.0 } else { 0.0 };
+        if (app.stage_controls_visibility - target_value).abs() > 0.005 {
+            let parent = self.parent.clone();
+            cx.defer(move |cx| {
+                let _ = parent.update(cx, |app, app_cx| {
+                    let target_visible = stage_chrome_target_visible(app);
+                    let target_value = if target_visible { 1.0 } else { 0.0 };
+                    if (app.stage_controls_visibility - target_value).abs() > 0.005 {
+                        app.stage_controls_visibility = target_value;
+                        app_cx.notify();
+                    }
+                });
+            });
+        }
 
         self.stage_active = stage_active;
         self.playback_state = playback_state;
@@ -288,7 +321,7 @@ impl StageControlsView {
 }
 
 impl Render for StageControlsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         if self.fade.advance(Instant::now()) {
             window.request_animation_frame();
         }
@@ -460,7 +493,7 @@ impl StageTitlebarView {
     }
 
     fn sync_from_app(&mut self, app: &MusicApp, cx: &mut Context<Self>) {
-        let fade_changed = self.fade.set_target(app.stage_controls_visibility >= 0.5);
+        let fade_changed = self.fade.set_target(stage_chrome_target_visible(app));
         let title_key = stage_title_fingerprint(app);
         let title_changed = title_key != self.title_key;
         if title_changed {
@@ -660,6 +693,7 @@ fn stage_title_fingerprint(app: &MusicApp) -> u64 {
 
     #[inline]
     fn mix(hash: &mut u64, bytes: &[u8]) {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
         for byte in bytes {
             *hash ^= u64::from(*byte);
             *hash = hash.wrapping_mul(PRIME);
@@ -673,7 +707,7 @@ fn stage_title_fingerprint(app: &MusicApp) -> u64 {
         mix(&mut hash, &[0xff]);
         mix(&mut hash, track.artist.as_bytes());
     }
-    hash
+    hash.wrapping_mul(PRIME)
 }
 
 struct StageTransportView {
@@ -1066,5 +1100,10 @@ mod tests {
         assert_eq!(StageChromeFade::ease(0.0), 0.0);
         assert!((StageChromeFade::ease(0.5) - 0.5).abs() < f32::EPSILON);
         assert_eq!(StageChromeFade::ease(1.0), 1.0);
+    }
+
+    #[test]
+    fn stage_chrome_timeout_matches_stage_policy() {
+        assert_eq!(STAGE_CHROME_IDLE_TIMEOUT, Duration::from_secs(20));
     }
 }
