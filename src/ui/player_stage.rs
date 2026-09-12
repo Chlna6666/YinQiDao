@@ -5,9 +5,10 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView,
-    BorrowAppContext as _, Context, Easing, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    BorrowAppContext as _, Context, Easing, ElementId, EncodedImageBytes, Entity, Global,
+    ImageFormat, IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -31,11 +32,50 @@ struct StagePlayerViewCache {
 
 impl Global for StagePlayerViewCache {}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct StagePlayerRenderKey {
     track_id: Option<TrackId>,
     artwork_ptr: usize,
     artwork_len: usize,
+}
+
+#[derive(Clone)]
+struct StageCoverRenderData {
+    track_id: Option<TrackId>,
+    title: SharedString,
+    artist: SharedString,
+    album: SharedString,
+    artwork: Option<Arc<[u8]>>,
+}
+
+impl Default for StageCoverRenderData {
+    fn default() -> Self {
+        Self {
+            track_id: None,
+            title: SharedString::new_static("未在播放音乐"),
+            artist: SharedString::new_static("请选择音乐"),
+            album: SharedString::new_static("未知专辑"),
+            artwork: None,
+        }
+    }
+}
+
+impl StageCoverRenderData {
+    fn from_track(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> Self {
+        let Some(track) = track else {
+            return Self {
+                artwork,
+                ..Self::default()
+            };
+        };
+        Self {
+            track_id: Some(track.id),
+            title: SharedString::from(track.title.clone()),
+            artist: SharedString::from(track.artist.clone()),
+            album: SharedString::from(track.album.clone()),
+            artwork,
+        }
+    }
 }
 
 pub(super) fn render(
@@ -61,8 +101,6 @@ pub(super) fn render(
     let initial_fluid = fluid_background.clone();
     let initial_lyrics = lyrics.clone();
     let initial_controls = controls.clone();
-    let initial_track = app.snapshot.current_track.clone();
-    let initial_artwork = artwork.clone();
     let stage = cx.update_default_global(move |cache: &mut StagePlayerViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
@@ -72,9 +110,8 @@ pub(super) fn render(
             fluid_background: initial_fluid,
             lyrics: initial_lyrics,
             controls: initial_controls,
-            track: initial_track,
-            artwork: initial_artwork,
-            key,
+            cover: StageCoverRenderData::default(),
+            key: StagePlayerRenderKey::default(),
         });
         cache.view = Some(view.clone());
         view
@@ -84,8 +121,10 @@ pub(super) fn render(
         let mut changed = false;
         if stage.key != key {
             stage.key = key;
-            stage.track = app.snapshot.current_track.clone();
-            stage.artwork = artwork.clone();
+            stage.cover = StageCoverRenderData::from_track(
+                app.snapshot.current_track.as_ref(),
+                artwork.clone(),
+            );
             changed = true;
         }
         if stage.fluid_background != fluid_background {
@@ -113,8 +152,7 @@ struct StagePlayerView {
     fluid_background: Entity<AppleFluidView>,
     lyrics: Entity<stage_lyrics::StageLyricsView>,
     controls: Entity<stage_controls::StageControlsView>,
-    track: Option<Track>,
-    artwork: Option<Arc<[u8]>>,
+    cover: StageCoverRenderData,
     key: StagePlayerRenderKey,
 }
 
@@ -177,7 +215,7 @@ impl Render for StagePlayerView {
                             .min_h(px(0.0))
                             .gap_12()
                             .items_center()
-                            .child(stage_cover(self.track.as_ref(), self.artwork.clone()))
+                            .child(stage_cover(&self.cover))
                             .child(lyrics),
                     )
                     .child(self.controls.clone()),
@@ -185,18 +223,14 @@ impl Render for StagePlayerView {
     }
 }
 
-fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoElement {
-    let title = track.map_or("未在播放音乐", |track| track.title.as_str());
-    let artist = track.map_or("请选择音乐", |track| track.artist.as_str());
-    let album = track.map_or("未知专辑", |track| track.album.as_str());
-    let track_key = track.map_or(i64::MIN, |track| track.id);
-    let cover = if let Some(bytes) = artwork {
+fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
+    let cover = if let Some(bytes) = data.artwork.clone() {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))
             .size_full()
             .object_fit(ObjectFit::Cover)
             .into_any_element()
     } else {
-        let (c1, c2) = elegant_gradient_for(track.map_or(0, |track| track.id));
+        let (c1, c2) = elegant_gradient_for(data.track_id.unwrap_or(0));
         div()
             .size_full()
             .bg(linear_gradient(
@@ -234,7 +268,10 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
         .shadow_lg()
         .child(cover)
         .with_animation(
-            SharedString::from(format!("stage-cover-enter-{track_key}")),
+            ElementId::NamedInteger(
+                SharedString::new_static("stage-cover-enter"),
+                data.track_id.map_or(u64::MAX, |id| id as u64),
+            ),
             cover_enter,
             |element, _| element,
         );
@@ -261,7 +298,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_center()
                         .truncate()
-                        .child(title.to_owned()),
+                        .child(data.title.clone()),
                 )
                 .child(
                     div()
@@ -269,7 +306,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
                         .text_base()
                         .text_color(hsla(0.0, 0.0, 1.0, 0.72))
                         .truncate()
-                        .child(artist.to_owned()),
+                        .child(data.artist.clone()),
                 )
                 .child(
                     div()
@@ -277,7 +314,7 @@ fn stage_cover(track: Option<&Track>, artwork: Option<Arc<[u8]>>) -> impl IntoEl
                         .text_sm()
                         .text_color(hsla(0.0, 0.0, 1.0, 0.42))
                         .truncate()
-                        .child(album.to_owned()),
+                        .child(data.album.clone()),
                 ),
         )
 }
