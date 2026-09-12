@@ -380,8 +380,16 @@ impl StageTransportView {
             let playback_state = self.playback_state;
             let stage_active = self.stage_active;
             let controls_visible = self.controls_visible;
+            let drag_progress_ratio = self.drag_progress_ratio;
             progress.update(cx, |progress, cx| {
-                progress.sync(engine, playback_state, stage_active, controls_visible, cx)
+                progress.sync(
+                    engine,
+                    playback_state,
+                    stage_active,
+                    controls_visible,
+                    drag_progress_ratio,
+                    cx,
+                )
             });
         }
 
@@ -400,6 +408,7 @@ impl StageTransportView {
         let playback_state = self.playback_state;
         let stage_active = self.stage_active;
         let controls_visible = self.controls_visible;
+        let drag_progress_ratio = self.drag_progress_ratio;
         let progress = cx.new(move |_| {
             StageProgressView::new(
                 parent,
@@ -408,6 +417,7 @@ impl StageTransportView {
                 playback_state,
                 stage_active,
                 controls_visible,
+                drag_progress_ratio,
             )
         });
         self.progress = Some(progress.clone());
@@ -506,6 +516,7 @@ struct StageProgressView {
     playback_state: PlaybackState,
     stage_active: bool,
     controls_visible: bool,
+    drag_progress_ratio: Option<f32>,
 }
 
 impl StageProgressView {
@@ -516,6 +527,7 @@ impl StageProgressView {
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
+        drag_progress_ratio: Option<f32>,
     ) -> Self {
         Self {
             parent,
@@ -524,6 +536,7 @@ impl StageProgressView {
             playback_state,
             stage_active,
             controls_visible,
+            drag_progress_ratio,
         }
     }
 
@@ -533,6 +546,7 @@ impl StageProgressView {
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
+        drag_progress_ratio: Option<f32>,
         cx: &mut Context<Self>,
     ) {
         let engine_changed = match (&self.engine, &engine) {
@@ -543,11 +557,13 @@ impl StageProgressView {
         let changed = engine_changed
             || self.playback_state != playback_state
             || self.stage_active != stage_active
-            || self.controls_visible != controls_visible;
+            || self.controls_visible != controls_visible
+            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
         self.engine = engine;
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
+        self.drag_progress_ratio = drag_progress_ratio;
         if changed {
             cx.notify();
         }
@@ -560,10 +576,7 @@ impl Render for StageProgressView {
             (PlaybackState::Stopped, 0, 0),
             |engine| engine.progress(),
         );
-        let drag_progress_ratio = self
-            .parent
-            .read_with(cx, |app, _| app.drag_progress_ratio)
-            .unwrap_or(None);
+        let drag_progress_ratio = self.drag_progress_ratio;
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
                 0.0
@@ -599,6 +612,7 @@ impl Render for StageProgressView {
                         app.seek_to_ratio(ratio, app_cx);
                     });
                     let _ = this_click.update(cx, |this, cx| {
+                        this.drag_progress_ratio = None;
                         let _ = this.owner.update(cx, |owner, cx| {
                             owner.drag_progress_ratio = None;
                             cx.notify();
@@ -619,6 +633,7 @@ impl Render for StageProgressView {
                         }
                     });
                     let _ = this_drag.update(cx, |this, cx| {
+                        this.drag_progress_ratio = Some(ratio);
                         let _ = this.owner.update(cx, |owner, cx| {
                             owner.drag_progress_ratio = Some(ratio);
                             cx.notify();
@@ -638,6 +653,7 @@ impl Render for StageProgressView {
                     app.commit_drag(app_cx);
                 });
                 let _ = this_commit.update(cx, |this, cx| {
+                    this.drag_progress_ratio = None;
                     let _ = this.owner.update(cx, |owner, cx| {
                         owner.drag_progress_ratio = None;
                         cx.notify();
