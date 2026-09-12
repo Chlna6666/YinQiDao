@@ -91,10 +91,10 @@ impl LyricScrollAnimation {
         if duration <= f32::EPSILON {
             return 0.0;
         }
-        let progress = now
+        let progress = (now
             .saturating_duration_since(self.started_at)
             .as_secs_f32()
-            .div_euclid(duration)
+            / duration)
             .clamp(0.0, 1.0);
         let remaining = 1.0 - progress;
         self.from_y * remaining * remaining * remaining
@@ -405,7 +405,12 @@ impl StageLyricsView {
             .map_or(0.0, |animation| animation.offset_at(now))
     }
 
-    fn start_scroll_animation(&mut self, from_y: f32, cx: &mut Context<Self>) {
+    fn start_scroll_animation(
+        &mut self,
+        from_y: f32,
+        started_at: Instant,
+        cx: &mut Context<Self>,
+    ) {
         if !from_y.is_finite() || from_y.abs() <= SCROLL_SETTLE_PX {
             self.cancel_scroll_animation();
             return;
@@ -416,7 +421,7 @@ impl StageLyricsView {
         self.scroll_animation = Some(LyricScrollAnimation {
             epoch,
             from_y,
-            started_at: Instant::now(),
+            started_at,
         });
 
         cx.spawn(async move |this, cx| -> Result<()> {
@@ -500,7 +505,7 @@ impl StageLyricsView {
             return;
         }
 
-        let now = Instant::now();
+        let now = window.animation_time();
         let carry = self.current_scroll_animation_offset(now);
         let before = f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
         self.list_state.scroll_by(px(diff));
@@ -518,7 +523,7 @@ impl StageLyricsView {
         // compositor frame exactly where the previous frame was. If a new lyric arrives while the
         // previous transition is still running, carry its current residual transform into the new
         // start value so retargeting remains continuous.
-        self.start_scroll_animation(carry + applied, cx);
+        self.start_scroll_animation(carry + applied, now, cx);
     }
 }
 
