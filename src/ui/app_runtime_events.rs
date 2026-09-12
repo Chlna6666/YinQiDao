@@ -105,7 +105,34 @@ impl AppRuntimeEventBridge {
         self.audio_generation = self.audio_generation.wrapping_add(1);
         let generation = self.audio_generation;
         cx.spawn(async move |this, cx| {
-            while let Some(event) = events.recv().await {
+            let mut pending_event = None;
+            loop {
+                let event = if let Some(event) = pending_event.take() {
+                    event
+                } else {
+                    let Some(event) = events.recv().await else {
+                        break;
+                    };
+                    event
+                };
+
+                let event = match event {
+                    AudioUiEvent::SnapshotChanged => {
+                        loop {
+                            match events.try_recv() {
+                                Ok(AudioUiEvent::SnapshotChanged) => {}
+                                Ok(next) => {
+                                    pending_event = Some(next);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        AudioUiEvent::SnapshotChanged
+                    }
+                    event => event,
+                };
+
                 let alive = this.update(cx, |bridge, cx| {
                     if bridge.audio_generation == generation {
                         cx.emit(AppRuntimeEvent::Audio(event));
