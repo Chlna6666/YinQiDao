@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, IntoElement};
+use gpui::{Context, Entity, IntoElement, div};
 
 use super::{
     player_stage::{self, PlaybackProgress, PlaybackTime},
@@ -12,6 +12,15 @@ pub(super) fn mini_player(
     cx: &mut Context<MusicApp>,
     playback_progress: Entity<PlaybackProgress>,
     playback_time: Entity<PlaybackTime>,
-) -> impl IntoElement {
-    player_stage::mini_player(app, cx, playback_progress, playback_time)
+) -> gpui::AnyElement {
+    // Once the immersive Stage is fully open, this player is completely covered and its owning
+    // main-page content is already replaced by an empty retained node. Avoid rebuilding cover,
+    // shuffle/repeat/volume controls and their listeners on every root transport poll. The moment a
+    // close transition starts `stage_open` becomes false, so the underlying mini-player is restored
+    // before the Stage translates away.
+    if app.stage_open && !app.stage_animating && app.stage_progress >= 0.999 {
+        return div().id("mini-player-stage-covered").into_any_element();
+    }
+
+    player_stage::mini_player(app, cx, playback_progress, playback_time).into_any_element()
 }
