@@ -18,7 +18,9 @@ use super::{
     theme::{ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
 
-const STAGE_TRANSPORT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+const TRANSPORT_IDLE_POLL: Duration = Duration::from_millis(500);
+const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
+const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 
 #[derive(Default)]
 struct StageControlsViewCache {
@@ -27,17 +29,24 @@ struct StageControlsViewCache {
 
 impl Global for StageControlsViewCache {}
 
+#[derive(Default)]
+struct StageTransportViewCache {
+    view: Option<Entity<StageTransportView>>,
+}
+
+impl Global for StageTransportViewCache {}
+
 pub(super) fn view(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
 ) -> Entity<StageControlsView> {
+    let transport = transport_view(app, cx);
     let parent = cx.entity().downgrade();
-    let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageControlsViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StageControlsView::new(parent, engine));
+        let view = cx.new(move |_| StageControlsView::new(parent, transport.clone()));
         cache.view = Some(view.clone());
         view
     });
@@ -47,24 +56,48 @@ pub(super) fn view(
     view
 }
 
+fn transport_view(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+) -> Entity<StageTransportView> {
+    let parent = cx.entity().downgrade();
+    let engine = app.engine.clone();
+    let view = cx.update_default_global(|cache: &mut StageTransportViewCache, cx| {
+        if let Some(view) = &cache.view {
+            return view.clone();
+        }
+        let view = cx.new(move |_| StageTransportView::new(parent, engine));
+        cache.view = Some(view.clone());
+        view
+    });
+
+    let stage_active = app.stage_open || app.stage_animating;
+    let visibility = app.stage_controls_visibility.clamp(0.0, 1.0);
+    let controls_visible = visibility > 0.005 || app.drag_target.is_some();
+    view.update(cx, |view, cx| {
+        view.sync_from_app(app, stage_active, controls_visible, cx)
+    });
+    view
+}
+
 pub(super) struct StageControlsView {
     parent: WeakEntity<MusicApp>,
-    engine: Option<Arc<AudioEngine>>,
+    transport: Entity<StageTransportView>,
     stage_active: bool,
-    controls_visible: bool,
     visibility: f32,
-    timer_started: bool,
+    playback_state: PlaybackState,
+    volume: f32,
 }
 
 impl StageControlsView {
-    fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+    fn new(parent: WeakEntity<MusicApp>, transport: Entity<StageTransportView>) -> Self {
         Self {
             parent,
-            engine,
+            transport,
             stage_active: false,
-            controls_visible: true,
             visibility: 1.0,
-            timer_started: false,
+            playback_state: PlaybackState::Paused,
+            volume: 1.0,
         }
     }
 
@@ -74,94 +107,32 @@ impl StageControlsView {
         stage_active: bool,
         cx: &mut Context<Self>,
     ) {
-        let engine_changed = match (&self.engine, &app.engine) {
-            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
-            (None, None) => false,
-            _ => true,
-        };
         let visibility = app.stage_controls_visibility.clamp(0.0, 1.0);
-        let controls_visible = visibility > 0.005 || app.drag_target.is_some();
-        let visibility_changed = (self.visibility - visibility).abs() > 0.0005;
-        let changed = engine_changed
-            || self.stage_active != stage_active
-            || self.controls_visible != controls_visible
-            || visibility_changed;
-        if engine_changed {
-            self.engine = app.engine.clone();
-        }
+        let playback_state = app.snapshot.state;
+        let volume = app.displayed_volume_ratio();
+        let changed = self.stage_active != stage_active
+            || (self.visibility - visibility).abs() > 0.0005
+            || self.playback_state != playback_state
+            || (self.volume - volume).abs() > 0.0005;
+
         self.stage_active = stage_active;
-        self.controls_visible = controls_visible;
         self.visibility = visibility;
+        self.playback_state = playback_state;
+        self.volume = volume;
+
         if changed {
-            // MusicApp owns the idle-policy clock, but only this small entity needs the sampled
-            // visibility value. Lyrics, cover and fluid remain retained during chrome fades.
+            // Only chrome-level state invalidates this entity. The hot playback clock is isolated
+            // in StageTransportView/StageProgressView below.
             cx.notify();
         }
-    }
-
-    fn ensure_transport_timer(&mut self, cx: &mut Context<Self>) {
-        if self.timer_started {
-            return;
-        }
-        self.timer_started = true;
-        cx.spawn(async move |this, cx| -> Result<()> {
-            loop {
-                Timer::after(STAGE_TRANSPORT_REFRESH_INTERVAL).await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.stage_active
-                            && this.controls_visible
-                            && this.engine.as_ref().is_some_and(|engine| {
-                                engine.progress().0 == PlaybackState::Playing
-                            })
-                        {
-                            // Only this transport entity is invalidated. MusicApp, artwork, lyrics
-                            // and the fluid background stay retained while the clock advances.
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(())
-        })
-        .detach();
     }
 }
 
 impl Render for StageControlsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_transport_timer(cx);
-
-        let Some(parent_entity) = self.parent.upgrade() else {
-            return div().into_any_element();
-        };
-        let (transport_state, drag_progress_ratio, volume) = {
-            let app = parent_entity.read(cx);
-            (
-                app.snapshot.state,
-                app.drag_progress_ratio,
-                app.displayed_volume_ratio(),
-            )
-        };
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let visibility = self.visibility;
-        let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
-            (PlaybackState::Stopped, 0, 0),
-            |engine| engine.progress(),
-        );
-        let position = drag_progress_ratio.map_or(live_position_ms, |ratio| {
-            (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
-        });
-        let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
-            if duration_ms == 0 {
-                0.0
-            } else {
-                (live_position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
-            }
-        });
-        let playing = transport_state == PlaybackState::Playing;
+        let playing = self.playback_state == PlaybackState::Playing;
+        let volume = self.volume;
         let parent = self.parent.clone();
 
         div()
@@ -199,62 +170,7 @@ impl Render for StageControlsView {
                     });
                 }
             })
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                    .child(format_time(position)),
-            )
-            .child(
-                interactive_slider(
-                    "stage-progress-track",
-                    progress_ratio,
-                    SliderStyle::stage_progress(),
-                    {
-                        let parent = parent.clone();
-                        move |ratio, cx| {
-                            let _ = parent.update(cx, |app, app_cx| {
-                                app.wake_stage_controls_immediately(app_cx);
-                                app.seek_to_ratio(ratio, app_cx);
-                            });
-                        }
-                    },
-                    {
-                        let parent = parent.clone();
-                        move |ratio, cx| {
-                            let _ = parent.update(cx, |app, app_cx| {
-                                app.wake_stage_controls_immediately(app_cx);
-                                if app.drag_target == Some(DragTarget::Progress) {
-                                    app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                                } else {
-                                    app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                                }
-                            });
-                        }
-                    },
-                    {
-                        let parent = parent.clone();
-                        move |ratio, cx| {
-                            let _ = parent.update(cx, |app, app_cx| {
-                                app.wake_stage_controls_immediately(app_cx);
-                                if app.drag_target == Some(DragTarget::Progress) {
-                                    app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                                } else {
-                                    app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                                }
-                                app.commit_drag(app_cx);
-                            });
-                        }
-                    },
-                )
-                .flex_1(),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                    .child(format_remaining_time(position, duration_ms)),
-            )
+            .child(self.transport.clone())
             .child(control_button("stage-prev-btn", icon!(skip_back), {
                 let parent = parent.clone();
                 move |_, _, cx| {
@@ -406,6 +322,344 @@ impl Render for StageControlsView {
     }
 }
 
+struct StageTransportView {
+    parent: WeakEntity<MusicApp>,
+    engine: Option<Arc<AudioEngine>>,
+    stage_active: bool,
+    controls_visible: bool,
+    playback_state: PlaybackState,
+    drag_progress_ratio: Option<f32>,
+    progress: Option<Entity<StageProgressView>>,
+    timer_started: bool,
+}
+
+impl StageTransportView {
+    fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+        Self {
+            parent,
+            engine,
+            stage_active: false,
+            controls_visible: true,
+            playback_state: PlaybackState::Paused,
+            drag_progress_ratio: None,
+            progress: None,
+            timer_started: false,
+        }
+    }
+
+    fn sync_from_app(
+        &mut self,
+        app: &MusicApp,
+        stage_active: bool,
+        controls_visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let engine_changed = match (&self.engine, &app.engine) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        let playback_state = app.snapshot.state;
+        let drag_progress_ratio = app.drag_progress_ratio;
+        let changed = engine_changed
+            || self.stage_active != stage_active
+            || self.controls_visible != controls_visible
+            || self.playback_state != playback_state
+            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
+
+        if engine_changed {
+            self.engine = app.engine.clone();
+        }
+        self.stage_active = stage_active;
+        self.controls_visible = controls_visible;
+        self.playback_state = playback_state;
+        self.drag_progress_ratio = drag_progress_ratio;
+
+        if let Some(progress) = &self.progress {
+            let engine = self.engine.clone();
+            let playback_state = self.playback_state;
+            let stage_active = self.stage_active;
+            let controls_visible = self.controls_visible;
+            progress.update(cx, |progress, cx| {
+                progress.sync(engine, playback_state, stage_active, controls_visible, cx)
+            });
+        }
+
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn ensure_progress(&mut self, cx: &mut Context<Self>) -> Entity<StageProgressView> {
+        if let Some(progress) = &self.progress {
+            return progress.clone();
+        }
+        let parent = self.parent.clone();
+        let owner = cx.entity().downgrade();
+        let engine = self.engine.clone();
+        let playback_state = self.playback_state;
+        let stage_active = self.stage_active;
+        let controls_visible = self.controls_visible;
+        let progress = cx.new(move |_| {
+            StageProgressView::new(
+                parent,
+                owner,
+                engine,
+                playback_state,
+                stage_active,
+                controls_visible,
+            )
+        });
+        self.progress = Some(progress.clone());
+        progress
+    }
+
+    fn next_clock_delay(&self) -> Duration {
+        if !self.stage_active
+            || !self.controls_visible
+            || self.playback_state != PlaybackState::Playing
+        {
+            return TRANSPORT_IDLE_POLL;
+        }
+        let Some(engine) = &self.engine else {
+            return TRANSPORT_IDLE_POLL;
+        };
+        let (_, position_ms, _) = engine.progress();
+        let remainder = position_ms % 1_000;
+        let delay = (1_000 - remainder)
+            .clamp(TRANSPORT_MIN_SLEEP_MS, TRANSPORT_MAX_SLEEP_MS);
+        Duration::from_millis(delay)
+    }
+
+    fn ensure_clock_timer(&mut self, cx: &mut Context<Self>) {
+        if self.timer_started {
+            return;
+        }
+        self.timer_started = true;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            loop {
+                let delay = match this.update(cx, |this, _cx| this.next_clock_delay()) {
+                    Ok(delay) => delay,
+                    Err(_) => break,
+                };
+                Timer::after(delay).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.stage_active
+                            && this.controls_visible
+                            && this.playback_state == PlaybackState::Playing
+                        {
+                            // The text changes only on second boundaries. The progress rail has its
+                            // own animation-frame entity and does not force these strings to reshape.
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .detach();
+    }
+}
+
+impl Render for StageTransportView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_clock_timer(cx);
+        let progress = self.ensure_progress(cx);
+        let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
+            (PlaybackState::Stopped, 0, 0),
+            |engine| engine.progress(),
+        );
+        let position = self.drag_progress_ratio.map_or(live_position_ms, |ratio| {
+            (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
+        });
+
+        div()
+            .flex()
+            .flex_1()
+            .min_w(px(0.0))
+            .items_center()
+            .gap_5()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
+                    .child(format_time(position)),
+            )
+            .child(progress)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
+                    .child(format_remaining_time(position, duration_ms)),
+            )
+    }
+}
+
+struct StageProgressView {
+    parent: WeakEntity<MusicApp>,
+    owner: WeakEntity<StageTransportView>,
+    engine: Option<Arc<AudioEngine>>,
+    playback_state: PlaybackState,
+    stage_active: bool,
+    controls_visible: bool,
+}
+
+impl StageProgressView {
+    fn new(
+        parent: WeakEntity<MusicApp>,
+        owner: WeakEntity<StageTransportView>,
+        engine: Option<Arc<AudioEngine>>,
+        playback_state: PlaybackState,
+        stage_active: bool,
+        controls_visible: bool,
+    ) -> Self {
+        Self {
+            parent,
+            owner,
+            engine,
+            playback_state,
+            stage_active,
+            controls_visible,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        engine: Option<Arc<AudioEngine>>,
+        playback_state: PlaybackState,
+        stage_active: bool,
+        controls_visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let engine_changed = match (&self.engine, &engine) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        let changed = engine_changed
+            || self.playback_state != playback_state
+            || self.stage_active != stage_active
+            || self.controls_visible != controls_visible;
+        self.engine = engine;
+        self.playback_state = playback_state;
+        self.stage_active = stage_active;
+        self.controls_visible = controls_visible;
+        if changed {
+            cx.notify();
+        }
+    }
+}
+
+impl Render for StageProgressView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
+            (PlaybackState::Stopped, 0, 0),
+            |engine| engine.progress(),
+        );
+        let drag_progress_ratio = self
+            .parent
+            .read_with(cx, |app, _| app.drag_progress_ratio)
+            .unwrap_or(None);
+        let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
+            if duration_ms == 0 {
+                0.0
+            } else {
+                (live_position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+            }
+        });
+
+        if self.stage_active
+            && self.controls_visible
+            && self.playback_state == PlaybackState::Playing
+            && drag_progress_ratio.is_none()
+        {
+            // request_animation_frame() is scoped to StageProgressView in this GPUI fork. Only the
+            // rail follows the display refresh; labels/buttons/volume remain retained.
+            window.request_animation_frame();
+        }
+
+        let parent = self.parent.clone();
+        let this_click = cx.entity().downgrade();
+        let this_drag = this_click.clone();
+        let this_commit = this_click.clone();
+
+        interactive_slider(
+            "stage-progress-track",
+            progress_ratio,
+            SliderStyle::stage_progress(),
+            {
+                let parent = parent.clone();
+                move |ratio, cx| {
+                    let _ = parent.update(cx, |app, app_cx| {
+                        app.wake_stage_controls_immediately(app_cx);
+                        app.seek_to_ratio(ratio, app_cx);
+                    });
+                    let _ = this_click.update(cx, |this, cx| {
+                        let _ = this.owner.update(cx, |owner, cx| {
+                            owner.drag_progress_ratio = None;
+                            cx.notify();
+                        });
+                        cx.notify();
+                    });
+                }
+            },
+            {
+                let parent = parent.clone();
+                move |ratio, cx| {
+                    let _ = parent.update(cx, |app, app_cx| {
+                        app.wake_stage_controls_immediately(app_cx);
+                        if app.drag_target == Some(DragTarget::Progress) {
+                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                        } else {
+                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                        }
+                    });
+                    let _ = this_drag.update(cx, |this, cx| {
+                        let _ = this.owner.update(cx, |owner, cx| {
+                            owner.drag_progress_ratio = Some(ratio);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    });
+                }
+            },
+            move |ratio, cx| {
+                let _ = parent.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
+                    if app.drag_target == Some(DragTarget::Progress) {
+                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
+                    } else {
+                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
+                    }
+                    app.commit_drag(app_cx);
+                });
+                let _ = this_commit.update(cx, |this, cx| {
+                    let _ = this.owner.update(cx, |owner, cx| {
+                        owner.drag_progress_ratio = None;
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            },
+        )
+        .flex_1()
+        .min_w(px(80.0))
+        .into_any_element()
+    }
+}
+
+fn option_ratio_changed(current: Option<f32>, next: Option<f32>, epsilon: f32) -> bool {
+    match (current, next) {
+        (Some(current), Some(next)) => (current - next).abs() > epsilon,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 fn control_button(
     id: &'static str,
     icon: &'static str,
@@ -427,4 +681,17 @@ fn control_button(
             hsla(0.0, 0.0, 1.0, 0.85),
         ))
         .on_mouse_down(gpui::MouseButton::Left, listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_ratio_change_uses_epsilon() {
+        assert!(!option_ratio_changed(Some(0.5), Some(0.5001), 0.001));
+        assert!(option_ratio_changed(Some(0.5), Some(0.51), 0.001));
+        assert!(option_ratio_changed(None, Some(0.5), 0.001));
+        assert!(!option_ratio_changed(None, None, 0.001));
+    }
 }
