@@ -352,7 +352,7 @@ mod tests {
     use super::*;
 
     fn track(genre: Option<&str>, title: &str) -> Track {
-        Track {
+        Track::new(crate::model::TrackData {
             id: 1,
             path: PathBuf::from("song.flac"),
             title: title.into(),
@@ -365,7 +365,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             artwork_key: None,
-        }
+        })
     }
 
     #[test]
