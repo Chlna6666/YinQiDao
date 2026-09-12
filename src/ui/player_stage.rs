@@ -378,8 +378,8 @@ fn stage_lyrics(
             );
         }
 
-        // Hover is explicit and pointer-move driven instead of style-group driven. Automatic lyric
-        // scrolling must not transfer a stationary cursor's timestamp badge to the next row.
+        // Hover ownership is explicit per row. This decouples the timestamp from style-group
+        // hit-testing as lyrics move underneath a stationary pointer during automatic scrolling.
         if blur_sigma > 0.0 && !hovered {
             text = text.blur(px(blur_sigma));
         }
@@ -419,14 +419,19 @@ fn stage_lyrics(
             .mb(px(10.0))
             .cursor_pointer()
             .child(text)
-            .on_mouse_move(cx.listener(
-                move |this, _: &gpui::MouseMoveEvent, _window, cx| {
-                    if this.hovered_lyric_index != Some(index) {
-                        this.hovered_lyric_index = Some(index);
-                        cx.notify();
-                    }
-                },
-            ));
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                let next = if *hovered {
+                    Some(index)
+                } else if this.hovered_lyric_index == Some(index) {
+                    None
+                } else {
+                    return;
+                };
+                if this.hovered_lyric_index != next {
+                    this.hovered_lyric_index = next;
+                    cx.notify();
+                }
+            }));
 
         if !reading_mode {
             line_element = line_element.child(

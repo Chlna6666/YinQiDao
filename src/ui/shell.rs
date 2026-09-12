@@ -10,10 +10,9 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
-    CompositeLayerExt as _, Context, Easing, Entity, IntoElement, KeyDownEvent, Render,
-    SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowOptions, div, hsla,
-    point, prelude::*, px, rgb, size,
+    AnimationExt as _, AnimationProperty, App, AppContext, Bounds, CompositeLayerExt as _, Context,
+    Entity, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window,
+    WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -103,6 +102,10 @@ pub struct MusicApp {
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
     stage_transition_epoch: u64,
+    stage_transition_from: f32,
+    stage_transition_to: f32,
+    stage_transition_started_at: Option<std::time::Instant>,
+    stage_transition_duration: Duration,
     stage_prepared: bool,
     pub(crate) last_frame_instant: Option<std::time::Instant>,
     pub(crate) stage_controls_visibility: f32,
@@ -157,6 +160,16 @@ fn text_fingerprint(text: &str) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+#[inline]
+fn stage_ease_in_out_cubic(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress < 0.5 {
+        4.0 * progress * progress * progress
+    } else {
+        1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,6 +446,10 @@ impl MusicApp {
             stage_progress: 0.0,
             stage_animating: false,
             stage_transition_epoch: 0,
+            stage_transition_from: 0.0,
+            stage_transition_to: 0.0,
+            stage_transition_started_at: None,
+            stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_prepared: false,
             last_frame_instant: None,
             stage_controls_visibility: 1.0,
@@ -500,37 +517,90 @@ impl MusicApp {
         view
     }
 
-    fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.stage_open == open {
-            if self.stage_animating
-                || (!self.stage_animating
-                    && ((open && self.stage_progress >= 0.999)
-                        || (!open && self.stage_progress <= 0.001)))
-            {
-                return;
+    fn sample_stage_progress_at(&self, now: std::time::Instant) -> f32 {
+        if !self.stage_animating {
+            return self.stage_progress;
+        }
+        let Some(started_at) = self.stage_transition_started_at else {
+            return self.stage_progress;
+        };
+        if self.stage_transition_duration.is_zero() {
+            return self.stage_transition_to;
+        }
+        let linear = now
+            .saturating_duration_since(started_at)
+            .as_secs_f32()
+            / self.stage_transition_duration.as_secs_f32();
+        let eased = stage_ease_in_out_cubic(linear);
+        self.stage_transition_from
+            + (self.stage_transition_to - self.stage_transition_from) * eased
+    }
+
+    fn advance_stage_transition(&mut self, now: std::time::Instant) {
+        if !self.stage_animating || self.stage_transition_started_at.is_none() {
+            return;
+        }
+        self.stage_progress = self.sample_stage_progress_at(now).clamp(0.0, 1.0);
+        let started_at = self
+            .stage_transition_started_at
+            .expect("started transition must have a timestamp");
+        if now.saturating_duration_since(started_at) >= self.stage_transition_duration {
+            self.stage_progress = self.stage_transition_to;
+            self.stage_animating = false;
+            self.stage_transition_started_at = None;
+            if self.stage_progress <= 0.001 {
+                self.hovered_lyric_index = None;
             }
+        }
+    }
+
+    fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
+        let target = if open { 1.0 } else { 0.0 };
+        if self.stage_animating && (self.stage_transition_to - target).abs() <= 0.001 {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let current = self.sample_stage_progress_at(now).clamp(0.0, 1.0);
+        if !self.stage_animating && (current - target).abs() <= 0.001 {
+            self.stage_open = open;
+            self.stage_progress = target;
+            return;
         }
 
         self.stage_transition_epoch = self.stage_transition_epoch.wrapping_add(1);
         let epoch = self.stage_transition_epoch;
         self.stage_open = open;
         self.hovered_lyric_index = None;
-        // Keep one stable full-screen layout through the transition. GPUI moves only the retained
-        // composite in presentation, so the titlebar, lyrics, cover and fluid background share the
-        // exact same visual transform instead of being animated as independent primitive groups.
-        self.stage_progress = 1.0;
+        self.stage_progress = current;
+        self.stage_transition_from = current;
+        self.stage_transition_to = target;
+        self.stage_transition_started_at = None;
+
+        let distance = (target - current).abs();
+        if distance <= 0.001 {
+            self.stage_progress = target;
+            self.stage_animating = false;
+            return;
+        }
+        self.stage_transition_duration = Duration::from_secs_f32(
+            (STAGE_TRANSITION_DURATION.as_secs_f32() * distance).max(0.001),
+        );
         self.stage_animating = true;
+
+        // Do not start the clock until the first transition frame has fully materialized. On the
+        // first open this frame may compile the fluid shader, shape lyrics and build the composite;
+        // starting earlier would let that work consume the entire 190 ms and visually skip motion.
         cx.spawn(async move |this, cx| -> Result<()> {
-            Timer::after(STAGE_TRANSITION_DURATION).await;
+            Timer::after(Duration::from_millis(1)).await;
             this.update(cx, |this, cx| {
-                if this.stage_transition_epoch != epoch {
+                if this.stage_transition_epoch != epoch
+                    || !this.stage_animating
+                    || this.stage_transition_started_at.is_some()
+                {
                     return;
                 }
-                this.stage_animating = false;
-                this.stage_progress = if this.stage_open { 1.0 } else { 0.0 };
-                if !this.stage_open {
-                    this.hovered_lyric_index = None;
-                }
+                this.stage_transition_started_at = Some(std::time::Instant::now());
                 cx.notify();
             })?;
             Ok(())
@@ -699,12 +769,11 @@ impl MusicApp {
             && self.lyrics_scroll_target_y.is_some_and(|target| {
                 (target - f32::from(self.lyrics_scroll_handle.offset().y)).abs() > 0.30
             });
-        // Stage drawer motion is renderer-owned by AnimationProperty::Translation and schedules its
-        // own retained animation frames. Only the remaining sampled UI animations need to rerender
-        // MusicApp here.
-        (self.stage_open
-            && (self.stage_controls_visibility > 0.005
-                && self.stage_controls_visibility < 0.995))
+        let stage_transition = self.stage_animating && self.stage_transition_started_at.is_some();
+        stage_transition
+            || (self.stage_open
+                && (self.stage_controls_visibility > 0.005
+                    && self.stage_controls_visibility < 0.995))
             || lyrics_scrolling
     }
 
@@ -740,6 +809,12 @@ impl MusicApp {
         if let Some(palette) = palette {
             self.artwork_palettes.insert(track_id, palette);
         }
+        if !self.stage_open
+            && !self.stage_animating
+            && self.snapshot.current_track.as_ref().map(|track| track.id) == Some(track_id)
+        {
+            self.stage_prepared = false;
+        }
         self.bump_ui_content_revision();
     }
 
@@ -748,6 +823,9 @@ impl MusicApp {
         self.lyrics_order.retain(|id| *id != track_id);
         self.lyrics_order.push_back(track_id);
         let current_id = self.snapshot.current_track.as_ref().map(|track| track.id);
+        if !self.stage_open && !self.stage_animating && current_id == Some(track_id) {
+            self.stage_prepared = false;
+        }
         while self.lyrics_order.len() > MAX_LYRICS_MEMORY_ENTRIES {
             let Some(candidate) = self.lyrics_order.pop_front() else {
                 break;
@@ -896,6 +974,9 @@ impl MusicApp {
             self.reset_progress_for_track_switch();
             self.config.current_track = Some(track_id);
             self.status = "正在准备播放".into();
+            if !self.stage_open && !self.stage_animating {
+                self.stage_prepared = false;
+            }
             self.save_config();
         } else {
             self.status = "音频命令队列繁忙，请稍后重试".into();
@@ -1522,6 +1603,9 @@ impl MusicApp {
                 self.lyrics_user_scrolling_until = None;
                 self.lyrics_scroll_target_y = None;
                 self.lyrics_scroll_handle.scroll_to_item(0);
+                if !self.stage_open && !self.stage_animating {
+                    self.stage_prepared = false;
+                }
                 self.request_current_artwork(cx);
                 self.request_current_enrichment(cx);
             }
@@ -2360,12 +2444,13 @@ impl Render for MusicApp {
             .unwrap_or(0.016)
             .clamp(0.001, 0.1);
         self.last_frame_instant = Some(now);
+        self.advance_stage_transition(now);
 
         let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
         if stage_prewarm {
-            // Materialize the expensive stage subtree once while it is still below the viewport.
-            // Text shaping, image decode/upload and composite setup are then hot before the user's
-            // first visible open. A second frame immediately removes this hidden warm-up tree.
+            // Materialize the current expensive stage subtree below the viewport without advancing
+            // Fluid. Artwork/lyrics/track changes invalidate this cache so the next visible open is
+            // normally reduced to replaying the retained composite plus its sampled translation.
             self.stage_prepared = true;
             cx.notify();
         }
@@ -2398,7 +2483,9 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        let fluid_active = (self.stage_open || self.stage_animating) && !stage_prewarm;
+        // Hidden prewarm and the armed first frame keep Fluid static. Dynamic work begins only after
+        // the sampled Stage has actually moved into view, and continues until close reaches zero.
+        let fluid_active = !stage_prewarm && self.stage_progress > 0.001;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
             view.sync(
@@ -2444,30 +2531,20 @@ impl Render for MusicApp {
             }
         };
 
-        let stage_drawer = if self.stage_progress > 0.001 || stage_prewarm {
+        let stage_drawer = if self.stage_progress > 0.001 || self.stage_animating || stage_prewarm {
             let viewport_height = window.viewport_size().height;
             let zero = point(px(0.0), px(0.0));
             let below_viewport = point(px(0.0), viewport_height);
-            let motion = if stage_prewarm {
-                AnimationProperty::translation(below_viewport, below_viewport)
-            } else if self.stage_open {
-                AnimationProperty::translation(below_viewport, zero)
+            let motion = AnimationProperty::translation(below_viewport, zero);
+            let sampled_progress = if stage_prewarm {
+                0.0
             } else {
-                AnimationProperty::translation(zero, below_viewport)
+                self.stage_progress.clamp(0.0, 1.0)
             };
-            let duration = if stage_prewarm {
-                Duration::from_millis(1)
-            } else {
-                STAGE_TRANSITION_DURATION
-            };
-            let transition = Animation::from_spec(
-                AnimationSpec::new(duration).ease(Easing::InOutCubic),
-            )
-            .with_property(motion);
 
-            // Capture player + immersive titlebar into one retained layer first, then move that
-            // single layer. This prevents unsupported/text/window-control primitives from drifting
-            // relative to the fluid background during open/close.
+            // Capture Fluid + cover + lyrics + controls + immersive titlebar into one retained
+            // layer, then apply only one caller-sampled renderer translation to that full subtree.
+            // No per-frame layout is involved, and a close/open retarget simply changes progress.
             let stage_surface = div()
                 .id("stage-drawer-root")
                 .absolute()
@@ -2531,15 +2608,7 @@ impl Render for MusicApp {
                         .child(self.stage_titlebar(window, cx)),
                 )
                 .composite_layer()
-                .with_animation(
-                    SharedString::from(if stage_prewarm {
-                        "stage-drawer-prewarm".to_string()
-                    } else {
-                        format!("stage-drawer-motion-{}", self.stage_transition_epoch)
-                    }),
-                    transition,
-                    |element, _| element,
-                )
+                .with_sampled_animation(motion, sampled_progress)
                 .into_any_element();
             Some(stage_surface)
         } else {
@@ -3038,6 +3107,9 @@ mod tests {
     #[test]
     fn stage_transition_is_short_and_bounded() {
         assert_eq!(STAGE_TRANSITION_DURATION, Duration::from_millis(190));
+        assert_eq!(stage_ease_in_out_cubic(0.0), 0.0);
+        assert!((stage_ease_in_out_cubic(0.5) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(stage_ease_in_out_cubic(1.0), 1.0);
     }
 
     #[test]

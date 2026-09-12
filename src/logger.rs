@@ -6,7 +6,12 @@ use crate::settings::LogConfig;
 
 pub fn init_logging(config: &LogConfig, base_dir: &Path) -> Option<WorkerGuard> {
     let level_str = match config.level.to_lowercase().as_str() {
-        "debug" => "debug,yin_qi_dao=debug,gpui=info,symphonia=warn,reqwest=info",
+        // “debug” means application diagnostics, not every dependency's internal compiler/driver
+        // trace. Keep third-party crates at a sane baseline so Naga/WGPU shader overload dumps do
+        // not flood stdout while YinQiDao's own debug events remain visible. RUST_LOG still wins.
+        "debug" => {
+            "info,yin_qi_dao=debug,gpui=info,wgpu_core=warn,wgpu_hal=warn,naga=warn,symphonia=warn,reqwest=info"
+        }
         "warn" | "warning" => "warn,yin_qi_dao=warn",
         "error" => "error,yin_qi_dao=error",
         _ => "info,yin_qi_dao=info,symphonia=warn,reqwest=info",
