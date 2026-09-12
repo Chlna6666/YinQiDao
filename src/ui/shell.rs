@@ -30,7 +30,7 @@ use super::{
     app_runtime_events, home, library as library_page, player,
     player::NowPlaying,
     route::{self, AppRoute},
-    settings as settings_page, theme,
+    settings as settings_page, stage_controls, theme,
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
@@ -103,7 +103,6 @@ pub struct MusicApp {
     stage_transition_started_at: Option<std::time::Instant>,
     stage_transition_duration: Duration,
     stage_prepared: bool,
-    pub(crate) last_frame_instant: Option<std::time::Instant>,
     pub(crate) stage_controls_visibility: f32,
     pub(crate) stage_last_user_activity: std::time::Instant,
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
@@ -440,7 +439,6 @@ impl MusicApp {
             stage_transition_started_at: None,
             stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_prepared: false,
-            last_frame_instant: None,
             stage_controls_visibility: 1.0,
             stage_last_user_activity: std::time::Instant::now(),
             stage_last_mouse_pos: None,
@@ -609,7 +607,6 @@ impl MusicApp {
             self.previous_page = self.page;
         }
         self.begin_stage_transition(true, cx);
-        self.last_frame_instant = None;
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
@@ -621,7 +618,6 @@ impl MusicApp {
 
     pub(crate) fn close_stage(&mut self, cx: &mut Context<Self>) {
         self.begin_stage_transition(false, cx);
-        self.last_frame_instant = None;
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
         let return_page = if self.previous_page == AppPage::Player {
@@ -703,11 +699,7 @@ impl MusicApp {
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {
-        let stage_transition = self.stage_animating && self.stage_transition_started_at.is_some();
-        stage_transition
-            || (self.stage_open
-                && self.stage_controls_visibility > 0.005
-                && self.stage_controls_visibility < 0.995)
+        self.stage_animating && self.stage_transition_started_at.is_some()
     }
 
     pub(crate) fn show_library_tab(&mut self, tab: LibraryTab, cx: &mut Context<Self>) {
@@ -1395,7 +1387,7 @@ impl MusicApp {
         let task = Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || -> Result<Vec<crate::library::ScanReport>> {
                 scan_library.reset_index()?;
-                scan_library.scan_all(&roots)
+                library_scan_all(&scan_library, &roots)
             })
             .await?
         });
@@ -1426,7 +1418,7 @@ impl MusicApp {
         let roots = self.config.music_dirs.clone();
         let scan_library = library.clone();
         let task = Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || scan_library.scan_all(&roots)).await?
+            tokio::task::spawn_blocking(move || library_scan_all(&scan_library, &roots)).await?
         });
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await?;
@@ -2062,170 +2054,6 @@ impl MusicApp {
                     )),
             )
     }
-
-    fn stage_titlebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self.snapshot.current_track.as_ref().map_or_else(
-            || "沉浸音乐大舞台".to_string(),
-            |t| format!("{} · {}", t.title, t.artist),
-        );
-
-        let v = self.stage_controls_visibility;
-        let y_offset = -(1.0 - v) * 38.0;
-
-        div()
-            .w_full()
-            .h(px(38.0))
-            .top(px(y_offset))
-            .opacity(v)
-            .child(
-                div()
-                    .id("stage-titlebar")
-                    .w_full()
-                    .h(px(38.0))
-                    .flex_none()
-                    .bg(hsla(0.0, 0.0, 0.0, 0.10))
-                    .border_b_1()
-                    .border_color(hsla(0.0, 0.0, 1.0, 0.05))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_4()
-                    .child(
-                        div()
-                            .occlude()
-                            .window_control_area(gpui::WindowControlArea::Client)
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(traffic_light_button(
-                                "stage-window-close",
-                                rgb(0xff_5f_56),
-                                cx.listener(|_, _, _, cx| cx.quit()),
-                            ))
-                            .child(traffic_light_button(
-                                "stage-window-minimize",
-                                rgb(0xff_bd_2e),
-                                cx.listener(|_, _, window, _| window.minimize_window()),
-                            ))
-                            .child(traffic_light_button(
-                                "stage-window-maximize",
-                                rgb(0x27_c9_3f),
-                                cx.listener(|_, _, window, _| {
-                                    if window.is_maximized() {
-                                        window.restore_window();
-                                    } else {
-                                        window.maximize_window();
-                                    }
-                                }),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("stage-drag-region")
-                            .window_control_area(gpui::WindowControlArea::Drag)
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(hsla(0.0, 0.0, 1.0, 0.70))
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|_, event: &gpui::MouseDownEvent, window, _| {
-                                    if event.click_count >= 2 {
-                                        window.titlebar_double_click();
-                                    }
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("stage-quick-hide-btn")
-                                    .occlude()
-                                    .window_control_area(gpui::WindowControlArea::Client)
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
-                                    .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.22)))
-                                    .transition(theme::press_transition())
-                                    .active(|s| s.scale(0.95))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.hide_stage_controls_immediately(event.position, cx);
-                                        }),
-                                    )
-                                    .child(theme::themed_icon(
-                                        icon!(eye_off),
-                                        14.0,
-                                        hsla(0.0, 0.0, 1.0, 0.90),
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
-                                            .child("纯享沉浸"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("stage-collapse-btn")
-                                    .occlude()
-                                    .window_control_area(gpui::WindowControlArea::Client)
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
-                                    .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.22)))
-                                    .transition(theme::press_transition())
-                                    .active(|s| s.scale(0.95))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.close_stage(cx);
-                                        }),
-                                    )
-                                    .child(theme::themed_icon(
-                                        icon!(chevron_down),
-                                        14.0,
-                                        hsla(0.0, 0.0, 1.0, 0.90),
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
-                                            .child("收起舞台 (Esc)"),
-                                    ),
-                            ),
-                    ),
-            )
-    }
 }
 
 impl Drop for MusicApp {
@@ -2244,12 +2072,6 @@ impl Render for MusicApp {
         let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
 
         let now = std::time::Instant::now();
-        let dt = self
-            .last_frame_instant
-            .map(|prev| now.duration_since(prev).as_secs_f32())
-            .unwrap_or(0.016)
-            .clamp(0.001, 0.1);
-        self.last_frame_instant = Some(now);
         self.advance_stage_transition(now);
 
         let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
@@ -2278,18 +2100,12 @@ impl Render for MusicApp {
             }
         }
 
-        let target_visibility = if self.stage_suppress_wake_until.is_some() || is_idle {
-            0.0
-        } else {
-            1.0
-        };
-        let vis_diff = target_visibility - self.stage_controls_visibility;
-        if vis_diff.abs() > 0.005 {
-            let factor = 1.0 - (-12.0 * dt).exp();
-            self.stage_controls_visibility += vis_diff * factor;
-        } else {
-            self.stage_controls_visibility = target_visibility;
-        }
+        self.stage_controls_visibility =
+            if self.stage_suppress_wake_until.is_some() || is_idle {
+                0.0
+            } else {
+                1.0
+            };
 
         let fluid_background = self.ensure_fluid_background(cx);
         let fluid_track_id = self
@@ -2354,6 +2170,7 @@ impl Render for MusicApp {
             } else {
                 self.stage_progress.clamp(0.0, 1.0)
             };
+            let stage_titlebar = stage_controls::titlebar_view(self, cx);
 
             let stage_surface = div()
                 .id("stage-drawer-root")
@@ -2415,7 +2232,7 @@ impl Render for MusicApp {
                         .top(px(0.0))
                         .left(px(0.0))
                         .right(px(0.0))
-                        .child(self.stage_titlebar(window, cx)),
+                        .child(stage_titlebar),
                 )
                 .composite_layer()
                 .with_sampled_animation(motion, sampled_progress)
@@ -2771,6 +2588,10 @@ where
             cx.stop_propagation();
             on_press(event, window, cx);
         })
+}
+
+fn library_scan_all(library: &Library, roots: &[PathBuf]) -> Result<Vec<ScanReport>> {
+    library.scan_all(roots)
 }
 
 #[cfg(test)]
