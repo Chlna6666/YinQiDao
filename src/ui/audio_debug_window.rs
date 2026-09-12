@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     App, AppContext, BorrowAppContext, Bounds, Context, Global, IntoElement, MouseButton, Render,
-    Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, prelude::*, px, rgb,
-    size,
+    Subscription, Task, Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
+    prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
     ChannelLayout, SpeakerLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot,
@@ -42,7 +42,10 @@ pub(crate) fn open(cx: &mut App) -> Result<()> {
         .and_then(|state| state.window.clone())
     {
         if existing
-            .update(cx, |_view, window, _cx| window.show_window())
+            .update(cx, |view, window, view_cx| {
+                window.show_window();
+                view.ensure_refresh_task(view_cx);
+            })
             .is_ok()
         {
             set_audio_debug_enabled(true);
@@ -63,12 +66,11 @@ pub(crate) fn open(cx: &mut App) -> Result<()> {
             is_movable: true,
             ..Default::default()
         },
-        |_, cx| cx.new(|_| AudioDebugView::default()),
+        |_, cx| cx.new(AudioDebugView::new),
     )?;
     cx.update_global(|state: &mut AudioDebugWindowState, _cx| {
-        state.window = Some(window.clone());
+        state.window = Some(window);
     });
-    start_debug_ui_service(window, cx);
     Ok(())
 }
 
@@ -100,51 +102,6 @@ fn remove_untracked_windows(cx: &mut App) {
     }
 }
 
-fn start_debug_ui_service(window: WindowHandle<AudioDebugView>, cx: &mut App) {
-    cx.spawn(async move |cx| -> anyhow::Result<()> {
-        loop {
-            Timer::after(DEBUG_UI_TICK).await;
-            let audio = audio_debug_latest_snapshot();
-            let spatial = spatial_debug_latest_snapshot();
-            let still_open = cx.update(|cx| {
-                let result = window.update(cx, |view, window, view_cx| {
-                    if view.frozen {
-                        return;
-                    }
-                    let audio_changed = audio.sequence != view.snapshot.sequence;
-                    let spatial_changed = spatial.as_ref().map(|snapshot| snapshot.sequence)
-                        != view.spatial_snapshot.as_ref().map(|snapshot| snapshot.sequence);
-                    if spatial_changed {
-                        view.gpu_scene.update(spatial);
-                        view.spatial_snapshot = spatial;
-                    }
-                    if audio_changed {
-                        view.snapshot = audio;
-                    }
-                    if audio_changed || spatial_changed {
-                        view_cx.notify();
-                        window.refresh();
-                    }
-                });
-                if result.is_err() {
-                    if cx.has_global::<AudioDebugWindowState>() {
-                        cx.update_global(|state: &mut AudioDebugWindowState, _cx| state.window = None);
-                    }
-                    reset_runtime_listener_pose();
-                    set_audio_debug_enabled(false);
-                    return false;
-                }
-                true
-            })?;
-            if !still_open {
-                break;
-            }
-        }
-        Ok(())
-    })
-    .detach();
-}
-
 pub(crate) struct AudioDebugView {
     snapshot: AudioDebugSnapshot,
     spatial_snapshot: Option<SpatialDebugSnapshot>,
@@ -156,14 +113,29 @@ pub(crate) struct AudioDebugView {
     head_yaw: f32,
     head_pitch: f32,
     frozen: bool,
+    refresh_task: Option<Task<()>>,
+    _release_subscription: Subscription,
 }
 
-impl Default for AudioDebugView {
-    fn default() -> Self {
+impl AudioDebugView {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let snapshot = audio_debug_latest_snapshot();
+        let spatial_snapshot = spatial_debug_latest_snapshot();
+        let mut gpu_scene = SpatialDebug3dScene::default();
+        gpu_scene.update(spatial_snapshot);
+        let release_subscription = cx.on_release(|_, cx| {
+            set_audio_debug_enabled(false);
+            reset_runtime_listener_pose();
+            if cx.has_global::<AudioDebugWindowState>() {
+                cx.update_global(|state: &mut AudioDebugWindowState, _cx| {
+                    state.window = None;
+                });
+            }
+        });
         Self {
-            snapshot: AudioDebugSnapshot::default(),
-            spatial_snapshot: None,
-            gpu_scene: SpatialDebug3dScene::default(),
+            snapshot,
+            spatial_snapshot,
+            gpu_scene,
             camera: SpatialDebug3dCamera::default(),
             drag_anchor: None,
             head_tracking: HeadTrackingBridge::new(ManualHeadTrackingProvider::default()),
@@ -171,11 +143,49 @@ impl Default for AudioDebugView {
             head_yaw: 0.0,
             head_pitch: 0.0,
             frozen: false,
+            refresh_task: None,
+            _release_subscription: release_subscription,
         }
     }
-}
 
-impl AudioDebugView {
+    fn ensure_refresh_task(&mut self, cx: &mut Context<Self>) {
+        if self.frozen || self.refresh_task.is_some() {
+            return;
+        }
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(DEBUG_UI_TICK).await;
+                let keep_running = match this.update(cx, |view, cx| {
+                    if view.frozen {
+                        return false;
+                    }
+                    let audio = audio_debug_latest_snapshot();
+                    let spatial = spatial_debug_latest_snapshot();
+                    let audio_changed = audio.sequence != view.snapshot.sequence;
+                    let spatial_changed = spatial.as_ref().map(|snapshot| snapshot.sequence)
+                        != view.spatial_snapshot.as_ref().map(|snapshot| snapshot.sequence);
+                    if spatial_changed {
+                        view.gpu_scene.update(spatial);
+                        view.spatial_snapshot = spatial;
+                    }
+                    if audio_changed {
+                        view.snapshot = audio;
+                    }
+                    if audio_changed || spatial_changed {
+                        cx.notify();
+                    }
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => break,
+                };
+                if !keep_running {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn publish_debug_head_pose(&mut self) {
         self.head_tracking.provider_mut().push_euler(HeadTrackingEulerPose {
             position_meters: Vec3::ZERO,
@@ -198,6 +208,7 @@ impl AudioDebugView {
 
 impl Render for AudioDebugView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_refresh_task(cx);
         let snapshot = self.snapshot.clone();
         let spatial = self.spatial_snapshot;
         let mesh = self.gpu_scene.mesh();
@@ -292,6 +303,11 @@ impl Render for AudioDebugView {
                             .child(action_button(if frozen { "继续采样" } else { "冻结分析" }).on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.frozen = !this.frozen;
+                                    if this.frozen {
+                                        this.refresh_task = None;
+                                    } else {
+                                        this.ensure_refresh_task(cx);
+                                    }
                                     cx.notify();
                                 }),
                             )),
