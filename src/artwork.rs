@@ -524,7 +524,7 @@ mod tests {
         let image =
             DynamicImage::ImageRgba8(ImageBuffer::from_pixel(12, 8, Rgba([30, 90, 180, 255])));
         image.save(root.join("cover.png")).expect("cover");
-        let track = Track {
+        let track = Track::new(crate::model::TrackData {
             id: 1,
             path: root.join("song.mp3"),
             title: "Song".into(),
@@ -537,7 +537,7 @@ mod tests {
             sample_rate: 44_100,
             channels: 2,
             artwork_key: None,
-        };
+        });
         let cache = ArtworkCache::new(root.join("cache")).expect("cache");
         let artwork = cache.load(&track).expect("load").expect("artwork");
         assert_eq!(
