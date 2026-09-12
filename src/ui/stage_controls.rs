@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, WeakEntity, Window, div,
-    hsla, prelude::*, px,
+    BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString, WeakEntity,
+    Window, div, hsla, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -17,11 +17,110 @@ use crate::{
 use super::{
     components::{SliderStyle, slider::InteractiveSliderState},
     shell::{DragTarget, MusicApp},
-    theme::{ACCENT_RED, format_remaining_time, format_time, themed_icon},
+    theme::{self, ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
 
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
+const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
+
+#[derive(Clone, Copy, Debug)]
+struct StageChromeFade {
+    value: f32,
+    from: f32,
+    to: f32,
+    started_at: Option<Instant>,
+    duration: Duration,
+}
+
+impl StageChromeFade {
+    fn new(visible: bool) -> Self {
+        let value = if visible { 1.0 } else { 0.0 };
+        Self {
+            value,
+            from: value,
+            to: value,
+            started_at: None,
+            duration: STAGE_CHROME_FADE_DURATION,
+        }
+    }
+
+    #[inline]
+    fn ease(progress: f32) -> f32 {
+        let progress = progress.clamp(0.0, 1.0);
+        if progress < 0.5 {
+            4.0 * progress * progress * progress
+        } else {
+            1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+        }
+    }
+
+    fn sample(&self, now: Instant) -> f32 {
+        let Some(started_at) = self.started_at else {
+            return self.value;
+        };
+        if self.duration.is_zero() {
+            return self.to;
+        }
+        let linear = now.saturating_duration_since(started_at).as_secs_f32()
+            / self.duration.as_secs_f32();
+        let eased = Self::ease(linear);
+        self.from + (self.to - self.from) * eased
+    }
+
+    fn set_target(&mut self, visible: bool) -> bool {
+        let target = if visible { 1.0 } else { 0.0 };
+        if (self.to - target).abs() <= 0.001 {
+            return false;
+        }
+
+        let now = Instant::now();
+        let current = self.sample(now).clamp(0.0, 1.0);
+        self.value = current;
+        self.from = current;
+        self.to = target;
+
+        let distance = (target - current).abs();
+        if distance <= 0.001 {
+            self.value = target;
+            self.from = target;
+            self.started_at = None;
+            return true;
+        }
+
+        self.duration = Duration::from_secs_f32(
+            (STAGE_CHROME_FADE_DURATION.as_secs_f32() * distance).max(0.001),
+        );
+        self.started_at = Some(now);
+        true
+    }
+
+    fn advance(&mut self, now: Instant) -> bool {
+        let Some(started_at) = self.started_at else {
+            return false;
+        };
+
+        self.value = self.sample(now).clamp(0.0, 1.0);
+        if now.saturating_duration_since(started_at) >= self.duration {
+            self.value = self.to;
+            self.from = self.to;
+            self.started_at = None;
+            false
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    fn value(&self) -> f32 {
+        self.value.clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn is_animating(&self) -> bool {
+        self.started_at.is_some()
+    }
+}
 
 #[derive(Default)]
 struct StageControlsViewCache {
@@ -36,6 +135,13 @@ struct StageTransportViewCache {
 }
 
 impl Global for StageTransportViewCache {}
+
+#[derive(Default)]
+struct StageTitlebarViewCache {
+    view: Option<Entity<StageTitlebarView>>,
+}
+
+impl Global for StageTitlebarViewCache {}
 
 pub(super) fn view(
     app: &MusicApp,
@@ -57,6 +163,23 @@ pub(super) fn view(
     view
 }
 
+pub(super) fn titlebar_view(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+) -> Entity<StageTitlebarView> {
+    let parent = cx.entity().downgrade();
+    let view = cx.update_default_global(|cache: &mut StageTitlebarViewCache, cx| {
+        if let Some(view) = &cache.view {
+            return view.clone();
+        }
+        let view = cx.new(move |_| StageTitlebarView::new(parent));
+        cache.view = Some(view.clone());
+        view
+    });
+    view.update(cx, |view, cx| view.sync_from_app(app, cx));
+    view
+}
+
 fn transport_view(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
@@ -73,8 +196,7 @@ fn transport_view(
     });
 
     let stage_active = app.stage_open || app.stage_animating;
-    let visibility = app.stage_controls_visibility.clamp(0.0, 1.0);
-    let controls_visible = visibility > 0.005 || app.drag_target.is_some();
+    let controls_visible = app.stage_controls_visibility >= 0.5 || app.drag_target.is_some();
     view.update(cx, |view, cx| {
         view.sync_from_app(app, stage_active, controls_visible, cx)
     });
@@ -86,7 +208,7 @@ pub(super) struct StageControlsView {
     transport: Entity<StageTransportView>,
     volume_slider: InteractiveSliderState,
     stage_active: bool,
-    visibility: f32,
+    fade: StageChromeFade,
     playback_state: PlaybackState,
     volume: f32,
 }
@@ -135,7 +257,7 @@ impl StageControlsView {
             transport,
             volume_slider,
             stage_active: false,
-            visibility: 1.0,
+            fade: StageChromeFade::new(true),
             playback_state: PlaybackState::Paused,
             volume: 1.0,
         }
@@ -147,35 +269,38 @@ impl StageControlsView {
         stage_active: bool,
         cx: &mut Context<Self>,
     ) {
-        let visibility = app.stage_controls_visibility.clamp(0.0, 1.0);
+        let target_visible = app.stage_controls_visibility >= 0.5;
         let playback_state = app.snapshot.state;
         let volume = app.displayed_volume_ratio();
         let changed = self.stage_active != stage_active
-            || (self.visibility - visibility).abs() > 0.0005
             || self.playback_state != playback_state
             || (self.volume - volume).abs() > 0.0005;
+        let fade_changed = self.fade.set_target(target_visible);
 
         self.stage_active = stage_active;
-        self.visibility = visibility;
         self.playback_state = playback_state;
         self.volume = volume;
 
-        if changed {
+        if changed || fade_changed {
             cx.notify();
         }
     }
 }
 
 impl Render for StageControlsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let visibility = self.visibility;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.fade.advance(Instant::now()) {
+            window.request_animation_frame();
+        }
+        let visibility = self.fade.value();
         let playing = self.playback_state == PlaybackState::Playing;
         let volume = self.volume;
         let parent = self.parent.clone();
 
+        // Keep the dock in its stable flex slot. Only opacity changes, so the animation cannot
+        // perturb layout or hitbox geometry while the retained Entity repaints itself at vsync.
         div()
             .id("stage-bottom-dock")
-            .top(px((1.0 - visibility) * 56.0))
             .opacity(visibility)
             .flex()
             .items_center()
@@ -315,6 +440,240 @@ impl Render for StageControlsView {
             )
             .into_any_element()
     }
+}
+
+pub(super) struct StageTitlebarView {
+    parent: WeakEntity<MusicApp>,
+    fade: StageChromeFade,
+    title_key: u64,
+    title: SharedString,
+}
+
+impl StageTitlebarView {
+    fn new(parent: WeakEntity<MusicApp>) -> Self {
+        Self {
+            parent,
+            fade: StageChromeFade::new(true),
+            title_key: 0,
+            title: SharedString::new_static("沉浸音乐大舞台"),
+        }
+    }
+
+    fn sync_from_app(&mut self, app: &MusicApp, cx: &mut Context<Self>) {
+        let fade_changed = self.fade.set_target(app.stage_controls_visibility >= 0.5);
+        let title_key = stage_title_fingerprint(app);
+        let title_changed = title_key != self.title_key;
+        if title_changed {
+            self.title_key = title_key;
+            self.title = app.snapshot.current_track.as_ref().map_or_else(
+                || SharedString::new_static("沉浸音乐大舞台"),
+                |track| SharedString::from(format!("{} · {}", track.title, track.artist)),
+            );
+        }
+        if fade_changed || title_changed {
+            cx.notify();
+        }
+    }
+}
+
+impl Render for StageTitlebarView {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        if self.fade.advance(Instant::now()) {
+            window.request_animation_frame();
+        }
+        let visibility = self.fade.value();
+        if visibility <= 0.001 && !self.fade.is_animating() {
+            return div().w_full().h(px(38.0)).into_any_element();
+        }
+
+        let parent = self.parent.clone();
+        let hide_parent = parent.clone();
+        let collapse_parent = parent.clone();
+        let title = self.title.clone();
+
+        div()
+            .w_full()
+            .h(px(38.0))
+            .opacity(visibility)
+            .child(
+                div()
+                    .id("stage-titlebar")
+                    .w_full()
+                    .h(px(38.0))
+                    .flex_none()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.10))
+                    .border_b_1()
+                    .border_color(hsla(0.0, 0.0, 1.0, 0.05))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .child(
+                        div()
+                            .occlude()
+                            .window_control_area(gpui::WindowControlArea::Client)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(stage_traffic_light_button(
+                                "stage-window-close",
+                                rgb(0xff_5f_56),
+                                |_, _, cx| cx.quit(),
+                            ))
+                            .child(stage_traffic_light_button(
+                                "stage-window-minimize",
+                                rgb(0xff_bd_2e),
+                                |_, window, _| window.minimize_window(),
+                            ))
+                            .child(stage_traffic_light_button(
+                                "stage-window-maximize",
+                                rgb(0x27_c9_3f),
+                                |_, window, _| {
+                                    if window.is_maximized() {
+                                        window.restore_window();
+                                    } else {
+                                        window.maximize_window();
+                                    }
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("stage-drag-region")
+                            .window_control_area(gpui::WindowControlArea::Drag)
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(hsla(0.0, 0.0, 1.0, 0.70))
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                |event: &gpui::MouseDownEvent, window, _| {
+                                    if event.click_count >= 2 {
+                                        window.titlebar_double_click();
+                                    }
+                                },
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("stage-quick-hide-btn")
+                                    .occlude()
+                                    .window_control_area(gpui::WindowControlArea::Client)
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
+                                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.22)))
+                                    .transition(theme::press_transition())
+                                    .active(|style| style.scale(0.95))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        move |event: &gpui::MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = hide_parent.update(cx, |app, app_cx| {
+                                                app.hide_stage_controls_immediately(
+                                                    event.position,
+                                                    app_cx,
+                                                );
+                                            });
+                                        },
+                                    )
+                                    .child(themed_icon(
+                                        icon!(eye_off),
+                                        14.0,
+                                        hsla(0.0, 0.0, 1.0, 0.90),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                                            .child("纯享沉浸"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("stage-collapse-btn")
+                                    .occlude()
+                                    .window_control_area(gpui::WindowControlArea::Client)
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
+                                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.22)))
+                                    .transition(theme::press_transition())
+                                    .active(|style| style.scale(0.95))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = collapse_parent.update(cx, |app, app_cx| {
+                                                app.close_stage(app_cx);
+                                            });
+                                        },
+                                    )
+                                    .child(themed_icon(
+                                        icon!(chevron_down),
+                                        14.0,
+                                        hsla(0.0, 0.0, 1.0, 0.90),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                                            .child("收起舞台 (Esc)"),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn stage_title_fingerprint(app: &MusicApp) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    #[inline]
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(PRIME);
+        }
+    }
+
+    let mut hash = OFFSET;
+    if let Some(track) = app.snapshot.current_track.as_ref() {
+        mix(&mut hash, &track.id.to_le_bytes());
+        mix(&mut hash, track.title.as_bytes());
+        mix(&mut hash, &[0xff]);
+        mix(&mut hash, track.artist.as_bytes());
+    }
+    hash
 }
 
 struct StageTransportView {
@@ -666,6 +1025,30 @@ fn control_button(
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
+fn stage_traffic_light_button(
+    id: &'static str,
+    color: gpui::Rgba,
+    listener: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(12.0))
+        .rounded_full()
+        .bg(color)
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 0.0, 0.15))
+        .cursor_pointer()
+        .occlude()
+        .window_control_area(gpui::WindowControlArea::Client)
+        .hover(|style| style.opacity(0.80))
+        .transition(theme::press_transition())
+        .active(|style| style.scale(0.90))
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            listener(event, window, cx);
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,5 +1059,12 @@ mod tests {
         assert!(option_ratio_changed(Some(0.5), Some(0.51), 0.001));
         assert!(option_ratio_changed(None, Some(0.5), 0.001));
         assert!(!option_ratio_changed(None, None, 0.001));
+    }
+
+    #[test]
+    fn stage_chrome_easing_is_bounded() {
+        assert_eq!(StageChromeFade::ease(0.0), 0.0);
+        assert!((StageChromeFade::ease(0.5) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(StageChromeFade::ease(1.0), 1.0);
     }
 }
