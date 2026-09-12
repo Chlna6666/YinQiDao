@@ -698,7 +698,7 @@ mod tests {
     use super::*;
 
     fn test_track(title: &str) -> Track {
-        Track {
+        Track::new(crate::model::TrackData {
             id: 7,
             path: std::path::PathBuf::from("test.flac"),
             title: title.to_owned(),
@@ -711,7 +711,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             artwork_key: Some("art".into()),
-        }
+        })
     }
 
     #[test]
