@@ -32,6 +32,17 @@ fn mini_clock_visible(parent: &WeakEntity<MusicApp>, cx: &gpui::App) -> bool {
         .unwrap_or(false)
 }
 
+fn mini_clock_should_run(
+    parent: &WeakEntity<MusicApp>,
+    engine: &Option<Arc<AudioEngine>>,
+    cx: &gpui::App,
+) -> bool {
+    mini_clock_visible(parent, cx)
+        && engine
+            .as_ref()
+            .is_some_and(|engine| engine.progress().0 == PlaybackState::Playing)
+}
+
 pub(super) struct PlaybackProgress {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
@@ -50,23 +61,23 @@ impl PlaybackProgress {
 
 impl Render for PlaybackProgress {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.timer_started {
+        if !self.timer_started && mini_clock_should_run(&self.parent, &self.engine, cx) {
             self.timer_started = true;
             cx.spawn(async move |this, cx| -> Result<()> {
                 loop {
                     Timer::after(MINI_PROGRESS_REFRESH_INTERVAL).await;
-                    if this
-                        .update(cx, |this, cx| {
-                            if mini_clock_visible(&this.parent, cx)
-                                && this.engine.as_ref().is_some_and(|engine| {
-                                    engine.progress().0 == PlaybackState::Playing
-                                })
-                            {
-                                cx.notify();
-                            }
-                        })
-                        .is_err()
-                    {
+                    let keep_running = match this.update(cx, |this, cx| {
+                        if !mini_clock_should_run(&this.parent, &this.engine, cx) {
+                            this.timer_started = false;
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    }) {
+                        Ok(keep_running) => keep_running,
+                        Err(_) => break,
+                    };
+                    if !keep_running {
                         break;
                     }
                 }
@@ -165,23 +176,23 @@ impl PlaybackTime {
 
 impl Render for PlaybackTime {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.timer_started {
+        if !self.timer_started && mini_clock_should_run(&self.parent, &self.engine, cx) {
             self.timer_started = true;
             cx.spawn(async move |this, cx| -> Result<()> {
                 loop {
                     Timer::after(MINI_TIME_REFRESH_INTERVAL).await;
-                    if this
-                        .update(cx, |this, cx| {
-                            if mini_clock_visible(&this.parent, cx)
-                                && this.engine.as_ref().is_some_and(|engine| {
-                                    engine.progress().0 == PlaybackState::Playing
-                                })
-                            {
-                                cx.notify();
-                            }
-                        })
-                        .is_err()
-                    {
+                    let keep_running = match this.update(cx, |this, cx| {
+                        if !mini_clock_should_run(&this.parent, &this.engine, cx) {
+                            this.timer_started = false;
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    }) {
+                        Ok(keep_running) => keep_running,
+                        Err(_) => break,
+                    };
+                    if !keep_running {
                         break;
                     }
                 }
