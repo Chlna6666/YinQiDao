@@ -44,8 +44,9 @@ pub struct SystemMediaBridge {
     _hwnd: Option<*mut std::ffi::c_void>,
 }
 
+// The bridge is moved as a single owner into the serialized blocking worker and moved back when
+// the update finishes. It is never concurrently shared, so Send is required here but Sync is not.
 unsafe impl Send for SystemMediaBridge {}
-unsafe impl Sync for SystemMediaBridge {}
 
 impl SystemMediaBridge {
     pub fn try_create(event_tx: Sender<SystemMediaEvent>) -> Result<Self, String> {
