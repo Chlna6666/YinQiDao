@@ -1,11 +1,23 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
 pub type TrackId = i64;
 
+/// Cheap-to-clone handle to immutable-by-default track metadata.
+///
+/// Playback snapshots, preload requests, engine registration, enrichment tasks and UI projections
+/// frequently retain the same logical track concurrently. Keeping the payload behind `Arc` makes
+/// those clones O(1); rare metadata edits use `DerefMut`/`Arc::make_mut` for copy-on-write updates.
 #[derive(Clone, Debug)]
-pub struct Track {
+pub struct Track(Arc<TrackData>);
+
+#[derive(Clone, Debug)]
+pub struct TrackData {
     pub id: TrackId,
     pub path: PathBuf,
     pub title: String,
@@ -20,13 +32,23 @@ pub struct Track {
     pub artwork_key: Option<String>,
 }
 
-/// Construction payload for [`Track`]. This is temporarily an alias so call sites can migrate to
-/// `Track::new(TrackData { .. })` without changing runtime behavior before Track becomes shared.
-pub type TrackData = Track;
-
 impl Track {
     pub fn new(data: TrackData) -> Self {
-        data
+        Self(Arc::new(data))
+    }
+}
+
+impl Deref for Track {
+    type Target = TrackData;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl DerefMut for Track {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
     }
 }
 
