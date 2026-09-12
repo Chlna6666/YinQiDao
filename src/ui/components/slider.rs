@@ -1,8 +1,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, Stateful, div, hsla,
-    prelude::*, px, relative, rgb,
+    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, SharedString, Stateful,
+    div, hsla, prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
@@ -129,9 +129,46 @@ enum SliderAxis {
 
 #[derive(Clone)]
 struct SliderDrag {
-    id: String,
+    id: Rc<str>,
     axis: SliderAxis,
     on_change: SliderCallback,
+}
+
+#[derive(Clone)]
+pub struct InteractiveSliderState {
+    id: ElementId,
+    id_string: Rc<str>,
+    hover_group: SharedString,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    on_click: SliderCallback,
+    on_drag: SliderCallback,
+    on_drag_end: SliderCallback,
+}
+
+impl InteractiveSliderState {
+    pub fn new(
+        id: impl Into<ElementId>,
+        on_click: impl Fn(f32, &mut App) + 'static,
+        on_drag: impl Fn(f32, &mut App) + 'static,
+        on_drag_end: impl Fn(f32, &mut App) + 'static,
+    ) -> Self {
+        let id = id.into();
+        let id_string: Rc<str> = Rc::from(id.to_string());
+        let hover_group = SharedString::from(format!("slider-hover-{id}"));
+        Self {
+            id,
+            id_string,
+            hover_group,
+            bounds: Rc::new(Cell::new(None)),
+            on_click: Rc::new(on_click),
+            on_drag: Rc::new(on_drag),
+            on_drag_end: Rc::new(on_drag_end),
+        }
+    }
+
+    pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
+        interactive_slider_state(self, ratio, style)
+    }
 }
 
 fn begin_pointer_press_state(state: &mut SliderInteractionState, id: &str) {
@@ -210,11 +247,15 @@ fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
         )
 }
 
-fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Div {
+fn slider_visual_with_group(
+    id: ElementId,
+    ratio: f32,
+    style: SliderStyle,
+    hover_group: SharedString,
+) -> Div {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
         .max(f32::from(style.hover_track_height)));
-    let hover_group = format!("slider-hover-{id}");
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
     let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
@@ -318,6 +359,11 @@ fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Div {
     }
 }
 
+fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Div {
+    let hover_group = SharedString::from(format!("slider-hover-{id}"));
+    slider_visual_with_group(id, ratio, style, hover_group)
+}
+
 fn vertical_slider_visual(id: ElementId, ratio: f32, height: Pixels, style: SliderStyle) -> Div {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_width = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
@@ -412,27 +458,31 @@ pub fn interactive_slider(
     on_drag: impl Fn(f32, &mut App) + 'static,
     on_drag_end: impl Fn(f32, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let id = id.into();
-    let id_string = id.to_string();
-    let on_click: SliderCallback = Rc::new(on_click);
-    let on_drag: SliderCallback = Rc::new(on_drag);
-    let on_drag_end: SliderCallback = Rc::new(on_drag_end);
-    let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+    InteractiveSliderState::new(id, on_click, on_drag, on_drag_end).render(ratio, style)
+}
 
-    let bounds_for_children = bounds.clone();
-    let bounds_for_down = bounds.clone();
-    let bounds_for_up = bounds.clone();
-    let bounds_for_up_out = bounds.clone();
-    let id_for_down = id_string.clone();
-    let id_for_down_out = id_string.clone();
-    let id_for_up = id_string.clone();
-    let id_for_up_out = id_string.clone();
-    let id_for_drag = id_string.clone();
-    let click_for_down = on_click;
-    let drag_for_up = on_drag_end.clone();
-    let drag_for_up_out = on_drag_end;
+fn interactive_slider_state(
+    state: &InteractiveSliderState,
+    ratio: f32,
+    style: SliderStyle,
+) -> Stateful<Div> {
+    let id = state.id.clone();
+    let id_string = state.id_string.clone();
+    let bounds_for_children = state.bounds.clone();
+    let bounds_for_down = state.bounds.clone();
+    let bounds_for_up = state.bounds.clone();
+    let bounds_for_up_out = state.bounds.clone();
+    let id_for_down = state.id_string.clone();
+    let id_for_down_out = state.id_string.clone();
+    let id_for_up = state.id_string.clone();
+    let id_for_up_out = state.id_string.clone();
+    let id_for_drag = state.id_string.clone();
+    let click_for_down = state.on_click.clone();
+    let drag_for_up = state.on_drag_end.clone();
+    let drag_for_up_out = state.on_drag_end.clone();
+    let on_drag = state.on_drag.clone();
 
-    slider_visual(id.clone(), ratio, style)
+    slider_visual_with_group(id.clone(), ratio, style, state.hover_group.clone())
         .on_children_prepainted(move |children_bounds, _window, _cx| {
             bounds_for_children.set(children_bounds.first().copied());
         })
@@ -517,7 +567,7 @@ pub fn interactive_vertical_slider(
     on_change: impl Fn(f32, &mut App) + 'static,
 ) -> Stateful<Div> {
     let id = id.into();
-    let id_string = id.to_string();
+    let id_string: Rc<str> = Rc::from(id.to_string());
     let on_change: SliderCallback = Rc::new(on_change);
     let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
 
