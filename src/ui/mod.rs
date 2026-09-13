@@ -16,6 +16,7 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+mod stage_chrome;
 mod stage_controls;
 mod stage_lyrics;
 use player_facade as player;
