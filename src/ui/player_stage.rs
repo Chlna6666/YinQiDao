@@ -25,6 +25,18 @@ use super::{
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime, mini_player};
 
+const STAGE_CHROME_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[inline]
+fn stage_chrome_hidden(app: &MusicApp) -> bool {
+    app.stage_suppress_wake_until.is_some()
+        || (app.stage_open
+            && app.stage_last_user_activity.elapsed() >= STAGE_CHROME_IDLE_TIMEOUT
+            && !app.seeking
+            && !app.volume_dragging
+            && !app.stage_controls_hovered)
+}
+
 #[derive(Default)]
 struct StagePlayerViewCache {
     view: Option<Entity<StagePlayerView>>,
@@ -183,9 +195,7 @@ impl Render for StagePlayerView {
                 cx.stop_propagation();
                 let _ = parent_move.update(cx, |app, _cx| {
                     app.stage_last_mouse_pos = Some(event.position);
-                    if app.stage_suppress_wake_until.is_some()
-                        || app.stage_controls_visibility < 0.995
-                    {
+                    if stage_chrome_hidden(app) {
                         return;
                     }
                     app.stage_last_user_activity = Instant::now();
@@ -193,9 +203,7 @@ impl Render for StagePlayerView {
             })
             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                 let _ = parent_down.update(cx, |app, app_cx| {
-                    if app.stage_suppress_wake_until.is_some()
-                        || app.stage_controls_visibility < 0.995
-                    {
+                    if stage_chrome_hidden(app) {
                         app.wake_stage_controls_immediately(app_cx);
                     } else {
                         app.stage_last_user_activity = Instant::now();
