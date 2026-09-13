@@ -5,9 +5,9 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, IntoElement, ListAlignment,
-    ListOffset, ListState, Render, SharedString, Transition, TransitionProperty, WeakEntity, Window,
-    div, hsla, list, point, prelude::*, px, relative,
+    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
+    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Transition,
+    TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -941,7 +941,7 @@ fn karaoke_word(
         .left(px(0.0))
         .top(px(0.0))
         .h_full()
-        .w(relative(progress))
+        .w_full()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
@@ -952,7 +952,6 @@ fn karaoke_word(
         && let Some(remaining) = word_reveal_remaining(word, position_ms)
         && !remaining.is_zero()
     {
-        let start = progress;
         let key = karaoke_epoch
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(word.timestamp_ms.rotate_left(17))
@@ -963,11 +962,19 @@ fn karaoke_word(
                     SharedString::new_static("lyric-word-sweep"),
                     key,
                 ),
-                Animation::new(remaining),
-                move |element, delta| {
-                    let reveal = start + (1.0 - start) * delta.clamp(0.0, 1.0);
-                    element.w(relative(reveal))
-                },
+                Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
+                    HorizontalRevealEdge::Left,
+                    progress,
+                    1.0,
+                )),
+                |element, _| element,
+            )
+            .into_any_element()
+    } else if progress < 1.0 {
+        overlay
+            .with_sampled_animation(
+                AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
+                progress,
             )
             .into_any_element()
     } else {
@@ -1001,11 +1008,10 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    // Keep the authored words as independent nowrap fragments so wrapping still occurs only at
-    // semantic word/syllable boundaries. Only the current fragment owns a tiny absolute bright
-    // overlay whose width is animated. GPUI's legacy animation path targets the fragment's retained
-    // subtree, so this continuous sweep does not make the lyric list, Stage, or root rerender at
-    // display refresh rate.
+    // Keep authored words as independent nowrap fragments so wrapping still occurs only at semantic
+    // word/syllable boundaries. The bright overlay always keeps its final geometry; GPUI's retained
+    // ClipReveal changes only the renderer content mask, so the active word is shaped and laid out
+    // once while its left-to-right highlight advances at compositor cadence.
     let mut row = div()
         .w_full()
         .min_w(px(0.0))
