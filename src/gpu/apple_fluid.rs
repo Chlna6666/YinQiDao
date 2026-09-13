@@ -30,7 +30,7 @@ pub(crate) fn apple_fluid_params(
     track_id: i64,
     palette: Option<&ArtworkPalette>,
     time_seconds: f32,
-    _dynamic: bool,
+    full_effect: bool,
 ) -> ShaderParams16 {
     let fallback = ArtworkPalette::default();
     let palette = palette.unwrap_or(&fallback);
@@ -40,7 +40,11 @@ pub(crate) fn apple_fluid_params(
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
     let time = time_seconds.rem_euclid(21_600.0);
-    let motion = 1.0;
+    // The same shader/pipeline is used for both paths. While the stage is prewarming or the drawer
+    // is moving we set motion to zero, which selects the cheap static fragment path. This still
+    // exercises the backend pipeline during prewarm without paying the full-screen FBM cost on
+    // every drawer frame. Once the stage settles, motion=1 enables the full fluid effect.
+    let motion = if full_effect { 1.0 } else { 0.0 };
     let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
 
     ShaderParams16::from_columns([
@@ -63,6 +67,10 @@ pub(crate) struct AppleFluidView {
 
 impl AppleFluidView {
     pub(crate) fn new() -> Self {
+        // Parse/validate WGSL and build the shared mesh as soon as the retained entity is created.
+        // The existing offscreen stage prewarm can then spend its frame on backend pipeline creation
+        // instead of also paying Naga/source construction during the first immersive render.
+        let shader_available = apple_fluid_program().is_ok();
         Self {
             track_id: 0,
             palette: None,
@@ -70,7 +78,7 @@ impl AppleFluidView {
             playing: false,
             animation_seconds: 0.0,
             last_frame_at: Instant::now(),
-            shader_available: true,
+            shader_available,
         }
     }
 
@@ -130,7 +138,7 @@ impl Render for AppleFluidView {
                         self.track_id,
                         self.palette.as_ref(),
                         self.animation_seconds,
-                        true,
+                        self.stage_visible,
                     ),
                 );
             }
@@ -184,9 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dynamic_blur_flag_no_longer_freezes_immersive_fluid() {
-        let enabled = apple_fluid_params(7, None, 12.5, true);
-        let disabled = apple_fluid_params(7, None, 12.5, false);
-        assert_eq!(enabled, disabled);
+    fn stage_prewarm_uses_a_cheaper_static_shader_parameter_set() {
+        let warmup = apple_fluid_params(7, None, 12.5, false);
+        let active = apple_fluid_params(7, None, 12.5, true);
+        assert_ne!(warmup, active);
     }
 }
