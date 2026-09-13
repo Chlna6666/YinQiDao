@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString, WeakEntity,
-    Window, div, hsla, prelude::*, px, rgb,
+    BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render, SharedString,
+    Transition, TransitionProperty, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -118,9 +118,19 @@ impl StageChromeFade {
     }
 
     #[inline]
-    fn is_animating(&self) -> bool {
-        self.started_at.is_some()
+    fn target_value(&self) -> f32 {
+        self.to.clamp(0.0, 1.0)
     }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.started_at.map(|started_at| started_at + self.duration)
+    }
+}
+
+fn stage_chrome_fade_transition() -> Transition {
+    Transition::new(STAGE_CHROME_FADE_DURATION)
+        .ease(Easing::InOutCubic)
+        .properties([TransitionProperty::Opacity])
 }
 
 #[derive(Default)]
@@ -289,20 +299,29 @@ impl StageControlsView {
 }
 
 impl Render for StageControlsView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        if self.fade.advance(Instant::now()) {
-            window.request_animation_frame();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let animating = self.fade.advance(now);
+        if animating
+            && let Some(deadline) = self.fade.deadline()
+        {
+            window.request_invalidation_at(deadline, cx);
         }
-        let visibility = self.fade.value();
+        let visibility = if animating {
+            self.fade.target_value()
+        } else {
+            self.fade.value()
+        };
         let playing = self.playback_state == PlaybackState::Playing;
         let volume = self.volume;
         let parent = self.parent.clone();
 
-        // Keep the dock in its stable flex slot. Only opacity changes, so the animation cannot
-        // perturb layout or hitbox geometry while the retained Entity repaints itself at vsync.
+        // Opacity is a GPU visual transition in the pinned GPUI fork. The View only renders at the
+        // semantic endpoints; the renderer interpolates the dock without a per-frame CPU RAF.
         div()
             .id("stage-bottom-dock")
             .opacity(visibility)
+            .transition(stage_chrome_fade_transition())
             .flex()
             .items_center()
             .gap_5()
@@ -478,12 +497,20 @@ impl StageTitlebarView {
 }
 
 impl Render for StageTitlebarView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        if self.fade.advance(Instant::now()) {
-            window.request_animation_frame();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let animating = self.fade.advance(now);
+        if animating
+            && let Some(deadline) = self.fade.deadline()
+        {
+            window.request_invalidation_at(deadline, cx);
         }
-        let visibility = self.fade.value();
-        if visibility <= 0.001 && !self.fade.is_animating() {
+        let visibility = if animating {
+            self.fade.target_value()
+        } else {
+            self.fade.value()
+        };
+        if visibility <= 0.001 && !animating {
             return div().w_full().h(px(38.0)).into_any_element();
         }
 
@@ -493,9 +520,11 @@ impl Render for StageTitlebarView {
         let title = self.title.clone();
 
         div()
+            .id("stage-titlebar-shell")
             .w_full()
             .h(px(38.0))
             .opacity(visibility)
+            .transition(stage_chrome_fade_transition())
             .child(
                 div()
                     .id("stage-titlebar")
