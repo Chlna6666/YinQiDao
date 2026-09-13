@@ -319,11 +319,10 @@ impl StageLyricsView {
             .map(|line| line.timestamp_ms);
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && line.enhanced_complete
-            && let Some(word) = line.words.iter().find(|word| word.timestamp_ms > position_ms)
+            && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
         {
-            next_timestamp = Some(next_timestamp.map_or(word.timestamp_ms, |current| {
-                current.min(word.timestamp_ms)
+            next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
+                current.min(word_timestamp)
             }));
         }
 
@@ -348,14 +347,8 @@ impl StageLyricsView {
         }
 
         self.position_ms = position_ms;
-        let previous_word = self.active_word_index;
-        let active_changed = self.update_active_index();
-        let next_word = self.compute_active_word_index();
-        if active_changed || previous_word != next_word {
-            self.active_word_index = next_word;
-        } else {
-            self.active_word_index = next_word;
-        }
+        self.update_active_index();
+        self.active_word_index = self.compute_active_word_index();
     }
 
     #[inline]
@@ -674,7 +667,13 @@ fn render_lyric_row(
         let active_focus = Animation::from_spec(
             AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
         )
-        .with_property(AnimationProperty::opacity(0.80, 1.0));
+        .with_property(AnimationProperty::scale_opacity(
+            0.985,
+            1.0,
+            0.80,
+            1.0,
+            gpui::TransformOrigin::CENTER,
+        ));
         let animation_key = motion_epoch
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(index as u64);
@@ -820,6 +819,15 @@ fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option
     line.words
         .partition_point(|word| word.timestamp_ms <= position_ms)
         .checked_sub(1)
+}
+
+fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
+    if !line.enhanced_complete {
+        return None;
+    }
+    line.words
+        .get(line.words.partition_point(|word| word.timestamp_ms <= position_ms))
+        .map(|word| word.timestamp_ms)
 }
 
 fn lyric_word_highlight(fade_out: Option<f32>) -> gpui::HighlightStyle {
@@ -990,6 +998,10 @@ mod tests {
         assert_eq!(active_enhanced_word_index(&line, 1_000), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_499), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_500), Some(1));
+        assert_eq!(next_enhanced_word_timestamp(&line, 999), Some(1_000));
+        assert_eq!(next_enhanced_word_timestamp(&line, 1_000), Some(1_500));
+        assert_eq!(next_enhanced_word_timestamp(&line, 1_499), Some(1_500));
+        assert_eq!(next_enhanced_word_timestamp(&line, 1_500), None);
         assert_eq!(line.words[0].byte_start, 0);
         assert_eq!(line.words[0].byte_end, "你好 ".len());
         assert_eq!(line.words[1].byte_start, "你好 ".len());
