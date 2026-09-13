@@ -36,6 +36,7 @@ impl Global for StageLyricsViewCache {}
 #[derive(Clone)]
 struct StageLyricWord {
     timestamp_ms: u64,
+    duration_ms: Option<u64>,
     byte_start: usize,
     byte_end: usize,
 }
@@ -56,11 +57,22 @@ impl StageLyricLine {
         let words = line
             .words
             .iter()
-            .map(|word| {
+            .enumerate()
+            .map(|(index, word)| {
                 let byte_start = byte_offset;
                 byte_offset += word.text.len();
+                // QRC/YRC/TTML provide an authored duration. Enhanced LRC only provides starts, in
+                // which case the next authored segment gives a precise upper bound without inventing
+                // timing from character count. The last LRC segment stays duration-less.
+                let duration_ms = word.duration_ms.filter(|duration| *duration > 0).or_else(|| {
+                    line.words.get(index + 1).and_then(|next| {
+                        let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
+                        (duration > 0).then_some(duration)
+                    })
+                });
                 StageLyricWord {
                     timestamp_ms: word.timestamp_ms,
+                    duration_ms,
                     byte_start,
                     byte_end: byte_offset,
                 }
@@ -319,11 +331,17 @@ impl StageLyricsView {
             .map(|line| line.timestamp_ms);
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
         {
-            next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
-                current.min(word_timestamp)
-            }));
+            if let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms) {
+                next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
+                    current.min(word_timestamp)
+                }));
+            }
+            if let Some(reveal_timestamp) = next_enhanced_reveal_timestamp(line, position_ms) {
+                next_timestamp = Some(next_timestamp.map_or(reveal_timestamp, |current| {
+                    current.min(reveal_timestamp)
+                }));
+            }
         }
 
         let timestamp = next_timestamp?;
@@ -519,6 +537,7 @@ impl Render for StageLyricsView {
 
         let active = self.active_index.unwrap_or(0);
         let active_word_index = self.active_word_index;
+        let position_ms = self.position_ms;
         let reading_mode = self.is_reading();
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
@@ -539,6 +558,7 @@ impl Render for StageLyricsView {
                 index,
                 active,
                 active_word_index,
+                position_ms,
                 reading_mode,
                 depth_blur_active,
                 text_id,
@@ -607,6 +627,7 @@ fn render_lyric_row(
     index: usize,
     active: usize,
     active_word_index: Option<usize>,
+    position_ms: u64,
     reading_mode: bool,
     depth_blur_active: bool,
     text_id: &'static str,
@@ -636,6 +657,7 @@ fn render_lyric_row(
             line,
             karaoke_active,
             active_word_index,
+            position_ms,
         ));
 
     if let Some(translation) = &line.translation {
@@ -823,6 +845,69 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
         .map(|word| word.timestamp_ms)
 }
 
+fn current_word_reveal_end(
+    line: &StageLyricLine,
+    word: &StageLyricWord,
+    position_ms: u64,
+) -> usize {
+    let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
+        return word.byte_end;
+    };
+    let text: &str = &line.text;
+    let Some(segment) = text.get(word.byte_start..word.byte_end) else {
+        return word.byte_end;
+    };
+    let char_count = segment.chars().count();
+    if char_count <= 1 {
+        return word.byte_end;
+    }
+
+    let elapsed = position_ms
+        .saturating_sub(word.timestamp_ms)
+        .min(duration_ms);
+    // Reveal the first glyph at the authored segment start, then advance only on character
+    // boundaries. This approximates Apple Music's left-to-right sweep without repainting every
+    // display frame or splitting UTF-8 inside a code point.
+    let reveal_count = (1
+        + ((elapsed as u128 * char_count as u128) / duration_ms as u128) as usize)
+        .min(char_count);
+    let relative_end = segment
+        .char_indices()
+        .nth(reveal_count)
+        .map_or(segment.len(), |(offset, _)| offset);
+    word.byte_start + relative_end
+}
+
+fn next_enhanced_reveal_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
+    let current = active_enhanced_word_index(line, position_ms)?;
+    let word = line.words.get(current)?;
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
+    let text: &str = &line.text;
+    let segment = text.get(word.byte_start..word.byte_end)?;
+    let char_count = segment.chars().count() as u64;
+    if char_count <= 1 {
+        return None;
+    }
+    let end = word.timestamp_ms.saturating_add(duration_ms);
+    if position_ms >= end {
+        return None;
+    }
+
+    let elapsed = position_ms.saturating_sub(word.timestamp_ms);
+    let revealed = (1
+        + ((elapsed as u128 * char_count as u128) / duration_ms as u128) as u64)
+        .min(char_count);
+    for step in revealed..char_count {
+        let numerator = duration_ms as u128 * step as u128;
+        let offset = ((numerator + char_count as u128 - 1) / char_count as u128) as u64;
+        let timestamp = word.timestamp_ms.saturating_add(offset);
+        if timestamp > position_ms {
+            return Some(timestamp);
+        }
+    }
+    None
+}
+
 fn lyric_word_highlight(fade_out: Option<f32>) -> gpui::HighlightStyle {
     gpui::HighlightStyle {
         fade_out,
@@ -834,6 +919,7 @@ fn stage_primary_lyric(
     line: &StageLyricLine,
     karaoke_active: bool,
     current_word: Option<usize>,
+    position_ms: u64,
 ) -> gpui::AnyElement {
     if !karaoke_active || !line.enhanced_complete {
         return div()
@@ -845,20 +931,31 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    // Apple Music-like karaoke keeps completed/current text near full luminance while the unsung
-    // tail stays clearly recessed. The update cadence remains semantic word boundaries rather than
-    // a per-frame root timer, so stronger contrast does not add layout/paint frequency.
-    let highlights = line.words.iter().enumerate().map(|(index, word)| {
-        let fade_out = match current_word {
-            Some(current) if index < current => Some(0.03),
-            Some(current) if index == current => None,
-            Some(_) | None => Some(0.72),
-        };
-        (
-            word.byte_start..word.byte_end,
-            lyric_word_highlight(fade_out),
-        )
-    });
+    // Completed text stays near full luminance, the unsung tail remains recessed, and the current
+    // authored word is split at a UTF-8-safe reveal boundary derived from its real duration. This
+    // gives the active line a left-to-right karaoke sweep without a high-frequency root timer.
+    let mut highlights = Vec::with_capacity(line.words.len() + 1);
+    for (index, word) in line.words.iter().enumerate() {
+        match current_word {
+            Some(current) if index < current => highlights.push((
+                word.byte_start..word.byte_end,
+                lyric_word_highlight(Some(0.03)),
+            )),
+            Some(current) if index == current => {
+                let reveal_end = current_word_reveal_end(line, word, position_ms);
+                if reveal_end < word.byte_end {
+                    highlights.push((
+                        reveal_end..word.byte_end,
+                        lyric_word_highlight(Some(0.72)),
+                    ));
+                }
+            }
+            Some(_) | None => highlights.push((
+                word.byte_start..word.byte_end,
+                lyric_word_highlight(Some(0.72)),
+            )),
+        }
+    }
 
     div()
         .w_full()
@@ -947,10 +1044,12 @@ mod tests {
             words: Arc::from([
                 LyricWord {
                     timestamp_ms: 1_000,
+                    duration_ms: None,
                     text: "你好 ".into(),
                 },
                 LyricWord {
                     timestamp_ms: 1_500,
+                    duration_ms: None,
                     text: "世界".into(),
                 },
             ]),
@@ -963,6 +1062,7 @@ mod tests {
             translation: None,
             words: Arc::from([LyricWord {
                 timestamp_ms: 1_200,
+                duration_ms: None,
                 text: "你好".into(),
             }]),
         };
@@ -978,10 +1078,12 @@ mod tests {
             words: Arc::from([
                 LyricWord {
                     timestamp_ms: 1_000,
+                    duration_ms: None,
                     text: "你好 ".into(),
                 },
                 LyricWord {
                     timestamp_ms: 1_500,
+                    duration_ms: None,
                     text: "世界".into(),
                 },
             ]),
@@ -995,9 +1097,34 @@ mod tests {
         assert_eq!(next_enhanced_word_timestamp(&line, 1_000), Some(1_500));
         assert_eq!(next_enhanced_word_timestamp(&line, 1_499), Some(1_500));
         assert_eq!(next_enhanced_word_timestamp(&line, 1_500), None);
+        assert_eq!(line.words[0].duration_ms, Some(500));
+        assert_eq!(line.words[1].duration_ms, None);
         assert_eq!(line.words[0].byte_start, 0);
         assert_eq!(line.words[0].byte_end, "你好 ".len());
         assert_eq!(line.words[1].byte_start, "你好 ".len());
         assert_eq!(line.words[1].byte_end, line.text.len());
+    }
+
+    #[test]
+    fn authored_word_duration_drives_intra_word_reveal_boundaries() {
+        let source = LyricLine {
+            timestamp_ms: 1_000,
+            text: "ABC".into(),
+            translation: None,
+            words: Arc::from([LyricWord {
+                timestamp_ms: 1_000,
+                duration_ms: Some(300),
+                text: "ABC".into(),
+            }]),
+        };
+        let line = StageLyricLine::from_source(&source);
+        let word = &line.words[0];
+        assert_eq!(current_word_reveal_end(&line, word, 1_000), 1);
+        assert_eq!(current_word_reveal_end(&line, word, 1_099), 1);
+        assert_eq!(current_word_reveal_end(&line, word, 1_100), 2);
+        assert_eq!(current_word_reveal_end(&line, word, 1_200), 3);
+        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_000), Some(1_100));
+        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_100), Some(1_200));
+        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_200), None);
     }
 }
