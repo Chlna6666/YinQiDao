@@ -217,7 +217,25 @@ impl DiscordPresence {
         });
 
         if state_changed || context_changed || seeked {
+            // A real publish already performs the liveness read around the write, so do not probe
+            // the same IPC endpoint twice on this path.
             self.publish();
+        } else {
+            // During steady playback the transport anchor can remain valid indefinitely. Probe once
+            // so a Discord restart is still detected even when there is no state/seek/metadata
+            // change. disconnect_with_backoff clears `published`; the next regular update then
+            // enters `context_changed` and drives the bounded reconnect path.
+            self.check_connection();
+        }
+    }
+
+    fn check_connection(&mut self) {
+        let disconnected = self
+            .stream
+            .as_mut()
+            .is_some_and(|stream| stream.drain_responses().is_err());
+        if disconnected {
+            self.disconnect_with_backoff();
         }
     }
 
@@ -323,7 +341,7 @@ impl DiscordPresence {
             ));
         };
         // One response drain before and after the write is enough to surface a stale/disconnected
-        // IPC endpoint. Avoid additional read-timeout probes in update_playback/ensure_connected.
+        // IPC endpoint. Avoid additional read-timeout probes in ensure_connected.
         stream.drain_responses()?;
         stream.write_frame(&frame)?;
         stream.drain_responses()
