@@ -852,8 +852,7 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    let mut highlights = Vec::with_capacity(line.words.len());
-    for (index, word) in line.words.iter().enumerate() {
+    let highlights = line.words.iter().enumerate().map(|(index, word)| {
         let fade_out = match current_word {
             Some(current) if index < current => Some(0.12),
             Some(current) if index == current => None,
@@ -861,11 +860,11 @@ fn stage_primary_lyric(
             None if index == 0 => Some(0.10),
             None => Some(0.58),
         };
-        highlights.push((
+        (
             word.byte_start..word.byte_end,
             lyric_word_highlight(fade_out),
-        ));
-    }
+        )
+    });
 
     div()
         .w_full()
