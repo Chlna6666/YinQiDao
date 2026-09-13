@@ -1,0 +1,302 @@
+package yinqidao:music-plugin@0.1.0;
+
+interface types {
+    enum capability {
+        authentication,
+        search,
+        metadata,
+        lyrics,
+        artwork,
+        streaming,
+        playlists,
+        cloud-library,
+        recommendations,
+        recognition,
+        user-profile,
+        like-sync,
+        playback-events,
+    }
+
+    enum auth-method {
+        qr-code,
+        browser-oauth,
+        device-code,
+        cookie-import,
+        custom-form,
+    }
+
+    record key-value {
+        key: string,
+        value: string,
+    }
+
+    record provider-descriptor {
+        id: string,
+        display-name: string,
+        capabilities: list<capability>,
+        auth-methods: list<auth-method>,
+    }
+
+    record plugin-manifest {
+        id: string,
+        name: string,
+        version: string,
+        abi-version: u32,
+        description: string,
+        homepage: option<string>,
+        providers: list<provider-descriptor>,
+        network-domains: list<string>,
+    }
+
+    enum auth-challenge-kind {
+        qr-code,
+        browser,
+        device-code,
+        form,
+    }
+
+    record auth-challenge {
+        challenge-id: string,
+        kind: auth-challenge-kind,
+        verification-uri: option<string>,
+        user-code: option<string>,
+        qr-payload: option<string>,
+        fields: list<key-value>,
+        expires-at-ms: option<u64>,
+    }
+
+    record account {
+        account-id: string,
+        provider-id: string,
+        display-name: string,
+        avatar-url: option<string>,
+        capabilities: list<capability>,
+    }
+
+    variant auth-poll {
+        pending,
+        authenticated(account),
+        expired,
+        denied(string),
+    }
+
+    record source-track-ref {
+        provider-id: string,
+        source-id: string,
+    }
+
+    record track-query {
+        title: string,
+        artists: list<string>,
+        album: string,
+        duration-ms: option<u64>,
+        isrc: option<string>,
+        musicbrainz-recording-id: option<string>,
+        fingerprint-id: option<string>,
+    }
+
+    record remote-track {
+        source: source-track-ref,
+        title: string,
+        artists: list<string>,
+        album: string,
+        duration-ms: option<u64>,
+        isrc: option<string>,
+        cover-url: option<string>,
+        playable: bool,
+        explicit: bool,
+    }
+
+    record lyric-word {
+        timestamp-ms: u64,
+        duration-ms: option<u64>,
+        text: string,
+    }
+
+    record lyric-line {
+        timestamp-ms: u64,
+        text: string,
+        translation: option<string>,
+        words: list<lyric-word>,
+    }
+
+    record lyric-document {
+        source: string,
+        plain: option<string>,
+        lines: list<lyric-line>,
+    }
+
+    record artwork-descriptor {
+        url: string,
+        headers: list<key-value>,
+        expires-at-ms: option<u64>,
+    }
+
+    record stream-request {
+        track: source-track-ref,
+        quality: option<string>,
+    }
+
+    record stream-descriptor {
+        url: string,
+        headers: list<key-value>,
+        codec: option<string>,
+        bitrate: option<u32>,
+        sample-rate: option<u32>,
+        channels: option<u16>,
+        expires-at-ms: option<u64>,
+    }
+
+    enum recommendation-surface {
+        home,
+        daily-mix,
+        discovery,
+        similar-track,
+        artist-radio,
+        continue-listening,
+    }
+
+    record recommendation-request {
+        surface: recommendation-surface,
+        seed: option<track-query>,
+        limit: u16,
+        exclude: list<source-track-ref>,
+    }
+
+    record recommendation-item {
+        track: remote-track,
+        score: option<float32>,
+        reason: option<string>,
+    }
+
+    record recognition-request {
+        algorithm: string,
+        fingerprint: list<u8>,
+        duration-ms: u64,
+    }
+
+    record recognition-result {
+        track: remote-track,
+        confidence: option<float32>,
+    }
+
+    record playlist {
+        provider-id: string,
+        source-id: string,
+        name: string,
+        cover-url: option<string>,
+        track-count: option<u32>,
+        editable: bool,
+    }
+
+    enum playback-signal-kind {
+        started,
+        completed,
+        skipped,
+        liked,
+        unliked,
+        disliked,
+    }
+
+    record playback-signal {
+        kind: playback-signal-kind,
+        track: track-query,
+        source: option<source-track-ref>,
+        position-ms: u64,
+        duration-ms: u64,
+        occurred-at-ms: u64,
+    }
+}
+
+interface host {
+    use types.{key-value};
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<key-value>,
+        body: list<u8>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<key-value>,
+        body: list<u8>,
+    }
+
+    /// Host-mediated network access. The host validates the manifest domain allowlist, request size,
+    /// timeout, concurrency and redirects before any socket is opened.
+    http-request: func(request: http-request) -> result<http-response, string>;
+
+    /// Secrets are always namespaced by plugin id and never shared between components.
+    secret-get: func(key: string) -> result<option<list<u8>>, string>;
+    secret-set: func(key: string, value: list<u8>) -> result<bool, string>;
+    secret-delete: func(key: string) -> result<bool, string>;
+
+    now-ms: func() -> u64;
+    log: func(level: log-level, message: string);
+}
+
+interface provider {
+    use types.{
+        account,
+        artwork-descriptor,
+        auth-challenge,
+        auth-method,
+        auth-poll,
+        lyric-document,
+        playback-signal,
+        playlist,
+        plugin-manifest,
+        recognition-request,
+        recognition-result,
+        recommendation-item,
+        recommendation-request,
+        remote-track,
+        source-track-ref,
+        stream-descriptor,
+        stream-request,
+        track-query,
+    };
+
+    manifest: func() -> plugin-manifest;
+
+    accounts: func(provider-id: string) -> result<list<account>, string>;
+    auth-begin: func(provider-id: string, method: auth-method) -> result<auth-challenge, string>;
+    auth-poll: func(challenge-id: string) -> result<auth-poll, string>;
+    auth-cancel: func(challenge-id: string) -> result<bool, string>;
+    logout: func(account-id: string) -> result<bool, string>;
+
+    search: func(account-id: option<string>, query: string, limit: u16) -> result<list<remote-track>, string>;
+    resolve-track: func(account-id: option<string>, query: track-query) -> result<option<remote-track>, string>;
+    lyrics: func(account-id: option<string>, track: source-track-ref) -> result<option<lyric-document>, string>;
+    artwork: func(account-id: option<string>, track: source-track-ref) -> result<option<artwork-descriptor>, string>;
+    stream: func(account-id: string, request: stream-request) -> result<stream-descriptor, string>;
+
+    playlists: func(account-id: string) -> result<list<playlist>, string>;
+    playlist-tracks: func(account-id: string, playlist-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    playlist-create: func(account-id: string, name: string) -> result<playlist, string>;
+    playlist-add: func(account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
+    playlist-remove: func(account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
+
+    cloud-library: func(account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    liked-tracks: func(account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    set-liked: func(account-id: string, track: source-track-ref, liked: bool) -> result<bool, string>;
+
+    recommendations: func(account-id: string, request: recommendation-request) -> result<list<recommendation-item>, string>;
+    recognize: func(account-id: option<string>, request: recognition-request) -> result<option<recognition-result>, string>;
+    report-playback: func(account-id: string, signal: playback-signal) -> result<bool, string>;
+}
+
+world music-plugin {
+    import host;
+    export provider;
+}

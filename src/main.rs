@@ -32,6 +32,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod plugins;
 mod preferences;
 pub mod runtime;
 mod settings;
