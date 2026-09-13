@@ -518,11 +518,20 @@ fn run_bridge(
 ) {
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
     let mut transport_fade = TransportFade::new(initial_volume);
+    // Online enrichment updates the registry without touching decoder transport. The blocking
+    // engine's structural snapshot can therefore still carry the Track value captured when the
+    // song started. Keep only the enriched current Track as an O(1) bridge-side overlay until the
+    // transport switches to a different id; never mirror the full track registry here.
+    let mut current_track_override: Option<Track> = None;
 
     while running.load(Ordering::Acquire) {
         let mut refresh_snapshot = false;
         match request_rx.recv_timeout(Duration::from_millis(4)) {
             Ok(request) => {
+                if let Some(track) = registered_current_track(&engine, &request) {
+                    current_track_override = Some(track);
+                    refresh_snapshot = true;
+                }
                 refresh_snapshot |= request_refreshes_snapshot(&request);
                 if !apply_request(&engine, request, &mut transport_fade) {
                     break;
@@ -536,6 +545,10 @@ fn run_bridge(
             let Ok(request) = request_rx.try_recv() else {
                 break;
             };
+            if let Some(track) = registered_current_track(&engine, &request) {
+                current_track_override = Some(track);
+                refresh_snapshot = true;
+            }
             refresh_snapshot |= request_refreshes_snapshot(&request);
             if !apply_request(&engine, request, &mut transport_fade) {
                 running.store(false, Ordering::Release);
@@ -564,10 +577,39 @@ fn run_bridge(
 
         if refresh_snapshot {
             let mut current = engine.snapshot();
+            apply_current_track_override(&mut current, &mut current_track_override);
             current.volume = transport_fade.master_volume;
             snapshot.store(current);
             let _ = ui_event_tx.send(AudioUiEvent::SnapshotChanged);
         }
+    }
+}
+
+fn registered_current_track(engine: &BlockingAudioEngine, request: &EngineRequest) -> Option<Track> {
+    let EngineRequest::RegisterTracks(tracks) = request else {
+        return None;
+    };
+    let current_id = engine.snapshot().current_track.as_ref()?.id;
+    tracks.iter().find(|track| track.id == current_id).cloned()
+}
+
+fn apply_current_track_override(
+    current: &mut PlayerSnapshot,
+    current_track_override: &mut Option<Track>,
+) {
+    let Some(override_id) = current_track_override.as_ref().map(|track| track.id) else {
+        return;
+    };
+    if current.current_track.as_ref().map(|track| track.id) != Some(override_id) {
+        *current_track_override = None;
+        return;
+    }
+
+    let replacement = current_track_override
+        .as_ref()
+        .expect("current track override must exist after id check");
+    if !tracks_equal(current.current_track.as_ref(), Some(replacement)) {
+        current.current_track = Some(replacement.clone());
     }
 }
 
@@ -821,6 +863,28 @@ mod tests {
                 .map(|track| track.title.as_str()),
             Some("new")
         );
+    }
+
+    #[test]
+    fn current_track_override_survives_stale_structural_snapshot_until_track_switch() {
+        let mut current = PlayerSnapshot {
+            current_track: Some(test_track("old")),
+            ..PlayerSnapshot::default()
+        };
+        let mut current_track_override = Some(test_track("enriched"));
+        apply_current_track_override(&mut current, &mut current_track_override);
+        assert_eq!(
+            current.current_track.as_ref().map(|track| track.title.as_str()),
+            Some("enriched")
+        );
+        assert!(current_track_override.is_some());
+
+        let mut other = test_track("other");
+        other.id = 8;
+        current.current_track = Some(other);
+        apply_current_track_override(&mut current, &mut current_track_override);
+        assert!(current_track_override.is_none());
+        assert_eq!(current.current_track.as_ref().map(|track| track.id), Some(8));
     }
 
     #[test]
