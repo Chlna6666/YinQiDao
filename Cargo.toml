@@ -37,6 +37,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 lofty = "0.22"
+mimalloc = { version = "0.1.52", default-features = false }
 notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rfd = "0.17"
