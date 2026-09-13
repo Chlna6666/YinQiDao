@@ -30,11 +30,10 @@ use super::{
     app_runtime_events, home, library as library_page, player,
     player::NowPlaying,
     route::{self, AppRoute},
-    settings as settings_page, stage_controls, theme,
+    settings as settings_page, stage_chrome, stage_controls, theme,
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
-const STAGE_CONTROLS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 
@@ -78,6 +77,7 @@ pub struct MusicApp {
     system_media_update_in_flight: bool,
     system_media_sync_dirty: bool,
     last_system_media_track_id: Option<TrackId>,
+    last_system_media_metadata_fingerprint: Option<u64>,
     last_system_media_state: Option<PlaybackState>,
     last_system_media_position_sec: u64,
     pub(crate) artwork_cache: Option<ArtworkCache>,
@@ -103,7 +103,6 @@ pub struct MusicApp {
     stage_transition_started_at: Option<std::time::Instant>,
     stage_transition_duration: Duration,
     stage_prepared: bool,
-    pub(crate) stage_controls_visibility: f32,
     pub(crate) stage_last_user_activity: std::time::Instant,
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
@@ -414,6 +413,7 @@ impl MusicApp {
             system_media_update_in_flight: false,
             system_media_sync_dirty: true,
             last_system_media_track_id: None,
+            last_system_media_metadata_fingerprint: None,
             last_system_media_state: None,
             last_system_media_position_sec: 0,
             artwork_cache,
@@ -439,7 +439,6 @@ impl MusicApp {
             stage_transition_started_at: None,
             stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_prepared: false,
-            stage_controls_visibility: 1.0,
             stage_last_user_activity: std::time::Instant::now(),
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
@@ -610,7 +609,6 @@ impl MusicApp {
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
-        self.stage_controls_visibility = 1.0;
         self.page = AppPage::Player;
         route::navigate_to(cx, AppPage::Player);
         cx.notify();
@@ -643,18 +641,20 @@ impl MusicApp {
         if self.stage_suppress_wake_until.is_some() {
             return;
         }
+        let needs_notify = stage_chrome::needs_wake_surface(self);
         self.stage_last_user_activity = std::time::Instant::now();
-        if self.stage_controls_visibility < 0.995 {
-            self.stage_controls_visibility = 1.0;
+        if needs_notify {
             cx.notify();
         }
     }
 
     pub(crate) fn wake_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
+        let needs_notify = stage_chrome::needs_wake_surface(self);
         self.stage_suppress_wake_until = None;
         self.stage_last_user_activity = std::time::Instant::now();
-        self.stage_controls_visibility = 1.0;
-        cx.notify();
+        if needs_notify {
+            cx.notify();
+        }
     }
 
     pub(crate) fn hide_stage_controls_immediately(
@@ -662,15 +662,17 @@ impl MusicApp {
         pointer_pos: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let needs_notify = stage_chrome::target_visible(self);
         let now = std::time::Instant::now();
-        self.stage_controls_visibility = 0.0;
         self.stage_last_user_activity = now
-            .checked_sub(STAGE_CONTROLS_IDLE_TIMEOUT + Duration::from_secs(1))
+            .checked_sub(stage_chrome::IDLE_TIMEOUT + Duration::from_secs(1))
             .unwrap_or(now);
         self.stage_controls_hovered = false;
         self.stage_last_mouse_pos = Some(pointer_pos);
         self.stage_suppress_wake_until = Some(now);
-        cx.notify();
+        if needs_notify {
+            cx.notify();
+        }
     }
 
     pub(crate) fn handle_stage_mouse_move(
@@ -1563,9 +1565,11 @@ impl MusicApp {
         let state = self.snapshot.state;
         let position_ms = self.snapshot.position_ms;
         let track_id = track.as_ref().map(|track| track.id);
+        let metadata_fingerprint = crate::media_controls::metadata_fingerprint(track.as_ref());
         let position_sec = position_ms / 1000;
         let needs_update = self.system_media_sync_dirty
             || self.last_system_media_track_id != track_id
+            || self.last_system_media_metadata_fingerprint != Some(metadata_fingerprint)
             || self.last_system_media_state != Some(state)
             || position_sec.abs_diff(self.last_system_media_position_sec) >= 2;
         if !needs_update {
@@ -1574,6 +1578,7 @@ impl MusicApp {
         }
 
         self.last_system_media_track_id = track_id;
+        self.last_system_media_metadata_fingerprint = Some(metadata_fingerprint);
         self.last_system_media_state = Some(state);
         self.last_system_media_position_sec = position_sec;
         self.system_media_sync_dirty = false;
@@ -1581,9 +1586,9 @@ impl MusicApp {
 
         let task = Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
-                bridge.update_metadata(track.as_ref());
-                bridge.update_playback(state, position_ms);
-                bridge
+                let metadata_synced = bridge.update_metadata(track.as_ref());
+                let playback_synced = bridge.update_playback(state, position_ms);
+                (bridge, metadata_synced && playback_synced)
             })
             .await
             .map_err(|error| anyhow::anyhow!("系统媒体状态更新任务异常退出: {error}"))
@@ -1593,11 +1598,16 @@ impl MusicApp {
             this.update(cx, |this, _cx| {
                 this.system_media_update_in_flight = false;
                 match result {
-                    Ok(bridge) => {
+                    Ok((bridge, sync_ok)) => {
                         let current_track_id =
                             this.snapshot.current_track.as_ref().map(|track| track.id);
+                        let current_metadata_fingerprint = crate::media_controls::metadata_fingerprint(
+                            this.snapshot.current_track.as_ref(),
+                        );
                         let current_position_sec = this.snapshot.position_ms / 1000;
-                        this.system_media_sync_dirty = current_track_id != track_id
+                        this.system_media_sync_dirty = !sync_ok
+                            || current_track_id != track_id
+                            || current_metadata_fingerprint != metadata_fingerprint
                             || this.snapshot.state != state
                             || current_position_sec.abs_diff(position_sec) >= 2;
                         this.system_media = Some(bridge);
@@ -1891,6 +1901,8 @@ impl MusicApp {
         self.config.volume = vol.clamp(0.0, 1.0);
         self.send(PlayerCommand::SetVolume(self.config.volume));
         self.save_config();
+        self.system_media_sync_dirty = true;
+        self.update_system_media_async(cx);
         cx.notify();
     }
 
@@ -2081,7 +2093,7 @@ impl Render for MusicApp {
         }
 
         let is_idle = self.stage_open
-            && self.stage_last_user_activity.elapsed() >= STAGE_CONTROLS_IDLE_TIMEOUT
+            && self.stage_last_user_activity.elapsed() >= stage_chrome::IDLE_TIMEOUT
             && !self.seeking
             && !self.volume_dragging
             && !self.stage_controls_hovered;
@@ -2092,20 +2104,12 @@ impl Render for MusicApp {
             && !self.seeking
             && !self.volume_dragging
             && !self.stage_controls_hovered
-            && self.stage_controls_visibility >= 0.995
         {
-            let deadline = self.stage_last_user_activity + STAGE_CONTROLS_IDLE_TIMEOUT;
+            let deadline = self.stage_last_user_activity + stage_chrome::IDLE_TIMEOUT;
             if deadline > now {
                 window.request_invalidation_at(deadline, cx);
             }
         }
-
-        self.stage_controls_visibility =
-            if self.stage_suppress_wake_until.is_some() || is_idle {
-                0.0
-            } else {
-                1.0
-            };
 
         let fluid_background = self.ensure_fluid_background(cx);
         let fluid_track_id = self
@@ -2688,7 +2692,7 @@ mod tests {
 
     #[test]
     fn stage_idle_policy_is_twenty_seconds() {
-        assert_eq!(STAGE_CONTROLS_IDLE_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(stage_chrome::IDLE_TIMEOUT, Duration::from_secs(20));
     }
 
     #[test]
