@@ -7,6 +7,7 @@ use crate::{
 
 const ANALYSIS_WINDOW_MS: u64 = 50;
 const MAX_ANALYSIS_MS: u64 = 12_000;
+const MAX_ANALYSIS_WINDOWS: usize = (MAX_ANALYSIS_MS / ANALYSIS_WINDOW_MS) as usize + 1;
 const STABLE_WINDOWS: usize = 5;
 const FLOOR_RMS: f64 = 0.0025;
 const ACTIVE_RMS: f64 = 0.0063;
@@ -41,13 +42,22 @@ pub(crate) fn analyze_smart_cue(
         .saturating_add(validation_tail_ms)
         .min(MAX_ANALYSIS_MS)
         .min((track.duration_ms / 4).max(ANALYSIS_WINDOW_MS));
-    let mut chunk_samples = Vec::new();
-    let mut windows = Vec::<(u64, f64)>::new();
+    let mut current_rate = track.sample_rate.max(1);
+    let mut current_channels = track.channels.max(1);
+    let initial_chunk_samples = ((u64::from(current_rate)
+        .saturating_mul(u64::from(current_channels))
+        .saturating_mul(ANALYSIS_WINDOW_MS))
+        / 1_000)
+        .max(1)
+        .min(262_144) as usize;
+    let mut chunk_samples = Vec::with_capacity(initial_chunk_samples);
+    // Analysis is hard-bounded to 12 seconds, so keep the 50 ms RMS windows on the preloader
+    // thread's stack instead of repeatedly growing and freeing a short-lived heap Vec.
+    let mut windows = [(0_u64, 0.0_f64); MAX_ANALYSIS_WINDOWS];
+    let mut window_count = 0_usize;
     let mut sum_squares = 0.0_f64;
     let mut sample_count = 0_u64;
     let mut window_start_ms = 0_u64;
-    let mut current_rate = track.sample_rate.max(1);
-    let mut current_channels = track.channels.max(1);
 
     while decoder.position().as_millis() as u64 <= scan_ms {
         let Some((sample_rate, channels)) = decoder.next_chunk_into(&mut chunk_samples)? else {
@@ -64,8 +74,12 @@ pub(crate) fn analyze_smart_cue(
             sum_squares += value * value;
             sample_count += 1;
             if sample_count >= samples_per_window {
+                if window_count >= windows.len() {
+                    break;
+                }
                 let rms = (sum_squares / sample_count as f64).sqrt();
-                windows.push((window_start_ms, rms));
+                windows[window_count] = (window_start_ms, rms);
+                window_count += 1;
                 window_start_ms = window_start_ms.saturating_add(ANALYSIS_WINDOW_MS);
                 sum_squares = 0.0;
                 sample_count = 0;
@@ -74,14 +88,16 @@ pub(crate) fn analyze_smart_cue(
                 }
             }
         }
-        if window_start_ms >= scan_ms {
+        if window_start_ms >= scan_ms || window_count >= windows.len() {
             break;
         }
     }
 
-    if sample_count > 0 {
-        windows.push((window_start_ms, (sum_squares / sample_count as f64).sqrt()));
+    if sample_count > 0 && window_count < windows.len() {
+        windows[window_count] = (window_start_ms, (sum_squares / sample_count as f64).sqrt());
+        window_count += 1;
     }
+    let windows = &windows[..window_count];
 
     let mut best = SmartCue::default();
     for index in 0..windows.len() {
@@ -148,14 +164,14 @@ pub(crate) fn fade_in_gain(progress: f32) -> f32 {
 }
 
 fn smart_cue_style_cap_ms(track: &Track) -> u64 {
-    let genre = track.genre.as_deref().unwrap_or_default().to_lowercase();
+    let genre = track.genre.as_deref().unwrap_or_default();
     if contains_any(
-        &genre,
+        genre,
         &["classical", "ambient", "new age", "古典", "氛围", "新世纪"],
     ) {
         800
     } else if contains_any(
-        &genre,
+        genre,
         &[
             "jazz", "blues", "soul", "folk", "acoustic", "vocal", "爵士", "蓝调", "民谣", "原声",
         ],
@@ -167,7 +183,20 @@ fn smart_cue_style_cap_ms(track: &Track) -> u64 {
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+    needles
+        .iter()
+        .any(|needle| contains_keyword(haystack, needle))
+}
+
+fn contains_keyword(haystack: &str, needle: &str) -> bool {
+    if needle.is_ascii() {
+        let needle = needle.as_bytes();
+        return haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle));
+    }
+    haystack.contains(needle)
 }
 
 #[cfg(test)]
@@ -202,5 +231,12 @@ mod tests {
             (150, 0.0002),
         ];
         assert!(!has_sustained_leading_audio(&windows));
+    }
+
+    #[test]
+    fn genre_matching_avoids_lowercase_allocation_and_keeps_ascii_case_insensitive() {
+        assert!(contains_keyword("Ambient / Vocal", "ambient"));
+        assert!(contains_keyword("现代古典", "古典"));
+        assert!(!contains_keyword("Rock", "jazz"));
     }
 }
