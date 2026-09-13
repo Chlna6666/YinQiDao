@@ -20,9 +20,9 @@ use crate::{
 use super::{shell::MusicApp, theme::themed_icon};
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
-const LIST_OVERDRAW_PX: f32 = 180.0;
+const LIST_OVERDRAW_PX: f32 = 120.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(320);
+const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(220);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 
@@ -522,14 +522,11 @@ impl Render for StageLyricsView {
         let reading_mode = self.is_reading();
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        let depth_blur_active = self.playback_state == PlaybackState::Playing
-            && !reading_mode
-            && !scroll_animating;
-        let text_id = if depth_blur_active {
-            "lyric-text-blur"
-        } else {
-            "lyric-text-direct"
-        };
+        // Text blur forces extra offscreen passes exactly when the lyric list moves and also changes
+        // subtree shape at every active-line boundary. Keep depth through opacity/scale instead so
+        // the compositor can translate one stable retained lyric layer.
+        let depth_blur_active = false;
+        let text_id = "lyric-text";
         let motion_epoch = self.motion_epoch;
         let hovered_index = self.hovered_index;
         let lines = self.lines.clone();
@@ -622,13 +619,9 @@ fn render_lyric_row(
     let distance = index.abs_diff(active);
     let (alpha, blur_sigma) = lyric_focus_profile(distance, reading_mode, depth_blur_active);
     let timestamp = line.timestamp_ms;
-    let weight = if index == active {
-        gpui::FontWeight::BOLD
-    } else if distance == 1 {
-        gpui::FontWeight::SEMIBOLD
-    } else {
-        gpui::FontWeight::MEDIUM
-    };
+    // Keep glyph shaping stable across active-line changes. Emphasis is compositor-owned below;
+    // changing Medium/Semibold/Bold for neighboring rows used to reshape several lines per step.
+    let weight = gpui::FontWeight::SEMIBOLD;
     let karaoke_active = index == active && !reading_mode;
 
     let mut text = div()
