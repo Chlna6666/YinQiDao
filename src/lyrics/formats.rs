@@ -474,13 +474,13 @@ fn xml_text_excluding_auxiliary(input: &str) -> String {
     let mut cursor = 0usize;
     while cursor < input.len() {
         let Some(relative) = input[cursor..].find('<') else {
-            result.push_str(&decode_xml_entities(&input[cursor..]));
+            append_decoded_xml_entities(&mut result, &input[cursor..]);
             break;
         };
         let tag_start = cursor + relative;
-        result.push_str(&decode_xml_entities(&input[cursor..tag_start]));
+        append_decoded_xml_entities(&mut result, &input[cursor..tag_start]);
         let Some(close) = input[tag_start + 1..].find('>') else {
-            result.push_str(&decode_xml_entities(&input[tag_start..]));
+            append_decoded_xml_entities(&mut result, &input[tag_start..]);
             break;
         };
         let tag_end = tag_start + 1 + close;
@@ -506,14 +506,28 @@ fn xml_text_excluding_auxiliary(input: &str) -> String {
         }
         cursor = tag_end + 1;
     }
-    result.trim().to_owned()
+
+    let leading = result.len() - result.trim_start().len();
+    let trimmed_len = result.trim().len();
+    if leading > 0 {
+        result.drain(..leading);
+    }
+    result.truncate(trimmed_len);
+    result
 }
 
 fn decode_xml_entities(input: &str) -> String {
-    if !input.contains('&') {
-        return input.to_owned();
-    }
     let mut output = String::with_capacity(input.len());
+    append_decoded_xml_entities(&mut output, input);
+    output
+}
+
+fn append_decoded_xml_entities(output: &mut String, input: &str) {
+    if !input.contains('&') {
+        output.push_str(input);
+        return;
+    }
+
     let mut cursor = 0usize;
     while cursor < input.len() {
         let Some(relative_amp) = input[cursor..].find('&') else {
@@ -550,7 +564,6 @@ fn decode_xml_entities(input: &str) -> String {
         }
         cursor = end + 1;
     }
-    output
 }
 
 fn parse_ttml_time(value: &str) -> Option<u64> {
@@ -645,6 +658,18 @@ mod tests {
         assert_eq!(lines[0].timestamp_ms, 12_300);
         assert_eq!(lines[0].text, "Hello world");
         assert_eq!(lines[0].translation.as_deref(), Some("你好世界"));
+    }
+
+    #[test]
+    fn decodes_xml_entities_in_place() {
+        assert_eq!(
+            decode_xml_entities("A &amp; B &#x4F60;&#22909; &unknown;"),
+            "A & B 你好 &unknown;"
+        );
+        assert_eq!(
+            xml_text_excluding_auxiliary("  <span>Hi &amp; 你好</span>  "),
+            "Hi & 你好"
+        );
     }
 
     #[test]
