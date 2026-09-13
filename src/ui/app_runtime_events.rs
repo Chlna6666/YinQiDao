@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use gpui::{Context, Entity, EventEmitter, Global, Subscription, Timer};
+use gpui::{
+    AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter, Global, Subscription,
+    Timer,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::{
