@@ -20,7 +20,8 @@ use super::engine::{
 
 const REQUEST_QUEUE_CAPACITY: usize = 128;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
-const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(800);
+const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(120);
+const TRANSPORT_FADE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 const NO_POSITION_OVERRIDE: u64 = u64::MAX;
 const SEEK_ACK_TOLERANCE_MS: u64 = 50;
@@ -277,6 +278,7 @@ struct TransportFade {
     active: bool,
     completion: Option<FadeCompletion>,
     last_sent_control: f32,
+    last_sent_at: Instant,
 }
 
 impl TransportFade {
@@ -291,6 +293,7 @@ impl TransportFade {
             active: false,
             completion: None,
             last_sent_control: master_volume,
+            last_sent_at: Instant::now(),
         }
     }
 
@@ -306,9 +309,11 @@ impl TransportFade {
 
     fn send_current(&mut self, engine: &BlockingAudioEngine, force: bool) {
         let control = self.control_volume();
-        if force || (control - self.last_sent_control).abs() >= 1.0e-4 {
+        let changed = (control - self.last_sent_control).abs() >= 1.0e-4;
+        if force || (changed && self.last_sent_at.elapsed() >= TRANSPORT_FADE_SEND_INTERVAL) {
             let _ = engine.try_send(PlayerCommand::SetVolume(control));
             self.last_sent_control = control;
+            self.last_sent_at = Instant::now();
         }
     }
 
