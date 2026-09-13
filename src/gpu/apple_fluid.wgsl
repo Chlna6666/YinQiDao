@@ -71,13 +71,13 @@ fn octave_transform(point: vec2<f32>) -> vec2<f32> {
     );
 }
 
+// Two octaves preserve the large Apple Music-like color flow while removing one third of the
+// previous FBM noise work. The surrounding warp/noise field provides the missing fine variation.
 fn fbm(point: vec2<f32>, seed: f32) -> f32 {
     var p = point;
-    var value = value_noise(p, seed) * 0.5714286;
+    var value = value_noise(p, seed) * 0.6666667;
     p = octave_transform(p) + vec2<f32>(3.7, 1.9);
-    value += value_noise(p, seed + 0.17) * 0.2857143;
-    p = octave_transform(p) + vec2<f32>(-2.1, 5.4);
-    value += value_noise(p, seed + 0.41) * 0.1428571;
+    value += value_noise(p, seed + 0.17) * 0.3333333;
     return value;
 }
 
@@ -115,6 +115,22 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let seed = input.params2.w;
     let dim = input.params3.w;
 
+    // Stage prewarm and drawer motion only need the final color field to be visually coherent.
+    // Keep using this exact shader/pipeline so backend compilation is warmed, but avoid the expensive
+    // procedural FBM field until the stage is fully settled. This makes drawer frames bandwidth/
+    // composition bound instead of spending dozens of hash operations per pixel.
+    if motion < 0.5 {
+        let axis = clamp(input.uv.x * 0.68 + (1.0 - input.uv.y) * 0.32, 0.0, 1.0);
+        var color = mix(dominant, secondary, smoothstep(0.06, 0.94, axis));
+        let halo = 1.0 - smoothstep(0.08, 0.74, distance(input.uv, vec2<f32>(0.43, 0.42)));
+        color = mix(color, tertiary, halo * 0.20);
+        let centered = (input.uv - vec2<f32>(0.5)) * vec2<f32>(0.86, 1.06);
+        let vignette = smoothstep(0.27, 0.77, length(centered));
+        let dark_mix = clamp(dim * 0.46 + vignette * 0.18, 0.08, 0.46);
+        color = mix(color, dark, dark_mix);
+        return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+
     let aspect = input.bounds_size.x / max(input.bounds_size.y, 1.0);
     var p = (input.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0) * 2.35;
 
@@ -126,7 +142,7 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
         fbm(p * 1.03 + drift, seed + 0.11),
         fbm(p * 1.03 - drift * 0.81 + vec2<f32>(5.2, 1.3), seed + 0.37),
     ) - vec2<f32>(0.5);
-    let warped = p + q * (1.72 * motion + 0.42);
+    let warped = p + q * 2.14;
     let flow = value_noise(
         warped * 0.82 + vec2<f32>(-t * 0.31, t * 0.27),
         seed + 0.71,
@@ -137,10 +153,10 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
         warped * 1.31 + vec2<f32>(7.1, 2.8) - vec2<f32>(t * 0.31, t * 0.41),
         seed + 2.03,
     );
-    let n2 = value_noise(
-        warped * 1.57 + vec2<f32>(-3.4, 8.6) + vec2<f32>(t * 0.27, -t * 0.44),
-        seed + 2.89,
-    );
+    // The third color weight does not need an independent four-corner noise lookup. Deriving it
+    // from the two decorrelated fields plus the warp keeps three-color motion while cutting another
+    // full value-noise sample from every pixel.
+    let n2 = fract(n0 * 0.61 + n1 * 0.39 + q.x * 0.17 - q.y * 0.13 + seed * 0.37);
 
     let w0 = 0.18 + smoothstep(0.17, 0.83, n0 + (flow - 0.5) * 0.44) * 0.98;
     let w1 = 0.18 + smoothstep(0.15, 0.85, n1 - (flow - 0.5) * 0.38) * 0.94;
