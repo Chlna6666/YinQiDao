@@ -1605,7 +1605,8 @@ impl MusicApp {
                             this.snapshot.current_track.as_ref(),
                         );
                         let current_position_sec = this.snapshot.position_ms / 1000;
-                        this.system_media_sync_dirty = !sync_ok
+                        this.system_media_sync_dirty = this.system_media_sync_dirty
+                            || !sync_ok
                             || current_track_id != track_id
                             || current_metadata_fingerprint != metadata_fingerprint
                             || this.snapshot.state != state
