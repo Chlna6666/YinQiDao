@@ -10,9 +10,10 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    AnimationExt as _, AnimationProperty, App, AppContext, Bounds, CompositeLayerExt as _, Context,
-    Entity, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
+    CompositeLayerExt as _, Context, Easing, ElementId, Entity, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowOptions, div, hsla,
+    point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -519,21 +520,6 @@ impl MusicApp {
             + (self.stage_transition_to - self.stage_transition_from) * eased
     }
 
-    fn advance_stage_transition(&mut self, now: std::time::Instant) {
-        if !self.stage_animating || self.stage_transition_started_at.is_none() {
-            return;
-        }
-        self.stage_progress = self.sample_stage_progress_at(now).clamp(0.0, 1.0);
-        let started_at = self
-            .stage_transition_started_at
-            .expect("started transition must have a timestamp");
-        if now.saturating_duration_since(started_at) >= self.stage_transition_duration {
-            self.stage_progress = self.stage_transition_to;
-            self.stage_animating = false;
-            self.stage_transition_started_at = None;
-        }
-    }
-
     fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
         let target = if open { 1.0 } else { 0.0 };
         if self.stage_animating && (self.stage_transition_to - target).abs() <= 0.001 {
@@ -562,24 +548,39 @@ impl MusicApp {
             self.stage_animating = false;
             return;
         }
-        self.stage_transition_duration = Duration::from_secs_f32(
+        let duration = Duration::from_secs_f32(
             (STAGE_TRANSITION_DURATION.as_secs_f32() * distance).max(0.001),
         );
+        self.stage_transition_duration = duration;
         self.stage_animating = true;
 
-        // Do not start the clock until the first transition frame has fully materialized. On the
-        // first open this frame may compile the fluid shader, shape lyrics and build the composite;
-        // starting earlier would let that work consume the entire 190 ms and visually skip motion.
+        // Materialize the retained stage once before starting the renderer-owned transform. Root
+        // MusicApp is then idle for the whole transition; GPUI advances only the stage scene layer.
         cx.spawn(async move |this, cx| -> Result<()> {
             Timer::after(Duration::from_millis(1)).await;
-            this.update(cx, |this, cx| {
+            let started = this.update(cx, |this, cx| {
                 if this.stage_transition_epoch != epoch
                     || !this.stage_animating
                     || this.stage_transition_started_at.is_some()
                 {
-                    return;
+                    return false;
                 }
                 this.stage_transition_started_at = Some(std::time::Instant::now());
+                cx.notify();
+                true
+            })?;
+            if !started {
+                return Ok(());
+            }
+
+            Timer::after(duration).await;
+            this.update(cx, |this, cx| {
+                if this.stage_transition_epoch != epoch || !this.stage_animating {
+                    return;
+                }
+                this.stage_progress = this.stage_transition_to;
+                this.stage_animating = false;
+                this.stage_transition_started_at = None;
                 cx.notify();
             })?;
             Ok(())
@@ -698,10 +699,6 @@ impl MusicApp {
             }
             self.wake_stage_controls(cx);
         }
-    }
-
-    pub(crate) fn has_active_animations(&self) -> bool {
-        self.stage_animating && self.stage_transition_started_at.is_some()
     }
 
     pub(crate) fn show_library_tab(&mut self, tab: LibraryTab, cx: &mut Context<Self>) {
@@ -2085,7 +2082,6 @@ impl Render for MusicApp {
         let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
 
         let now = std::time::Instant::now();
-        self.advance_stage_transition(now);
 
         let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
         if stage_prewarm {
@@ -2119,7 +2115,9 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        let fluid_active = !stage_prewarm && self.stage_progress > 0.001;
+        // Do not run a full-screen shader RAF while the whole stage is itself moving. The retained
+        // drawer animation replays the already painted stage; fluid resumes once the drawer settles.
+        let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
             view.sync(
@@ -2130,10 +2128,6 @@ impl Render for MusicApp {
                 cx,
             );
         });
-
-        if self.has_active_animations() {
-            window.request_animation_frame();
-        }
 
         let current_route = route::current_route(cx);
         if current_route == AppRoute::Player && !self.stage_open && self.stage_progress < 0.001 {
@@ -2169,15 +2163,19 @@ impl Render for MusicApp {
             let viewport_height = window.viewport_size().height;
             let zero = point(px(0.0), px(0.0));
             let below_viewport = point(px(0.0), viewport_height);
-            let motion = AnimationProperty::translation(below_viewport, zero);
-            let sampled_progress = if stage_prewarm {
-                0.0
-            } else {
-                self.stage_progress.clamp(0.0, 1.0)
+            let progress_position = |progress: f32| {
+                point(
+                    px(0.0),
+                    px(f32::from(viewport_height) * (1.0 - progress.clamp(0.0, 1.0))),
+                )
             };
+            let motion = AnimationProperty::translation(
+                progress_position(self.stage_transition_from),
+                progress_position(self.stage_transition_to),
+            );
             let stage_titlebar = stage_controls::titlebar_view(self, cx);
 
-            let stage_surface = div()
+            let stage_layer = div()
                 .id("stage-drawer-root")
                 .absolute()
                 .inset_0()
@@ -2239,9 +2237,37 @@ impl Render for MusicApp {
                         .right(px(0.0))
                         .child(stage_titlebar),
                 )
-                .composite_layer()
-                .with_sampled_animation(motion, sampled_progress)
-                .into_any_element();
+                .composite_layer();
+
+            let stage_surface = if stage_prewarm {
+                stage_layer
+                    .with_sampled_animation(
+                        AnimationProperty::translation(below_viewport, zero),
+                        0.0,
+                    )
+                    .into_any_element()
+            } else if self.stage_animating {
+                if self.stage_transition_started_at.is_some() {
+                    let animation = Animation::from_spec(
+                        AnimationSpec::new(self.stage_transition_duration).ease(Easing::InOutCubic),
+                    )
+                    .with_property(motion);
+                    stage_layer
+                        .with_animation(
+                            ElementId::NamedInteger(
+                                SharedString::new_static("stage-drawer-transition"),
+                                self.stage_transition_epoch,
+                            ),
+                            animation,
+                            |element, _| element,
+                        )
+                        .into_any_element()
+                } else {
+                    stage_layer.with_sampled_animation(motion, 0.0).into_any_element()
+                }
+            } else {
+                stage_layer.into_any_element()
+            };
             Some(stage_surface)
         } else {
             None
