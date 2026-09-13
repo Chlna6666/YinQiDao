@@ -575,25 +575,23 @@ impl MusicApp {
         let epoch = self.stage_transition_epoch;
         let entity = cx.entity();
         window.on_next_frame(move |window, cx| {
-            let started = entity
-                .update(cx, |this, cx| {
-                    if this.stage_transition_epoch != epoch
-                        || !this.stage_animating
-                        || this.stage_transition_started_at.is_some()
-                    {
-                        if this.stage_transition_epoch == epoch {
-                            this.stage_transition_start_armed = false;
-                        }
-                        return None;
+            let started = entity.update(cx, |this, cx| {
+                if this.stage_transition_epoch != epoch
+                    || !this.stage_animating
+                    || this.stage_transition_started_at.is_some()
+                {
+                    if this.stage_transition_epoch == epoch {
+                        this.stage_transition_start_armed = false;
                     }
+                    return None;
+                }
 
-                    this.stage_transition_start_armed = false;
-                    this.stage_transition_started_at = Some(std::time::Instant::now());
-                    let duration = this.stage_transition_duration;
-                    cx.notify();
-                    Some(duration)
-                })
-                .flatten();
+                this.stage_transition_start_armed = false;
+                this.stage_transition_started_at = Some(std::time::Instant::now());
+                let duration = this.stage_transition_duration;
+                cx.notify();
+                Some(duration)
+            });
 
             let Some(duration) = started else {
                 return;
@@ -1196,7 +1194,7 @@ impl MusicApp {
         }
         let Some(library) = self.library.clone() else {
             return;
-        };
+        }
         let roots = self.config.music_dirs.clone();
         self.scan_in_progress = true;
         self.status = "正在扫描音乐目录…".into();
