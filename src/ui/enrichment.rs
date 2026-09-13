@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use gpui::Context;
 use gpui_tokio::Tokio;
@@ -150,16 +152,23 @@ impl MusicApp {
                 _ => None,
             };
             let persist_library = library.clone();
-            // 封面所有权只交给 PreparedArtwork；持久化结果仅复制元数据与歌词，避免复制 PNG。
-            // artwork_key 只有在本地封面明确缺失时才可能存在，因此普通在线识别不会覆盖
-            // 音频内嵌/sidecar 封面的本地缓存身份。
+            // 持久化只借用共享结果。LyricsDocument 内含原始歌词 String，过去这里为了跨
+            // spawn_blocking 深 clone 整个 EnrichmentResult，会复制大段逐字歌词文本。
+            // Arc 仅跨越这一个 blocking 任务；任务完成后立即恢复唯一所有权。
+            let result = Arc::new(result);
             let persist_result = result.clone();
             let persist_key = artwork_key.clone();
             tokio::task::spawn_blocking(move || {
-                persist_library.apply_enrichment(track_id, &persist_result, persist_key.as_deref())
+                persist_library.apply_enrichment(
+                    track_id,
+                    persist_result.as_ref(),
+                    persist_key.as_deref(),
+                )
             })
             .await
             .map_err(|_| anyhow!("保存联网识别结果任务异常退出"))??;
+            let result = Arc::try_unwrap(result)
+                .map_err(|_| anyhow!("联网识别结果持久化后仍存在额外引用"))?;
             Ok(EnrichmentOutcome {
                 result,
                 artwork_key,
