@@ -27,7 +27,7 @@ pub(super) fn detect_synced_format(input: &str) -> SyncedLyricsFormat {
             && content
                 .get(1..)
                 .and_then(|rest| rest.find(')'))
-                .is_some_and(|end| parse_tuple(&content[1..1 + end], 3).is_some())
+                .is_some_and(|end| parse_tuple::<3>(&content[1..1 + end]).is_some())
         {
             return SyncedLyricsFormat::Yrc;
         }
@@ -118,24 +118,20 @@ fn parse_millisecond_line_header(line: &str) -> Option<(u64, u64, &str)> {
     let line = line.trim_start();
     let rest = line.strip_prefix('[')?;
     let end = rest.find(']')?;
-    let (start, values) = parse_tuple(&rest[..end], 2)?;
-    Some((start, duration_or_zero(&values, 1), &rest[end + 1..]))
+    let [start, duration] = parse_tuple::<2>(&rest[..end])?;
+    Some((start, duration, &rest[end + 1..]))
 }
 
-#[inline]
-fn duration_or_zero(values: &[u64], index: usize) -> u64 {
-    values.get(index).copied().unwrap_or(0)
-}
-
-fn parse_tuple(value: &str, arity: usize) -> Option<(u64, Vec<u64>)> {
-    let mut values = Vec::with_capacity(arity);
-    for part in value.split(',') {
-        values.push(part.trim().parse::<u64>().ok()?);
+fn parse_tuple<const N: usize>(value: &str) -> Option<[u64; N]> {
+    let mut parts = value.split(',');
+    let mut values = [0_u64; N];
+    for slot in &mut values {
+        *slot = parts.next()?.trim().parse::<u64>().ok()?;
     }
-    if values.len() != arity {
+    if parts.next().is_some() {
         return None;
     }
-    Some((values[0], values))
+    Some(values)
 }
 
 fn parse_qrc_words(content: &str) -> (String, Vec<LyricWord>) {
@@ -154,7 +150,7 @@ fn parse_qrc_words(content: &str) -> (String, Vec<LyricWord>) {
             break;
         };
         let close = open + 1 + relative_close;
-        let Some((start, values)) = parse_tuple(&content[open + 1..close], 2) else {
+        let Some([start, duration]) = parse_tuple::<2>(&content[open + 1..close]) else {
             text.push_str(&content[cursor..=open]);
             cursor = open + 1;
             continue;
@@ -162,7 +158,7 @@ fn parse_qrc_words(content: &str) -> (String, Vec<LyricWord>) {
 
         let segment = &content[cursor..open];
         text.push_str(segment);
-        if !segment.is_empty() && duration_or_zero(&values, 1) > 0 {
+        if !segment.is_empty() && duration > 0 {
             words.push(LyricWord {
                 timestamp_ms: start,
                 text: segment.to_owned(),
@@ -193,7 +189,7 @@ fn parse_yrc_words(content: &str) -> (String, Vec<LyricWord>) {
             break;
         };
         let close = open + 1 + relative_close;
-        let Some((start, values)) = parse_tuple(&content[open + 1..close], 3) else {
+        let Some([start, duration, _reserved]) = parse_tuple::<3>(&content[open + 1..close]) else {
             text.push('(');
             cursor = open + 1;
             continue;
@@ -204,7 +200,7 @@ fn parse_yrc_words(content: &str) -> (String, Vec<LyricWord>) {
             .map_or(content.len(), |relative| segment_start + relative);
         let segment = &content[segment_start..segment_end];
         text.push_str(segment);
-        if !segment.is_empty() && duration_or_zero(&values, 1) > 0 {
+        if !segment.is_empty() && duration > 0 {
             words.push(LyricWord {
                 timestamp_ms: start,
                 text: segment.to_owned(),
@@ -569,18 +565,19 @@ fn parse_ttml_time(value: &str) -> Option<u64> {
         return parse_non_negative_f64(raw).map(|value| (value * 60_000.0).round() as u64);
     }
 
-    let parts = value.split(':').collect::<Vec<_>>();
-    let seconds = match parts.as_slice() {
-        [seconds] => parse_non_negative_f64(seconds)?,
-        [minutes, seconds] => {
-            minutes.parse::<u64>().ok()? as f64 * 60.0 + parse_non_negative_f64(seconds)?
+    let seconds = if let Some((first, rest)) = value.split_once(':') {
+        if let Some((second, third)) = rest.split_once(':') {
+            if third.contains(':') {
+                return None;
+            }
+            first.parse::<u64>().ok()? as f64 * 3_600.0
+                + second.parse::<u64>().ok()? as f64 * 60.0
+                + parse_non_negative_f64(third)?
+        } else {
+            first.parse::<u64>().ok()? as f64 * 60.0 + parse_non_negative_f64(rest)?
         }
-        [hours, minutes, seconds] => {
-            hours.parse::<u64>().ok()? as f64 * 3_600.0
-                + minutes.parse::<u64>().ok()? as f64 * 60.0
-                + parse_non_negative_f64(seconds)?
-        }
-        _ => return None,
+    } else {
+        parse_non_negative_f64(value)?
     };
     Some((seconds * 1_000.0).round() as u64)
 }
