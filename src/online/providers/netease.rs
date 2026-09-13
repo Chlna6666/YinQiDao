@@ -49,6 +49,10 @@ struct LyricsResponse {
     lrc: LyricsBody,
     #[serde(default)]
     tlyric: LyricsBody,
+    #[serde(default)]
+    yrc: LyricsBody,
+    #[serde(default)]
+    klyric: LyricsBody,
 }
 
 #[derive(Default, Deserialize)]
@@ -107,6 +111,7 @@ pub async fn lyrics(client: &Client, matched: &ProviderMatch) -> Result<Option<L
             ("lv", "1"),
             ("kv", "1"),
             ("tv", "1"),
+            ("yv", "1"),
         ])
         .send()
         .await
@@ -116,7 +121,13 @@ pub async fn lyrics(client: &Client, matched: &ProviderMatch) -> Result<Option<L
         .json::<LyricsResponse>()
         .await
         .context("解析网易云歌词失败")?;
-    let original = non_empty(response.lrc.lyric);
+
+    // YRC carries authored word/syllable timing. Prefer it over the legacy karaoke/LRC payload so
+    // the immersive player can render real word-level progression instead of manufacturing timing
+    // from text length. `klyric` remains a compatibility fallback for tracks without YRC.
+    let original = non_empty(response.yrc.lyric)
+        .or_else(|| non_empty(response.klyric.lyric))
+        .or_else(|| non_empty(response.lrc.lyric));
     let translation = non_empty(response.tlyric.lyric);
     if original.is_none() && translation.is_none() {
         return Ok(None);
