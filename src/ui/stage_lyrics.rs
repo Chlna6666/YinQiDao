@@ -522,10 +522,10 @@ impl Render for StageLyricsView {
         let reading_mode = self.is_reading();
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        // Text blur forces extra offscreen passes exactly when the lyric list moves and also changes
-        // subtree shape at every active-line boundary. Keep depth through opacity/scale instead so
-        // the compositor can translate one stable retained lyric layer.
-        let depth_blur_active = false;
+        // Restore depth only after the retained list has settled. During the 220 ms compositor
+        // scroll (and manual reading) glyph blur is disabled, so Gaussian offscreen passes never
+        // compete with the list translation that previously caused low-FPS lyric motion.
+        let depth_blur_active = !reading_mode && !scroll_animating;
         let text_id = "lyric-text";
         let motion_epoch = self.motion_epoch;
         let hovered_index = self.hovered_index;
@@ -793,11 +793,11 @@ fn lyric_focus_profile(
     let blur_sigma = if depth_blur_active {
         match distance {
             0 => 0.0,
-            1 => 0.40,
-            2 => 0.80,
-            3 => 1.15,
-            4 => 1.40,
-            _ => 0.0,
+            1 => 0.65,
+            2 => 1.15,
+            3 => 1.65,
+            4 => 2.00,
+            _ => 2.20,
         }
     } else {
         0.0
@@ -845,13 +845,14 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
+    // Apple Music-like karaoke keeps completed/current text near full luminance while the unsung
+    // tail stays clearly recessed. The update cadence remains semantic word boundaries rather than
+    // a per-frame root timer, so stronger contrast does not add layout/paint frequency.
     let highlights = line.words.iter().enumerate().map(|(index, word)| {
         let fade_out = match current_word {
-            Some(current) if index < current => Some(0.12),
+            Some(current) if index < current => Some(0.03),
             Some(current) if index == current => None,
-            Some(_) => Some(0.58),
-            None if index == 0 => Some(0.10),
-            None => Some(0.58),
+            Some(_) | None => Some(0.72),
         };
         (
             word.byte_start..word.byte_end,
@@ -916,9 +917,9 @@ mod tests {
     #[test]
     fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
         assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 0.40));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.15));
-        assert_eq!(lyric_focus_profile(5, false, true), (0.26, 0.0));
+        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 0.65));
+        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.65));
+        assert_eq!(lyric_focus_profile(5, false, true), (0.26, 2.20));
         assert_eq!(lyric_focus_profile(2, false, false), (0.42, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
     }
