@@ -75,8 +75,23 @@ impl MusicApp {
                     .lyrics
                     .as_ref()
                     .is_some_and(|lyrics| !lyrics.has_translation());
+            // Before the YRC provider path was wired up, Netease/cache rows could be permanently
+            // marked complete with line-only LRC. Detect those rows from the parsed semantic data,
+            // not from raw tag syntax, and re-run provider enrichment so authored word timing can
+            // replace the old cache. `enrichment_done` keeps this to one attempt per track/session.
+            let needs_word_timing_upgrade = stored.checked_online
+                && lyrics_enabled
+                && stored.lyrics.as_ref().is_some_and(|lyrics| {
+                    matches!(lyrics.source.as_str(), "网易云音乐" | "缓存")
+                        && !lyrics.timed_lines().is_empty()
+                        && !lyrics
+                            .timed_lines()
+                            .iter()
+                            .any(|line| !line.words.is_empty())
+                });
+            let needs_lyrics_upgrade = needs_translation_upgrade || needs_word_timing_upgrade;
 
-            if stored.checked_online && !needs_translation_upgrade && !needs_artwork_fallback {
+            if stored.checked_online && !needs_lyrics_upgrade && !needs_artwork_fallback {
                 return Ok(EnrichmentOutcome {
                     result: EnrichmentResult::default(),
                     artwork_key: None,
@@ -86,7 +101,12 @@ impl MusicApp {
             }
 
             let services = OnlineServices::new(api_key)?;
-            let mut result = if needs_translation_upgrade && !needs_artwork_fallback {
+            let mut result = if needs_word_timing_upgrade && !needs_artwork_fallback {
+                // A word-timing upgrade must revisit the normal provider chain because the old
+                // translation-only helper deliberately accepted only bilingual documents. Artwork
+                // remains disabled here, so this is still a bounded background lyrics refresh.
+                services.enrich(&track, true, false).await?
+            } else if needs_translation_upgrade && !needs_artwork_fallback {
                 let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
                     return Ok(EnrichmentOutcome {
                         result: EnrichmentResult::default(),
