@@ -1980,13 +1980,8 @@ fn build_output_stream(
                     &flush,
                     &paused,
                     &audible_frames,
+                    current_output_gain(&output_gain),
                 );
-                let gain = current_output_gain(&output_gain);
-                if gain != 1.0 {
-                    for sample in data {
-                        *sample *= gain;
-                    }
-                }
             },
             move |error: cpal::StreamError| {
                 let _ = f32_events
@@ -2004,16 +1999,8 @@ fn build_output_stream(
                     &flush,
                     &paused,
                     &audible_frames,
+                    current_output_gain(&output_gain),
                 );
-                let gain = current_output_gain(&output_gain);
-                if gain != 1.0 {
-                    for sample in data {
-                        *sample = ((*sample as f32 * gain)
-                            .round()
-                            .clamp(i16::MIN as f32, i16::MAX as f32))
-                            as i16;
-                    }
-                }
             },
             move |error: cpal::StreamError| {
                 let _ = i16_events
@@ -2031,17 +2018,8 @@ fn build_output_stream(
                     &flush,
                     &paused,
                     &audible_frames,
+                    current_output_gain(&output_gain),
                 );
-                let gain = current_output_gain(&output_gain);
-                if gain != 1.0 {
-                    const CENTER: f32 = 32768.0;
-                    for sample in data {
-                        let centered = *sample as f32 - CENTER;
-                        *sample = (CENTER + centered * gain)
-                            .round()
-                            .clamp(0.0, u16::MAX as f32) as u16;
-                    }
-                }
             },
             move |error: cpal::StreamError| {
                 let _ = u16_events
@@ -2060,13 +2038,6 @@ fn current_output_gain(output_gain: &AtomicU32) -> f32 {
     perceptual_volume_gain(f32::from_bits(output_gain.load(Ordering::Acquire)))
 }
 
-fn read_stereo(consumer: &mut ringbuf::HeapCons<f32>) -> Option<(f32, f32)> {
-    if consumer.occupied_len() < 2 {
-        return None;
-    }
-    Some((consumer.try_pop()?, consumer.try_pop()?))
-}
-
 fn fill_f32(
     data: &mut [f32],
     channels: usize,
@@ -2074,6 +2045,7 @@ fn fill_f32(
     flush: &AtomicBool,
     paused: &AtomicBool,
     audible_frames: &AtomicU64,
+    gain: f32,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -2082,21 +2054,37 @@ fn fill_f32(
         data.fill(0.0);
         return;
     }
-    for frame in data.chunks_exact_mut(channels.max(1)) {
-        let Some((left, right)) = read_stereo(consumer) else {
+
+    let channels = channels.max(1);
+    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
+    let mut consumed_frames = 0_u64;
+    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
+        if frame_index >= readable_frames {
+            frame.fill(0.0);
+            continue;
+        }
+        let Some(left) = consumer.try_pop() else {
+            frame.fill(0.0);
+            continue;
+        };
+        let Some(right) = consumer.try_pop() else {
             frame.fill(0.0);
             continue;
         };
         for (index, sample) in frame.iter_mut().enumerate() {
-            *sample = if channels == 1 {
+            let value = if channels == 1 {
                 (left + right) * 0.5
             } else if index % 2 == 0 {
                 left
             } else {
                 right
             };
+            *sample = value * gain;
         }
-        audible_frames.fetch_add(1, Ordering::Relaxed);
+        consumed_frames += 1;
+    }
+    if consumed_frames != 0 {
+        audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
 }
 
@@ -2107,6 +2095,7 @@ fn fill_i16(
     flush: &AtomicBool,
     paused: &AtomicBool,
     audible_frames: &AtomicU64,
+    gain: f32,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -2115,8 +2104,20 @@ fn fill_i16(
         data.fill(0);
         return;
     }
-    for frame in data.chunks_exact_mut(channels.max(1)) {
-        let Some((left, right)) = read_stereo(consumer) else {
+
+    let channels = channels.max(1);
+    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
+    let mut consumed_frames = 0_u64;
+    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
+        if frame_index >= readable_frames {
+            frame.fill(0);
+            continue;
+        }
+        let Some(left) = consumer.try_pop() else {
+            frame.fill(0);
+            continue;
+        };
+        let Some(right) = consumer.try_pop() else {
             frame.fill(0);
             continue;
         };
@@ -2128,9 +2129,19 @@ fn fill_i16(
             } else {
                 right
             };
-            *sample = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            let quantized = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            *sample = if gain == 1.0 {
+                quantized
+            } else {
+                ((quantized as f32 * gain)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32)) as i16
+            };
         }
-        audible_frames.fetch_add(1, Ordering::Relaxed);
+        consumed_frames += 1;
+    }
+    if consumed_frames != 0 {
+        audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
 }
 
@@ -2141,6 +2152,7 @@ fn fill_u16(
     flush: &AtomicBool,
     paused: &AtomicBool,
     audible_frames: &AtomicU64,
+    gain: f32,
 ) {
     if flush.swap(false, Ordering::Acquire) {
         consumer.clear();
@@ -2149,8 +2161,21 @@ fn fill_u16(
         data.fill(32768);
         return;
     }
-    for frame in data.chunks_exact_mut(channels.max(1)) {
-        let Some((left, right)) = read_stereo(consumer) else {
+
+    const CENTER: f32 = 32768.0;
+    let channels = channels.max(1);
+    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
+    let mut consumed_frames = 0_u64;
+    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
+        if frame_index >= readable_frames {
+            frame.fill(32768);
+            continue;
+        }
+        let Some(left) = consumer.try_pop() else {
+            frame.fill(32768);
+            continue;
+        };
+        let Some(right) = consumer.try_pop() else {
             frame.fill(32768);
             continue;
         };
@@ -2162,9 +2187,21 @@ fn fill_u16(
             } else {
                 right
             };
-            *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            let quantized =
+                ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            *sample = if gain == 1.0 {
+                quantized
+            } else {
+                let centered = quantized as f32 - CENTER;
+                (CENTER + centered * gain)
+                    .round()
+                    .clamp(0.0, u16::MAX as f32) as u16
+            };
         }
-        audible_frames.fetch_add(1, Ordering::Relaxed);
+        consumed_frames += 1;
+    }
+    if consumed_frames != 0 {
+        audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
 }
 
