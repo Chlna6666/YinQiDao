@@ -1056,7 +1056,7 @@ impl MusicApp {
             _ => return,
         }
         self.config.spatial = crate::audio::clamp_spatial(self.config.spatial.clone());
-        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone());
+        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
         self.save_config();
         cx.notify();
     }
