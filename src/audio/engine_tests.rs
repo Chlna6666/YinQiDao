@@ -92,6 +92,7 @@ fn output_converters_fill_silence_without_allocating() {
         &flush,
         &paused,
         &audible_frames,
+        1.0,
     );
     assert_eq!(samples, [0, 0, 0, 0]);
     assert_eq!(audible_frames.load(Ordering::Acquire), 0);
@@ -117,6 +118,7 @@ fn audible_clock_advances_only_for_consumed_pcm_frames() {
         &flush,
         &paused,
         &audible_frames,
+        1.0,
     );
 
     assert_eq!(audible_frames.load(Ordering::Acquire), 2);
@@ -238,6 +240,7 @@ fn removing_current_track_stops_and_flushes_old_pcm() {
         flush.as_ref(),
         paused.as_ref(),
         worker.audible_frames.as_ref(),
+        1.0,
     );
     assert_eq!(output, [0.0, 0.0]);
 }
@@ -319,6 +322,7 @@ fn next_at_end_stops_and_flushes_old_pcm() {
         flush.as_ref(),
         paused.as_ref(),
         worker.audible_frames.as_ref(),
+        1.0,
     );
     assert_eq!(output, [0.0, 0.0]);
 }
@@ -342,6 +346,7 @@ fn pause_outputs_silence_without_dropping_pcm() {
         flush.as_ref(),
         paused.as_ref(),
         worker.audible_frames.as_ref(),
+        1.0,
     );
     assert_eq!(output, [0.0, 0.0]);
     assert_eq!(worker.audible_frames.load(Ordering::Acquire), 0);
@@ -355,6 +360,7 @@ fn pause_outputs_silence_without_dropping_pcm() {
         flush.as_ref(),
         paused.as_ref(),
         worker.audible_frames.as_ref(),
+        1.0,
     );
     assert_eq!(output, [0.6, 0.4]);
     assert_eq!(worker.audible_frames.load(Ordering::Acquire), 1);
