@@ -32,6 +32,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod plugin_host;
 mod plugins;
 mod preferences;
 pub mod runtime;
@@ -71,6 +72,25 @@ fn main() -> Result<()> {
         "音栖岛启动中... 运行模式: 异步多线程, 日志级别: {}",
         config.log.level
     );
+
+    let plugin_host = plugin_host::initialize(&base_dir);
+    match plugin_host.read() {
+        Ok(host) => {
+            tracing::info!(
+                installed_plugins = host.catalog().plugins().len(),
+                restored_accounts = host.router().accounts().len(),
+                startup_errors = host.startup_errors().len(),
+                plugin_root = %host.catalog().root().display(),
+                "WASM 插件宿主基础状态已初始化"
+            );
+            for error in host.startup_errors() {
+                tracing::warn!(%error, "插件启动检查失败");
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "插件宿主状态锁已损坏");
+        }
+    }
 
     ensure_gpui_outside_tokio_runtime()?;
 

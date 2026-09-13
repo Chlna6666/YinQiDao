@@ -8,7 +8,7 @@
 
 目标不是把现有 `src/online/providers` 简单改成可加载脚本，而是建立完整的跨平台音乐服务层：网易云音乐、QQ 音乐及后续其他服务通过同一 ABI 接入，多个账号可以同时在线，搜索/识别/歌词/串流/歌单/推荐按能力自动路由，不要求用户反复切换“当前平台”。
 
-详细设计见 [`docs/PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md)，组件 ABI 见 [`plugins/wit/yinqidao-plugin.wit`](../plugins/wit/yinqidao-plugin.wit)。
+详细设计见 [`docs/PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md)，组件 ABI 见 [`plugins/wit/yinqidao-plugin.wit`](../plugins/wit/yinqidao-plugin.wit)。插件包结构与当前 Host 校验见 [`plugins/README.md`](../plugins/README.md)。
 
 ### P0：协议与路由基础
 
@@ -26,8 +26,10 @@
 
 - [ ] 引入与项目 MSRV/locked graph 验证兼容的 Wasmtime Component Model 版本。
 - [ ] 使用 WIT bindgen 生成宿主与 guest binding，禁止手写易漂移 ABI。
-- [ ] 插件目录：`<config>/plugins/<plugin-id>/`；每个插件包含 component、manifest/signature 元数据与可选静态资源。
-- [ ] 启动时仅扫描 manifest，WASM component 懒加载；避免冷启动一次编译全部插件。
+- [x] 插件目录：`<config>/plugins/<plugin-id>/`；`plugin.toml` v1 描述 component、manifest 与网络域名声明。
+- [x] 启动时仅扫描/校验 manifest 与 component 路径，不 instantiate WASM；为后续 component 懒加载保留边界。
+- [x] 校验插件/Provider ID、ABI、重复 capability/auth method、component 路径逃逸与静态 network domain allowlist。
+- [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
 - [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/CPU feature 变化自动失效。
 - [ ] 对实例设置 memory limit、fuel/epoch interruption、call timeout、最大 response/body、最大并发。
 - [ ] 默认不授予 filesystem、raw socket、process、environment 权限。
@@ -37,9 +39,11 @@
 
 ### P2：统一账号中心与融合登录
 
+- [x] 建立 Host 级 `PluginHostState` 与非 Secret 的 `plugin-accounts.json` 账号索引，启动恢复全部已安装插件账号路由。
+- [x] 同一 `plugin_id + provider_id` 可以保存多个账号，并规范化为最多一个默认账号；不会产生全局平台切换状态。
+- [x] 账号索引只保存路由元数据和状态，明确禁止 cookie/token/refresh token/device secret 进入普通配置文件。
 - [ ] 设置页增加“音乐服务与插件”入口，显示所有插件、Provider、账号状态与权限。
 - [ ] 支持 QR 登录、浏览器 OAuth、Device Code、Cookie Import、Host-owned Custom Form。
-- [ ] 同一平台允许多个账号；每个平台可标记默认账号，但所有平台仍保持同时在线。
 - [ ] 登录完成后账号立即注册到 `PluginServiceRouter`，不重启应用、不重建播放器。
 - [ ] 用户可以在一次具体操作中临时指定平台/账号，该偏好只作用于本次请求，不产生全局切换。
 - [ ] Session/refresh token/cookie 不写入 `config.toml`；迁移到 OS credential store 或 Host 加密 Secret Store。
