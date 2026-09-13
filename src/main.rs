@@ -13,6 +13,9 @@
     clippy::collapsible_if
 )]
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod artwork;
 mod audio;
 mod audio_policy;
@@ -39,7 +42,7 @@ mod window_platform;
 use anyhow::Result;
 use gpui::{
     App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowCornerPreference,
-    WindowOptions, px, size,
+    WindowIconSource, WindowOptions, px, size,
 };
 use settings::ConfigStore;
 use ui::MusicApp;
@@ -71,7 +74,10 @@ fn main() -> Result<()> {
     ensure_gpui_outside_tokio_runtime()?;
 
     lucide_assets::install();
-    let app = Application::new().with_assets(lucide_gpui::Assets);
+    let window_icon = embedded_window_icon()?;
+    let app = Application::new()
+        .with_assets(lucide_gpui::Assets)
+        .with_default_window_icon(window_icon);
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, io_handle);
         gpui_router::init(cx);
@@ -127,6 +133,16 @@ fn main() -> Result<()> {
 
     hotkeys::shutdown();
     Ok(())
+}
+
+fn embedded_window_icon() -> Result<WindowIconSource> {
+    let icon = image::load_from_memory_with_format(
+        include_bytes!("../assets/brand/app-icon.png"),
+        image::ImageFormat::Png,
+    )?
+    .into_rgba8();
+    let (width, height) = icon.dimensions();
+    WindowIconSource::from_rgba(width, height, icon.into_raw())
 }
 
 fn ensure_gpui_outside_tokio_runtime() -> Result<()> {
