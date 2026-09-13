@@ -161,6 +161,7 @@ fn parse_qrc_words(content: &str) -> (String, Vec<LyricWord>) {
         if !segment.is_empty() && duration > 0 {
             words.push(LyricWord {
                 timestamp_ms: start,
+                duration_ms: Some(duration),
                 text: segment.to_owned(),
             });
         }
@@ -203,6 +204,7 @@ fn parse_yrc_words(content: &str) -> (String, Vec<LyricWord>) {
         if !segment.is_empty() && duration > 0 {
             words.push(LyricWord {
                 timestamp_ms: start,
+                duration_ms: Some(duration),
                 text: segment.to_owned(),
             });
         }
@@ -275,7 +277,20 @@ fn parse_ttml_words(input: &str) -> Vec<LyricWord> {
         {
             let text = xml_text_excluding_auxiliary(&input[open.end..close.start]);
             if !text.is_empty() {
-                words.push(LyricWord { timestamp_ms, text });
+                let duration_ms = xml_attr(open.attrs, "dur")
+                    .and_then(parse_ttml_time)
+                    .filter(|duration| *duration > 0)
+                    .or_else(|| {
+                        xml_attr(open.attrs, "end")
+                            .and_then(parse_ttml_time)
+                            .map(|end| end.saturating_sub(timestamp_ms))
+                            .filter(|duration| *duration > 0)
+                    });
+                words.push(LyricWord {
+                    timestamp_ms,
+                    duration_ms,
+                    text,
+                });
             }
         }
         cursor = close.end;
@@ -614,6 +629,7 @@ mod tests {
         assert_eq!(lines[0].text, "A Sky Full");
         assert_eq!(lines[0].words.len(), 3);
         assert_eq!(lines[0].words[1].timestamp_ms, 930);
+        assert_eq!(lines[0].words[1].duration_ms, Some(180));
         assert_eq!(lines[0].words[1].text, "Sky ");
     }
 
@@ -625,6 +641,7 @@ mod tests {
         assert_eq!(lines[0].text, "你好");
         assert_eq!(lines[0].words.len(), 2);
         assert_eq!(lines[0].words[1].timestamp_ms, 1_300);
+        assert_eq!(lines[0].words[1].duration_ms, Some(500));
     }
 
     #[test]
@@ -636,6 +653,7 @@ mod tests {
         assert_eq!(lines[0].text, "Stop and stare");
         assert_eq!(lines[0].words.len(), 3);
         assert_eq!(lines[0].words[2].timestamp_ms, 55_640);
+        assert_eq!(lines[0].words[2].duration_ms, Some(1_710));
     }
 
     #[test]
@@ -647,6 +665,8 @@ mod tests {
         assert_eq!(lines[0].timestamp_ms, 10_000);
         assert_eq!(lines[0].text, "你好");
         assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].words[0].duration_ms, Some(500));
+        assert_eq!(lines[0].words[1].duration_ms, Some(1_500));
         assert_eq!(lines[0].translation.as_deref(), Some("Hello"));
     }
 
