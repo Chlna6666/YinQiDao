@@ -59,6 +59,8 @@ pub(crate) struct AppleFluidView {
     track_id: i64,
     palette: Option<ArtworkPalette>,
     stage_visible: bool,
+    full_effect_ready: bool,
+    full_effect_resume_armed: bool,
     playing: bool,
     animation_seconds: f32,
     last_frame_at: Instant,
@@ -75,6 +77,8 @@ impl AppleFluidView {
             track_id: 0,
             palette: None,
             stage_visible: false,
+            full_effect_ready: false,
+            full_effect_resume_armed: false,
             playing: false,
             animation_seconds: 0.0,
             last_frame_at: Instant::now(),
@@ -90,12 +94,20 @@ impl AppleFluidView {
         stage_visible: bool,
         cx: &mut Context<Self>,
     ) {
-        let changed = self.track_id != track_id
-            || self.palette != palette
-            || self.stage_visible != stage_visible;
+        let visibility_changed = self.stage_visible != stage_visible;
+        let changed = self.track_id != track_id || self.palette != palette || visibility_changed;
         self.track_id = track_id;
         self.palette = palette;
         self.stage_visible = stage_visible;
+
+        if visibility_changed {
+            // Keep the first fully settled Stage frame on the cheap static shader path. The full
+            // procedural effect is re-enabled only after that frame has actually been presented,
+            // so the Stage terminal reconciliation and the expensive fullscreen fragment workload
+            // cannot land on the same frame.
+            self.full_effect_ready = false;
+            self.full_effect_resume_armed = false;
+        }
         if changed {
             self.last_frame_at = Instant::now();
             cx.notify();
@@ -113,12 +125,28 @@ impl AppleFluidView {
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.stage_visible && !self.full_effect_ready && !self.full_effect_resume_armed {
+            self.full_effect_resume_armed = true;
+            let entity = cx.entity();
+            window.on_next_frame(move |_window, cx| {
+                let _ = entity.update(cx, |view, cx| {
+                    view.full_effect_resume_armed = false;
+                    if view.stage_visible && !view.full_effect_ready {
+                        view.full_effect_ready = true;
+                        view.last_frame_at = Instant::now();
+                        cx.notify();
+                    }
+                });
+            });
+        }
+
         match apple_fluid_program() {
             Ok(program) => {
                 self.shader_available = true;
                 let now = window.animation_time();
-                if self.stage_visible && self.playing {
+                let full_effect = self.stage_visible && self.full_effect_ready;
+                if full_effect && self.playing {
                     let delta = now
                         .saturating_duration_since(self.last_frame_at)
                         .as_secs_f32()
@@ -138,7 +166,7 @@ impl Render for AppleFluidView {
                         self.track_id,
                         self.palette.as_ref(),
                         self.animation_seconds,
-                        self.stage_visible,
+                        full_effect,
                     ),
                 );
             }
