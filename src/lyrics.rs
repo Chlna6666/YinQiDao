@@ -170,16 +170,20 @@ fn pair_translated_synced(original: &str, translated: &str) -> Vec<LyricLine> {
 
     let mut used = vec![false; translations.len()];
     for line in &mut primary {
-        let best = translations
+        let lower = line
+            .timestamp_ms
+            .saturating_sub(TRANSLATION_SYNC_TOLERANCE_MS);
+        let upper = line
+            .timestamp_ms
+            .saturating_add(TRANSLATION_SYNC_TOLERANCE_MS);
+        let window_start = translations.partition_point(|candidate| candidate.timestamp_ms < lower);
+        let window_end = translations.partition_point(|candidate| candidate.timestamp_ms <= upper);
+        let best = translations[window_start..window_end]
             .iter()
             .enumerate()
-            .filter(|(index, candidate)| {
-                !used[*index]
-                    && candidate.timestamp_ms.abs_diff(line.timestamp_ms)
-                        <= TRANSLATION_SYNC_TOLERANCE_MS
-            })
+            .filter(|(offset, _)| !used[window_start + *offset])
             .min_by_key(|(_, candidate)| candidate.timestamp_ms.abs_diff(line.timestamp_ms))
-            .map(|(index, _)| index);
+            .map(|(offset, _)| window_start + offset);
         if let Some(index) = best {
             used[index] = true;
             attach_translation(line, &translations[index]);
@@ -494,6 +498,19 @@ mod tests {
         assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
         assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("再见"));
         assert!(document.has_translation());
+    }
+
+    #[test]
+    fn unequal_translation_count_uses_nearest_unused_candidate_in_time_window() {
+        let document = LyricsDocument::from_sources(
+            None,
+            Some("[00:01.00]First\n[00:02.00]Second".into()),
+            Some("[00:00.90]较远\n[00:01.05]第一\n[00:02.00]第二".into()),
+            "测试",
+        );
+        assert_eq!(document.timed_lines().len(), 2);
+        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("第一"));
+        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("第二"));
     }
 
     #[test]
