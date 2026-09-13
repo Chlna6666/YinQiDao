@@ -154,6 +154,7 @@ pub(super) struct StageLyricsView {
     hovered_index: Option<usize>,
     motion_epoch: u64,
     karaoke_epoch: u64,
+    transport_generation: u64,
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
@@ -164,6 +165,9 @@ pub(super) struct StageLyricsView {
 
 impl StageLyricsView {
     fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+        let transport_generation = engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
         Self {
             parent,
             engine,
@@ -179,6 +183,7 @@ impl StageLyricsView {
             hovered_index: None,
             motion_epoch: 0,
             karaoke_epoch: 0,
+            transport_generation,
             reading_until: None,
             scroll_target: None,
             scroll_animation: None,
@@ -201,6 +206,14 @@ impl StageLyricsView {
         };
         if engine_changed {
             self.engine = app.engine.clone();
+        }
+        let transport_generation = self
+            .engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
+        let transport_changed = engine_changed || self.transport_generation != transport_generation;
+        if transport_changed {
+            self.transport_generation = transport_generation;
         }
 
         let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
@@ -238,6 +251,13 @@ impl StageLyricsView {
             self.cancel_scroll_animation();
             changed = true;
         }
+        if transport_changed && !source_changed {
+            // Seek/restore commands update AudioEngine's optimistic position immediately. A separate
+            // generation lets the compositor timeline restart even when the target stays inside the
+            // same authored word and therefore does not change active_word_index.
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+            changed = true;
+        }
 
         let live_position_ms = self
             .engine
@@ -268,6 +288,9 @@ impl StageLyricsView {
         if stage_active_changed {
             self.stage_active = stage_active;
             if stage_active {
+                // Re-entering Stage must not reuse an old retained word timeline that may have kept
+                // aging while its scene subtree was absent.
+                self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
                 if !self.is_reading() {
                     self.scroll_target = self.active_index;
                 }
@@ -1190,8 +1213,14 @@ mod tests {
         assert_eq!(word_reveal_progress(word, 1_000), 0.0);
         assert!((word_reveal_progress(word, 1_150) - 0.5).abs() < 0.001);
         assert_eq!(word_reveal_progress(word, 1_300), 1.0);
-        assert_eq!(word_reveal_remaining(word, 1_000), Some(Duration::from_millis(300)));
-        assert_eq!(word_reveal_remaining(word, 1_250), Some(Duration::from_millis(50)));
+        assert_eq!(
+            word_reveal_remaining(word, 1_000),
+            Some(Duration::from_millis(300))
+        );
+        assert_eq!(
+            word_reveal_remaining(word, 1_250),
+            Some(Duration::from_millis(50))
+        );
         assert_eq!(word_reveal_remaining(word, 1_300), None);
     }
 }

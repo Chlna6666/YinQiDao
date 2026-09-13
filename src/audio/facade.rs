@@ -59,6 +59,7 @@ struct SnapshotCache {
     duration_ms: AtomicU64,
     state_override: AtomicU8,
     position_override_ms: AtomicU64,
+    transport_generation: AtomicU64,
 }
 
 impl SnapshotCache {
@@ -71,6 +72,7 @@ impl SnapshotCache {
             duration_ms: AtomicU64::new(initial.duration_ms),
             state_override: AtomicU8::new(NO_STATE_OVERRIDE),
             position_override_ms: AtomicU64::new(NO_POSITION_OVERRIDE),
+            transport_generation: AtomicU64::new(0),
         }
     }
 
@@ -210,6 +212,14 @@ impl SnapshotCache {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+    }
+
+    fn bump_transport_generation(&self) {
+        self.transport_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn transport_generation(&self) -> u64 {
+        self.transport_generation.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -453,6 +463,7 @@ impl AudioEngine {
     pub fn try_send(&self, command: PlayerCommand) -> bool {
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
+        let advances_transport = optimistic_position_ms.is_some();
         let position_override_update = optimistic_position_ms
             .map(|position_ms| {
                 (
@@ -472,6 +483,9 @@ impl AudioEngine {
             Ok(()) => {
                 if let Some(state) = optimistic_state {
                     self.snapshot.set_optimistic_state(state);
+                }
+                if advances_transport {
+                    self.snapshot.bump_transport_generation();
                 }
                 true
             }
@@ -499,6 +513,14 @@ impl AudioEngine {
 
     pub fn progress(&self) -> (PlaybackState, u64, u64) {
         self.snapshot.progress()
+    }
+
+    /// Monotonic generation for accepted seek/restore commands.
+    ///
+    /// UI consumers can use this to invalidate renderer-owned timelines without polling position or
+    /// inferring discontinuities from wall-clock deltas. Normal playback progress never changes it.
+    pub fn transport_generation(&self) -> u64 {
+        self.snapshot.transport_generation()
     }
 
     pub fn output_devices() -> Result<Vec<OutputDeviceInfo>> {
@@ -828,6 +850,25 @@ mod tests {
 
         assert_eq!(cache.progress().1, 9_000);
         assert_eq!(previous, NO_POSITION_OVERRIDE);
+    }
+
+    #[test]
+    fn accepted_seek_advances_transport_generation_but_failed_seek_does_not() {
+        let (request_tx, request_rx) = bounded::<EngineRequest>(1);
+        let snapshot = Arc::new(SnapshotCache::new(PlayerSnapshot::default()));
+        let engine = AudioEngine {
+            request_tx,
+            snapshot,
+            running: Arc::new(AtomicBool::new(true)),
+            ui_event_rx: Mutex::new(None),
+        };
+
+        assert_eq!(engine.transport_generation(), 0);
+        assert!(engine.try_send(PlayerCommand::Seek(Duration::from_millis(1_000))));
+        assert_eq!(engine.transport_generation(), 1);
+        assert!(!engine.try_send(PlayerCommand::Seek(Duration::from_millis(2_000))));
+        assert_eq!(engine.transport_generation(), 1);
+        drop(request_rx);
     }
 
     #[test]
