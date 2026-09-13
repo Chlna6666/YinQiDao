@@ -70,9 +70,9 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .text_sm()
                         .text_color(TEXT_SECONDARY)
                         .child(if app.scan_in_progress {
-                            "正在高速扫描音乐目录元数据…".to_string()
+                            "正在高速扫描音乐目录元数据…"
                         } else {
-                            "你的专属离线音乐库持续保持最新".to_string()
+                            "你的专属离线音乐库持续保持最新"
                         }),
                 ),
         )
@@ -167,22 +167,22 @@ fn stats_overview(app: &MusicApp) -> impl IntoElement {
         .gap_4()
         .child(stat_badge(
             "歌曲总计",
-            &format!("{track_count} 首"),
+            format!("{track_count} 首"),
             icon!(music),
         ))
         .child(stat_badge(
             "已收录专辑",
-            &format!("{album_count} 张"),
+            format!("{album_count} 张"),
             icon!(disc_3),
         ))
         .child(stat_badge(
             "艺术家",
-            &format!("{artist_count} 位"),
+            format!("{artist_count} 位"),
             icon!(users_round),
         ))
 }
 
-fn stat_badge(label: &'static str, val: &str, icon: &'static str) -> impl IntoElement {
+fn stat_badge(label: &'static str, val: String, icon: &'static str) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -213,27 +213,34 @@ fn stat_badge(label: &'static str, val: &str, icon: &'static str) -> impl IntoEl
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(TEXT_PRIMARY)
-                        .child(val.to_owned()),
+                        .child(val),
                 ),
         )
 }
 
 fn featured_albums_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
-    // 聚合出前 8 个独特专辑进行卡片展示
-    let mut albums = Vec::new();
-    let mut seen = HashSet::new();
+    // 最多只展示 8 张专辑：用固定栈数组去重，避免每次 Home 重绘临时分配
+    // `Vec<&Track> + HashSet<String>` 并复制专辑名。
+    let mut albums: [Option<&Track>; 8] = [None; 8];
+    let mut album_count = 0_usize;
     for track in &app.tracks {
-        if seen.insert(track.album.clone()) {
-            albums.push(track);
-            if albums.len() >= 8 {
-                break;
-            }
+        let duplicate = albums[..album_count]
+            .iter()
+            .flatten()
+            .any(|existing| existing.album.as_str() == track.album.as_str());
+        if duplicate {
+            continue;
+        }
+        albums[album_count] = Some(track);
+        album_count += 1;
+        if album_count == albums.len() {
+            break;
         }
     }
 
     let mut grid = div().flex().flex_wrap().gap_5();
 
-    for track in albums {
+    for track in albums[..album_count].iter().flatten().copied() {
         grid = grid.child(album_card(track, app, view));
     }
 
