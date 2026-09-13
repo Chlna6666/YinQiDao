@@ -1056,7 +1056,7 @@ impl MusicApp {
             _ => return,
         }
         self.config.spatial = crate::audio::clamp_spatial(self.config.spatial.clone());
-        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone()));
+        self.send(PlayerCommand::SetSpatial(self.config.spatial.clone());
         self.save_config();
         cx.notify();
     }
@@ -1194,7 +1194,7 @@ impl MusicApp {
         }
         let Some(library) = self.library.clone() else {
             return;
-        }
+        };
         let roots = self.config.music_dirs.clone();
         self.scan_in_progress = true;
         self.status = "正在扫描音乐目录…".into();
