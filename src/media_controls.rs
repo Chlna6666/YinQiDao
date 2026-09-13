@@ -123,10 +123,11 @@ impl SystemMediaBridge {
 
     /// 向操作系统与 Discord 同步当前曲目元数据。元数据指纹包含标题/歌手/专辑/时长，
     /// 因此同一 TrackId 在联网补全后也会重新发布，而不是被旧的 ID-only 缓存吞掉。
-    pub fn update_metadata(&mut self, track: Option<&Track>) {
+    /// 返回平台后端是否已经接受当前元数据；失败时调用方应保留 dirty 状态重试。
+    pub fn update_metadata(&mut self, track: Option<&Track>) -> bool {
         let fingerprint = metadata_fingerprint(track);
         if self.last_metadata_fingerprint == Some(fingerprint) {
-            return;
+            return true;
         }
 
         if let Some(discord) = &mut self.discord {
@@ -134,7 +135,7 @@ impl SystemMediaBridge {
         }
 
         let Some(controls) = &mut self.controls else {
-            return;
+            return true;
         };
         let result = if let Some(track) = track {
             let duration = Duration::from_millis(track.duration_ms);
@@ -154,13 +155,17 @@ impl SystemMediaBridge {
         // COM/D-Bus/Now Playing failure must remain retryable on the next serialized media sync.
         if result.is_ok() {
             self.last_metadata_fingerprint = Some(fingerprint);
+            true
+        } else {
+            false
         }
     }
 
     /// 同步当前播放状态与进度。系统后端只在状态变化或时间跳变时更新；Discord 自己
     /// 使用 transport anchor 去除连续播放的 2 秒维护采样，只在曲目/状态/seek 改变时发 IPC。
-    pub fn update_playback(&mut self, state: PlaybackState, position_ms: u64) {
-        self.confirm_mpris_volume_request();
+    /// 返回系统播放状态以及待确认 MPRIS 音量是否都已同步完成。
+    pub fn update_playback(&mut self, state: PlaybackState, position_ms: u64) -> bool {
+        let volume_synced = self.confirm_mpris_volume_request();
         if let Some(discord) = &mut self.discord {
             discord.update_playback(state, position_ms);
         }
@@ -170,11 +175,11 @@ impl SystemMediaBridge {
         let time_jumped = position_sec.abs_diff(self.last_position_sec) >= 2;
 
         if !state_changed && !time_jumped {
-            return;
+            return volume_synced;
         }
 
         let Some(controls) = &mut self.controls else {
-            return;
+            return volume_synced;
         };
         let progress = Some(MediaPosition(Duration::from_millis(position_ms)));
         let playback = match state {
@@ -190,26 +195,31 @@ impl SystemMediaBridge {
         if controls.set_playback(playback).is_ok() {
             self.last_state = Some(state);
             self.last_position_sec = position_sec;
+            volume_synced
+        } else {
+            false
         }
     }
 
-    fn confirm_mpris_volume_request(&mut self) {
+    fn confirm_mpris_volume_request(&mut self) -> bool {
         #[cfg(target_os = "linux")]
         {
             let bits = self
                 .mpris_volume_request
                 .swap(NO_MPRIS_VOLUME_REQUEST, Ordering::AcqRel);
             if bits == NO_MPRIS_VOLUME_REQUEST {
-                return;
+                return true;
             }
             let volume = f64::from_bits(bits).clamp(0.0, 1.0);
             let Some(controls) = &mut self.controls else {
                 self.mpris_volume_request.store(bits, Ordering::Release);
-                return;
+                return false;
             };
             if controls.set_volume(volume).is_err() {
                 self.mpris_volume_request.store(bits, Ordering::Release);
+                return false;
             }
+            true
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -217,11 +227,12 @@ impl SystemMediaBridge {
             let _ = self
                 .mpris_volume_request
                 .swap(NO_MPRIS_VOLUME_REQUEST, Ordering::AcqRel);
+            true
         }
     }
 }
 
-fn metadata_fingerprint(track: Option<&Track>) -> u64 {
+pub(crate) fn metadata_fingerprint(track: Option<&Track>) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
