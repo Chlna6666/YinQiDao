@@ -182,6 +182,14 @@ impl Render for StagePlayerView {
             .on_mouse_move(move |event: &gpui::MouseMoveEvent, _, cx| {
                 cx.stop_propagation();
                 let _ = parent_move.update(cx, |app, _cx| {
+                    let moved = app.stage_last_mouse_pos.is_none_or(|last| {
+                        let dx = f32::from(event.position.x - last.x).abs();
+                        let dy = f32::from(event.position.y - last.y).abs();
+                        dx >= 2.0 || dy >= 2.0
+                    });
+                    if !moved {
+                        return;
+                    }
                     app.stage_last_mouse_pos = Some(event.position);
                     if stage_chrome::needs_wake_surface(app) {
                         return;
