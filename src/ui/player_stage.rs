@@ -1,14 +1,9 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView,
-    BorrowAppContext as _, Context, Easing, ElementId, EncodedImageBytes, Entity, Global,
-    ImageFormat, IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient,
-    prelude::*, px, rgb,
+    AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
+    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -258,33 +253,19 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
             .into_any_element()
     };
 
-    let cover_enter = Animation::from_spec(
-        AnimationSpec::new(Duration::from_millis(220)).ease(Easing::OutCubic),
-    )
-    .with_property(AnimationProperty::scale_opacity(
-        0.975,
-        1.0,
-        0.0,
-        1.0,
-        gpui::TransformOrigin::CENTER,
-    ));
+    // The whole immersive stage already owns the enter/exit translation animation. Keeping a
+    // second 0→1 opacity animation on the cover made stage prewarm/rematerialization temporarily
+    // hide an otherwise ready texture and showed up as a one-frame flash on every drawer open.
+    // Keep the card identity stable and fully opaque; track/artwork changes only replace its child.
     let cover_card = div()
+        .id("stage-cover-card")
         .size(px(280.0))
         .rounded_2xl()
         .overflow_hidden()
         .border_1()
         .border_color(hsla(0.0, 0.0, 1.0, 0.15))
         .shadow_lg()
-        .child(cover)
-        .with_animation(
-            ElementId::NamedInteger(
-                SharedString::new_static("stage-cover-enter"),
-                data.track_id
-                    .map_or(u64::MAX, |id| u64::from_ne_bytes(id.to_ne_bytes())),
-            ),
-            cover_enter,
-            |element, _| element,
-        );
+        .child(cover);
 
     div()
         .w(px(380.0))
