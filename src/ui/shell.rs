@@ -103,6 +103,7 @@ pub struct MusicApp {
     stage_transition_to: f32,
     stage_transition_started_at: Option<std::time::Instant>,
     stage_transition_duration: Duration,
+    stage_transition_start_armed: bool,
     stage_prepared: bool,
     pub(crate) stage_last_user_activity: std::time::Instant,
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
@@ -439,6 +440,7 @@ impl MusicApp {
             stage_transition_to: 0.0,
             stage_transition_started_at: None,
             stage_transition_duration: STAGE_TRANSITION_DURATION,
+            stage_transition_start_armed: false,
             stage_prepared: false,
             stage_last_user_activity: std::time::Instant::now(),
             stage_last_mouse_pos: None,
@@ -535,12 +537,12 @@ impl MusicApp {
         }
 
         self.stage_transition_epoch = self.stage_transition_epoch.wrapping_add(1);
-        let epoch = self.stage_transition_epoch;
         self.stage_open = open;
         self.stage_progress = current;
         self.stage_transition_from = current;
         self.stage_transition_to = target;
         self.stage_transition_started_at = None;
+        self.stage_transition_start_armed = false;
 
         let distance = (target - current).abs();
         if distance <= 0.001 {
@@ -548,44 +550,84 @@ impl MusicApp {
             self.stage_animating = false;
             return;
         }
-        let duration = Duration::from_secs_f32(
+        self.stage_transition_duration = Duration::from_secs_f32(
             (STAGE_TRANSITION_DURATION.as_secs_f32() * distance).max(0.001),
         );
-        self.stage_transition_duration = duration;
         self.stage_animating = true;
 
-        // Materialize the retained stage once before starting the renderer-owned transform. Root
-        // MusicApp is then idle for the whole transition; GPUI advances only the stage scene layer.
-        cx.spawn(async move |this, cx| -> Result<()> {
-            Timer::after(Duration::from_millis(1)).await;
-            let started = this.update(cx, |this, cx| {
-                if this.stage_transition_epoch != epoch
-                    || !this.stage_animating
-                    || this.stage_transition_started_at.is_some()
-                {
-                    return false;
-                }
-                this.stage_transition_started_at = Some(std::time::Instant::now());
-                cx.notify();
-                true
-            })?;
-            if !started {
-                return Ok(());
-            }
+        // The renderer-owned animation is armed from `render` after the sampled start frame has
+        // actually been presented. Do not begin a wall-clock timer here: on a cold first open the
+        // stage may still be compiling its shader pipeline, uploading artwork, shaping text or
+        // materializing retained layers. Starting the clock before those operations finish makes
+        // the visible animation jump directly into its middle.
+        cx.notify();
+    }
 
-            Timer::after(duration).await;
-            this.update(cx, |this, cx| {
-                if this.stage_transition_epoch != epoch || !this.stage_animating {
-                    return;
-                }
-                this.stage_progress = this.stage_transition_to;
-                this.stage_animating = false;
-                this.stage_transition_started_at = None;
-                cx.notify();
-            })?;
-            Ok(())
-        })
-        .detach();
+    fn arm_stage_transition_after_present(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.stage_animating
+            || self.stage_transition_started_at.is_some()
+            || self.stage_transition_start_armed
+        {
+            return;
+        }
+
+        self.stage_transition_start_armed = true;
+        let epoch = self.stage_transition_epoch;
+        let entity = cx.entity();
+        window.on_next_frame(move |window, cx| {
+            let started = entity
+                .update(cx, |this, cx| {
+                    if this.stage_transition_epoch != epoch
+                        || !this.stage_animating
+                        || this.stage_transition_started_at.is_some()
+                    {
+                        if this.stage_transition_epoch == epoch {
+                            this.stage_transition_start_armed = false;
+                        }
+                        return None;
+                    }
+
+                    this.stage_transition_start_armed = false;
+                    this.stage_transition_started_at = Some(std::time::Instant::now());
+                    let duration = this.stage_transition_duration;
+                    cx.notify();
+                    Some(duration)
+                })
+                .ok()
+                .flatten();
+
+            let Some(duration) = started else {
+                return;
+            };
+
+            // `with_animation` creates the scene animation during paint. Wait for that first
+            // animated frame to finish as well before starting the completion timer. This can make
+            // the logical state live for at most one extra presented frame, but can never cut a
+            // renderer animation short because a cold frame took longer than expected.
+            let finish_entity = entity.clone();
+            window.on_next_frame(move |_window, cx| {
+                let _ = finish_entity.update(cx, |this, cx| {
+                    if this.stage_transition_epoch != epoch || !this.stage_animating {
+                        return;
+                    }
+                    cx.spawn(async move |this, cx| -> Result<()> {
+                        Timer::after(duration).await;
+                        this.update(cx, |this, cx| {
+                            if this.stage_transition_epoch != epoch || !this.stage_animating {
+                                return;
+                            }
+                            this.stage_progress = this.stage_transition_to;
+                            this.stage_animating = false;
+                            this.stage_transition_started_at = None;
+                            this.stage_transition_start_armed = false;
+                            cx.notify();
+                        })?;
+                        Ok(())
+                    })
+                    .detach();
+                });
+            });
+        });
     }
 
     pub(crate) fn show_page(&mut self, page: AppPage, cx: &mut Context<Self>) {
@@ -1075,6 +1117,7 @@ impl MusicApp {
             .await
             .map_err(|_| anyhow::anyhow!("音频设备切换任务异常退出"))?
         });
+        self.scan_in_progress = self.scan_in_progress;
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -2133,6 +2176,8 @@ impl Render for MusicApp {
         if current_route == AppRoute::Player && !self.stage_open && self.stage_progress < 0.001 {
             self.open_stage(cx);
         }
+
+        self.arm_stage_transition_after_present(window, cx);
 
         let main_page = match self.page {
             AppPage::Player => {
