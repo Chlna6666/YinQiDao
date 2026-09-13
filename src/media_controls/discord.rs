@@ -186,7 +186,6 @@ impl DiscordPresence {
     }
 
     pub(super) fn update_playback(&mut self, state: PlaybackState, position_ms: u64) {
-        self.check_connection();
         let state_changed = self.state != state;
         self.state = state;
         self.position_ms = position_ms;
@@ -222,18 +221,8 @@ impl DiscordPresence {
         }
     }
 
-    fn check_connection(&mut self) {
-        let disconnected = self
-            .stream
-            .as_mut()
-            .is_some_and(|stream| stream.drain_responses().is_err());
-        if disconnected {
-            self.disconnect_with_backoff();
-        }
-    }
-
     fn publish(&mut self) {
-        let Some(track) = self.track.clone() else {
+        let Some(track) = self.track.as_ref() else {
             if self.published.take().is_some() {
                 let _ = self.send_activity(Value::Null);
             }
@@ -247,18 +236,21 @@ impl DiscordPresence {
             return;
         }
 
-        let mut state_text = if track.album.trim().is_empty() {
-            track.artist.clone()
-        } else {
-            format!("{} · {}", track.artist, track.album)
-        };
+        let mut state_text = String::with_capacity(
+            track.artist.len() + track.album.len() + " ·  · 缓冲中".len(),
+        );
+        state_text.push_str(&track.artist);
+        if !track.album.trim().is_empty() {
+            state_text.push_str(" · ");
+            state_text.push_str(&track.album);
+        }
         match self.state {
             PlaybackState::Paused => state_text.push_str(" · 已暂停"),
             PlaybackState::Buffering | PlaybackState::Loading => state_text.push_str(" · 缓冲中"),
             _ => {}
         }
         let mut activity = json!({
-            "details": track.title.clone(),
+            "details": track.title.as_str(),
             "state": state_text,
             "instance": false
         });
@@ -267,15 +259,16 @@ impl DiscordPresence {
         {
             activity["timestamps"] = json!({ "start": start, "end": end });
         }
+        let published = PublishedPlayback {
+            track_id: track.id,
+            metadata_revision: self.metadata_revision,
+            state: self.state,
+            position_ms: self.position_ms,
+            published_at: Instant::now(),
+        };
 
         if self.send_activity(activity) {
-            self.published = Some(PublishedPlayback {
-                track_id: track.id,
-                metadata_revision: self.metadata_revision,
-                state: self.state,
-                position_ms: self.position_ms,
-                published_at: Instant::now(),
-            });
+            self.published = Some(published);
         }
     }
 
@@ -301,11 +294,8 @@ impl DiscordPresence {
     }
 
     fn ensure_connected(&mut self) -> bool {
-        if let Some(stream) = &mut self.stream {
-            if stream.drain_responses().is_ok() {
-                return true;
-            }
-            self.disconnect_with_backoff();
+        if self.stream.is_some() {
+            return true;
         }
         if Instant::now() < self.retry_after {
             return false;
@@ -332,6 +322,8 @@ impl DiscordPresence {
                 "Discord IPC 未连接",
             ));
         };
+        // One response drain before and after the write is enough to surface a stale/disconnected
+        // IPC endpoint. Avoid additional read-timeout probes in update_playback/ensure_connected.
         stream.drain_responses()?;
         stream.write_frame(&frame)?;
         stream.drain_responses()
@@ -345,14 +337,17 @@ impl DiscordPresence {
 }
 
 fn encode_json_frame(opcode: u32, payload: &Value) -> io::Result<Vec<u8>> {
-    let bytes = serde_json::to_vec(payload)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Discord IPC 帧过大"))?;
-    let mut frame = Vec::with_capacity(8 + bytes.len());
+    // Serialize directly behind the 8-byte Discord IPC header. The previous implementation first
+    // allocated a JSON Vec and then allocated/copied it again into the framed Vec.
+    let mut frame = Vec::with_capacity(512);
     frame.extend_from_slice(&opcode.to_le_bytes());
-    frame.extend_from_slice(&len.to_le_bytes());
-    frame.extend_from_slice(&bytes);
+    frame.extend_from_slice(&[0_u8; 4]);
+    serde_json::to_writer(&mut frame, payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let payload_len = frame.len().saturating_sub(8);
+    let len = u32::try_from(payload_len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Discord IPC 帧过大"))?;
+    frame[4..8].copy_from_slice(&len.to_le_bytes());
     Ok(frame)
 }
 
