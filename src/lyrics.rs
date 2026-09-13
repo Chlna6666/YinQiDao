@@ -19,6 +19,10 @@ pub struct LyricsDocument {
 pub struct LyricWord {
     /// Absolute transport timestamp for the beginning of this authored lyric segment.
     pub timestamp_ms: u64,
+    /// Authored segment duration when the source format supplies one (QRC/YRC/TTML). Enhanced LRC
+    /// only carries start timestamps, so this remains `None` and the presentation layer may infer a
+    /// bounded duration from the next authored segment without pretending it came from the source.
+    pub duration_ms: Option<u64>,
     /// Segment text exactly as authored by the source format. Leading/trailing whitespace is
     /// intentionally preserved so the UI can rebuild CJK/Latin lines without synthetic gaps.
     pub text: String,
@@ -342,6 +346,7 @@ fn parse_inline_words(input: &str, offset_ms: i64) -> (String, Vec<LyricWord>) {
         if !segment.is_empty() {
             words.push(LyricWord {
                 timestamp_ms: apply_offset(timestamp_ms, offset_ms),
+                duration_ms: None,
                 text: segment.to_owned(),
             });
         }
@@ -443,6 +448,7 @@ mod tests {
         assert_eq!(lines[0].text, "你好 世界");
         assert_eq!(lines[0].words.len(), 2);
         assert_eq!(lines[0].words[0].timestamp_ms, 10_000);
+        assert_eq!(lines[0].words[0].duration_ms, None);
         assert_eq!(lines[0].words[0].text, "你好 ");
         assert_eq!(lines[0].words[1].timestamp_ms, 10_500);
         assert_eq!(lines[0].words[1].text, "世界");
