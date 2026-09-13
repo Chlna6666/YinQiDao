@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use gpui::{Context, IntoElement, div, prelude::*};
 
 use crate::gpu::AppleFluidView;
@@ -6,6 +8,8 @@ use super::{player_stage, shell::MusicApp};
 
 pub(super) use super::mini_player_lyrics::mini_player;
 pub(super) use super::player_stage::{NowPlaying, PlaybackProgress, PlaybackTime};
+
+const STAGE_CHROME_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Render the immersive stage and reserve the first explicit click for waking hidden chrome.
 ///
@@ -18,8 +22,12 @@ pub(super) fn render(
     cx: &mut Context<MusicApp>,
     fluid_background: gpui::Entity<AppleFluidView>,
 ) -> gpui::AnyElement {
-    let needs_wake_surface =
-        app.stage_suppress_wake_until.is_some() || app.stage_controls_visibility < 0.995;
+    let idle_hidden = app.stage_open
+        && app.stage_last_user_activity.elapsed() >= STAGE_CHROME_IDLE_TIMEOUT
+        && !app.seeking
+        && !app.volume_dragging
+        && !app.stage_controls_hovered;
+    let needs_wake_surface = app.stage_suppress_wake_until.is_some() || idle_hidden;
     let stage = player_stage::render(app, cx, fluid_background);
 
     let mut root = div().size_full().relative().child(stage);
