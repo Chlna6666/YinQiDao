@@ -130,28 +130,48 @@ impl OnlineServices {
                     tracing::debug!(
                         provider = matched_provider.name(),
                         %error,
-                        "首选音乐平台歌词读取失败，尝试中文字幕兜底"
+                        "首选音乐平台歌词读取失败，尝试高质量歌词兜底"
                     );
                     None
                 }
             };
 
-            match provider_lyrics {
-                Some(lyrics) if lyrics.has_translation() => Some(lyrics),
-                Some(lyrics) => self
+            // Metadata identity and lyric presentation quality are independent. A QQ/other metadata
+            // winner must not hide a Netease YRC document for the same local track. Upgrade only
+            // with another confidently searched provider and rank authored word timing above a
+            // line-only document. Raw translated tracks are merged when possible so karaoke does
+            // not have to trade synchronized Chinese subtitles for word timing.
+            let mut selected = provider_lyrics;
+            if selected
+                .as_ref()
+                .map_or(true, |lyrics| !lyrics_have_word_timing(lyrics))
+                && let Some(word_timed) = self
+                    .fetch_word_timed_lyrics_fallback(track, Some(matched.provider))
+                    .await
+            {
+                selected = Some(match selected {
+                    Some(primary) => prefer_richer_lyrics(primary, word_timed),
+                    None => word_timed,
+                });
+            }
+
+            if selected
+                .as_ref()
+                .map_or(true, |lyrics| !lyrics.has_translation())
+                && let Some(translated) = self
                     .fetch_translated_lyrics_fallback(track, Some(matched.provider))
                     .await
-                    .or(Some(lyrics)),
-                None => {
-                    if let Some(translated) = self
-                        .fetch_translated_lyrics_fallback(track, Some(matched.provider))
-                        .await
-                    {
-                        Some(translated)
-                    } else {
-                        self.fetch_lyrics(Some(&metadata), track).await?
-                    }
-                }
+            {
+                selected = Some(match selected {
+                    Some(primary) => prefer_richer_lyrics(primary, translated),
+                    None => translated,
+                });
+            }
+
+            if selected.is_some() {
+                selected
+            } else {
+                self.fetch_lyrics(Some(&metadata), track).await?
             }
         } else {
             None
@@ -295,6 +315,60 @@ impl OnlineServices {
         self.fetch_translated_lyrics_fallback(track, None).await
     }
 
+    /// Upgrade an already-cached line-only lyric without changing metadata or artwork. This is
+    /// intentionally separate from the normal metadata winner so a QQ/Spotify identity can still
+    /// consume authored Netease YRC timing.
+    pub(crate) async fn fetch_word_timed_lyrics_for_track(
+        &self,
+        track: &Track,
+    ) -> Option<LyricsDocument> {
+        self.fetch_word_timed_lyrics_fallback(track, None).await
+    }
+
+    async fn fetch_word_timed_lyrics_fallback(
+        &self,
+        track: &Track,
+        exclude: Option<providers::ProviderKind>,
+    ) -> Option<LyricsDocument> {
+        for provider in [
+            providers::ProviderKind::Netease,
+            providers::ProviderKind::QqMusic,
+        ] {
+            if exclude == Some(provider) {
+                continue;
+            }
+
+            let matched = match providers::search(
+                &self.client,
+                provider,
+                track,
+                &self.netease_base_url,
+                None,
+            )
+            .await
+            {
+                Ok(Some(matched)) => matched,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(provider = provider.name(), %error, "逐字歌词候选搜索失败");
+                    continue;
+                }
+            };
+
+            match providers::lyrics(&self.client, &matched).await {
+                Ok(Some(lyrics)) if lyrics_have_word_timing(&lyrics) => {
+                    tracing::debug!(provider = provider.name(), "使用备用平台补全 authored 逐字时间");
+                    return Some(lyrics);
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(provider = provider.name(), %error, "逐字歌词候选读取失败");
+                }
+            }
+        }
+        None
+    }
+
     /// Prefer a lyric document that carries a synchronized translation without changing the
     /// metadata provider selected for the track. Netease and QQ expose explicit translated lyric
     /// tracks; keep this lookup in the background enrichment path so it never blocks GPUI.
@@ -363,6 +437,49 @@ impl OnlineServices {
             .await
             .ok()
             .map(|response| response.access_token)
+    }
+}
+
+fn lyrics_have_word_timing(lyrics: &LyricsDocument) -> bool {
+    lyrics
+        .timed_lines()
+        .iter()
+        .any(|line| !line.words.is_empty())
+}
+
+fn lyric_quality(lyrics: &LyricsDocument) -> u8 {
+    u8::from(lyrics_have_word_timing(lyrics)) * 4
+        + u8::from(lyrics.has_translation()) * 2
+        + u8::from(!lyrics.timed_lines().is_empty())
+}
+
+fn attach_raw_translation(
+    target: LyricsDocument,
+    translation: Option<String>,
+) -> LyricsDocument {
+    if target.has_translation() {
+        return target;
+    }
+    let Some(translation) = translation.filter(|value| !value.trim().is_empty()) else {
+        return target;
+    };
+    LyricsDocument::from_sources(
+        target.plain.clone(),
+        target.synced.clone(),
+        Some(translation),
+        target.source.clone(),
+    )
+}
+
+fn prefer_richer_lyrics(primary: LyricsDocument, candidate: LyricsDocument) -> LyricsDocument {
+    let primary_translation = primary.translation.clone();
+    let candidate_translation = candidate.translation.clone();
+    let primary = attach_raw_translation(primary, candidate_translation);
+    let candidate = attach_raw_translation(candidate, primary_translation);
+    if lyric_quality(&candidate) > lyric_quality(&primary) {
+        candidate
+    } else {
+        primary
     }
 }
 
