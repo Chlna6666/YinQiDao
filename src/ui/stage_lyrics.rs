@@ -153,6 +153,7 @@ pub(super) struct StageLyricsView {
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     motion_epoch: u64,
+    karaoke_epoch: u64,
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
@@ -177,6 +178,7 @@ impl StageLyricsView {
             active_word_index: None,
             hovered_index: None,
             motion_epoch: 0,
+            karaoke_epoch: 0,
             reading_until: None,
             scroll_target: None,
             scroll_animation: None,
@@ -230,6 +232,7 @@ impl StageLyricsView {
             self.active_word_index = None;
             self.hovered_index = None;
             self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             self.reading_until = None;
             self.scroll_target = None;
             self.cancel_scroll_animation();
@@ -250,16 +253,16 @@ impl StageLyricsView {
         }
         if playback_state_changed {
             self.playback_state = app.snapshot.state;
-            // A renderer-independent karaoke sweep must restart from the exact transport position
-            // when playback resumes instead of continuing a timeline that elapsed while paused.
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            // Karaoke owns an independent epoch: pausing/resuming must not retrigger the active-line
+            // focus scale animation. Only the word sweep restarts from the exact transport sample.
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }
         if scrubbing_changed {
             self.scrubbing = scrubbing;
             // During a drag the mask is sampled directly. Releasing creates a fresh retained
             // animation from the released transport position, so no stale timeline can catch up.
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }
         if stage_active_changed {
@@ -282,7 +285,7 @@ impl StageLyricsView {
             && previous_word != next_word;
         self.active_word_index = next_word;
         if word_changed {
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
         if active_changed || word_changed {
             changed = true;
@@ -315,6 +318,7 @@ impl StageLyricsView {
         self.active_index = active;
         self.hovered_index = None;
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
             self.scroll_target = active;
         }
@@ -382,7 +386,7 @@ impl StageLyricsView {
         let active_changed = self.update_active_index();
         self.active_word_index = self.compute_active_word_index();
         if !active_changed && previous_word != self.active_word_index {
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
     }
 
@@ -429,7 +433,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.active_word_index = self.compute_active_word_index();
             self.scroll_target = self.active_index;
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
         if self
             .scroll_animation
@@ -569,6 +573,7 @@ impl Render for StageLyricsView {
         let depth_blur_active = !reading_mode && !scroll_animating;
         let text_id = "lyric-text";
         let motion_epoch = self.motion_epoch;
+        let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
@@ -588,6 +593,7 @@ impl Render for StageLyricsView {
                 hovered_index == Some(index),
                 !scroll_animating,
                 motion_epoch,
+                karaoke_epoch,
                 view.clone(),
                 parent.clone(),
             )
@@ -658,6 +664,7 @@ fn render_lyric_row(
     hovered: bool,
     interactive: bool,
     motion_epoch: u64,
+    karaoke_epoch: u64,
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
@@ -683,7 +690,7 @@ fn render_lyric_row(
             active_word_index,
             position_ms,
             karaoke_running,
-            motion_epoch,
+            karaoke_epoch,
         ));
 
     if let Some(translation) = &line.translation {
@@ -811,6 +818,7 @@ fn render_lyric_row(
             this.active_index = Some(index);
             this.active_word_index = this.compute_active_word_index();
             this.motion_epoch = this.motion_epoch.wrapping_add(1);
+            this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
             cx.notify();
         });
@@ -873,7 +881,7 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
 
 fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
-        return f32::from(position_ms >= word.timestamp_ms);
+        return if position_ms >= word.timestamp_ms { 1.0 } else { 0.0 };
     };
     let elapsed = position_ms
         .saturating_sub(word.timestamp_ms)
@@ -890,14 +898,22 @@ fn word_reveal_remaining(word: &StageLyricWord, position_ms: u64) -> Option<Dura
 fn karaoke_word(
     word: &StageLyricWord,
     index: usize,
-    current_word: usize,
+    current_word: Option<usize>,
     position_ms: u64,
     animate: bool,
-    motion_epoch: u64,
+    karaoke_epoch: u64,
 ) -> gpui::AnyElement {
     const DIM_ALPHA: f32 = 0.28;
     const DONE_ALPHA: f32 = 0.97;
 
+    let Some(current_word) = current_word else {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
+    };
     if index < current_word {
         return div()
             .flex_none()
@@ -937,7 +953,7 @@ fn karaoke_word(
         && !remaining.is_zero()
     {
         let start = progress;
-        let key = motion_epoch
+        let key = karaoke_epoch
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(word.timestamp_ms.rotate_left(17))
             .wrapping_add(index as u64);
@@ -973,9 +989,9 @@ fn stage_primary_lyric(
     current_word: Option<usize>,
     position_ms: u64,
     animate: bool,
-    motion_epoch: u64,
+    karaoke_epoch: u64,
 ) -> gpui::AnyElement {
-    let Some(current_word) = current_word.filter(|_| karaoke_active && line.enhanced_complete) else {
+    if !karaoke_active || !line.enhanced_complete {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -983,7 +999,7 @@ fn stage_primary_lyric(
             .text_color(hsla(0.0, 0.0, 1.0, 1.0))
             .child(line.text.clone())
             .into_any_element();
-    };
+    }
 
     // Keep the authored words as independent nowrap fragments so wrapping still occurs only at
     // semantic word/syllable boundaries. Only the current fragment owns a tiny absolute bright
@@ -1005,7 +1021,7 @@ fn stage_primary_lyric(
             current_word,
             position_ms,
             animate,
-            motion_epoch,
+            karaoke_epoch,
         ));
     }
     row.into_any_element()
