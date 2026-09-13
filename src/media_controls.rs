@@ -128,7 +128,6 @@ impl SystemMediaBridge {
         if self.last_metadata_fingerprint == Some(fingerprint) {
             return;
         }
-        self.last_metadata_fingerprint = Some(fingerprint);
 
         if let Some(discord) = &mut self.discord {
             discord.update_metadata(track);
@@ -137,7 +136,7 @@ impl SystemMediaBridge {
         let Some(controls) = &mut self.controls else {
             return;
         };
-        if let Some(track) = track {
+        let result = if let Some(track) = track {
             let duration = Duration::from_millis(track.duration_ms);
             let metadata = MediaMetadata {
                 title: Some(&track.title),
@@ -146,9 +145,15 @@ impl SystemMediaBridge {
                 duration: Some(duration),
                 cover_url: None,
             };
-            let _ = controls.set_metadata(metadata);
+            controls.set_metadata(metadata)
         } else {
-            let _ = controls.set_metadata(MediaMetadata::default());
+            controls.set_metadata(MediaMetadata::default())
+        };
+
+        // Only commit the dedupe key after the platform backend accepted the update. A transient
+        // COM/D-Bus/Now Playing failure must remain retryable on the next serialized media sync.
+        if result.is_ok() {
+            self.last_metadata_fingerprint = Some(fingerprint);
         }
     }
 
@@ -168,9 +173,6 @@ impl SystemMediaBridge {
             return;
         }
 
-        self.last_state = Some(state);
-        self.last_position_sec = position_sec;
-
         let Some(controls) = &mut self.controls else {
             return;
         };
@@ -183,7 +185,12 @@ impl SystemMediaBridge {
             | PlaybackState::Loading
             | PlaybackState::Buffering => MediaPlayback::Stopped,
         };
-        let _ = controls.set_playback(playback);
+        // Do not poison the local cache when the platform backend rejects an update. Keeping the
+        // previous state/position makes the same state retryable on the next bridge invocation.
+        if controls.set_playback(playback).is_ok() {
+            self.last_state = Some(state);
+            self.last_position_sec = position_sec;
+        }
     }
 
     fn confirm_mpris_volume_request(&mut self) {
