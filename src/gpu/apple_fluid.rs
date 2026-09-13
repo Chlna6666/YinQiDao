@@ -40,10 +40,9 @@ pub(crate) fn apple_fluid_params(
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
     let time = time_seconds.rem_euclid(21_600.0);
-    // The same shader/pipeline is used for both paths. While the stage is prewarming or the drawer
-    // is moving we set motion to zero, which selects the cheap static fragment path. This still
-    // exercises the backend pipeline during prewarm without paying the full-screen FBM cost on
-    // every drawer frame. Once the stage settles, motion=1 enables the full fluid effect.
+    // Keep the cheap parameter branch available as a fallback/diagnostic path, but the retained
+    // immersive Stage always paints the full field. Prewarm and drawer motion now reduce work by
+    // freezing time and withholding RAF rather than switching to a visually different gradient.
     let motion = if full_effect { 1.0 } else { 0.0 };
     let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
 
@@ -59,8 +58,6 @@ pub(crate) struct AppleFluidView {
     track_id: i64,
     palette: Option<ArtworkPalette>,
     stage_visible: bool,
-    full_effect_ready: bool,
-    full_effect_resume_armed: bool,
     playing: bool,
     animation_seconds: f32,
     last_frame_at: Instant,
@@ -70,15 +67,13 @@ pub(crate) struct AppleFluidView {
 impl AppleFluidView {
     pub(crate) fn new() -> Self {
         // Parse/validate WGSL and build the shared mesh as soon as the retained entity is created.
-        // The existing offscreen stage prewarm can then spend its frame on backend pipeline creation
-        // instead of also paying Naga/source construction during the first immersive render.
+        // The offscreen Stage prewarm then paints the exact full-fluid visual that will later be
+        // replayed by the drawer instead of warming a cheaper but visibly different approximation.
         let shader_available = apple_fluid_program().is_ok();
         Self {
             track_id: 0,
             palette: None,
             stage_visible: false,
-            full_effect_ready: false,
-            full_effect_resume_armed: false,
             playing: false,
             animation_seconds: 0.0,
             last_frame_at: Instant::now(),
@@ -100,15 +95,10 @@ impl AppleFluidView {
         self.palette = palette;
         self.stage_visible = stage_visible;
 
-        if visibility_changed {
-            // Keep the first fully settled Stage frame on the cheap static shader path. The full
-            // procedural effect is re-enabled only after that frame has actually been presented,
-            // so the Stage terminal reconciliation and the expensive fullscreen fragment workload
-            // cannot land on the same frame.
-            self.full_effect_ready = false;
-            self.full_effect_resume_armed = false;
-        }
         if changed {
+            // `stage_visible` controls only time advancement/RAF. Resetting the time origin here
+            // makes the first animated frame continue from the frozen prewarm image with a near-zero
+            // delta instead of jumping forward by however long the drawer transition took.
             self.last_frame_at = Instant::now();
             cx.notify();
         }
@@ -125,37 +115,22 @@ impl AppleFluidView {
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.stage_visible && !self.full_effect_ready && !self.full_effect_resume_armed {
-            self.full_effect_resume_armed = true;
-            let entity = cx.entity();
-            window.on_next_frame(move |_window, cx| {
-                let _ = entity.update(cx, |view, cx| {
-                    view.full_effect_resume_armed = false;
-                    if view.stage_visible && !view.full_effect_ready {
-                        view.full_effect_ready = true;
-                        view.last_frame_at = Instant::now();
-                        cx.notify();
-                    }
-                });
-            });
-        }
-
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match apple_fluid_program() {
             Ok(program) => {
                 self.shader_available = true;
                 let now = window.animation_time();
-                let full_effect = self.stage_visible && self.full_effect_ready;
-                if full_effect && self.playing {
+                let animate = self.stage_visible && self.playing;
+                if animate {
                     let delta = now
                         .saturating_duration_since(self.last_frame_at)
                         .as_secs_f32()
                         .min(0.05);
                     self.animation_seconds =
                         (self.animation_seconds + delta).rem_euclid(21_600.0);
-                    // The pinned GPUI fork targets request_animation_frame() at the currently
-                    // rendering Entity. Fluid therefore follows the display's real vsync cadence
-                    // without waking MusicApp or imposing a fixed 30 Hz software timer.
+                    // Prewarm/drawer frames keep the full procedural field but do not schedule RAF.
+                    // Once the Stage settles, animation resumes from the exact frozen field already
+                    // on screen, so enabling motion does not change shader branches or color layout.
                     window.request_animation_frame();
                 }
                 self.last_frame_at = now;
@@ -166,7 +141,7 @@ impl Render for AppleFluidView {
                         self.track_id,
                         self.palette.as_ref(),
                         self.animation_seconds,
-                        full_effect,
+                        true,
                     ),
                 );
             }
@@ -220,9 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn stage_prewarm_uses_a_cheaper_static_shader_parameter_set() {
-        let warmup = apple_fluid_params(7, None, 12.5, false);
-        let active = apple_fluid_params(7, None, 12.5, true);
-        assert_ne!(warmup, active);
+    fn cheap_fallback_differs_from_full_fluid_parameter_set() {
+        let fallback = apple_fluid_params(7, None, 12.5, false);
+        let full = apple_fluid_params(7, None, 12.5, true);
+        assert_ne!(fallback, full);
     }
 }
