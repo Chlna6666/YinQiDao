@@ -75,15 +75,14 @@ impl MusicApp {
                     .lyrics
                     .as_ref()
                     .is_some_and(|lyrics| !lyrics.has_translation());
-            // Before the YRC provider path was wired up, Netease/cache rows could be permanently
-            // marked complete with line-only LRC. Detect those rows from the parsed semantic data,
-            // not from raw tag syntax, and re-run provider enrichment so authored word timing can
-            // replace the old cache. `enrichment_done` keeps this to one attempt per track/session.
+            // Older online caches from any provider can contain only line-level LRC. Lyrics quality
+            // is now independent from the metadata winner, so detect the semantic capability instead
+            // of hard-coding a provider name. `enrichment_done` keeps the upgrade to one attempt per
+            // track/session when no authored word-timed source exists.
             let needs_word_timing_upgrade = stored.checked_online
                 && lyrics_enabled
                 && stored.lyrics.as_ref().is_some_and(|lyrics| {
-                    matches!(lyrics.source.as_str(), "网易云音乐" | "缓存")
-                        && !lyrics.timed_lines().is_empty()
+                    !lyrics.timed_lines().is_empty()
                         && !lyrics
                             .timed_lines()
                             .iter()
@@ -102,10 +101,44 @@ impl MusicApp {
 
             let services = OnlineServices::new(api_key)?;
             let mut result = if needs_word_timing_upgrade && !needs_artwork_fallback {
-                // A word-timing upgrade must revisit the normal provider chain because the old
-                // translation-only helper deliberately accepted only bilingual documents. Artwork
-                // remains disabled here, so this is still a bounded background lyrics refresh.
-                services.enrich(&track, true, false).await?
+                // Upgrade line-only caches through the dedicated word-timing path first. This avoids
+                // refetching unrelated metadata/artwork for QQ/legacy cache rows. If a bilingual
+                // cache would lose its translation, fall back to the full lyrics-only provider chain,
+                // which can merge authored timing with a translated provider result.
+                if let Some(lyrics) = services.fetch_word_timed_lyrics_for_track(&track).await {
+                    let cached_has_translation = stored
+                        .lyrics
+                        .as_ref()
+                        .is_some_and(LyricsDocument::has_translation);
+                    if cached_has_translation && !lyrics.has_translation() {
+                        services.enrich(&track, true, false).await?
+                    } else {
+                        EnrichmentResult {
+                            lyrics: Some(lyrics),
+                            ..EnrichmentResult::default()
+                        }
+                    }
+                } else if needs_translation_upgrade {
+                    let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
+                        return Ok(EnrichmentOutcome {
+                            result: EnrichmentResult::default(),
+                            artwork_key: None,
+                            artwork: None,
+                            cached_lyrics: stored.lyrics,
+                        });
+                    };
+                    EnrichmentResult {
+                        lyrics: Some(lyrics),
+                        ..EnrichmentResult::default()
+                    }
+                } else {
+                    return Ok(EnrichmentOutcome {
+                        result: EnrichmentResult::default(),
+                        artwork_key: None,
+                        artwork: None,
+                        cached_lyrics: stored.lyrics,
+                    });
+                }
             } else if needs_translation_upgrade && !needs_artwork_fallback {
                 let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
                     return Ok(EnrichmentOutcome {
