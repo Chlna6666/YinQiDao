@@ -227,7 +227,8 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
 
     for line in input.lines() {
         let mut remaining = line.trim();
-        let mut timestamps = Vec::new();
+        let mut first_timestamp = None;
+        let mut extra_timestamps = Vec::new();
 
         loop {
             remaining = remaining.trim_start();
@@ -236,7 +237,11 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             {
                 let stamp = &rest[..end];
                 if let Some(timestamp_ms) = parse_timestamp(stamp) {
-                    timestamps.push(timestamp_ms);
+                    if first_timestamp.is_none() {
+                        first_timestamp = Some(timestamp_ms);
+                    } else {
+                        extra_timestamps.push(timestamp_ms);
+                    }
                     remaining = &rest[end + 1..];
                     continue;
                 }
@@ -244,9 +249,9 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             break;
         }
 
-        if timestamps.is_empty() {
+        let Some(first_timestamp) = first_timestamp else {
             continue;
-        }
+        };
 
         let (enhanced_text, enhanced_words) = parse_inline_words(remaining, global_offset);
         let text = if enhanced_words.is_empty() {
@@ -254,13 +259,13 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
         } else {
             clean_inline_tags(&enhanced_text)
         };
-        let words: Arc<[LyricWord]> = if timestamps.len() == 1 {
+        let words: Arc<[LyricWord]> = if extra_timestamps.is_empty() {
             enhanced_words.into()
         } else {
             Arc::from([])
         };
 
-        for raw_ts in timestamps {
+        for raw_ts in std::iter::once(first_timestamp).chain(extra_timestamps) {
             lines.push(LyricLine {
                 timestamp_ms: apply_offset(raw_ts, global_offset),
                 text: text.clone(),
@@ -344,35 +349,29 @@ fn parse_inline_words(input: &str, offset_ms: i64) -> (String, Vec<LyricWord>) {
 
 fn parse_timestamp(value: &str) -> Option<u64> {
     let value = value.trim();
-    let parts: Vec<&str> = value.split(':').collect();
-    match parts.len() {
-        2 => {
-            let minutes = parts[0].parse::<u64>().ok()?;
-            let (seconds, ms) = parse_seconds_and_fraction(parts[1])?;
-            (seconds < 60).then(|| minutes * 60_000 + seconds * 1_000 + ms)
-        }
-        3 => {
-            if let (Ok(p0), Ok(p1)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
-                if parts[2].contains('.') {
-                    let (sec, ms) = parse_seconds_and_fraction(parts[2])?;
-                    (p1 < 60 && sec < 60).then(|| p0 * 3_600_000 + p1 * 60_000 + sec * 1_000 + ms)
-                } else if let Ok(frac) = parts[2].parse::<u64>() {
-                    let ms = if parts[2].len() == 2 {
-                        frac * 10
-                    } else if parts[2].len() == 1 {
-                        frac * 100
-                    } else {
-                        frac
-                    };
-                    (p1 < 60).then(|| p0 * 60_000 + p1 * 1_000 + ms)
-                } else {
-                    None
-                }
+    let (first, rest) = value.split_once(':')?;
+    if let Some((second, third)) = rest.split_once(':') {
+        let p0 = first.parse::<u64>().ok()?;
+        let p1 = second.parse::<u64>().ok()?;
+        if third.contains('.') {
+            let (sec, ms) = parse_seconds_and_fraction(third)?;
+            (p1 < 60 && sec < 60)
+                .then(|| p0 * 3_600_000 + p1 * 60_000 + sec * 1_000 + ms)
+        } else {
+            let frac = third.parse::<u64>().ok()?;
+            let ms = if third.len() == 2 {
+                frac * 10
+            } else if third.len() == 1 {
+                frac * 100
             } else {
-                None
-            }
+                frac
+            };
+            (p1 < 60).then(|| p0 * 60_000 + p1 * 1_000 + ms)
         }
-        _ => None,
+    } else {
+        let minutes = first.parse::<u64>().ok()?;
+        let (seconds, ms) = parse_seconds_and_fraction(rest)?;
+        (seconds < 60).then(|| minutes * 60_000 + seconds * 1_000 + ms)
     }
 }
 
