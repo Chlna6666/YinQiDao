@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, IntoElement, ListAlignment,
     ListOffset, ListState, Render, SharedString, Transition, TransitionProperty, WeakEntity, Window,
-    div, hsla, list, point, prelude::*, px,
+    div, hsla, list, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -39,6 +39,7 @@ struct StageLyricWord {
     duration_ms: Option<u64>,
     byte_start: usize,
     byte_end: usize,
+    text: SharedString,
 }
 
 #[derive(Clone)]
@@ -75,6 +76,7 @@ impl StageLyricLine {
                     duration_ms,
                     byte_start,
                     byte_end: byte_offset,
+                    text: SharedString::from(word.text.clone()),
                 }
             })
             .collect::<Vec<_>>()
@@ -156,6 +158,7 @@ pub(super) struct StageLyricsView {
     scroll_animation: Option<LyricScrollAnimation>,
     scroll_epoch: u64,
     stage_active: bool,
+    scrubbing: bool,
 }
 
 impl StageLyricsView {
@@ -179,6 +182,7 @@ impl StageLyricsView {
             scroll_animation: None,
             scroll_epoch: 0,
             stage_active: false,
+            scrubbing: false,
         }
     }
 
@@ -208,6 +212,8 @@ impl StageLyricsView {
             || self.source_len != source_len;
         let playback_state_changed = self.playback_state != app.snapshot.state;
         let stage_active_changed = self.stage_active != stage_active;
+        let scrubbing = app.drag_progress_ratio.is_some();
+        let scrubbing_changed = self.scrubbing != scrubbing;
 
         let mut changed = engine_changed;
         if source_changed {
@@ -244,6 +250,16 @@ impl StageLyricsView {
         }
         if playback_state_changed {
             self.playback_state = app.snapshot.state;
+            // A renderer-independent karaoke sweep must restart from the exact transport position
+            // when playback resumes instead of continuing a timeline that elapsed while paused.
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+            changed = true;
+        }
+        if scrubbing_changed {
+            self.scrubbing = scrubbing;
+            // During a drag the mask is sampled directly. Releasing creates a fresh retained
+            // animation from the released transport position, so no stale timeline can catch up.
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
             changed = true;
         }
         if stage_active_changed {
@@ -265,6 +281,9 @@ impl StageLyricsView {
             && !active_changed
             && previous_word != next_word;
         self.active_word_index = next_word;
+        if word_changed {
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        }
         if active_changed || word_changed {
             changed = true;
         }
@@ -331,17 +350,11 @@ impl StageLyricsView {
             .map(|line| line.timestamp_ms);
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
+            && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
         {
-            if let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms) {
-                next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
-                    current.min(word_timestamp)
-                }));
-            }
-            if let Some(reveal_timestamp) = next_enhanced_reveal_timestamp(line, position_ms) {
-                next_timestamp = Some(next_timestamp.map_or(reveal_timestamp, |current| {
-                    current.min(reveal_timestamp)
-                }));
-            }
+            next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
+                current.min(word_timestamp)
+            }));
         }
 
         let timestamp = next_timestamp?;
@@ -353,7 +366,7 @@ impl StageLyricsView {
     }
 
     fn refresh_transport(&mut self) {
-        if !self.transport_should_run() {
+        if !self.transport_should_run() || self.scrubbing {
             return;
         }
         let Some(engine) = &self.engine else {
@@ -364,9 +377,13 @@ impl StageLyricsView {
             return;
         }
 
+        let previous_word = self.active_word_index;
         self.position_ms = position_ms;
-        self.update_active_index();
+        let active_changed = self.update_active_index();
         self.active_word_index = self.compute_active_word_index();
+        if !active_changed && previous_word != self.active_word_index {
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        }
     }
 
     #[inline]
@@ -412,6 +429,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.active_word_index = self.compute_active_word_index();
             self.scroll_target = self.active_index;
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
         }
         if self
             .scroll_animation
@@ -539,6 +557,10 @@ impl Render for StageLyricsView {
         let active_word_index = self.active_word_index;
         let position_ms = self.position_ms;
         let reading_mode = self.is_reading();
+        let karaoke_running = self.stage_active
+            && self.playback_state == PlaybackState::Playing
+            && !self.scrubbing
+            && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
         // Restore depth only after the retained list has settled. During the 220 ms compositor
@@ -560,6 +582,7 @@ impl Render for StageLyricsView {
                 active_word_index,
                 position_ms,
                 reading_mode,
+                karaoke_running,
                 depth_blur_active,
                 text_id,
                 hovered_index == Some(index),
@@ -629,6 +652,7 @@ fn render_lyric_row(
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
+    karaoke_running: bool,
     depth_blur_active: bool,
     text_id: &'static str,
     hovered: bool,
@@ -658,6 +682,8 @@ fn render_lyric_row(
             karaoke_active,
             active_word_index,
             position_ms,
+            karaoke_running,
+            motion_epoch,
         ));
 
     if let Some(translation) = &line.translation {
@@ -845,74 +871,100 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
         .map(|word| word.timestamp_ms)
 }
 
-fn current_word_reveal_end(
-    line: &StageLyricLine,
-    word: &StageLyricWord,
-    position_ms: u64,
-) -> usize {
+fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
-        return word.byte_end;
+        return f32::from(position_ms >= word.timestamp_ms);
     };
-    let text: &str = &line.text;
-    let Some(segment) = text.get(word.byte_start..word.byte_end) else {
-        return word.byte_end;
-    };
-    let char_count = segment.chars().count();
-    if char_count <= 1 {
-        return word.byte_end;
-    }
-
     let elapsed = position_ms
         .saturating_sub(word.timestamp_ms)
         .min(duration_ms);
-    // Reveal the first glyph at the authored segment start, then advance only on character
-    // boundaries. This approximates Apple Music's left-to-right sweep without repainting every
-    // display frame or splitting UTF-8 inside a code point.
-    let reveal_count = (1
-        + ((elapsed as u128 * char_count as u128) / duration_ms as u128) as usize)
-        .min(char_count);
-    let relative_end = segment
-        .char_indices()
-        .nth(reveal_count)
-        .map_or(segment.len(), |(offset, _)| offset);
-    word.byte_start + relative_end
+    (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
 }
 
-fn next_enhanced_reveal_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
-    let current = active_enhanced_word_index(line, position_ms)?;
-    let word = line.words.get(current)?;
+fn word_reveal_remaining(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
     let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
-    let text: &str = &line.text;
-    let segment = text.get(word.byte_start..word.byte_end)?;
-    let char_count = segment.chars().count() as u64;
-    if char_count <= 1 {
-        return None;
-    }
     let end = word.timestamp_ms.saturating_add(duration_ms);
-    if position_ms >= end {
-        return None;
-    }
-
-    let elapsed = position_ms.saturating_sub(word.timestamp_ms);
-    let revealed = (1
-        + ((elapsed as u128 * char_count as u128) / duration_ms as u128) as u64)
-        .min(char_count);
-    for step in revealed..char_count {
-        let numerator = duration_ms as u128 * step as u128;
-        let offset = ((numerator + char_count as u128 - 1) / char_count as u128) as u64;
-        let timestamp = word.timestamp_ms.saturating_add(offset);
-        if timestamp > position_ms {
-            return Some(timestamp);
-        }
-    }
-    None
+    (position_ms < end).then(|| Duration::from_millis(end.saturating_sub(position_ms)))
 }
 
-fn lyric_word_highlight(fade_out: Option<f32>) -> gpui::HighlightStyle {
-    gpui::HighlightStyle {
-        fade_out,
-        ..gpui::HighlightStyle::default()
+fn karaoke_word(
+    word: &StageLyricWord,
+    index: usize,
+    current_word: usize,
+    position_ms: u64,
+    animate: bool,
+    motion_epoch: u64,
+) -> gpui::AnyElement {
+    const DIM_ALPHA: f32 = 0.28;
+    const DONE_ALPHA: f32 = 0.97;
+
+    if index < current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DONE_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
     }
+    if index > current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
+    }
+
+    let progress = word_reveal_progress(word, position_ms);
+    let base = div()
+        .whitespace_nowrap()
+        .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+        .child(word.text.clone());
+    let overlay = div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .h_full()
+        .w(relative(progress))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+        .child(word.text.clone());
+
+    let overlay = if animate
+        && progress < 1.0
+        && let Some(remaining) = word_reveal_remaining(word, position_ms)
+        && !remaining.is_zero()
+    {
+        let start = progress;
+        let key = motion_epoch
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(word.timestamp_ms.rotate_left(17))
+            .wrapping_add(index as u64);
+        overlay
+            .with_animation(
+                ElementId::NamedInteger(
+                    SharedString::new_static("lyric-word-sweep"),
+                    key,
+                ),
+                Animation::new(remaining),
+                move |element, delta| {
+                    let reveal = start + (1.0 - start) * delta.clamp(0.0, 1.0);
+                    element.w(relative(reveal))
+                },
+            )
+            .into_any_element()
+    } else {
+        overlay.into_any_element()
+    };
+
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(base)
+        .child(overlay)
+        .into_any_element()
 }
 
 fn stage_primary_lyric(
@@ -920,8 +972,10 @@ fn stage_primary_lyric(
     karaoke_active: bool,
     current_word: Option<usize>,
     position_ms: u64,
+    animate: bool,
+    motion_epoch: u64,
 ) -> gpui::AnyElement {
-    if !karaoke_active || !line.enhanced_complete {
+    let Some(current_word) = current_word.filter(|_| karaoke_active && line.enhanced_complete) else {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -929,42 +983,32 @@ fn stage_primary_lyric(
             .text_color(hsla(0.0, 0.0, 1.0, 1.0))
             .child(line.text.clone())
             .into_any_element();
-    }
+    };
 
-    // Completed text stays near full luminance, the unsung tail remains recessed, and the current
-    // authored word is split at a UTF-8-safe reveal boundary derived from its real duration. This
-    // gives the active line a left-to-right karaoke sweep without a high-frequency root timer.
-    let mut highlights = Vec::with_capacity(line.words.len() + 1);
-    for (index, word) in line.words.iter().enumerate() {
-        match current_word {
-            Some(current) if index < current => highlights.push((
-                word.byte_start..word.byte_end,
-                lyric_word_highlight(Some(0.03)),
-            )),
-            Some(current) if index == current => {
-                let reveal_end = current_word_reveal_end(line, word, position_ms);
-                if reveal_end < word.byte_end {
-                    highlights.push((
-                        reveal_end..word.byte_end,
-                        lyric_word_highlight(Some(0.72)),
-                    ));
-                }
-            }
-            Some(_) | None => highlights.push((
-                word.byte_start..word.byte_end,
-                lyric_word_highlight(Some(0.72)),
-            )),
-        }
-    }
-
-    div()
+    // Keep the authored words as independent nowrap fragments so wrapping still occurs only at
+    // semantic word/syllable boundaries. Only the current fragment owns a tiny absolute bright
+    // overlay whose width is animated. GPUI's legacy animation path targets the fragment's retained
+    // subtree, so this continuous sweep does not make the lyric list, Stage, or root rerender at
+    // display refresh rate.
+    let mut row = div()
         .w_full()
         .min_w(px(0.0))
+        .flex()
+        .flex_wrap()
+        .items_center()
         .text_size(px(28.0))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-        .child(gpui::StyledText::new(line.text.clone()).with_highlights(highlights))
-        .into_any_element()
+        .font_weight(gpui::FontWeight::BOLD);
+    for (index, word) in line.words.iter().enumerate() {
+        row = row.child(karaoke_word(
+            word,
+            index,
+            current_word,
+            position_ms,
+            animate,
+            motion_epoch,
+        ));
+    }
+    row.into_any_element()
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1103,10 +1147,11 @@ mod tests {
         assert_eq!(line.words[0].byte_end, "你好 ".len());
         assert_eq!(line.words[1].byte_start, "你好 ".len());
         assert_eq!(line.words[1].byte_end, line.text.len());
+        assert_eq!(line.words[0].text.as_ref(), "你好 ");
     }
 
     #[test]
-    fn authored_word_duration_drives_intra_word_reveal_boundaries() {
+    fn authored_word_duration_drives_continuous_reveal_progress() {
         let source = LyricLine {
             timestamp_ms: 1_000,
             text: "ABC".into(),
@@ -1119,12 +1164,12 @@ mod tests {
         };
         let line = StageLyricLine::from_source(&source);
         let word = &line.words[0];
-        assert_eq!(current_word_reveal_end(&line, word, 1_000), 1);
-        assert_eq!(current_word_reveal_end(&line, word, 1_099), 1);
-        assert_eq!(current_word_reveal_end(&line, word, 1_100), 2);
-        assert_eq!(current_word_reveal_end(&line, word, 1_200), 3);
-        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_000), Some(1_100));
-        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_100), Some(1_200));
-        assert_eq!(next_enhanced_reveal_timestamp(&line, 1_200), None);
+        assert_eq!(word_reveal_progress(word, 999), 0.0);
+        assert_eq!(word_reveal_progress(word, 1_000), 0.0);
+        assert!((word_reveal_progress(word, 1_150) - 0.5).abs() < 0.001);
+        assert_eq!(word_reveal_progress(word, 1_300), 1.0);
+        assert_eq!(word_reveal_remaining(word, 1_000), Some(Duration::from_millis(300)));
+        assert_eq!(word_reveal_remaining(word, 1_250), Some(Duration::from_millis(50)));
+        assert_eq!(word_reveal_remaining(word, 1_300), None);
     }
 }
