@@ -30,10 +30,12 @@
 - [x] 启动时仅扫描/校验 manifest 与 component 路径，不 instantiate WASM；为后续 component 懒加载保留边界。
 - [x] 校验插件/Provider ID、ABI、重复 capability/auth method、component 路径逃逸与静态 network domain allowlist。
 - [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
+- [x] 建立 Host HTTP preflight：目标必须同时命中 manifest 声明和用户 grant；首版仅允许 HTTPS，redirect 必须重新授权，并拒绝 IP literal/明显本地域名。
+- [ ] Host HTTP executor 在 DNS 解析后拒绝 loopback/private/link-local/特殊用途地址，并在每次 redirect 后重新执行完整 SSRF 校验。
 - [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/CPU feature 变化自动失效。
 - [ ] 对实例设置 memory limit、fuel/epoch interruption、call timeout、最大 response/body、最大并发。
 - [ ] 默认不授予 filesystem、raw socket、process、environment 权限。
-- [ ] 所有 HTTP 走 host-mediated HTTP import，并按 manifest domain allowlist、用户授权、重定向目标再次校验。
+- [ ] 所有 HTTP 走 host-mediated HTTP import，WASM 不持有 raw socket。
 - [ ] 插件崩溃/超时仅熔断该 plugin/provider，不得拖垮 UI、播放引擎或其他插件。
 - [ ] 插件调用只允许运行在普通 async/worker 路径，严禁进入 realtime audio callback。
 
@@ -42,12 +44,13 @@
 - [x] 建立 Host 级 `PluginHostState` 与非 Secret 的 `plugin-accounts.json` 账号索引，启动恢复全部已安装插件账号路由。
 - [x] 同一 `plugin_id + provider_id` 可以保存多个账号，并规范化为最多一个默认账号；不会产生全局平台切换状态。
 - [x] 账号索引只保存路由元数据和状态，明确禁止 cookie/token/refresh token/device secret 进入普通配置文件。
+- [x] 建立 Host-owned `SecretSlot`，使用 `plugin/provider/account/key` 的结构化 namespace 和长度前缀 storage key，避免分隔符逃逸/跨账号碰撞。
 - [ ] 设置页增加“音乐服务与插件”入口，显示所有插件、Provider、账号状态与权限。
 - [ ] 支持 QR 登录、浏览器 OAuth、Device Code、Cookie Import、Host-owned Custom Form。
 - [ ] 登录完成后账号立即注册到 `PluginServiceRouter`，不重启应用、不重建播放器。
 - [ ] 用户可以在一次具体操作中临时指定平台/账号，该偏好只作用于本次请求，不产生全局切换。
 - [ ] Session/refresh token/cookie 不写入 `config.toml`；迁移到 OS credential store 或 Host 加密 Secret Store。
-- [ ] Secret namespace 固定为 `plugin-id/account-id/key`，组件无法读取其他插件秘密。
+- [ ] 新进程启动后，磁盘中的历史 Authenticated 状态必须先进入待校验状态；只有 Secret/session refresh 成功后才能重新进入可路由 Authenticated。
 - [ ] Session 即将过期时由后台刷新；刷新失败标记 `Expired`，不阻塞其他已登录平台。
 - [ ] 支持 logout 单账号、logout 单平台全部账号、撤销插件全部 secret。
 

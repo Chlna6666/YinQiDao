@@ -33,6 +33,7 @@ pub mod media_controls;
 mod model;
 mod online;
 mod plugin_host;
+mod plugin_security;
 mod plugins;
 mod preferences;
 pub mod runtime;
