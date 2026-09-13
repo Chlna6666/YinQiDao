@@ -593,7 +593,6 @@ impl MusicApp {
                     cx.notify();
                     Some(duration)
                 })
-                .ok()
                 .flatten();
 
             let Some(duration) = started else {
@@ -1117,7 +1116,6 @@ impl MusicApp {
             .await
             .map_err(|_| anyhow::anyhow!("音频设备切换任务异常退出"))?
         });
-        self.scan_in_progress = self.scan_in_progress;
         cx.spawn(async move |this, cx| -> Result<()> {
             let result = task.await;
             this.update(cx, |this, cx| {
