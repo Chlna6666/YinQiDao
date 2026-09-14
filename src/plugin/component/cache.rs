@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::plugin_components::PluginComponentSnapshot;
+use super::registry::PluginComponentSnapshot;
 
 static PLUGIN_COMPILED_CACHE: OnceLock<Arc<PluginCompiledArtifactStore>> = OnceLock::new();
 
@@ -275,10 +275,10 @@ pub fn global() -> Option<Arc<PluginCompiledArtifactStore>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        plugin_components::{PluginComponentLimits, PluginComponentRegistry},
-        plugin_host::InstalledPlugin,
-        plugins::{PluginManifest, PLUGIN_ABI_VERSION},
+    use crate::plugin::{
+        abi::{PluginManifest, PLUGIN_ABI_VERSION},
+        component::registry::{PluginComponentLimits, PluginComponentRegistry},
+        host::catalog::InstalledPlugin,
     };
 
     fn unique_temp_root(name: &str) -> std::path::PathBuf {

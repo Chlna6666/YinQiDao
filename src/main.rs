@@ -34,14 +34,9 @@ mod model;
 mod online;
 mod plugin;
 
-// Transitional crate-root aliases keep moved plugin internals source-compatible while the next
-// boundary pass rewrites those imports to the nested module paths and removes the aliases.
+// Transitional aliases remain only for Host internals that have not yet moved to sibling paths.
+// Application-facing plugin code and Component lifecycle code no longer depend on crate-root aliases.
 pub(crate) use plugin::abi as plugins;
-pub(crate) use plugin::client as plugin_client;
-pub(crate) use plugin::component::cache as plugin_compiled_cache;
-pub(crate) use plugin::component::policy as plugin_engine_policy;
-pub(crate) use plugin::component::registry as plugin_components;
-pub(crate) use plugin::frontend as plugin_frontend;
 pub(crate) use plugin::host::catalog as plugin_host;
 pub(crate) use plugin::host::http as plugin_http;
 pub(crate) use plugin::host::permissions as plugin_permissions;
@@ -49,7 +44,6 @@ pub(crate) use plugin::host::runtime as plugin_runtime;
 pub(crate) use plugin::host::security as plugin_security;
 pub(crate) use plugin::host::secrets as plugin_secrets;
 pub(crate) use plugin::host::sessions as plugin_sessions;
-pub(crate) use plugin::routing::gate as plugin_route_gate;
 
 mod preferences;
 pub mod runtime;

@@ -10,9 +10,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use md5::{Digest, Md5};
 
-use crate::{
-    plugin_host::InstalledPlugin,
-    plugins::PLUGIN_ABI_VERSION,
+use super::super::{
+    abi::PLUGIN_ABI_VERSION,
+    host::catalog::InstalledPlugin,
 };
 
 pub const SELECTED_WASMTIME_VERSION: &str = "48.0.1";
@@ -383,7 +383,7 @@ pub fn global() -> Option<Arc<PluginComponentRegistry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{PluginManifest, PLUGIN_ABI_VERSION};
+    use crate::plugin::abi::PluginManifest;
 
     fn unique_temp_root(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
