@@ -234,7 +234,7 @@ impl PluginPackageManager {
                 let _ = components.invalidate(&plugin_id);
             }
             if let Some(gc) = gc::global() {
-                let _ = gc.sweep_once();
+                let _ = gc.invalidate_plugin(&plugin_id);
             }
 
             if backup.exists() {
@@ -297,6 +297,9 @@ impl PluginPackageManager {
             if let Some(components) = component_registry::global() {
                 let _ = components.invalidate(plugin_id);
             }
+            if let Some(gc) = gc::global() {
+                let _ = gc.invalidate_plugin(plugin_id);
+            }
         }
         Ok(true)
     }
@@ -326,6 +329,9 @@ impl PluginPackageManager {
         let _ = ui_registry::unregister_plugin(plugin_id);
         if let Some(components) = component_registry::global() {
             let _ = components.invalidate(plugin_id);
+        }
+        if let Some(gc) = gc::global() {
+            let _ = gc.invalidate_plugin(plugin_id);
         }
         if let Some(runtime) = runtime::global() {
             let _ = runtime.revoke_all_plugin_secrets(plugin_id);
@@ -382,9 +388,6 @@ impl PluginPackageManager {
         fs::remove_dir_all(&trash)
             .with_context(|| format!("删除插件卸载暂存目录失败: {}", trash.display()))?;
         let _ = fs::remove_dir(&trash_parent);
-        if let Some(gc) = gc::global() {
-            let _ = gc.sweep_once();
-        }
         Ok(true)
     }
 }
