@@ -621,6 +621,12 @@ impl MusicApp {
             (STAGE_TRANSITION_DURATION.as_secs_f32() * distance).max(0.001),
         );
         self.stage_animating = true;
+
+        // The renderer-owned animation is armed from `render` after the sampled start frame has
+        // actually been presented. Do not begin a wall-clock timer here: on a cold first open the
+        // stage may still be compiling its shader pipeline, uploading artwork, shaping text or
+        // materializing retained layers. Starting the clock before those operations finish makes
+        // the visible animation jump directly into its middle.
         cx.notify();
     }
 
@@ -658,6 +664,10 @@ impl MusicApp {
                 return;
             };
 
+            // `with_animation` creates the scene animation during paint. Wait for that first
+            // animated frame to finish as well before starting the completion timer. This can make
+            // the logical state live for at most one extra presented frame, but can never cut a
+            // renderer animation short because a cold frame took longer than expected.
             let finish_entity = entity.clone();
             window.on_next_frame(move |_window, cx| {
                 let _ = finish_entity.update(cx, |this, cx| {
@@ -2211,6 +2221,8 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
+        // Do not run a full-screen shader RAF while the whole stage is itself moving. The retained
+        // drawer animation replays the already painted stage; fluid resumes once the drawer settles.
         let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
@@ -2438,6 +2450,23 @@ impl Render for MusicApp {
 
 fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
     let track_count = app.tracks.len();
+    let active_plugin_route = super::plugin_navigation::current(cx).ok().flatten();
+    let sidebar_routes = super::plugin_navigation::sidebar_routes().unwrap_or_default();
+    let has_sidebar_routes = !sidebar_routes.is_empty();
+    let mut plugin_section = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(sidebar_section_header("插件"));
+    for target in sidebar_routes {
+        let active = active_plugin_route
+            .as_ref()
+            .is_some_and(|current| current.pathname == target.pathname);
+        plugin_section = plugin_section.child(super::plugin_navigation::sidebar_entry(
+            target, active, cx,
+        ));
+    }
+
     div()
         .w(px(236.0))
         .flex_none()
@@ -2570,6 +2599,7 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                     cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Playlists, cx)),
                 )),
         )
+        .children(has_sidebar_routes.then_some(plugin_section))
         .child(
             div()
                 .flex()
@@ -2579,7 +2609,7 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 .child(sidebar_item(
                     "偏好设置",
                     icon!(settings),
-                    app.page == AppPage::Settings,
+                    active_plugin_route.is_none() && app.page == AppPage::Settings,
                     cx.listener(|this, _, _, cx| this.show_page(AppPage::Settings, cx)),
                 )),
         )
