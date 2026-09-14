@@ -94,6 +94,41 @@ fn refresh(cx: &mut Context<MusicApp>) {
     .detach();
 }
 
+fn load_home_section(qualified_id: String, cx: &mut Context<MusicApp>) {
+    {
+        let Ok(mut state) = state().lock() else {
+            return;
+        };
+        if state.operation_in_flight {
+            return;
+        }
+        state.operation_in_flight = true;
+        state.status = format!("正在加载 Home Section {qualified_id}…");
+    }
+
+    let task = Tokio::spawn_result(cx, async move {
+        extensions::load_home_section(&qualified_id).await
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if let Ok(mut state) = state().lock() {
+                state.operation_in_flight = false;
+                state.status = match result {
+                    Ok(snapshot) => format!(
+                        "Home Section 页面已通过 Host 加载：{}/{} · rev {}",
+                        snapshot.plugin_id, snapshot.page_id, snapshot.revision
+                    ),
+                    Err(error) => format!("Home Section 页面加载失败：{error:#}"),
+                };
+            }
+            cx.notify();
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
 fn validate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
     {
         let Ok(mut state) = state().lock() else {
@@ -172,12 +207,64 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
     if current.home_sections.is_empty() {
         home = home.child(empty_state("暂无 Home section contribution"));
     } else {
-        for section in current.home_sections.iter() {
-            home = home.child(extension_row(
-                SharedString::from(format!("plugin-home-{}", section.qualified_id)),
-                section.title.clone(),
-                format!("{} · order {}", section.plugin_id, section.order),
-            ));
+        for section in current.home_sections.iter().cloned() {
+            let qualified = section.qualified_id.clone();
+            home = home.child(
+                div()
+                    .id(SharedString::from(format!("plugin-home-{}", section.qualified_id)))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(theme::BG_CANVAS)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child(section.title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_TERTIARY)
+                                    .truncate()
+                                    .child(format!(
+                                        "{} · page {} · order {}",
+                                        section.plugin_id, section.page_id, section.order
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("load-{qualified}")))
+                            .px_3()
+                            .py_1p5()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .bg(theme::accent_red_muted())
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::ACCENT_RED)
+                            .hover(|style| style.opacity(0.86))
+                            .active(|style| style.scale(0.98))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |_, _, _, cx| {
+                                    load_home_section(qualified.clone(), cx)
+                                }),
+                            )
+                            .child("加载页面"),
+                    ),
+            );
         }
     }
 
@@ -278,7 +365,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                     div()
                                         .text_sm()
                                         .text_color(theme::TEXT_SECONDARY)
-                                        .child("查看已注册的 Command、Home Section 与 Theme；所有数据来自 Host 已验证快照。"),
+                                        .child("查看并验证已注册的 Command、Home Section 与 Theme；所有运行时调用均经过 Host 边界。"),
                                 ),
                         )
                         .child(
@@ -314,7 +401,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                             theme::TEXT_TERTIARY
                         })
                         .child(if current.status.is_empty() {
-                            "Theme 文件只在选择/校验时由 Host 读取；paint 阶段不执行文件 I/O 或 guest code。".to_string()
+                            "Home 页面通过共享 page cache 加载；Theme 文件只在选择/校验时由 Host 读取；paint 阶段不执行文件 I/O 或 guest code。".to_string()
                         } else {
                             current.status
                         }),
