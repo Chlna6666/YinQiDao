@@ -1,5 +1,6 @@
 pub(crate) mod catalog;
 pub(crate) mod http;
+pub(crate) mod package_manager;
 pub(crate) mod permissions;
 pub(crate) mod runtime;
 pub(crate) mod security;
