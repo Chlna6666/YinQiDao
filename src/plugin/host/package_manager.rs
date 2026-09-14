@@ -14,7 +14,10 @@ use crate::plugin::{
     ui::{catalog as ui_catalog, registry as ui_registry},
 };
 
-use super::{catalog::PluginCatalog, permissions, runtime, sessions};
+use super::{
+    catalog::{PluginCatalog, PluginHostState},
+    permissions, runtime, sessions,
+};
 
 const PLUGIN_STATE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_STATE_FILE: &str = "plugin-state.json";
@@ -53,9 +56,8 @@ pub struct PluginImportResult {
     pub updated_existing: bool,
     pub enabled: bool,
     pub ui_registered: bool,
-    /// The runtime-neutral Host catalog is currently a startup snapshot. UI registration and package
-    /// files update immediately, while provider execution becomes fully hot-swappable when the
-    /// Wasmtime adapter moves its catalog behind the same live manager.
+    /// The Host security/runtime catalog is refreshed immediately. This remains true until the
+    /// private Provider Component adapter itself supports a coordinated hot swap without restart.
     pub provider_runtime_refresh_pending: bool,
 }
 
@@ -236,6 +238,8 @@ impl PluginPackageManager {
             if let Some(gc) = gc::global() {
                 let _ = gc.invalidate_plugin(&plugin_id);
             }
+            publish_runtime_catalog(&installed_catalog);
+            reconcile_host_catalog(&self.base_dir, &installed_catalog);
 
             if backup.exists() {
                 let _ = fs::remove_dir_all(&backup);
@@ -326,6 +330,8 @@ impl PluginPackageManager {
             format!("将插件移动到卸载暂存区失败: {}", plugin.package_dir.display())
         })?;
 
+        let live_catalog = PluginCatalog::discover(self.plugin_root.clone());
+        publish_runtime_catalog(&live_catalog);
         let _ = ui_registry::unregister_plugin(plugin_id);
         if let Some(components) = component_registry::global() {
             let _ = components.invalidate(plugin_id);
@@ -388,7 +394,79 @@ impl PluginPackageManager {
         fs::remove_dir_all(&trash)
             .with_context(|| format!("删除插件卸载暂存目录失败: {}", trash.display()))?;
         let _ = fs::remove_dir(&trash_parent);
+        reconcile_host_catalog(&self.base_dir, &live_catalog);
         Ok(true)
+    }
+}
+
+fn publish_runtime_catalog(catalog: &PluginCatalog) {
+    let Some(runtime) = runtime::global() else {
+        return;
+    };
+    if let Err(error) = runtime.replace_catalog(catalog.clone()) {
+        tracing::error!(%error, "发布插件 live runtime catalog 失败；后续执行将 fail closed");
+    }
+}
+
+/// Reconcile persisted accounts against the newly committed package catalog before replacing the
+/// Host router snapshot. Removed providers and capability-shrunk accounts must not survive a package
+/// update as ghost routes.
+fn reconcile_host_catalog(base_dir: &Path, catalog: &PluginCatalog) {
+    let Some(host) = super::catalog::global() else {
+        return;
+    };
+
+    let invalid_accounts = match host.read() {
+        Ok(host) => host
+            .router()
+            .accounts()
+            .iter()
+            .filter(|account| match catalog.provider(&account.plugin_id, &account.provider_id) {
+                None => true,
+                Some(provider) => account
+                    .capabilities
+                    .iter()
+                    .any(|capability| !provider.capabilities.contains(capability)),
+            })
+            .map(|account| {
+                (
+                    account.plugin_id.clone(),
+                    account.provider_id.clone(),
+                    account.account_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::error!(%error, "读取插件 Host state 进行 live catalog reconcile 失败");
+            return;
+        }
+    };
+
+    if !invalid_accounts.is_empty() {
+        let mut host_state = match host.write() {
+            Ok(host_state) => host_state,
+            Err(error) => {
+                tracing::error!(%error, "写入插件 Host state 进行账号 reconcile 失败");
+                return;
+            }
+        };
+        for (plugin_id, provider_id, account_id) in invalid_accounts {
+            if let Err(error) = host_state.remove_account(&plugin_id, &provider_id, &account_id) {
+                tracing::error!(
+                    %error,
+                    plugin_id = %plugin_id,
+                    provider_id = %provider_id,
+                    account_id = %account_id,
+                    "移除与新插件 catalog 不兼容的账号失败"
+                );
+            }
+        }
+    }
+
+    let refreshed = PluginHostState::load(base_dir);
+    match host.write() {
+        Ok(mut current) => *current = refreshed,
+        Err(error) => tracing::error!(%error, "发布插件 live Host catalog 失败"),
     }
 }
 
