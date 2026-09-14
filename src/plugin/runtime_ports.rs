@@ -7,7 +7,12 @@ use anyhow::{Context, Result, anyhow};
 
 use super::{
     client::{self, PluginProviderClient},
-    ui::{self, client::PluginUiClient},
+    host::runtime::{self as host_runtime, PluginCallKey, PluginHostServices},
+    ui::{
+        self,
+        client::{PluginUiClient, PluginUiEvent, PluginUiFuture, PluginUiResponse},
+        schema::UiPageModel,
+    },
 };
 
 static PORT_SWAP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -44,13 +49,57 @@ fn begin_swap() -> Result<PortSwapGuard> {
     Ok(PortSwapGuard { _guard: guard })
 }
 
+/// Host-owned proxy for every plugin-level UI export. Provider calls already pass through
+/// `PluginServiceFrontend`; this proxy gives UI page/event calls the same concurrency, deadline and
+/// circuit policy without making `plugin::ui` depend on Host runtime internals.
+struct BudgetedUiAdapter<T> {
+    inner: Arc<T>,
+    runtime: Arc<PluginHostServices>,
+}
+
+impl<T> PluginUiClient for BudgetedUiAdapter<T>
+where
+    T: PluginUiClient + Send + Sync + 'static,
+{
+    fn load_page<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        page_id: &'a str,
+    ) -> PluginUiFuture<'a, UiPageModel> {
+        Box::pin(async move {
+            self.runtime
+                .execute_guest_call(
+                    PluginCallKey::plugin(plugin_id),
+                    self.inner.load_page(plugin_id, page_id),
+                )
+                .await
+        })
+    }
+
+    fn handle_event<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        page_id: &'a str,
+        event: PluginUiEvent,
+    ) -> PluginUiFuture<'a, PluginUiResponse> {
+        Box::pin(async move {
+            self.runtime
+                .execute_guest_call(
+                    PluginCallKey::plugin(plugin_id),
+                    self.inner.handle_event(plugin_id, page_id, event),
+                )
+                .await
+        })
+    }
+}
+
 /// Install one Component adapter into both semantic ports.
 ///
 /// The adapter type is shared so Provider and UI calls always refer to the same runtime generation.
-/// Readers fail closed while the two registry slots are being replaced. UI page snapshots are
-/// invalidated before the swap, preventing models produced by the previous adapter from surviving a
-/// runtime reload. If the second registry update fails, the first is rolled back before the gate is
-/// reopened.
+/// Provider calls are budgeted by `PluginServiceFrontend`; UI calls are published through a
+/// `BudgetedUiAdapter` proxy using the same Host runtime policy. Readers fail closed while the two
+/// registry slots are replaced. UI page snapshots are invalidated before the swap, preventing models
+/// produced by the previous adapter from surviving a runtime reload.
 #[allow(dead_code)]
 pub(crate) fn install<T>(adapter: Arc<T>) -> Result<RuntimePortSwapReport>
 where
@@ -63,10 +112,15 @@ where
         0
     };
 
+    let runtime = host_runtime::global()
+        .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化，拒绝安装 Component adapter"))?;
     let provider_clients = client::initialize();
     let ui_clients = ui::client::initialize();
     let provider_adapter: Arc<dyn PluginProviderClient> = adapter.clone();
-    let ui_adapter: Arc<dyn PluginUiClient> = adapter;
+    let ui_adapter: Arc<dyn PluginUiClient> = Arc::new(BudgetedUiAdapter {
+        inner: adapter,
+        runtime,
+    });
 
     let previous_provider = provider_clients.install(provider_adapter)?;
     let replaced_provider_client = previous_provider.is_some();
@@ -92,9 +146,8 @@ where
     })
 }
 
-/// Remove both semantic ports under the same read gate. This is used by a future Component runtime
-/// shutdown/rebuild path. Existing in-flight calls retain their cloned `Arc`; new calls fail closed
-/// until both registry slots are cleared.
+/// Remove both semantic ports under the same read gate. Existing in-flight calls retain their cloned
+/// `Arc`; new calls fail closed until both registry slots are cleared.
 #[allow(dead_code)]
 pub(crate) fn clear() -> Result<RuntimePortSwapReport> {
     let _swap = begin_swap()?;
