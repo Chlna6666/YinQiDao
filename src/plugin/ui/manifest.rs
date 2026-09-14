@@ -204,7 +204,7 @@ pub(super) fn validate_local_id(value: &str, label: &str) -> Result<()> {
     validate_namespace_id(value, label)
 }
 
-pub(super) fn validate_relative_asset_path(value: &str) -> Result<()> {
+pub(crate) fn validate_relative_asset_path(value: &str) -> Result<()> {
     let path = Path::new(value);
     if value.is_empty()
         || value.len() > 512
