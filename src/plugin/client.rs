@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 
-use crate::plugins::{
+use super::abi::{
     ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, PlaybackSignal, PlaylistDescriptor,
     PluginLyricDocument, PluginManifest, ProviderAccount, RecognitionRequest, RecognitionResult,
     RecommendationItem, RecommendationRequest, RemoteTrack, SourceTrackRef, StreamDescriptor,
@@ -198,11 +198,12 @@ pub trait PluginProviderClient: Send + Sync {
     ) -> PluginClientFuture<'a, bool>;
 }
 
-/// Process-wide swappable provider client slot.
+/// Process-wide provider client slot.
 ///
-/// Replacing the client is safe for in-flight calls because callers clone the current `Arc` before
-/// invoking it. This supports future runtime reload/update without storing Wasmtime objects in the
-/// online-service layer.
+/// Readers clone the current `Arc` before invoking it, so a Component-runtime reload can replace
+/// the adapter without invalidating in-flight calls. Mutation is intentionally restricted to the
+/// `plugin` subsystem; OnlineServices/UI callers can observe readiness but cannot install an
+/// arbitrary execution backend.
 #[derive(Default)]
 pub struct PluginClientRegistry {
     client: RwLock<Option<Arc<dyn PluginProviderClient>>>,
@@ -234,7 +235,7 @@ impl PluginClientRegistry {
             .is_some())
     }
 
-    pub fn install(
+    pub(super) fn install(
         &self,
         client: Arc<dyn PluginProviderClient>,
     ) -> Result<Option<Arc<dyn PluginProviderClient>>> {
@@ -245,7 +246,7 @@ impl PluginClientRegistry {
             .replace(client))
     }
 
-    pub fn clear(&self) -> Result<Option<Arc<dyn PluginProviderClient>>> {
+    pub(super) fn clear(&self) -> Result<Option<Arc<dyn PluginProviderClient>>> {
         Ok(self
             .client
             .write()
