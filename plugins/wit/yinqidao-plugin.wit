@@ -220,6 +220,8 @@ interface host {
     }
 
     record http-request {
+        provider-id: string,
+        account-id: option<string>,
         method: string,
         url: string,
         headers: list<key-value>,
@@ -232,14 +234,20 @@ interface host {
         body: list<u8>,
     }
 
-    /// Host-mediated network access. The host validates the manifest domain allowlist, request size,
-    /// timeout, concurrency and redirects before any socket is opened.
+    record secret-scope {
+        provider-id: string,
+        account-id: option<string>,
+    }
+
+    /// Host-mediated network access. `provider-id` is explicit so one component can safely expose
+    /// multiple music services while the Host applies per-provider policy, tracing and budgets.
     http-request: func(request: http-request) -> result<http-response, string>;
 
-    /// Secrets are always namespaced by plugin id and never shared between components.
-    secret-get: func(key: string) -> result<option<list<u8>>, string>;
-    secret-set: func(key: string, value: list<u8>) -> result<bool, string>;
-    secret-delete: func(key: string) -> result<bool, string>;
+    /// The Host injects plugin identity from the instantiated component. Guests choose only a
+    /// provider scope or a provider+account scope; they can never address another plugin namespace.
+    secret-get: func(scope: secret-scope, key: string) -> result<option<list<u8>>, string>;
+    secret-set: func(scope: secret-scope, key: string, value: list<u8>) -> result<bool, string>;
+    secret-delete: func(scope: secret-scope, key: string) -> result<bool, string>;
 
     now-ms: func() -> u64;
     log: func(level: log-level, message: string);
@@ -271,29 +279,29 @@ interface provider {
 
     accounts: func(provider-id: string) -> result<list<account>, string>;
     auth-begin: func(provider-id: string, method: auth-method) -> result<auth-challenge, string>;
-    auth-poll: func(challenge-id: string) -> result<auth-poll, string>;
-    auth-cancel: func(challenge-id: string) -> result<bool, string>;
-    logout: func(account-id: string) -> result<bool, string>;
+    auth-poll: func(provider-id: string, challenge-id: string) -> result<auth-poll, string>;
+    auth-cancel: func(provider-id: string, challenge-id: string) -> result<bool, string>;
+    logout: func(provider-id: string, account-id: string) -> result<bool, string>;
 
-    search: func(account-id: option<string>, query: string, limit: u16) -> result<list<remote-track>, string>;
-    resolve-track: func(account-id: option<string>, query: track-query) -> result<option<remote-track>, string>;
-    lyrics: func(account-id: option<string>, track: source-track-ref) -> result<option<lyric-document>, string>;
-    artwork: func(account-id: option<string>, track: source-track-ref) -> result<option<artwork-descriptor>, string>;
-    stream: func(account-id: string, request: stream-request) -> result<stream-descriptor, string>;
+    search: func(provider-id: string, account-id: option<string>, query: string, limit: u16) -> result<list<remote-track>, string>;
+    resolve-track: func(provider-id: string, account-id: option<string>, query: track-query) -> result<option<remote-track>, string>;
+    lyrics: func(provider-id: string, account-id: option<string>, track: source-track-ref) -> result<option<lyric-document>, string>;
+    artwork: func(provider-id: string, account-id: option<string>, track: source-track-ref) -> result<option<artwork-descriptor>, string>;
+    stream: func(provider-id: string, account-id: string, request: stream-request) -> result<stream-descriptor, string>;
 
-    playlists: func(account-id: string) -> result<list<playlist>, string>;
-    playlist-tracks: func(account-id: string, playlist-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
-    playlist-create: func(account-id: string, name: string) -> result<playlist, string>;
-    playlist-add: func(account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
-    playlist-remove: func(account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
+    playlists: func(provider-id: string, account-id: string) -> result<list<playlist>, string>;
+    playlist-tracks: func(provider-id: string, account-id: string, playlist-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    playlist-create: func(provider-id: string, account-id: string, name: string) -> result<playlist, string>;
+    playlist-add: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
+    playlist-remove: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
 
-    cloud-library: func(account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
-    liked-tracks: func(account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
-    set-liked: func(account-id: string, track: source-track-ref, liked: bool) -> result<bool, string>;
+    cloud-library: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    liked-tracks: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    set-liked: func(provider-id: string, account-id: string, track: source-track-ref, liked: bool) -> result<bool, string>;
 
-    recommendations: func(account-id: string, request: recommendation-request) -> result<list<recommendation-item>, string>;
-    recognize: func(account-id: option<string>, request: recognition-request) -> result<option<recognition-result>, string>;
-    report-playback: func(account-id: string, signal: playback-signal) -> result<bool, string>;
+    recommendations: func(provider-id: string, account-id: string, request: recommendation-request) -> result<list<recommendation-item>, string>;
+    recognize: func(provider-id: string, account-id: option<string>, request: recognition-request) -> result<option<recognition-result>, string>;
+    report-playback: func(provider-id: string, account-id: string, signal: playback-signal) -> result<bool, string>;
 }
 
 world music-plugin {

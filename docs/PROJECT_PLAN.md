@@ -8,11 +8,14 @@
 
 目标不是把现有 `src/online/providers` 简单改成可加载脚本，而是建立完整的跨平台音乐服务层：网易云音乐、QQ 音乐及后续其他服务通过同一 ABI 接入，多个账号可以同时在线，搜索/识别/歌词/串流/歌单/推荐按能力自动路由，不要求用户反复切换“当前平台”。
 
+当前仍处于开发阶段：`PLUGIN_ABI_VERSION = 1` / WIT `@0.1.0` 继续作为开发期 ABI。首个稳定第三方插件 ABI 发布前可以直接修正 v1 设计，不人为引入 v2 兼容层。
+
 详细设计见 [`docs/PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md)，组件 ABI 见 [`plugins/wit/yinqidao-plugin.wit`](../plugins/wit/yinqidao-plugin.wit)。插件包结构与当前 Host 校验见 [`plugins/README.md`](../plugins/README.md)。
 
 ### P0：协议与路由基础
 
-- [x] 定义首版 `PLUGIN_ABI_VERSION`。
+- [x] 保持开发期 `PLUGIN_ABI_VERSION = 1`；所有 Provider operation 显式携带 `provider-id`，避免匿名搜索、相同 account id 等场景发生路由歧义。
+- [x] Secret import 使用 `provider + optional account + key` 显式 scope；plugin identity 由 Host Store context 注入，guest 不能选择其他插件 namespace。
 - [x] 定义动态 Provider capability，不再让未来插件依赖固定 `ProviderKind` 枚举。
 - [x] 定义账号、认证 challenge、曲目身份、串流、推荐、识别、播放反馈等宿主协议类型。
 - [x] 定义统一账号 `PluginServiceRouter`，多个平台/账号同时保持登录，不存在全局“切换平台”状态。
@@ -24,22 +27,24 @@
 
 ### P1：Wasmtime Component Host
 
-- [ ] 引入与项目 MSRV/locked graph 验证兼容的 Wasmtime Component Model 版本。
-- [ ] 使用 WIT bindgen 生成宿主与 guest binding，禁止手写易漂移 ABI。
+- [x] 项目实际 MSRV 升到 Rust 1.95；Wasmtime 运行时目标锁定 `wasmtime 48.0.1`。
+- [ ] 在可运行 Cargo 的环境加入 `wasmtime = 48.0.1`，生成/提交新的 `Cargo.lock` 并用 `--locked` 验证，禁止手工伪造锁文件。
+- [ ] 使用 Wasmtime Component `bindgen!` 从开发期 WIT v1 生成宿主与 guest binding，禁止手写易漂移 ABI。
+- [x] 建立 runtime-neutral `PluginHostServices` / `PluginStoreContext`，后续 Wasmtime generated Host traits 只负责类型转换，权限/网络/Secret/熔断决策继续留在独立 Host service 层。
+- [x] 建立 per-plugin/per-provider call permit：限制并发，连续错误/timeout/cancel/panic 累积失败并短时熔断对应 route，成功调用清零连续失败。
 - [x] 插件目录：`<config>/plugins/<plugin-id>/`；`plugin.toml` v1 描述 component、manifest 与网络域名声明。
 - [x] 启动时仅扫描/校验 manifest 与 component 路径，不 instantiate WASM；为后续 component 懒加载保留边界。
 - [x] 校验插件/Provider ID、ABI、重复 capability/auth method、component 路径逃逸与静态 network domain allowlist。
 - [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
 - [x] 建立 Host HTTP preflight：目标必须同时命中 manifest 声明和用户 grant；首版仅允许 HTTPS，redirect 必须重新授权，并拒绝 IP literal/明显本地域名。
 - [x] 建立 `<config>/plugin-permissions.json` 权限索引；用户 grant 只能等于或缩小 manifest 声明范围，插件更新不能借已有授权静默扩大网络/PlaybackEvents 权限。
-- [x] 建立 Host HTTP executor：DNS 在阻塞 worker 解析，过滤 loopback/private/link-local/documentation/benchmark 等特殊地址后使用 `resolve_to_addrs` 固定到本次 hop；关闭自动 redirect/系统代理继承，redirect 逐 hop 重新授权和解析。
+- [x] 建立 Host HTTP executor：DNS 在阻塞 worker 解析，过滤 loopback/private/link-local/documentation/benchmark/NAT64/Teredo/6to4 等特殊地址后使用 `resolve_to_addrs` 固定到本次 hop；关闭自动 redirect/系统代理继承，redirect 逐 hop 重新授权和解析。
 - [x] Host HTTP executor 限制 method/header/request body/response body/timeout/redirect 次数；跨 origin redirect 自动剥离 Authorization/Cookie，response 使用 bounded chunk 读取。
-- [ ] 将 Host HTTP executor 接到 WIT `host.http-request`，并加入 per-plugin/per-provider concurrency、429/backoff、连接池和显式 Host proxy 策略。
-- [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/CPU feature 变化自动失效。
-- [ ] 对实例设置 memory limit、fuel/epoch interruption、call timeout、最大 response/body、最大并发。
+- [ ] 将 Host HTTP executor 接到 generated WIT `host.http-request`，并加入 429/backoff、连接池和显式 Host proxy 策略。
+- [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/Wasmtime/CPU feature 变化自动失效。
+- [ ] 对 Wasmtime Store/实例设置 memory limit、fuel/epoch interruption、call timeout 与实例池上限。
 - [ ] 默认不授予 filesystem、raw socket、process、environment 权限。
 - [ ] 所有 HTTP 走 host-mediated HTTP import，WASM 不持有 raw socket。
-- [ ] 插件崩溃/超时仅熔断该 plugin/provider，不得拖垮 UI、播放引擎或其他插件。
 - [ ] 插件调用只允许运行在普通 async/worker 路径，严禁进入 realtime audio callback。
 
 ### P2：统一账号中心与融合登录
@@ -47,14 +52,15 @@
 - [x] 建立 Host 级 `PluginHostState` 与非 Secret 的 `plugin-accounts.json` 账号索引，启动恢复全部已安装插件账号路由元数据。
 - [x] 同一 `plugin_id + provider_id` 可以保存多个账号，并规范化为最多一个默认账号；不会产生全局平台切换状态。
 - [x] 账号索引只保存路由元数据和状态，明确禁止 cookie/token/refresh token/device secret 进入普通配置文件。
-- [x] 建立 Host-owned `SecretSlot`，使用 `plugin/provider/account/key` 的结构化 namespace 和长度前缀 storage key，避免分隔符逃逸/跨账号碰撞。
+- [x] `SecretSlot` 使用 `plugin/provider/provider-scope/key` 与 `plugin/provider/account-scope(account)/key` 两种作用域，长度前缀 + scope tag 避免碰撞。
+- [x] 建立 `PluginSecretStore` 抽象与有单 Secret 大小限制、删除/替换前清零旧值的 `MemorySecretStore`，用于 Host wiring/test；它明确不是生产持久化凭据后端。
 - [x] 建立 `PluginSessionCoordinator`：新进程启动时历史 Authenticated/Expired 会话进入 `PendingValidation` 恢复队列；历史 Authenticated 先从可路由状态降级，Secret/session 验证成功后才重新启用。
 - [x] 建立宿主会话转换接口：fresh login 可直接注册当前进程已验证账号；restore success / restore failure / logout 分别落到 Authenticated / Expired / LoggedOut，不要求重启播放器。
 - [ ] 设置页增加“音乐服务与插件”入口，显示所有插件、Provider、账号状态、待验证状态与权限。
 - [ ] 支持 QR 登录、浏览器 OAuth、Device Code、Cookie Import、Host-owned Custom Form。
-- [ ] 将 WIT `auth-poll`/refresh 结果接入 `PluginSessionCoordinator`，登录完成后立即注册，不重启应用、不重建播放器。
+- [ ] 将 generated WIT `auth-poll`/refresh 结果接入 `PluginSessionCoordinator`，登录完成后立即注册，不重启应用、不重建播放器。
 - [ ] 用户可以在一次具体操作中临时指定平台/账号，该偏好只作用于本次请求，不产生全局切换。
-- [ ] Session/refresh token/cookie 不写入 `config.toml`；实现 OS credential store 或 Host 加密 Secret Store，并通过 `SecretSlot` 访问。
+- [ ] Session/refresh token/cookie 不写入 `config.toml`；实现 OS credential store 或经过认证的 Host 加密 Secret Store，并实现 `PluginSecretStore`。
 - [ ] Session 即将过期时由后台刷新；刷新失败标记 `Expired`，不阻塞其他已登录平台。
 - [ ] 支持 logout 单账号、logout 单平台全部账号、撤销插件全部 secret。
 
@@ -67,7 +73,7 @@
 - [ ] 识别流程改为：Host 计算一次 fingerprint -> 已登录插件 Recognition fan-out/priority -> built-in remote recognition -> AcoustID/local fallback。
 - [ ] 保持“元数据 Provider 与歌词 Provider 解耦”：QQ 元数据命中仍可选择网易云 YRC/TTML 等更高质量 authored word timing。
 - [ ] artwork 同样独立选择最匹配来源，不能因 metadata winner 强制绑定封面来源。
-- [ ] Provider 运行健康度加入 routing：连续 timeout/429/5xx 触发短时 circuit breaker。
+- [ ] 将 `PluginHostServices` 的健康状态接入 routing：连续 timeout/429/5xx 触发短时 circuit breaker，并在健康恢复后自动重新参与路由。
 
 ### P4：统一在线曲库与播放
 
@@ -108,8 +114,8 @@
 - [ ] 签名插件显示发布者身份；未签名插件默认需要显式开发者模式确认。
 - [ ] 插件权限更新必须重新授权，不允许新版本静默扩大 network/secret 能力。
 - [ ] 提供 Rust SDK；WIT 保证未来可以生成 TypeScript/Go/C# 等 guest bindings。
-- [ ] 提供 reference plugin：本地 mock provider，不访问真实音乐服务，用于测试 ABI。
-- [ ] 提供插件 conformance tests：manifest、超时、分页、auth state、secret namespace、URL expiry、错误映射。
+- [ ] 提供 reference plugin：本地 mock provider，不访问真实音乐服务，用于测试当前开发期 ABI。
+- [ ] 提供插件 conformance tests：manifest、Provider 显式路由、超时、分页、auth state、provider/account Secret scope、URL expiry、错误映射。
 - [ ] 插件 UI 第一阶段只允许 Host-owned schema/form/action；不向插件暴露 GPUI 对象或任意 native window。
 
 ### P8：稳定性、性能和安全收口
@@ -132,3 +138,4 @@
 6. **失败局部化。** 一个插件超时不能卡 UI、不能阻塞其他 provider、不能影响已经在播放的 PCM。
 7. **权限最小化。** 网络、Secret、文件、UI 能力都由 Host 显式授权；默认没有 raw OS 权限。
 8. **会话跨进程 fail-closed。** 上一进程保存的 Authenticated 只代表历史状态；新进程必须重新验证 Secret/session 后才能获得 authenticated route。
+9. **Provider 身份必须显式。** 一个 component 暴露多个 Provider 时，guest/Host 调用都不能依赖 account id 或隐式“当前平台”推断 Provider。

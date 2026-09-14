@@ -2,7 +2,7 @@
 name = "yin_qi_dao"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 description = "音栖岛：一款基于 GPUI 的音乐播放器"
 license = "GPL-3.0-or-later"
 publish = false

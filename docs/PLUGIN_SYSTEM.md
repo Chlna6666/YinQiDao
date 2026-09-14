@@ -1,6 +1,6 @@
 # YinQiDao WASM 插件系统设计
 
-状态：设计已确定，P0 协议/路由基础实现中。
+状态：开发期 ABI v1；P1 Host 安全基础已实现，Wasmtime 48.0.1 generated binding 尚待在可运行 Cargo 的 Rust 1.95 环境接入。
 
 ## 1. 设计目标
 
@@ -58,15 +58,24 @@ Local Library ─────────▶│ Canonical Identity Layer │
 - Component Model 允许以后提供 Rust、JavaScript/TypeScript、Go 等不同语言 SDK。
 - Host 可以只暴露明确 imports，而不是给 WASM 任意 OS 能力。
 
-首版 world 位于：
+world 位于：
 
 `plugins/wit/yinqidao-plugin.wit`
 
-首版 ABI：
+当前开发期 ABI：
 
 `PLUGIN_ABI_VERSION = 1`
 
-ABI 的 breaking change 必须升级 major ABI；新增 optional capability、optional field 或独立 interface 应优先保持兼容。
+WIT package：
+
+`yinqidao:music-plugin@0.1.0`
+
+当前还没有稳定第三方 ABI，因此开发阶段直接修正 v1，不人为制造 v2 兼容层。首个稳定插件 SDK 发布之后，breaking change 才需要正式升级 ABI 版本。
+
+开发期 v1 已明确两个基础约束：
+
+1. 一个 component 可以同时声明多个 Provider，因此所有 Provider operation 都显式携带 `provider-id`，不根据 account id 或隐式“当前平台”猜 Provider。
+2. Secret import 使用 `provider + optional account + key` 显式作用域；plugin id 由 Host Store context 注入，guest 永远不能选择其他插件 namespace。
 
 ## 4. 权限模型
 
@@ -95,14 +104,17 @@ WASM 组件不直接拥有 raw network socket。插件发出 Host HTTP request�
 
 - manifest `network_domains` allowlist
 - 用户授权
-- DNS/redirect 后再次校验目标域名
+- Provider/account 调用上下文
+- DNS 解析后过滤 loopback/private/link-local/documentation/benchmark/NAT64/Teredo/6to4 等特殊地址
+- 使用已验证地址 pinning，避免检查后再次默认 DNS 解析
+- 每次 redirect 重新执行权限与 DNS 校验
 - timeout
-- 最大 body/response
-- connection pooling
-- proxy
-- TLS
+- 最大 request/response body
+- 最大 header 数量与大小
+- connection pooling（待接 Wasmtime 后完成）
+- explicit Host proxy policy（待完成）
 - per-plugin/per-provider concurrency
-- 429 backoff
+- 429 backoff（待完成）
 - tracing 与脱敏
 
 这样网易云/QQ 插件仍然可以在组件内部计算签名、构造 query/body/header，但最终 socket 由 YinQiDao 控制。
@@ -111,13 +123,18 @@ WASM 组件不直接拥有 raw network socket。插件发出 Host HTTP request�
 
 Token、cookie、refresh token、device secret 不允许写入普通插件配置或 `config.toml`。
 
-Secret key 在 Host 侧强制 namespace：
+Secret scope：
 
 ```text
-<plugin-id>/<provider-id>/<account-id>/<key>
+plugin-id / provider-id / provider-scope / key
+plugin-id / provider-id / account-scope(account-id) / key
 ```
 
-插件只能看到自己的 namespace。后续 Host 实现优先使用系统 credential store；没有可靠平台 keystore 时使用带版本的加密文件并明确标记安全级别。
+Provider scope 用于 QR/OAuth/Device Code 等账号尚未确定的认证阶段；Account scope 用于 refresh token、cookie 等长期账号凭据。
+
+`SecretSlot` storage key 使用长度前缀编码并包含显式 scope tag，因此 provider scope 与任意 account id 都不碰撞。插件 id 由 Host 注入，guest 只能指定自身 manifest 中存在的 provider 与可选 account id。
+
+`MemorySecretStore` 仅用于 Host wiring/test，单 Secret 有硬大小上限并在删除/替换时尽量清零旧缓冲区。生产版本优先使用系统 credential store；没有可靠平台 keystore 时使用经过认证的加密存储并明确安全级别。
 
 ## 5. 登录模型
 
@@ -137,9 +154,10 @@ Secret key 在 Host 侧强制 namespace：
 Host -> auth-begin(provider, method)
 Plugin -> AuthChallenge
 Host -> 展示二维码/打开浏览器/显示表单
-Host -> auth-poll(challenge)
+Host -> auth-poll(provider, challenge)
 Plugin -> pending | authenticated(account) | expired | denied
-Host -> 注册 AccountSession -> ServiceRouter
+Host -> PluginSessionCoordinator
+     -> AccountSession -> ServiceRouter
 ```
 
 登录完成后不需要重启，不需要切换“网易云模式/QQ 模式”。
@@ -154,10 +172,11 @@ Host -> 注册 AccountSession -> ServiceRouter
 - `priority` 用于同能力的稳定选择。
 - Search/Recommendations 等 fan-out 服务可以同时使用多个账号。
 - 一次操作可临时指定 provider/account，但不会让其他账号退出或失活。
+- 新进程启动后历史 `Authenticated` 必须先进入 `PendingValidation`，只有 Secret/session refresh 成功后才重新获得 authenticated route。
 
 ## 6. Service Router
 
-Rust 侧 P0 已定义 `PluginServiceRouter`。
+Rust 侧已定义 `PluginServiceRouter`。
 
 ### 6.1 Fan-out 服务
 
@@ -190,7 +209,7 @@ Rust 侧 P0 已定义 `PluginServiceRouter`。
 3. account priority
 4. 稳定 provider/account id 顺序
 
-后续加入 runtime health 后，在第 1/2 项之间加入 circuit/latency/429 health score。
+运行时 health 接入后，在 route eligibility 中先排除 circuit-open/超时退避 Provider，再执行上面的稳定排序。
 
 ### 6.3 默认 fallback
 
@@ -411,31 +430,61 @@ YinQiDao 自己的 canonical like 是 UI 真相来源。远端同步是附加状
 - 所有 queue bounded。
 - Recommendation fetch 可以低优先级，不能与 stream refresh 抢占唯一 worker。
 
-## 15. Wasmtime Host 预期实现
+## 15. Wasmtime Host 实现
 
-Host crate/module 后续至少需要：
+运行时目标：
+
+```text
+Rust 1.95
+Wasmtime 48.0.1
+Component Model + generated WIT bindings
+```
+
+当前已经实现的 runtime-neutral 部件：
 
 ```text
 PluginCatalog
-  scan/install/update/enable/disable
+  scan/manifest/path validation
 
-ComponentCache
-  compile/deserialize/version invalidation
+PluginHttpExecutor
+  permission/DNS pinning/redirect/body+header limits
 
-PluginInstancePool
-  instantiate/reuse/limits/epoch interruption
-
-PluginHttpHost
-  allowlist/proxy/timeout/rate limit/redaction
+PluginPermissionState
+  persisted grants / no silent expansion
 
 PluginSecretStore
-  namespace/encrypt/revoke
+  abstract Secret backend
 
-PluginAccountStore
-  account/session metadata
+MemorySecretStore
+  non-persistent wiring/test backend
 
-PluginServiceRouter
-  capability + account + health routing
+PluginHostServices
+  security façade for generated Host imports
+
+PluginStoreContext
+  Host-injected plugin identity per Wasmtime Store
+
+PluginCallPermit
+  per-plugin/provider concurrency + circuit breaker
+
+PluginAccountStore / PluginSessionCoordinator / PluginServiceRouter
+  account metadata + cross-process validation + routing
+```
+
+Wasmtime 接入后仍需：
+
+```text
+GeneratedBindings
+  wasmtime::component::bindgen!(...)
+
+ComponentCache
+  compile/serialize/version invalidation
+
+PluginInstancePool
+  instantiate/reuse/resource limits/epoch interruption
+
+OSCredentialSecretStore or EncryptedSecretStore
+  persistent production credentials
 
 CanonicalIdentityStore
   local/remote id mapping
@@ -444,7 +493,7 @@ RecommendationEngine
   local model + provider merge
 ```
 
-Wasmtime runtime版本必须在真实 Rust 环境中验证项目的 Rust 1.89 MSRV 与 `Cargo.lock --locked` 后再 pin，不在无 toolchain 环境盲目修改依赖图。
+项目使用 `cargo --locked`，因此 Wasmtime dependency 必须在能实际运行 Rust 1.95/Cargo 的环境中加入并生成真实 `Cargo.lock`；禁止手写 Wasmtime 48 的传递依赖锁文件。
 
 ## 16. 安全与故障模型
 
@@ -454,9 +503,10 @@ Wasmtime runtime版本必须在真实 Rust 环境中验证项目的 Rust 1.89 MS
 - 内存膨胀 -> store/resource limiter
 - 大响应 -> body limit
 - redirect 到未授权域 -> 拒绝
-- secret cross-namespace probing -> 拒绝
+- DNS rebinding -> public-address filter + per-hop address pinning
+- secret cross-namespace probing -> Host-injected plugin id + provider/account scope validation
 - token/header log -> redact
-- plugin panic/trap -> provider isolated failure
+- plugin panic/trap/cancel -> provider isolated failure + unfinished permit counted as failure
 - repeated timeout/5xx -> circuit breaker
 - rate limit -> Retry-After/backoff
 - plugin update permissions expansion -> re-consent
@@ -466,9 +516,9 @@ Wasmtime runtime版本必须在真实 Rust 环境中验证项目的 Rust 1.89 MS
 
 建议顺序：
 
-1. `mock-provider`：本地 fixture，覆盖所有 ABI，不访问网络。
+1. `mock-provider`：本地 fixture，覆盖当前开发期 ABI、多 Provider 显式路由、Secret scopes，不访问网络。
 2. `netease`：QR/Cookie、Search、Metadata、YRC、Artwork、Cloud Library、Recommendations、Recognition（若平台接口可稳定实现）。
 3. `qqmusic`：QR/Cookie、Search、Metadata、QRC、Artwork、Cloud Library、Recommendations。
 4. 再迁移 Spotify/咪咕/酷狗等。
 
-真实 Provider 插件应该独立于 Host 发布周期；Host 只维护稳定 ABI 和策略层。
+真实 Provider 插件应该独立于 Host 发布周期；Host 在稳定 ABI 发布后再承担正式兼容承诺。

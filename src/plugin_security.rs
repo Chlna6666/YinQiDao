@@ -28,8 +28,8 @@ pub struct AuthorizedHttpTarget {
 
 /// Validate a plugin HTTP target before any Host-owned request is created.
 ///
-/// This is only the first SSRF boundary. The eventual HTTP executor must run the same check for
-/// every redirect and must reject loopback/private/link-local addresses after DNS resolution.
+/// The HTTP executor repeats this check for every redirect and performs DNS resolution plus public
+/// address filtering before the connection is pinned to a validated address.
 pub fn authorize_http_target(
     manifest: &PluginManifest,
     grant: &PluginPermissionGrant,
@@ -113,29 +113,77 @@ fn obvious_local_hostname(host: &str) -> bool {
         || host.ends_with(".home.arpa")
 }
 
-/// Structured secret location owned by the Host. Guest components receive logical slots and never
-/// a filesystem/keychain path. The serialized storage key is length-prefixed, so provider/account
-/// identifiers cannot escape their namespace with separators.
+/// Logical Secret scope used by the development ABI.
+///
+/// Provider scope is useful while a login challenge has not produced a stable account id yet.
+/// Account scope keeps long-lived cookies/tokens isolated between multiple simultaneously logged-in
+/// accounts of the same provider.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum SecretScope {
+    Provider,
+    Account(String),
+}
+
+/// Structured Secret location owned by the Host. Guest components never receive filesystem or
+/// keychain paths. The storage key is length-prefixed and includes an explicit scope tag so provider
+/// and account scopes cannot collide even when account ids contain separator-like characters.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SecretSlot {
     plugin_id: String,
     provider_id: String,
-    account_id: String,
+    scope: SecretScope,
     key: String,
 }
 
 impl SecretSlot {
+    /// Account-scoped Secret helper kept for existing Host code.
     pub fn new(
         plugin_id: impl Into<String>,
         provider_id: impl Into<String>,
         account_id: impl Into<String>,
         key: impl Into<String>,
     ) -> Result<Self> {
+        Self::account(plugin_id, provider_id, account_id, key)
+    }
+
+    pub fn provider(
+        plugin_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<Self> {
+        Self::build(
+            plugin_id.into(),
+            provider_id.into(),
+            SecretScope::Provider,
+            key.into(),
+        )
+    }
+
+    pub fn account(
+        plugin_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        account_id: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<Self> {
+        Self::build(
+            plugin_id.into(),
+            provider_id.into(),
+            SecretScope::Account(account_id.into()),
+            key.into(),
+        )
+    }
+
+    fn build(
+        plugin_id: String,
+        provider_id: String,
+        scope: SecretScope,
+        key: String,
+    ) -> Result<Self> {
         let slot = Self {
-            plugin_id: plugin_id.into(),
-            provider_id: provider_id.into(),
-            account_id: account_id.into(),
-            key: key.into(),
+            plugin_id,
+            provider_id,
+            scope,
+            key,
         };
         slot.validate()?;
         Ok(slot)
@@ -149,8 +197,15 @@ impl SecretSlot {
         &self.provider_id
     }
 
-    pub fn account_id(&self) -> &str {
-        &self.account_id
+    pub fn scope(&self) -> &SecretScope {
+        &self.scope
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        match &self.scope {
+            SecretScope::Provider => None,
+            SecretScope::Account(account_id) => Some(account_id),
+        }
     }
 
     pub fn key(&self) -> &str {
@@ -158,17 +213,18 @@ impl SecretSlot {
     }
 
     pub fn storage_key(&self) -> String {
-        format!(
-            "{SECRET_KEY_SCHEMA_VERSION}:{}:{}:{}:{}:{}:{}:{}:{}",
-            self.plugin_id.len(),
-            self.plugin_id,
-            self.provider_id.len(),
-            self.provider_id,
-            self.account_id.len(),
-            self.account_id,
-            self.key.len(),
-            self.key
-        )
+        let mut output = String::from(SECRET_KEY_SCHEMA_VERSION);
+        push_length_prefixed(&mut output, &self.plugin_id);
+        push_length_prefixed(&mut output, &self.provider_id);
+        match &self.scope {
+            SecretScope::Provider => output.push_str(":p"),
+            SecretScope::Account(account_id) => {
+                output.push_str(":a");
+                push_length_prefixed(&mut output, account_id);
+            }
+        }
+        push_length_prefixed(&mut output, &self.key);
+        output
     }
 
     fn validate(&self) -> Result<()> {
@@ -177,9 +233,10 @@ impl SecretSlot {
         {
             bail!("Secret namespace 的 plugin/provider id 非法");
         }
-        if self.account_id.trim().is_empty()
-            || self.account_id.len() > 512
-            || self.account_id.contains('\0')
+        if let SecretScope::Account(account_id) = &self.scope
+            && (account_id.trim().is_empty()
+                || account_id.len() > 512
+                || account_id.contains('\0'))
         {
             bail!("Secret namespace 的 account id 非法");
         }
@@ -195,6 +252,13 @@ impl SecretSlot {
         }
         Ok(())
     }
+}
+
+fn push_length_prefixed(output: &mut String, value: &str) {
+    output.push(':');
+    output.push_str(&value.len().to_string());
+    output.push(':');
+    output.push_str(value);
 }
 
 fn valid_namespace_identifier(value: &str) -> bool {
@@ -297,12 +361,28 @@ mod tests {
     }
 
     #[test]
-    fn secret_storage_keys_are_namespace_safe() {
-        let first = SecretSlot::new("plugin.test", "netease", "a/b", "refresh_token")
+    fn account_secret_storage_keys_are_namespace_safe() {
+        let first = SecretSlot::account("plugin.test", "netease", "a/b", "refresh_token")
             .expect("slot");
-        let second = SecretSlot::new("plugin.test", "netease", "a", "refresh_token")
+        let second = SecretSlot::account("plugin.test", "netease", "a", "refresh_token")
             .expect("slot");
         assert_ne!(first.storage_key(), second.storage_key());
         assert!(first.storage_key().starts_with("v1:"));
+    }
+
+    #[test]
+    fn provider_and_account_secret_scopes_never_collide() {
+        let provider = SecretSlot::provider("plugin.test", "netease", "device_secret")
+            .expect("provider");
+        let account = SecretSlot::account(
+            "plugin.test",
+            "netease",
+            "device_secret",
+            "device_secret",
+        )
+        .expect("account");
+        assert_ne!(provider.storage_key(), account.storage_key());
+        assert_eq!(provider.account_id(), None);
+        assert_eq!(account.account_id(), Some("device_secret"));
     }
 }

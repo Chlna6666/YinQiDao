@@ -20,7 +20,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 ## Coding Style & Naming
 
-This is a Rust 2024 project requiring Rust 1.89 or newer. Run rustfmt and keep imports idiomatic. Use `snake_case` for modules and functions, `UpperCamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Prefer borrowed inputs, explicit `Result`/`Option`, small responsibility-focused modules, and no unnecessary cloning, allocation, blocking I/O, or unbounded queues. Keep UI work on the GPUI thread; move scanning, metadata, artwork, and network work to background tasks. Preserve the existing provider priority and GPUI image-cache usage.
+This is a Rust 2024 project requiring Rust 1.95 or newer. Run rustfmt and keep imports idiomatic. Use `snake_case` for modules and functions, `UpperCamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Prefer borrowed inputs, explicit `Result`/`Option`, small responsibility-focused modules, and no unnecessary cloning, allocation, blocking I/O, or unbounded queues. Keep UI work on the GPUI thread; move scanning, metadata, artwork, and network work to background tasks. Preserve the existing provider priority and GPUI image-cache usage.
 
 ## Testing Guidelines
 
