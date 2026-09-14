@@ -190,6 +190,14 @@ pub fn themes() -> Result<Vec<PluginThemeSummary>> {
     Ok(themes)
 }
 
+/// Lock-free generation of the Host-validated static UI contribution registry.
+///
+/// GPUI may use this value only to invalidate already parsed Host-side snapshots. It must not read
+/// the registry itself from paint/layout paths.
+pub fn theme_registry_generation() -> u64 {
+    registry::generation()
+}
+
 /// Load one static plugin theme on an ordinary controller/worker path.
 ///
 /// This is intentionally Host-owned: the guest never receives a per-frame paint callback and never

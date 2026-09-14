@@ -1,6 +1,11 @@
+use std::cell::RefCell;
+
 use gpui::{Rgba, rgb, rgba};
 
-use crate::{plugin::extensions::PluginThemeSnapshot, ui::theme};
+use crate::{
+    plugin::extensions::{self, PluginThemeSnapshot},
+    ui::theme,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PluginPageTheme {
@@ -18,6 +23,24 @@ pub struct PluginPageTheme {
     pub radius_small: f32,
     pub radius_medium: f32,
     pub radius_large: f32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivePluginTheme {
+    pub plugin_id: String,
+    pub qualified_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct ActivePluginThemeState {
+    selection: ActivePluginTheme,
+    registry_generation: u64,
+    palette: PluginPageTheme,
+}
+
+thread_local! {
+    static ACTIVE_THEME: RefCell<Option<ActivePluginThemeState>> = const { RefCell::new(None) };
 }
 
 impl PluginPageTheme {
@@ -108,6 +131,77 @@ impl PluginPageTheme {
             theme::TEXT_WHITE
         }
     }
+}
+
+/// Activate a Theme only after the caller explicitly selected it and loaded its validated snapshot.
+///
+/// `expected_registry_generation` must be captured before loading the static Theme asset. A plugin
+/// update/disable/uninstall racing that load changes the registry generation and makes activation
+/// fail closed instead of publishing stale colors.
+pub fn activate_snapshot(
+    snapshot: &PluginThemeSnapshot,
+    expected_registry_generation: u64,
+) -> Result<ActivePluginTheme, String> {
+    if extensions::theme_registry_generation() != expected_registry_generation {
+        return Err("Theme contribution 在加载期间已更新，请重试".into());
+    }
+    let palette = PluginPageTheme::try_from_snapshot(snapshot)?;
+    if extensions::theme_registry_generation() != expected_registry_generation {
+        return Err("Theme contribution 在解析期间已更新，请重试".into());
+    }
+
+    let selection = ActivePluginTheme {
+        plugin_id: snapshot.plugin_id.clone(),
+        qualified_id: snapshot.qualified_id.clone(),
+        display_name: snapshot.display_name.clone(),
+    };
+    ACTIVE_THEME.with(|active| {
+        *active.borrow_mut() = Some(ActivePluginThemeState {
+            selection: selection.clone(),
+            registry_generation: expected_registry_generation,
+            palette,
+        });
+    });
+    Ok(selection)
+}
+
+pub fn clear_active_theme() {
+    ACTIVE_THEME.with(|active| *active.borrow_mut() = None);
+}
+
+/// Return the paint-ready palette for plugin-rendered pages.
+///
+/// The hot path performs one atomic generation load and one thread-local copy. It never locks the UI
+/// registry, reads plugin files or executes guest code. Any contribution registry mutation causes an
+/// immediate fail-closed fallback to the Host palette.
+pub fn active_palette() -> Option<PluginPageTheme> {
+    let generation = extensions::theme_registry_generation();
+    ACTIVE_THEME.with(|active| {
+        let mut active = active.borrow_mut();
+        match active.as_ref() {
+            Some(state) if state.registry_generation == generation => Some(state.palette),
+            Some(_) => {
+                *active = None;
+                None
+            }
+            None => None,
+        }
+    })
+}
+
+pub fn active_selection() -> Option<ActivePluginTheme> {
+    let generation = extensions::theme_registry_generation();
+    ACTIVE_THEME.with(|active| {
+        let mut active = active.borrow_mut();
+        match active.as_ref() {
+            Some(state) if state.registry_generation == generation => Some(state.selection.clone()),
+            Some(_) => {
+                *active = None;
+                None
+            }
+            None => None,
+        }
+    })
 }
 
 fn bounded_radius(value: Option<u16>, fallback: f32) -> f32 {

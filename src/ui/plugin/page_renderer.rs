@@ -37,21 +37,20 @@ pub fn render_page(
     render_node(None, &model.root, handler, &palette).into_any_element()
 }
 
-/// Render one plugin page with the Host palette.
-///
-/// Theme contributions are never activated implicitly. Call `render_plugin_page_with_theme` only
-/// after a controller has explicitly selected and pre-parsed a Host-owned plugin Theme snapshot.
+/// Render one plugin page with the current explicitly selected scoped Theme, or the Host palette
+/// when no valid selection exists.
 pub fn render_plugin_page(
     plugin_id: &str,
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
-    render_plugin_page_with_theme(plugin_id, model, handler, None)
+    let active_theme = plugin_theme::active_palette();
+    render_plugin_page_with_theme(plugin_id, model, handler, active_theme.as_ref())
 }
 
 /// Render one plugin page with an optional pre-parsed scoped Theme.
 ///
-/// This path performs no filesystem I/O, Theme parsing, registry access, image decoding or guest
+/// This path performs no filesystem I/O, Theme parsing, registry locking, image decoding or guest
 /// execution. The palette is copied once at the render root and passed through the declarative tree.
 pub fn render_plugin_page_with_theme(
     plugin_id: &str,

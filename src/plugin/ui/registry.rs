@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
@@ -11,6 +14,7 @@ use super::manifest::{
 };
 
 static PLUGIN_UI_REGISTRY: OnceLock<Arc<RwLock<PluginUiRegistry>>> = OnceLock::new();
+static PLUGIN_UI_REGISTRY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisteredUiRoute {
@@ -115,7 +119,7 @@ impl PluginUiRegistry {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut delta = self.remove_plugin(plugin_id);
+        let mut delta = self.remove_plugin_entries(plugin_id);
         delta.added_routes = routes.len();
         delta.added_pages = pages.len();
         delta.added_commands = commands.len();
@@ -173,10 +177,19 @@ impl PluginUiRegistry {
             );
         }
 
+        bump_generation();
         Ok(delta)
     }
 
     pub fn remove_plugin(&mut self, plugin_id: &str) -> PluginUiRegistrationDelta {
+        let delta = self.remove_plugin_entries(plugin_id);
+        if registration_delta_changed(&delta) {
+            bump_generation();
+        }
+        delta
+    }
+
+    fn remove_plugin_entries(&mut self, plugin_id: &str) -> PluginUiRegistrationDelta {
         let before_routes = self.routes.len();
         let before_pages = self.pages.len();
         let before_commands = self.commands.len();
@@ -239,12 +252,37 @@ pub fn global() -> Option<Arc<RwLock<PluginUiRegistry>>> {
     PLUGIN_UI_REGISTRY.get().cloned()
 }
 
+/// Monotonic Host-owned generation for validated static UI contributions.
+///
+/// Render paths may compare this value without taking the registry lock. Any successful plugin UI
+/// replacement, disable or uninstall that changes registry contents invalidates cached selections.
+pub fn generation() -> u64 {
+    PLUGIN_UI_REGISTRY_GENERATION.load(Ordering::Acquire)
+}
+
 pub fn unregister_plugin(plugin_id: &str) -> Result<PluginUiRegistrationDelta> {
     let registry = global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
     Ok(registry
         .write()
         .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?
         .remove_plugin(plugin_id))
+}
+
+fn bump_generation() -> u64 {
+    PLUGIN_UI_REGISTRY_GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+fn registration_delta_changed(delta: &PluginUiRegistrationDelta) -> bool {
+    delta.removed_routes != 0
+        || delta.removed_pages != 0
+        || delta.removed_commands != 0
+        || delta.removed_home_sections != 0
+        || delta.removed_themes != 0
+        || delta.added_routes != 0
+        || delta.added_pages != 0
+        || delta.added_commands != 0
+        || delta.added_home_sections != 0
+        || delta.added_themes != 0
 }
 
 #[cfg(test)]
