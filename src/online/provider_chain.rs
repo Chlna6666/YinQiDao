@@ -3,7 +3,12 @@ use std::time::Duration;
 use anyhow::Result;
 use image::GenericImageView;
 
-use crate::{lyrics::LyricsDocument, model::Track};
+use crate::{
+    lyrics::LyricsDocument,
+    model::Track,
+    plugin_frontend::{self, plugin_lyrics_to_player},
+    plugins::{RemoteTrack, RoutingPolicy, TrackQuery},
+};
 
 use super::{EnrichmentResult, MetadataMatch, OnlineServices, SpotifyTokenResponse, providers};
 
@@ -13,6 +18,8 @@ const COVER_TITLE_SIMILARITY: i32 = 90;
 const COVER_ARTIST_SIMILARITY: i32 = 85;
 const COVER_ALBUM_SIMILARITY: i32 = 60;
 const COVER_DURATION_TOLERANCE_MS: u64 = 5_000;
+const MAX_PLUGIN_TRACK_TEXT_BYTES: usize = 32 * 1024;
+const MAX_PLUGIN_TRACK_ARTISTS: usize = 128;
 const COVER_VERSION_TERMS: &[&str] = &[
     "live",
     "现场",
@@ -44,6 +51,11 @@ const COVER_VERSION_TERMS: &[&str] = &[
     "翻唱",
 ];
 
+struct AuthenticatedPluginEnrichment {
+    result: EnrichmentResult,
+    identity_track: Track,
+}
+
 impl OnlineServices {
     pub(super) async fn enrich_from_providers(
         &self,
@@ -51,15 +63,27 @@ impl OnlineServices {
         fetch_lyrics: bool,
         fetch_artwork: bool,
     ) -> Result<Option<EnrichmentResult>> {
-        // Search every provider before committing to an identity. The previous first-match-wins
-        // chain allowed a weak result from an early provider to hide a much stronger candidate
-        // from later providers. Searches are started together so global ranking does not multiply
-        // network latency by the number of providers.
+        // Authenticated plugins are the first identity source. With no installed Wasmtime adapter,
+        // or when every authenticated route is gated/unmatched, this returns None and the existing
+        // built-in chain below is unchanged.
+        let mut authenticated = self
+            .enrich_from_authenticated_plugin(track, fetch_lyrics)
+            .await?;
+        if authenticated.is_some() && !fetch_artwork {
+            return Ok(authenticated.take().map(|enrichment| enrichment.result));
+        }
+
+        // Search every built-in provider before committing to an anonymous identity. When an
+        // authenticated plugin already resolved the track these searches are used only for artwork;
+        // search with the resolved identity so stale local tags cannot poison that fallback.
+        let search_track = authenticated
+            .as_ref()
+            .map_or_else(|| track.clone(), |enrichment| enrichment.identity_track.clone());
         let spotify_token = self.spotify_token().await;
         let mut searches = Vec::with_capacity(providers::ProviderKind::priority_order().len());
         for provider in providers::ProviderKind::priority_order() {
             let client = self.client.clone();
-            let track = track.clone();
+            let track = search_track.clone();
             let netease_base_url = self.netease_base_url.clone();
             let spotify_token = spotify_token.clone();
             searches.push((
@@ -100,7 +124,30 @@ impl OnlineServices {
             }
         }
 
-        let Some(matched) = providers::choose_global_best(track, candidates.clone()) else {
+        let matched = providers::choose_global_best(&search_track, candidates.clone());
+
+        // Authenticated metadata remains the winner. Artwork is intentionally independent: only a
+        // built-in candidate confidently matching that authenticated identity may supply a URL.
+        if let Some(mut enrichment) = authenticated {
+            if fetch_artwork {
+                let (artwork, artwork_key) = if let Some(matched) = matched.as_ref() {
+                    self.resolve_online_artwork(
+                        &enrichment.identity_track,
+                        matched,
+                        &candidates,
+                    )
+                    .await
+                } else {
+                    self.resolve_musicbrainz_artwork(&enrichment.identity_track)
+                        .await
+                };
+                enrichment.result.artwork = artwork;
+                enrichment.result.artwork_key = artwork_key;
+            }
+            return Ok(Some(enrichment.result));
+        }
+
+        let Some(matched) = matched else {
             // Returning None intentionally hands control back to the AcoustID/MusicBrainz path.
             // Ambiguous platform results should never overwrite a stronger audio identity.
             return Ok(None);
@@ -136,11 +183,6 @@ impl OnlineServices {
                 }
             };
 
-            // Metadata identity and lyric presentation quality are independent. A QQ/other metadata
-            // winner must not hide a Netease YRC document for the same local track. Upgrade only
-            // with another confidently searched provider and rank authored word timing above a
-            // line-only document. Raw translated tracks are merged when possible so karaoke does
-            // not have to trade synchronized Chinese subtitles for word timing.
             let mut selected = provider_lyrics;
             if selected
                 .as_ref()
@@ -192,6 +234,199 @@ impl OnlineServices {
             lyrics,
             artwork,
             artwork_key,
+        }))
+    }
+
+    async fn enrich_from_authenticated_plugin(
+        &self,
+        track: &Track,
+        fetch_lyrics: bool,
+    ) -> Result<Option<AuthenticatedPluginEnrichment>> {
+        let Some(frontend) = plugin_frontend::global() else {
+            return Ok(None);
+        };
+        let query = local_track_query(track);
+        let resolved = match frontend
+            .resolve_track(&query, &RoutingPolicy::default())
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::debug!(%error, "authenticated plugin metadata 调用失败，回退匿名 provider");
+                return Ok(None);
+            }
+        };
+        if !resolved.client_ready {
+            return Ok(None);
+        }
+        for failure in &resolved.failures {
+            tracing::debug!(
+                plugin = %failure.route.plugin_id,
+                provider = %failure.route.provider_id,
+                account = %failure.route.account_id,
+                error = %failure.error,
+                "authenticated plugin route 调用失败，尝试下一账号"
+            );
+        }
+        let (Some(remote), Some(route)) = (resolved.value, resolved.route) else {
+            return Ok(None);
+        };
+        if !plugin_remote_track_is_bounded(&remote)
+            || remote.source.provider_id != route.provider_id
+            || remote.source.source_id.trim().is_empty()
+        {
+            tracing::warn!(
+                plugin = %route.plugin_id,
+                provider = %route.provider_id,
+                "authenticated plugin 返回非法或越界 track，已拒绝"
+            );
+            return Ok(None);
+        }
+
+        let artist = remote.artists.join(" / ");
+        let confidence_candidate = providers::ProviderMatch {
+            provider: providers::ProviderKind::Netease,
+            source_id: remote.source.source_id.clone(),
+            title: remote.title.clone(),
+            artist: artist.clone(),
+            album: remote.album.clone(),
+            duration_ms: remote.duration_ms,
+            release_date: None,
+            // Never feed guest-provided artwork URLs into the anonymous reqwest path. Artwork from
+            // plugin descriptors will later be downloaded only by Host-mediated HTTP.
+            cover_url: None,
+            lyric_url: None,
+            score: 0,
+        };
+        let Some(scored) = providers::choose_global_best(track, vec![confidence_candidate]) else {
+            tracing::debug!(
+                plugin = %route.plugin_id,
+                provider = %route.provider_id,
+                title = %remote.title,
+                artist = %artist,
+                "authenticated plugin track 未通过 Host 身份置信度校验"
+            );
+            return Ok(None);
+        };
+
+        let metadata = MetadataMatch {
+            title: remote.title.clone(),
+            artist: if artist.trim().is_empty() {
+                track.artist.clone()
+            } else {
+                artist
+            },
+            album: if remote.album.trim().is_empty() {
+                track.album.clone()
+            } else {
+                remote.album.clone()
+            },
+            recording_mbid: format!(
+                "plugin:{}:{}:{}",
+                route.plugin_id, route.provider_id, remote.source.source_id
+            ),
+            release_mbid: None,
+            source: Some(format!("插件 · {}", route.provider_id)),
+            release_date: None,
+        };
+
+        let mut identity_track = track.clone();
+        identity_track.title.clone_from(&metadata.title);
+        identity_track.artist.clone_from(&metadata.artist);
+        identity_track.album.clone_from(&metadata.album);
+
+        let mut lyrics = if fetch_lyrics {
+            match frontend.lyrics_for_route(&route, &remote.source).await {
+                Ok(result) => {
+                    for failure in &result.failures {
+                        tracing::debug!(
+                            plugin = %failure.route.plugin_id,
+                            provider = %failure.route.provider_id,
+                            account = %failure.route.account_id,
+                            error = %failure.error,
+                            "authenticated plugin 歌词调用失败，尝试下一账号"
+                        );
+                    }
+                    match result.value {
+                        Some(document) => match plugin_lyrics_to_player(
+                            document,
+                            &format!("插件 {}", route.provider_id),
+                        ) {
+                            Ok(lyrics) => lyrics,
+                            Err(error) => {
+                                tracing::warn!(
+                                    plugin = %route.plugin_id,
+                                    provider = %route.provider_id,
+                                    %error,
+                                    "authenticated plugin 歌词结构非法，回退其他歌词来源"
+                                );
+                                None
+                            }
+                        },
+                        None => None,
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        plugin = %route.plugin_id,
+                        provider = %route.provider_id,
+                        %error,
+                        "authenticated plugin 歌词规划失败，回退其他歌词来源"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if fetch_lyrics {
+            if lyrics
+                .as_ref()
+                .map_or(true, |lyrics| !lyrics_have_word_timing(lyrics))
+                && let Some(word_timed) = self
+                    .fetch_word_timed_lyrics_fallback(&identity_track, None)
+                    .await
+            {
+                lyrics = Some(match lyrics {
+                    Some(primary) => prefer_richer_lyrics(primary, word_timed),
+                    None => word_timed,
+                });
+            }
+            if lyrics
+                .as_ref()
+                .map_or(true, |lyrics| !lyrics.has_translation())
+                && let Some(translated) = self
+                    .fetch_translated_lyrics_fallback(&identity_track, None)
+                    .await
+            {
+                lyrics = Some(match lyrics {
+                    Some(primary) => prefer_richer_lyrics(primary, translated),
+                    None => translated,
+                });
+            }
+            if lyrics.is_none() {
+                lyrics = self.fetch_lyrics(Some(&metadata), &identity_track).await?;
+            }
+        }
+
+        tracing::debug!(
+            plugin = %route.plugin_id,
+            provider = %route.provider_id,
+            account = %route.account_id,
+            score = scored.score,
+            title = %metadata.title,
+            artist = %metadata.artist,
+            "采用 authenticated plugin 元数据"
+        );
+        Ok(Some(AuthenticatedPluginEnrichment {
+            result: EnrichmentResult {
+                metadata: Some(metadata),
+                lyrics,
+                artwork: None,
+                artwork_key: None,
+            },
+            identity_track,
         }))
     }
 
@@ -251,10 +486,6 @@ impl OnlineServices {
             }
         }
 
-        // Platform metadata may be correct even when none of those services exposes artwork.
-        // Search MusicBrainz using the already-resolved identity, but only accept a release whose
-        // album is compatible with the selected provider result. This avoids unrelated same-title
-        // releases and Live/remaster artwork being used as a blind fallback.
         let mut identity_track = track.clone();
         identity_track.title.clone_from(&matched.title);
         identity_track.artist.clone_from(&matched.artist);
@@ -303,6 +534,33 @@ impl OnlineServices {
             }
         }
 
+        (None, None)
+    }
+
+    async fn resolve_musicbrainz_artwork(
+        &self,
+        identity_track: &Track,
+    ) -> (Option<Vec<u8>>, Option<String>) {
+        match self.search_recording(identity_track).await {
+            Ok(Some(metadata)) => {
+                let Some(release_mbid) = metadata.release_mbid.as_deref() else {
+                    return (None, None);
+                };
+                match self.fetch_cover(release_mbid).await {
+                    Ok(Some(bytes)) => {
+                        if let Some(bytes) = validate_cover_bytes(bytes).await {
+                            return (Some(bytes), Some(format!("musicbrainz:{release_mbid}")));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(%error, release_mbid, "authenticated identity CAA 封面回退失败");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%error, "authenticated identity MusicBrainz 封面搜索失败"),
+        }
         (None, None)
     }
 
@@ -369,9 +627,6 @@ impl OnlineServices {
         None
     }
 
-    /// Prefer a lyric document that carries a synchronized translation without changing the
-    /// metadata provider selected for the track. Netease and QQ expose explicit translated lyric
-    /// tracks; keep this lookup in the background enrichment path so it never blocks GPUI.
     async fn fetch_translated_lyrics_fallback(
         &self,
         track: &Track,
@@ -438,6 +693,41 @@ impl OnlineServices {
             .ok()
             .map(|response| response.access_token)
     }
+}
+
+fn local_track_query(track: &Track) -> TrackQuery {
+    let artists = if metadata_unknown_artist(&track.artist) {
+        Vec::new()
+    } else {
+        vec![track.artist.clone()]
+    };
+    TrackQuery {
+        title: track.title.clone(),
+        artists,
+        album: track.album.clone(),
+        duration_ms: Some(track.duration_ms),
+        isrc: None,
+        musicbrainz_recording_id: None,
+        fingerprint_id: None,
+    }
+}
+
+fn plugin_remote_track_is_bounded(track: &RemoteTrack) -> bool {
+    if track.artists.len() > MAX_PLUGIN_TRACK_ARTISTS {
+        return false;
+    }
+    let mut bytes = track
+        .source
+        .provider_id
+        .len()
+        .saturating_add(track.source.source_id.len())
+        .saturating_add(track.title.len())
+        .saturating_add(track.album.len())
+        .saturating_add(track.cover_url.as_ref().map_or(0, String::len));
+    for artist in &track.artists {
+        bytes = bytes.saturating_add(artist.len());
+    }
+    bytes <= MAX_PLUGIN_TRACK_TEXT_BYTES
 }
 
 fn lyrics_have_word_timing(lyrics: &LyricsDocument) -> bool {
@@ -610,5 +900,12 @@ fn metadata_unknown(value: &str) -> bool {
     matches!(
         normalize_identity(value).as_str(),
         "" | "未知专辑" | "unknownalbum" | "unknown"
+    )
+}
+
+fn metadata_unknown_artist(value: &str) -> bool {
+    matches!(
+        normalize_identity(value).as_str(),
+        "" | "未知艺术家" | "unknownartist" | "unknown"
     )
 }
