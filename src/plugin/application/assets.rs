@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Cursor, Read},
-    path::{Component, Path},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -11,7 +10,10 @@ use image::{ImageFormat, ImageReader, Limits};
 
 use super::{
     host::{catalog::PluginCatalog, package_manager},
-    ui::schema::{UiNode, UiPageModel},
+    ui::{
+        manifest::validate_relative_asset_path,
+        schema::{UiNode, UiPageModel},
+    },
 };
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
@@ -237,14 +239,11 @@ pub struct PluginImagePreloadReport {
     pub failures: Vec<PluginImageLoadFailure>,
 }
 
-/// Read one already-normalized image from the Host cache. This performs no filesystem I/O or image
-/// decoding and is the only image-asset operation intended for GPUI render paths.
+/// Read one already-normalized image from the Host cache. This performs only bounded in-memory cache
+/// work: no package-manager state lock, filesystem I/O, image decoding or guest execution occurs on
+/// the GPUI render path. Page visibility/access is checked by the management façade before render.
 pub fn cached_image(plugin_id: &str, asset: &str) -> Result<Option<PluginImageAsset>> {
-    validate_asset_path(asset)?;
-    let manager = package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))?;
-    if !manager.is_enabled(plugin_id) {
-        return Ok(None);
-    }
+    validate_relative_asset_path(asset)?;
     PLUGIN_IMAGE_CACHE
         .get_or_init(PluginImageCache::default)
         .cached(plugin_id, asset)
@@ -255,7 +254,7 @@ pub fn cached_image(plugin_id: &str, asset: &str) -> Result<Option<PluginImageAs
 /// This function performs filesystem I/O and decoding and therefore must never be called from GPUI
 /// paint or the realtime audio callback. Callers can use `cached_image` from render after preload.
 pub fn load_image(plugin_id: &str, asset: &str) -> Result<PluginImageAsset> {
-    validate_asset_path(asset)?;
+    validate_relative_asset_path(asset)?;
     let manager = package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))?;
     if !manager.is_enabled(plugin_id) {
         bail!("插件已禁用，拒绝读取图片 asset: {plugin_id}");
@@ -397,7 +396,7 @@ fn normalize_image(source: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
 fn collect_image_assets(node: &UiNode, assets: &mut HashSet<String>) -> Result<()> {
     match node {
         UiNode::Image { asset, .. } => {
-            validate_asset_path(asset)?;
+            validate_relative_asset_path(asset)?;
             assets.insert(asset.clone());
         }
         UiNode::Column { children }
@@ -410,23 +409,6 @@ fn collect_image_assets(node: &UiNode, assets: &mut HashSet<String>) -> Result<(
             }
         }
         _ => {}
-    }
-    Ok(())
-}
-
-fn validate_asset_path(value: &str) -> Result<()> {
-    let path = Path::new(value);
-    if value.is_empty()
-        || value.len() > 512
-        || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        bail!("插件图片 asset 必须是 package 内相对路径: {value:?}");
     }
     Ok(())
 }
@@ -453,8 +435,8 @@ mod tests {
 
     #[test]
     fn parent_paths_are_rejected() {
-        assert!(validate_asset_path("images/cover.png").is_ok());
-        assert!(validate_asset_path("../cover.png").is_err());
+        assert!(validate_relative_asset_path("images/cover.png").is_ok());
+        assert!(validate_relative_asset_path("../cover.png").is_err());
     }
 
     #[test]
