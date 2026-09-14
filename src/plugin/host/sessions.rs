@@ -159,6 +159,21 @@ impl PluginSessionCoordinator {
         &self.startup_errors
     }
 
+    /// Remove restore-overlay keys that no longer have an account row in the live Host router.
+    ///
+    /// Package update/uninstall can remove providers or invalidate account capabilities. The router
+    /// is authoritative for reachability, so stale pending keys must not outlive those account rows
+    /// and later affect a reinstall that reuses the same plugin/account identity.
+    pub fn retain_host_accounts(&mut self, accounts: &[PluginAccount]) -> usize {
+        let valid = accounts
+            .iter()
+            .map(PluginAccountKey::from)
+            .collect::<HashSet<_>>();
+        let before = self.pending_validation.len();
+        self.pending_validation.retain(|key| valid.contains(key));
+        before.saturating_sub(self.pending_validation.len())
+    }
+
     pub fn state_for(&self, account: &PluginAccount) -> PluginSessionState {
         if self
             .pending_validation
@@ -301,6 +316,24 @@ mod tests {
             coordinator.state_for(&account),
             PluginSessionState::PendingValidation
         );
+    }
+
+    #[test]
+    fn retain_host_accounts_drops_unreachable_pending_keys() {
+        let kept = account(AccountState::Expired);
+        let mut removed = kept.clone();
+        removed.account_id = "removed".into();
+        let mut coordinator = PluginSessionCoordinator {
+            pending_validation: HashSet::from([
+                PluginAccountKey::from(&kept),
+                PluginAccountKey::from(&removed),
+            ]),
+            startup_errors: Vec::new(),
+        };
+
+        assert_eq!(coordinator.retain_host_accounts(std::slice::from_ref(&kept)), 1);
+        assert_eq!(coordinator.pending_count(), 1);
+        assert!(coordinator.pending_validation.contains(&PluginAccountKey::from(&kept)));
     }
 
     #[test]
