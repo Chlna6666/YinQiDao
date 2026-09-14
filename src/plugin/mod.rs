@@ -3,8 +3,8 @@
 //! Dependency boundary:
 //! - `abi` contains runtime-neutral plugin/domain types and must not depend on Host, OnlineServices,
 //!   GPUI, audio, or Wasmtime.
-//! - `host` owns permissions, secrets, HTTP/network policy, sessions and call budgets. Guest code is
-//!   never authoritative for these decisions.
+//! - `host` owns permissions, secrets, HTTP/network policy, sessions, package management and call
+//!   budgets. Guest code is never authoritative for these decisions.
 //! - `component` owns Component loading/compiled cache, Host-owned GC and, later, the private
 //!   Wasmtime adapter. Generated Wasmtime binding types must not escape this module.
 //! - `client` is the semantic port implemented by the Component runtime.
@@ -28,16 +28,12 @@ pub(crate) mod routing;
 pub(crate) mod ui;
 
 /// Initialize the complete plugin control plane.
-///
-/// Keep this orchestration inside the plugin subsystem so the application entry point does not
-/// become coupled to Host security, session, Component-cache or future Wasmtime implementation
-/// details. Runtime state is retained by the individual process-wide subsystem initializers.
 pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     let engine_policy = component::policy::PluginEnginePolicy::default();
     engine_policy.validate()?;
-    let compiled_cache =
-        component::cache::initialize(engine_policy.max_compiled_artifact_bytes);
+    let compiled_cache = component::cache::initialize(engine_policy.max_compiled_artifact_bytes);
     let plugin_host = host::catalog::initialize(base_dir);
+    let package_manager = host::package_manager::initialize(base_dir);
 
     let secret_store = std::sync::Arc::new(host::secrets::MemorySecretStore::default());
     let secret_backend = host::secrets::PluginSecretStore::backend_name(secret_store.as_ref());
@@ -61,7 +57,11 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     };
 
     let ui_sync = match (catalog.as_ref(), ui_registry.write()) {
-        (Some(catalog), Ok(mut registry)) => Some(ui::catalog::sync_from_catalog(catalog, &mut registry)),
+        (Some(catalog), Ok(mut registry)) => Some(ui::catalog::sync_from_catalog_filtered(
+            catalog,
+            &mut registry,
+            |plugin_id| package_manager.is_enabled(plugin_id),
+        )),
         (Some(_), Err(error)) => {
             tracing::error!(%error, "插件 UI contribution registry 锁已损坏");
             None
@@ -116,6 +116,11 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         initial_disk_bytes_after = initial_gc.disk_bytes_after,
         "Host 插件 GC 已初始化；资源回收不暴露给 guest"
     );
+    tracing::info!(
+        plugin_root = %package_manager.plugin_root().display(),
+        installed_plugins = package_manager.list_installed().map(|plugins| plugins.len()).unwrap_or_default(),
+        "插件包管理器已初始化"
+    );
     if let Some(runtime) = runtime.as_ref() {
         tracing::info!(
             installed_plugins = runtime.catalog().plugins().len(),
@@ -132,6 +137,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     if let Some(report) = ui_sync.as_ref() {
         tracing::info!(
             registered_plugins = report.registered_plugins,
+            skipped_disabled_plugins = report.skipped_disabled_plugins,
             routes = report.routes,
             pages = report.pages,
             commands = report.commands,
