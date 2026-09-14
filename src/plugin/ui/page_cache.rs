@@ -67,6 +67,7 @@ struct PageCacheState {
     global_generation: u64,
     clock: u64,
     revision_clock: u64,
+    observable_revision: u64,
 }
 
 impl PageCacheState {
@@ -78,6 +79,11 @@ impl PageCacheState {
     fn next_revision(&mut self) -> u64 {
         self.revision_clock = self.revision_clock.wrapping_add(1).max(1);
         self.revision_clock
+    }
+
+    fn bump_observable_revision(&mut self) -> u64 {
+        self.observable_revision = self.observable_revision.wrapping_add(1).max(1);
+        self.observable_revision
     }
 
     fn plugin_generation(&self, plugin_id: &str) -> u64 {
@@ -113,6 +119,19 @@ impl PluginUiPageCache {
 
     pub fn max_entries(&self) -> usize {
         self.max_entries
+    }
+
+    /// Monotonic-ish Host change token for retained UI invalidation.
+    ///
+    /// It changes only when visible plugin UI state can change: publish, plugin invalidation or a
+    /// global clear. Cache reads/LRU touches intentionally do not change it, so GPUI can include this
+    /// value in a retained render key without creating a repaint loop.
+    pub fn observable_revision(&self) -> Result<u64> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|error| anyhow!("插件 UI page cache 锁已损坏: {error}"))?
+            .observable_revision)
     }
 
     pub fn begin_load(&self, plugin_id: &str, page_id: &str) -> Result<PluginUiPageLoadTicket> {
@@ -193,6 +212,7 @@ impl PluginUiPageCache {
             },
         );
         evict_lru(&mut state, self.max_entries, Some(&ticket.key));
+        state.bump_observable_revision();
         Ok(PluginUiPageSnapshot {
             key: ticket.key,
             revision,
@@ -228,7 +248,11 @@ impl PluginUiPageCache {
             .state
             .lock()
             .map_err(|error| anyhow!("插件 UI page cache 锁已损坏: {error}"))?;
-        Ok(state.entries.remove(&key).is_some())
+        let removed = state.entries.remove(&key).is_some();
+        if removed {
+            state.bump_observable_revision();
+        }
+        Ok(removed)
     }
 
     pub fn invalidate_plugin(&self, plugin_id: &str) -> Result<usize> {
@@ -244,7 +268,11 @@ impl PluginUiPageCache {
         *generation = generation.wrapping_add(1);
         let before = state.entries.len();
         state.entries.retain(|key, _| key.plugin_id != plugin_id);
-        Ok(before.saturating_sub(state.entries.len()))
+        let removed = before.saturating_sub(state.entries.len());
+        // Generation changes make in-flight results obsolete even when this plugin had no cached
+        // page yet, so retained UI still needs an observable invalidation edge.
+        state.bump_observable_revision();
+        Ok(removed)
     }
 
     pub fn clear(&self) -> Result<usize> {
@@ -255,6 +283,7 @@ impl PluginUiPageCache {
         state.global_generation = state.global_generation.wrapping_add(1);
         let removed = state.entries.len();
         state.entries.clear();
+        state.bump_observable_revision();
         Ok(removed)
     }
 
@@ -351,6 +380,23 @@ mod tests {
         let current = cache.get("plugin.demo", "home").expect("get").expect("page");
         assert_eq!(current.revision, fast.revision);
         assert_eq!(current.model.root, UiNode::Text { text: "fast".into() });
+    }
+
+    #[test]
+    fn observable_revision_changes_only_for_visible_state_changes() {
+        let cache = PluginUiPageCache::new(4, UiSchemaLimits::default()).expect("cache");
+        assert_eq!(cache.observable_revision().expect("revision"), 0);
+
+        let ticket = cache.begin_load("plugin.demo", "home").expect("ticket");
+        cache.publish(ticket, page("first")).expect("publish");
+        let after_publish = cache.observable_revision().expect("published revision");
+        assert!(after_publish > 0);
+
+        let _ = cache.get("plugin.demo", "home").expect("get");
+        assert_eq!(cache.observable_revision().expect("LRU revision"), after_publish);
+
+        cache.invalidate_plugin("plugin.demo").expect("invalidate");
+        assert_ne!(cache.observable_revision().expect("invalidated revision"), after_publish);
     }
 
     #[test]
