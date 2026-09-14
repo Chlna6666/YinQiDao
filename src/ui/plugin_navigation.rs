@@ -1,14 +1,21 @@
+use std::rc::Rc;
+
 use anyhow::{Result, bail};
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 use gpui_tokio::Tokio;
 
 use crate::{
     model::AppPage,
-    plugin::management::{self, PluginRouteSummary},
+    plugin::management::{self, PluginFieldValue, PluginRouteSummary},
     plugin::ui::manifest::UiRoutePlacement,
 };
 
-use super::{plugin_page_renderer, route, shell::MusicApp, theme};
+use super::{
+    plugin_page_renderer::{self, PluginUiInteraction, PluginUiInteractionHandler},
+    route,
+    shell::MusicApp,
+    theme,
+};
 
 const PLUGIN_ROUTE_PREFIX: &str = "/plugins/";
 
@@ -70,8 +77,6 @@ pub fn navigate(
     if app.stage_open {
         app.close_stage(cx);
     }
-    // Reuse the existing Settings content surface as the host container for dynamic plugin pages.
-    // The router pathname remains `/plugins/...`, so native Settings and plugin routes stay distinct.
     app.page = AppPage::Settings;
     route::navigate_path(cx, &target.pathname);
     ensure_page_loaded(target, cx);
@@ -102,9 +107,94 @@ fn ensure_page_loaded(target: &PluginNavigationRoute, cx: &mut Context<MusicApp>
                         snapshot.plugin_id, snapshot.page_id, snapshot.revision
                     );
                 }
-                Err(error) => {
-                    this.status = format!("插件页面加载失败：{error:#}");
+                Err(error) => this.status = format!("插件页面加载失败：{error:#}"),
+            }
+            cx.notify();
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn interaction_handler(
+    target: &PluginNavigationRoute,
+    cx: &mut Context<MusicApp>,
+) -> PluginUiInteractionHandler {
+    let view = cx.weak_entity();
+    let target = target.clone();
+    Rc::new(move |interaction, _window, cx| {
+        let target = target.clone();
+        let _ = view.update(cx, |app, app_cx| {
+            dispatch_interaction(app, app_cx, &target, interaction);
+        });
+    })
+}
+
+fn dispatch_interaction(
+    app: &mut MusicApp,
+    cx: &mut Context<MusicApp>,
+    target: &PluginNavigationRoute,
+    interaction: PluginUiInteraction,
+) {
+    if let PluginUiInteraction::BeginInput { .. } = interaction {
+        // Keep text editing fail-closed until the Host reuses its IME/focus-aware input component.
+        // Do not fall back to keydown scraping or expose secret field contents through status/logs.
+        app.status = "插件文本输入正在等待 Host 输入组件接入".into();
+        cx.notify();
+        return;
+    }
+
+    let plugin_id = target.summary.plugin_id.clone();
+    let page_id = target.summary.page_id.clone();
+    app.status = format!("正在处理插件页面操作：{plugin_id}/{page_id}");
+    cx.notify();
+
+    let task = Tokio::spawn_result(cx, async move {
+        match interaction {
+            PluginUiInteraction::Action { action_id } => {
+                management::dispatch_action(&plugin_id, &page_id, &action_id).await
+            }
+            PluginUiInteraction::SelectChanged { field_id, value } => {
+                management::dispatch_field_changed(
+                    &plugin_id,
+                    &page_id,
+                    &field_id,
+                    PluginFieldValue::Text(value),
+                )
+                .await
+            }
+            PluginUiInteraction::ToggleChanged { field_id, value } => {
+                management::dispatch_field_changed(
+                    &plugin_id,
+                    &page_id,
+                    &field_id,
+                    PluginFieldValue::Bool(value),
+                )
+                .await
+            }
+            PluginUiInteraction::BeginInput { .. } => unreachable!("handled before async dispatch"),
+        }
+    });
+
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |this, cx| {
+            match result {
+                Ok(result) => {
+                    this.status = result.toast.unwrap_or_else(|| {
+                        format!(
+                            "插件页面已更新：{}/{} · rev {}",
+                            result.snapshot.plugin_id,
+                            result.snapshot.page_id,
+                            result.snapshot.revision
+                        )
+                    });
+                    if result.close {
+                        this.page = AppPage::Settings;
+                        route::navigate_to(cx, route::AppRoute::Settings);
+                    }
                 }
+                Err(error) => this.status = format!("插件页面操作失败：{error:#}"),
             }
             cx.notify();
         })?;
@@ -118,16 +208,17 @@ fn ensure_page_loaded(target: &PluginNavigationRoute, cx: &mut Context<MusicApp>
 pub fn render_route_shell(
     target: &PluginNavigationRoute,
     _app: &MusicApp,
-    _cx: &mut Context<MusicApp>,
+    cx: &mut Context<MusicApp>,
 ) -> gpui::AnyElement {
     let snapshot = management::page_snapshot(&target.summary.plugin_id, &target.summary.page_id)
         .ok()
         .flatten();
+    let runtime_ready = management::ui_client_ready();
 
     let body = if let Some(snapshot) = snapshot {
-        plugin_page_renderer::render_page(snapshot.model.as_ref(), None)
+        let handler = runtime_ready.then(|| interaction_handler(target, cx));
+        plugin_page_renderer::render_page(snapshot.model.as_ref(), handler)
     } else {
-        let runtime_ready = management::ui_client_ready();
         div()
             .p_4()
             .rounded_xl()
@@ -235,8 +326,8 @@ pub fn sidebar_entry(
     } else {
         theme::TEXT_PRIMARY
     };
-
     let target_for_click = target.clone();
+
     div()
         .id(id)
         .flex()

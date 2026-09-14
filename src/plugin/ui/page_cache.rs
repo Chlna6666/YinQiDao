@@ -35,6 +35,7 @@ pub struct PluginUiPageLoadTicket {
     key: PluginUiPageKey,
     plugin_generation: u64,
     global_generation: u64,
+    expected_revision: Option<u64>,
 }
 
 impl PluginUiPageLoadTicket {
@@ -85,9 +86,10 @@ impl PageCacheState {
 /// Host-owned immutable page-model cache.
 ///
 /// Guest code never controls cache capacity, eviction, revisions or invalidation. Async runtime code
-/// obtains a generation ticket before calling the guest and can publish only while that generation
-/// is still current. Plugin update/uninstall therefore prevents an old in-flight page result from
-/// reappearing after invalidation. GPUI paint reads only validated `Arc<UiPageModel>` snapshots.
+/// obtains a generation/revision ticket before calling the guest and can publish only while that
+/// state is still current. Plugin update/uninstall prevents obsolete results from reappearing, and
+/// slower UI events cannot overwrite newer snapshots. GPUI paint reads only validated
+/// `Arc<UiPageModel>` snapshots.
 #[derive(Debug)]
 pub struct PluginUiPageCache {
     max_entries: usize,
@@ -117,9 +119,36 @@ impl PluginUiPageCache {
             .state
             .lock()
             .map_err(|error| anyhow!("插件 UI page cache 锁已损坏: {error}"))?;
+        let expected_revision = state.entries.get(&key).map(|entry| entry.revision);
         Ok(PluginUiPageLoadTicket {
             plugin_generation: state.plugin_generation(plugin_id),
             global_generation: state.global_generation,
+            expected_revision,
+            key,
+        })
+    }
+
+    pub fn begin_update(
+        &self,
+        plugin_id: &str,
+        page_id: &str,
+        expected_revision: u64,
+    ) -> Result<PluginUiPageLoadTicket> {
+        let key = PluginUiPageKey::new(plugin_id, page_id)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|error| anyhow!("插件 UI page cache 锁已损坏: {error}"))?;
+        let actual_revision = state.entries.get(&key).map(|entry| entry.revision);
+        if actual_revision != Some(expected_revision) {
+            bail!(
+                "插件 UI page revision 已变化，拒绝从旧快照发起事件: expected={expected_revision}, actual={actual_revision:?}"
+            );
+        }
+        Ok(PluginUiPageLoadTicket {
+            plugin_generation: state.plugin_generation(plugin_id),
+            global_generation: state.global_generation,
+            expected_revision: Some(expected_revision),
             key,
         })
     }
@@ -142,6 +171,14 @@ impl PluginUiPageCache {
             || state.plugin_generation(&ticket.key.plugin_id) != ticket.plugin_generation
         {
             bail!("插件 UI page 在加载期间已失效，拒绝发布旧页面模型");
+        }
+        if let Some(expected_revision) = ticket.expected_revision {
+            let actual_revision = state.entries.get(&ticket.key).map(|entry| entry.revision);
+            if actual_revision != Some(expected_revision) {
+                bail!(
+                    "插件 UI page 在异步执行期间已被更新，拒绝乱序覆盖: expected={expected_revision}, actual={actual_revision:?}"
+                );
+            }
         }
 
         let revision = state.next_revision();
@@ -283,6 +320,20 @@ mod tests {
         cache.invalidate_plugin("plugin.demo").expect("invalidate");
         assert!(cache.publish(ticket, page("stale")).is_err());
         assert!(cache.get("plugin.demo", "home").expect("get").is_none());
+    }
+
+    #[test]
+    fn stale_event_cannot_overwrite_newer_revision() {
+        let cache = PluginUiPageCache::new(4, UiSchemaLimits::default()).expect("cache");
+        let initial = cache.begin_load("plugin.demo", "home").expect("initial");
+        let initial = cache.publish(initial, page("initial")).expect("publish initial");
+        let slow = cache.begin_load("plugin.demo", "home").expect("slow event");
+        let fast = cache.begin_load("plugin.demo", "home").expect("fast event");
+        let fast = cache.publish(fast, page("fast")).expect("publish fast");
+        assert!(cache.publish(slow, page("slow")).is_err());
+        let current = cache.get("plugin.demo", "home").expect("get").expect("page");
+        assert_eq!(current.revision, fast.revision);
+        assert_eq!(current.model.root, UiNode::Text { text: "fast".into() });
     }
 
     #[test]

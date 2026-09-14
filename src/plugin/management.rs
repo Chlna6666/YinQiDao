@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -7,9 +7,10 @@ use super::{
     host::package_manager::PluginPackageManager,
     ui::{
         self,
+        client::{PluginUiEvent, UiFieldValue},
         manifest::UiRoutePlacement,
         registry::{self, RegisteredUiRoute},
-        schema::UiPageModel,
+        schema::{UiNode, UiPageModel},
     },
 };
 
@@ -55,6 +56,19 @@ pub struct PluginPageSnapshot {
     pub page_id: String,
     pub revision: u64,
     pub model: Arc<UiPageModel>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginFieldValue {
+    Text(String),
+    Bool(bool),
+}
+
+#[derive(Clone, Debug)]
+pub struct PluginPageEventResult {
+    pub snapshot: PluginPageSnapshot,
+    pub toast: Option<String>,
+    pub close: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -206,6 +220,95 @@ pub async fn load_page(plugin_id: &str, page_id: &str) -> Result<PluginPageSnaps
     Ok(page_snapshot_to_summary(cache.publish(ticket, model)?))
 }
 
+pub async fn dispatch_action(
+    plugin_id: &str,
+    page_id: &str,
+    action_id: &str,
+) -> Result<PluginPageEventResult> {
+    let current = page_snapshot(plugin_id, page_id)?
+        .ok_or_else(|| anyhow!("插件页面尚未加载: {plugin_id}/{page_id}"))?;
+    match find_action(&current.model.root, action_id) {
+        Some(false) => {}
+        Some(true) => bail!("插件 UI action 已禁用: {action_id}"),
+        None => bail!("插件 UI action 不存在于当前页面: {action_id}"),
+    }
+
+    let mut fields = BTreeMap::new();
+    collect_fields(&current.model.root, &mut fields);
+    dispatch_event(
+        plugin_id,
+        page_id,
+        current,
+        PluginUiEvent::Action {
+            action_id: action_id.to_owned(),
+            fields,
+        },
+    )
+    .await
+}
+
+pub async fn dispatch_field_changed(
+    plugin_id: &str,
+    page_id: &str,
+    field_id: &str,
+    value: PluginFieldValue,
+) -> Result<PluginPageEventResult> {
+    let current = page_snapshot(plugin_id, page_id)?
+        .ok_or_else(|| anyhow!("插件页面尚未加载: {plugin_id}/{page_id}"))?;
+    let Some(kind) = find_field(&current.model.root, field_id) else {
+        bail!("插件 UI field 不存在于当前页面: {field_id}");
+    };
+    let value = match (kind, value) {
+        (UiFieldKind::Input | UiFieldKind::Select, PluginFieldValue::Text(value)) => {
+            UiFieldValue::Text(value)
+        }
+        (UiFieldKind::Toggle, PluginFieldValue::Bool(value)) => UiFieldValue::Bool(value),
+        _ => bail!("插件 UI field value 类型不匹配: {field_id}"),
+    };
+    dispatch_event(
+        plugin_id,
+        page_id,
+        current,
+        PluginUiEvent::FieldChanged {
+            field_id: field_id.to_owned(),
+            value,
+        },
+    )
+    .await
+}
+
+async fn dispatch_event(
+    plugin_id: &str,
+    page_id: &str,
+    current: PluginPageSnapshot,
+    event: PluginUiEvent,
+) -> Result<PluginPageEventResult> {
+    ensure_page_access(plugin_id, page_id)?;
+    let clients = ui::client::global().unwrap_or_else(ui::client::initialize);
+    let client = clients
+        .client()?
+        .ok_or_else(|| anyhow!("插件 Component UI runtime 尚未就绪"))?;
+    let cache = page_cache()?;
+    let ticket = cache.begin_update(plugin_id, page_id, current.revision)?;
+    let response = client
+        .handle_event(plugin_id, page_id, event)
+        .await
+        .with_context(|| format!("处理插件页面事件失败: {plugin_id}/{page_id}"))?;
+
+    // Re-check Host ownership after guest execution. A disable/uninstall/update during the call must
+    // fail closed even if the guest returned a seemingly valid response.
+    ensure_page_access(plugin_id, page_id)?;
+    let model = response
+        .page
+        .unwrap_or_else(|| current.model.as_ref().clone());
+    let snapshot = page_snapshot_to_summary(cache.publish(ticket, model)?);
+    Ok(PluginPageEventResult {
+        snapshot,
+        toast: response.toast,
+        close: response.close,
+    })
+}
+
 fn ensure_page_access(plugin_id: &str, page_id: &str) -> Result<()> {
     if !manager()?.is_enabled(plugin_id) {
         bail!("插件已禁用，拒绝加载 UI 页面: {plugin_id}");
@@ -230,6 +333,79 @@ fn page_snapshot_to_summary(snapshot: ui::page_cache::PluginUiPageSnapshot) -> P
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiFieldKind {
+    Input,
+    Select,
+    Toggle,
+}
+
+fn find_action(node: &UiNode, action_id: &str) -> Option<bool> {
+    match node {
+        UiNode::Button {
+            action_id: current,
+            disabled,
+            ..
+        } if current == action_id => Some(*disabled),
+        UiNode::Column { children }
+        | UiNode::Row { children }
+        | UiNode::Card { children }
+        | UiNode::List { children }
+        | UiNode::Section { children, .. } => {
+            children.iter().find_map(|child| find_action(child, action_id))
+        }
+        _ => None,
+    }
+}
+
+fn find_field(node: &UiNode, field_id: &str) -> Option<UiFieldKind> {
+    match node {
+        UiNode::Input { field_id: current, .. } if current == field_id => Some(UiFieldKind::Input),
+        UiNode::Select { field_id: current, .. } if current == field_id => Some(UiFieldKind::Select),
+        UiNode::Toggle { field_id: current, .. } if current == field_id => Some(UiFieldKind::Toggle),
+        UiNode::Column { children }
+        | UiNode::Row { children }
+        | UiNode::Card { children }
+        | UiNode::List { children }
+        | UiNode::Section { children, .. } => {
+            children.iter().find_map(|child| find_field(child, field_id))
+        }
+        _ => None,
+    }
+}
+
+fn collect_fields(node: &UiNode, fields: &mut BTreeMap<String, UiFieldValue>) {
+    match node {
+        UiNode::Input {
+            field_id, value, ..
+        } => {
+            fields.insert(field_id.clone(), UiFieldValue::Text(value.clone()));
+        }
+        UiNode::Select {
+            field_id, selected, ..
+        } => {
+            if let Some(selected) = selected {
+                fields.insert(field_id.clone(), UiFieldValue::Text(selected.clone()));
+            }
+        }
+        UiNode::Toggle {
+            field_id, value, ..
+        } => {
+            fields.insert(field_id.clone(), UiFieldValue::Bool(*value));
+        }
+        UiNode::Column { children }
+        | UiNode::Row { children }
+        | UiNode::Card { children }
+        | UiNode::List { children }
+        | UiNode::Section { children, .. } => {
+            for child in children {
+                collect_fields(child, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn gc_overview() -> Option<PluginGcOverview> {
     let gc = gc::global()?;
     let policy = gc.policy();
@@ -251,9 +427,6 @@ pub fn collect_host_resources_now() -> Result<PluginGcCollectionSummary> {
         .ok_or_else(|| anyhow!("插件 Host GC 尚未初始化"))?
         .sweep_once()?;
     if let Some(cache) = ui::page_cache::global() {
-        // UI models are bounded by schema and LRU capacity. They are not cleared during ordinary
-        // maintenance because active pages should stay warm; plugin update/disable/uninstall owns
-        // their generation invalidation.
         let _ = cache.len()?;
     }
     Ok(PluginGcCollectionSummary {
