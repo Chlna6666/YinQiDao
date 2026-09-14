@@ -16,11 +16,13 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+mod plugin_settings;
 mod stage_chrome;
 mod stage_controls;
 mod stage_lyrics;
 use player_facade as player;
 pub mod route;
+#[path = "settings_with_plugins.rs"]
 mod settings;
 mod shell;
 pub mod theme;
