@@ -32,20 +32,25 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
-mod plugin_client;
-mod plugin_compiled_cache;
-mod plugin_components;
-mod plugin_engine_policy;
-mod plugin_frontend;
-mod plugin_host;
-mod plugin_http;
-mod plugin_permissions;
-mod plugin_route_gate;
-mod plugin_runtime;
-mod plugin_security;
-mod plugin_secrets;
-mod plugin_sessions;
-mod plugins;
+mod plugin;
+
+// Transitional crate-root aliases keep the physical module move behavior-neutral. The next
+// boundary-tightening pass rewrites call sites to `crate::plugin::*` and removes these aliases.
+pub(crate) use plugin::abi as plugins;
+pub(crate) use plugin::client as plugin_client;
+pub(crate) use plugin::component::cache as plugin_compiled_cache;
+pub(crate) use plugin::component::policy as plugin_engine_policy;
+pub(crate) use plugin::component::registry as plugin_components;
+pub(crate) use plugin::frontend as plugin_frontend;
+pub(crate) use plugin::host::catalog as plugin_host;
+pub(crate) use plugin::host::http as plugin_http;
+pub(crate) use plugin::host::permissions as plugin_permissions;
+pub(crate) use plugin::host::runtime as plugin_runtime;
+pub(crate) use plugin::host::security as plugin_security;
+pub(crate) use plugin::host::secrets as plugin_secrets;
+pub(crate) use plugin::host::sessions as plugin_sessions;
+pub(crate) use plugin::routing::gate as plugin_route_gate;
+
 mod preferences;
 pub mod runtime;
 mod settings;
