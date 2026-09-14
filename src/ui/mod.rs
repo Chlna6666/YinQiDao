@@ -18,6 +18,8 @@ mod player_legacy;
 mod player_stage;
 #[path = "plugin/extensions.rs"]
 mod plugin_extensions;
+#[path = "plugin/input.rs"]
+mod plugin_input;
 #[path = "plugin/navigation.rs"]
 mod plugin_navigation;
 #[path = "plugin/page_renderer.rs"]

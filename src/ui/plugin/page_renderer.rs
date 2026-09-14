@@ -10,7 +10,7 @@ use crate::plugin::{
     ui::schema::{UiNode, UiPageModel, UiSpacerSize},
 };
 
-use super::theme;
+use super::{plugin_input, theme};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginUiInteraction {
@@ -43,6 +43,7 @@ pub fn render_plugin_page(
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
+    let _input_surface = plugin_input::begin_surface(plugin_id, model);
     render_node(Some(plugin_id), &model.root, handler).into_any_element()
 }
 
@@ -187,6 +188,13 @@ fn render_node(
             placeholder,
             secret,
         } => {
+            let input_key = handler
+                .as_ref()
+                .and_then(|_| plugin_input::key_for_field(field_id));
+            if let Some(active) = input_key.as_ref().and_then(plugin_input::active) {
+                return div().w_full().child(active).into_any_element();
+            }
+
             let display = if value.is_empty() {
                 placeholder.clone().unwrap_or_default()
             } else if *secret {
@@ -194,7 +202,7 @@ fn render_node(
             } else {
                 value.clone()
             };
-            let enabled = handler.is_some();
+            let enabled = handler.is_some() && input_key.is_some();
             let mut input = div()
                 .id(SharedString::from(format!("plugin-ui-input-{field_id}")))
                 .w_full()
@@ -212,20 +220,36 @@ fn render_node(
                 })
                 .child(display);
             if enabled {
+                let key = input_key.expect("enabled input requires Host surface key");
                 let field_id = field_id.clone();
                 let current_value = value.clone();
+                let placeholder = placeholder.clone().unwrap_or_default();
                 let secret = *secret;
                 let handler = handler.expect("enabled requires interaction handler");
                 input = input
                     .cursor_text()
                     .hover(|style| style.border_color(theme::ACCENT_RED))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                        handler(
-                            PluginUiInteraction::BeginInput {
-                                field_id: field_id.clone(),
-                                current_value: current_value.clone(),
-                                secret,
-                            },
+                        let commit_handler = handler.clone();
+                        let commit_field_id = field_id.clone();
+                        plugin_input::activate(
+                            key.clone(),
+                            current_value.clone(),
+                            placeholder.clone(),
+                            secret,
+                            Rc::new(move |value, window, cx| {
+                                // Input and Select are both validated text-valued fields at the
+                                // application boundary. Reuse the existing text field dispatch so
+                                // no guest call occurs until the Host editor commits with Enter.
+                                commit_handler(
+                                    PluginUiInteraction::SelectChanged {
+                                        field_id: commit_field_id.clone(),
+                                        value,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            }),
                             window,
                             cx,
                         );

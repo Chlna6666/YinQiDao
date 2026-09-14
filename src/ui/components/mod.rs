@@ -2,6 +2,7 @@
 
 pub mod button;
 pub mod dock;
+pub mod input;
 pub mod slider;
 
 pub use button::{glass_button, icon_button};
