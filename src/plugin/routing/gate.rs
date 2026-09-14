@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-use crate::{
-    plugin_runtime::{PluginCallKey, PluginHostServices, PluginRouteHealthSnapshot},
-    plugin_sessions::{PluginSessionCoordinator, PluginSessionState},
-    plugins::{
-        PluginAccount, PluginRoute, PluginServiceRouter, RoutePlan, RoutingPolicy, ServiceKind,
+use super::super::{
+    abi::{PluginAccount, PluginRoute, PluginServiceRouter, RoutePlan, RoutingPolicy, ServiceKind},
+    host::{
+        runtime::{PluginCallKey, PluginHostServices, PluginRouteHealthSnapshot},
+        sessions::{PluginSessionCoordinator, PluginSessionState},
     },
 };
 
@@ -172,7 +172,7 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::plugins::{AccountState, PluginCapability};
+    use crate::plugin::abi::{AccountState, PluginCapability};
 
     #[derive(Default)]
     struct MockHealth {

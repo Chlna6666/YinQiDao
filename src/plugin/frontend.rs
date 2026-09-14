@@ -5,19 +5,22 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::{
-    lyrics::LyricsDocument,
-    plugin_client::{PluginClientRegistry, PluginProviderClient},
-    plugin_host::PluginHostState,
-    plugin_http::PluginHttpRequest,
-    plugin_route_gate::{GatedRoutePlan, plan_routes},
-    plugin_runtime::{PluginCallKey, PluginHostServices},
-    plugin_sessions::{PluginAccountKey, PluginSessionCoordinator},
-    plugins::{
+use crate::lyrics::LyricsDocument;
+
+use super::{
+    abi::{
         AccountState, AuthChallenge, AuthMethod, AuthPollResult, LyricLine as PluginLyricLine,
         PluginAccount, PluginCapability, PluginLyricDocument, PluginRoute, ProviderAccount,
         RemoteTrack, RoutingPolicy, ServiceKind, SourceTrackRef, TrackQuery,
     },
+    client::{PluginClientRegistry, PluginProviderClient},
+    host::{
+        catalog::PluginHostState,
+        http::PluginHttpRequest,
+        runtime::{PluginCallKey, PluginHostServices},
+        sessions::{PluginAccountKey, PluginSessionCoordinator},
+    },
+    routing::gate::{GatedRoutePlan, plan_routes},
 };
 
 const MAX_PLUGIN_LYRIC_LINES: usize = 10_000;
@@ -833,7 +836,7 @@ pub fn global() -> Option<Arc<PluginServiceFrontend>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{LyricWord as PluginLyricWord, PluginLyricDocument};
+    use crate::plugin::abi::{LyricWord as PluginLyricWord, PluginLyricDocument};
 
     #[test]
     fn plugin_lyrics_round_trip_word_timing_translation_and_xml_text() {
