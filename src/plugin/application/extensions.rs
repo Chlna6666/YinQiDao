@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::{
     host::{catalog::PluginCatalog, package_manager},
+    management::{self, PluginPageSnapshot},
     ui::{
         manifest::UiCommandPlacement,
         registry,
@@ -133,6 +134,41 @@ pub fn home_sections() -> Result<Vec<PluginHomeSectionSummary>> {
     Ok(sections)
 }
 
+/// Read a Home section only from the Host-owned immutable page cache.
+///
+/// This never invokes guest code and is therefore suitable for retained GPUI render paths. A
+/// controller should call `load_home_section` when the snapshot is absent, then repaint after the
+/// async load publishes a validated page model.
+pub fn home_section_snapshot(qualified_id: &str) -> Result<Option<PluginPageSnapshot>> {
+    let registered = registered_home_section(qualified_id)?;
+    ensure_plugin_enabled(&registered.plugin_id)?;
+    management::page_snapshot(&registered.plugin_id, &registered.contribution.page_id)
+}
+
+/// Load one Home section through the normal bounded plugin-page runtime.
+///
+/// Registration and enabled state are checked both before and after the guest call. This makes an
+/// update/disable/uninstall that races an in-flight load fail closed even when the previous component
+/// returns a valid page model. The underlying management façade applies page-cache generation/CAS,
+/// schema validation and the shared Host guest-call budget.
+pub async fn load_home_section(qualified_id: &str) -> Result<PluginPageSnapshot> {
+    let registered = registered_home_section(qualified_id)?;
+    ensure_plugin_enabled(&registered.plugin_id)?;
+    let plugin_id = registered.plugin_id.clone();
+    let page_id = registered.contribution.page_id.clone();
+
+    let snapshot = management::load_page(&plugin_id, &page_id)
+        .await
+        .with_context(|| format!("加载插件 Home Section 失败: {qualified_id}"))?;
+
+    ensure_plugin_enabled(&plugin_id)?;
+    let current = registered_home_section(qualified_id)?;
+    if current.plugin_id != plugin_id || current.contribution.page_id != page_id {
+        bail!("插件 Home Section 在加载期间已更新，拒绝应用旧页面模型");
+    }
+    Ok(snapshot)
+}
+
 pub fn themes() -> Result<Vec<PluginThemeSummary>> {
     let registry = registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
     let registry = registry
@@ -221,6 +257,26 @@ pub fn load_theme(qualified_id: &str) -> Result<PluginThemeSnapshot> {
         registered.contribution.display_name,
         tokens,
     ))
+}
+
+fn registered_home_section(qualified_id: &str) -> Result<registry::RegisteredUiHomeSection> {
+    let registry = registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+    let registry = registry
+        .read()
+        .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
+    registry
+        .home_sections()
+        .find(|section| section.qualified_id == qualified_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("插件 Home Section 未注册: {qualified_id}"))
+}
+
+fn ensure_plugin_enabled(plugin_id: &str) -> Result<()> {
+    let manager = package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))?;
+    if !manager.is_enabled(plugin_id) {
+        bail!("插件已禁用，拒绝访问 Home Section: {plugin_id}");
+    }
+    Ok(())
 }
 
 fn command_surface(placement: UiCommandPlacement) -> PluginCommandSurface {
