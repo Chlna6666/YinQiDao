@@ -5,8 +5,8 @@
 //!   GPUI, audio, or Wasmtime.
 //! - `host` owns permissions, secrets, HTTP/network policy, sessions and call budgets. Guest code is
 //!   never authoritative for these decisions.
-//! - `component` owns Component loading/compiled cache and, later, the private Wasmtime adapter.
-//!   Generated Wasmtime binding types must not escape this module.
+//! - `component` owns Component loading/compiled cache, Host-owned GC and, later, the private
+//!   Wasmtime adapter. Generated Wasmtime binding types must not escape this module.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
 //! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
@@ -44,6 +44,12 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     let secret_protection = host::secrets::PluginSecretStore::protection(secret_store.as_ref());
     let sessions = host::sessions::initialize(&plugin_host, secret_protection);
     let components = component::registry::initialize(base_dir);
+
+    let mut gc_policy = component::gc::PluginGcPolicy::default();
+    gc_policy.max_warm_instances_per_route = engine_policy.max_pooled_instances_per_route;
+    let gc = component::gc::initialize(components.cache_root().to_path_buf(), gc_policy)?;
+    let initial_gc = gc.sweep_once()?;
+
     let ui_registry = ui::registry::initialize();
 
     let catalog = match plugin_host.read() {
@@ -87,6 +93,18 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         epoch_tick_ms = engine_policy.epoch_tick_interval.as_millis(),
         epoch_deadline_ticks = engine_policy.epoch_deadline_ticks(),
         "Wasmtime Engine/Store 资源策略已校验"
+    );
+    tracing::info!(
+        gc_sweep_seconds = gc.policy().sweep_interval.as_secs(),
+        warm_instance_idle_seconds = gc.policy().warm_instance_idle_ttl.as_secs(),
+        max_warm_instances_total = gc.policy().max_warm_instances_total,
+        max_warm_instances_per_route = gc.policy().max_warm_instances_per_route,
+        max_compiled_components = gc.policy().max_compiled_components,
+        max_disk_cache_bytes = gc.policy().max_disk_cache_bytes,
+        initial_removed_disk_buckets = initial_gc.removed_disk_buckets,
+        initial_disk_bytes_before = initial_gc.disk_bytes_before,
+        initial_disk_bytes_after = initial_gc.disk_bytes_after,
+        "Host 插件 GC 已初始化；资源回收不暴露给 guest"
     );
     if let Some(runtime) = runtime.as_ref() {
         tracing::info!(
