@@ -103,6 +103,7 @@ pub struct PluginGcStats {
 
 trait PluginGcTarget: Send + Sync {
     fn collect_idle(&self) -> Result<usize>;
+    fn invalidate_plugin(&self, plugin_id: &str) -> Result<usize>;
 }
 
 #[derive(Debug)]
@@ -269,6 +270,10 @@ where
             self.policy.warm_instance_idle_ttl,
         ))
     }
+
+    fn invalidate_plugin(&self, plugin_id: &str) -> Result<usize> {
+        HostOwnedInstancePool::invalidate_plugin(self, plugin_id)
+    }
 }
 
 fn collect_idle_locked<I>(state: &mut InstancePoolState<I>, idle_ttl: Duration) -> usize {
@@ -344,6 +349,28 @@ impl PluginGcController {
             .map_err(|error| anyhow!("插件 GC target registry 锁已损坏: {error}"))?
             .push(Arc::downgrade(&target));
         Ok(pool)
+    }
+
+    /// Drop every currently pooled Host-owned instance for one plugin immediately.
+    ///
+    /// This is called by package-management invalidation paths (disable/update/uninstall). It does
+    /// not invoke guest code and does not wait for the periodic idle sweep.
+    pub fn invalidate_plugin(&self, plugin_id: &str) -> Result<usize> {
+        let targets = {
+            let mut registered = self
+                .targets
+                .lock()
+                .map_err(|error| anyhow!("插件 GC target registry 锁已损坏: {error}"))?;
+            let live = registered.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            registered.retain(|target| target.strong_count() > 0);
+            live
+        };
+
+        let mut released = 0usize;
+        for target in targets {
+            released = released.saturating_add(target.invalidate_plugin(plugin_id)?);
+        }
+        Ok(released)
     }
 
     pub fn sweep_once(&self) -> Result<PluginGcStats> {
@@ -587,7 +614,7 @@ mod tests {
         let pool = controller.new_instance_pool::<u32>().expect("pool");
         pool.checkin(key("a", "qq", "c1"), 1).expect("checkin");
         pool.checkin(key("b", "qq", "c2"), 2).expect("checkin");
-        assert_eq!(pool.invalidate_plugin("a").expect("invalidate"), 1);
+        assert_eq!(controller.invalidate_plugin("a").expect("invalidate"), 1);
         assert_eq!(pool.pooled_len().expect("len"), 1);
     }
 }
