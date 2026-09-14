@@ -93,12 +93,29 @@ fn main() -> Result<()> {
     let plugin_permissions = plugin_catalog
         .as_ref()
         .map(|catalog| plugin_permissions::initialize(&base_dir, catalog));
+    let plugin_runtime = match (plugin_catalog.as_ref(), plugin_permissions.as_ref()) {
+        (Some(catalog), Some(permissions)) => Some(plugin_runtime::initialize(
+            catalog.clone(),
+            permissions.clone(),
+            std::sync::Arc::new(plugin_secrets::MemorySecretStore::default()),
+        )),
+        _ => None,
+    };
 
     tracing::info!(
         selected_wasmtime = plugin_components.selected_runtime_version(),
         cache_root = %plugin_components.cache_root().display(),
         "插件 Component 懒加载与编译缓存身份已初始化"
     );
+    if let Some(runtime) = plugin_runtime.as_ref() {
+        tracing::info!(
+            installed_plugins = runtime.catalog().plugins().len(),
+            secret_backend = "memory-nonpersistent",
+            "插件 Host service runtime 已初始化"
+        );
+    } else {
+        tracing::warn!("插件 Host service runtime 未初始化，Catalog 或权限状态不可用");
+    }
 
     match plugin_host.read() {
         Ok(host) => {
@@ -130,7 +147,7 @@ fn main() -> Result<()> {
         }
         Err(error) => tracing::error!(%error, "插件会话状态锁已损坏"),
     }
-    if let Some(plugin_permissions) = plugin_permissions {
+    if let Some(plugin_permissions) = plugin_permissions.as_ref() {
         match plugin_permissions.read() {
             Ok(permissions) => {
                 tracing::info!(

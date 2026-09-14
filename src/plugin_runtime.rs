@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +13,8 @@ use crate::{
     plugin_security::SecretSlot,
     plugin_secrets::PluginSecretStore,
 };
+
+static PLUGIN_RUNTIME: OnceLock<Arc<PluginHostServices>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeLimits {
@@ -362,6 +364,32 @@ impl PluginStoreContext {
     pub fn services(&self) -> &Arc<PluginHostServices> {
         &self.services
     }
+}
+
+/// Initialize the process-wide runtime-neutral Host service façade.
+///
+/// Wasmtime stores and generated bindings should always share this object so HTTP permissions,
+/// Secret storage and route health are consistent across all plugin instances in the process.
+pub fn initialize(
+    catalog: PluginCatalog,
+    permissions: Arc<RwLock<PluginPermissionState>>,
+    secrets: Arc<dyn PluginSecretStore>,
+) -> Arc<PluginHostServices> {
+    PLUGIN_RUNTIME
+        .get_or_init(|| {
+            Arc::new(PluginHostServices::new(
+                catalog,
+                permissions,
+                PluginHttpExecutor::default(),
+                secrets,
+                PluginRuntimeLimits::default(),
+            ))
+        })
+        .clone()
+}
+
+pub fn global() -> Option<Arc<PluginHostServices>> {
+    PLUGIN_RUNTIME.get().cloned()
 }
 
 #[cfg(test)]
