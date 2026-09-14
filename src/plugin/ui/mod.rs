@@ -5,7 +5,9 @@
 //! adapter converts generated WIT values into these semantic types before they enter the registry.
 
 pub(crate) mod catalog;
+pub(crate) mod client;
 pub(crate) mod manifest;
+pub(crate) mod page_cache;
 pub(crate) mod registry;
 pub(crate) mod schema;
 pub(crate) mod theme;

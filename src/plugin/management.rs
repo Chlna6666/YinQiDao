@@ -1,15 +1,19 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::{
     component::gc,
     host::package_manager::PluginPackageManager,
     ui::{
+        self,
         manifest::UiRoutePlacement,
         registry::{self, RegisteredUiRoute},
+        schema::UiPageModel,
     },
 };
+
+const DEFAULT_UI_PAGE_CACHE_ENTRIES: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginSummary {
@@ -45,6 +49,14 @@ pub struct PluginRouteSummary {
     pub order: i32,
 }
 
+#[derive(Clone, Debug)]
+pub struct PluginPageSnapshot {
+    pub plugin_id: String,
+    pub page_id: String,
+    pub revision: u64,
+    pub model: Arc<UiPageModel>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginGcOverview {
     pub sweep_seconds: u64,
@@ -68,6 +80,13 @@ fn manager() -> Result<std::sync::Arc<PluginPackageManager>> {
     super::host::package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))
 }
 
+fn page_cache() -> Result<Arc<ui::page_cache::PluginUiPageCache>> {
+    if let Some(cache) = ui::page_cache::global() {
+        return Ok(cache);
+    }
+    ui::page_cache::initialize(DEFAULT_UI_PAGE_CACHE_ENTRIES)
+}
+
 pub fn list_installed() -> Result<Vec<PluginSummary>> {
     Ok(manager()?
         .list_installed()?
@@ -88,6 +107,9 @@ pub fn list_installed() -> Result<Vec<PluginSummary>> {
 
 pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
     let result = manager()?.import_directory(path)?;
+    if let Some(cache) = ui::page_cache::global() {
+        let _ = cache.invalidate_plugin(&result.plugin_id);
+    }
     Ok(PluginImportSummary {
         plugin_id: result.plugin_id,
         version: result.version,
@@ -99,11 +121,23 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
 }
 
 pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<bool> {
-    manager()?.set_enabled(plugin_id, enabled)
+    let changed = manager()?.set_enabled(plugin_id, enabled)?;
+    if changed && !enabled
+        && let Some(cache) = ui::page_cache::global()
+    {
+        let _ = cache.invalidate_plugin(plugin_id);
+    }
+    Ok(changed)
 }
 
 pub fn uninstall(plugin_id: &str) -> Result<bool> {
-    manager()?.uninstall(plugin_id)
+    let removed = manager()?.uninstall(plugin_id)?;
+    if removed
+        && let Some(cache) = ui::page_cache::global()
+    {
+        let _ = cache.invalidate_plugin(plugin_id);
+    }
+    Ok(removed)
 }
 
 pub fn route_summary(qualified_id: &str) -> Result<Option<PluginRouteSummary>> {
@@ -141,6 +175,61 @@ pub fn settings_routes() -> Result<Vec<PluginRouteSummary>> {
     routes_for_placement(UiRoutePlacement::Settings)
 }
 
+pub fn ui_client_ready() -> bool {
+    ui::client::global()
+        .or_else(|| Some(ui::client::initialize()))
+        .and_then(|clients| clients.is_ready().ok())
+        .unwrap_or(false)
+}
+
+pub fn page_snapshot(plugin_id: &str, page_id: &str) -> Result<Option<PluginPageSnapshot>> {
+    ensure_page_access(plugin_id, page_id)?;
+    Ok(page_cache()?
+        .get(plugin_id, page_id)?
+        .map(page_snapshot_to_summary))
+}
+
+/// Load one page on an ordinary async path. The generation ticket is acquired before invoking the
+/// guest, so update/uninstall/disable invalidation can make an in-flight result unpublishable.
+pub async fn load_page(plugin_id: &str, page_id: &str) -> Result<PluginPageSnapshot> {
+    ensure_page_access(plugin_id, page_id)?;
+    let clients = ui::client::global().unwrap_or_else(ui::client::initialize);
+    let client = clients
+        .client()?
+        .ok_or_else(|| anyhow!("插件 Component UI runtime 尚未就绪"))?;
+    let cache = page_cache()?;
+    let ticket = cache.begin_load(plugin_id, page_id)?;
+    let model = client
+        .load_page(plugin_id, page_id)
+        .await
+        .with_context(|| format!("加载插件页面失败: {plugin_id}/{page_id}"))?;
+    Ok(page_snapshot_to_summary(cache.publish(ticket, model)?))
+}
+
+fn ensure_page_access(plugin_id: &str, page_id: &str) -> Result<()> {
+    if !manager()?.is_enabled(plugin_id) {
+        bail!("插件已禁用，拒绝加载 UI 页面: {plugin_id}");
+    }
+    let registry = registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+    let registry = registry
+        .read()
+        .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
+    let qualified = format!("plugin:{plugin_id}/{page_id}");
+    if registry.page(&qualified).is_none() {
+        bail!("插件页面未注册: {qualified}");
+    }
+    Ok(())
+}
+
+fn page_snapshot_to_summary(snapshot: ui::page_cache::PluginUiPageSnapshot) -> PluginPageSnapshot {
+    PluginPageSnapshot {
+        plugin_id: snapshot.key.plugin_id,
+        page_id: snapshot.key.page_id,
+        revision: snapshot.revision,
+        model: snapshot.model,
+    }
+}
+
 pub fn gc_overview() -> Option<PluginGcOverview> {
     let gc = gc::global()?;
     let policy = gc.policy();
@@ -161,6 +250,12 @@ pub fn collect_host_resources_now() -> Result<PluginGcCollectionSummary> {
     let stats = gc::global()
         .ok_or_else(|| anyhow!("插件 Host GC 尚未初始化"))?
         .sweep_once()?;
+    if let Some(cache) = ui::page_cache::global() {
+        // UI models are bounded by schema and LRU capacity. They are not cleared during ordinary
+        // maintenance because active pages should stay warm; plugin update/disable/uninstall owns
+        // their generation invalidation.
+        let _ = cache.len()?;
+    }
     Ok(PluginGcCollectionSummary {
         released_memory_resources: stats.released_memory_resources,
         removed_disk_buckets: stats.removed_disk_buckets,
