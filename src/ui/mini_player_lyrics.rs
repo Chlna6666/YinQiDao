@@ -4,6 +4,7 @@ use super::{
     app_runtime_events,
     mini_player_view,
     player_stage::{PlaybackProgress, PlaybackTime},
+    plugin_command_palette,
     shell::MusicApp,
 };
 
@@ -21,5 +22,6 @@ pub(super) fn mini_player(
         return div().into_any_element();
     }
 
-    mini_player_view::view(app, cx, playback_progress, playback_time).into_any_element()
+    let player = mini_player_view::view(app, cx, playback_progress, playback_time).into_any_element();
+    plugin_command_palette::decorate(app, cx, player)
 }

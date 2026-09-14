@@ -16,6 +16,8 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+#[path = "plugin/command_palette.rs"]
+mod plugin_command_palette;
 #[path = "plugin/extensions.rs"]
 mod plugin_extensions;
 #[path = "plugin/input.rs"]
