@@ -41,13 +41,9 @@ fn select_workspace(target: SettingsWorkspace, cx: &mut Context<MusicApp>) {
 
 pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     let selected = workspace();
-    let active_plugin_route = plugin_navigation::current(cx)
-        .ok()
-        .flatten()
-        .filter(|target| {
-            target.summary.placement
-                == crate::plugin::ui::manifest::UiRoutePlacement::Settings
-        });
+    // Sidebar- and Settings-placement routes share the same Host content surface. Placement controls
+    // navigation exposure only; it must not grant different rendering/runtime privileges.
+    let active_plugin_route = plugin_navigation::current(cx).ok().flatten();
     let settings_routes = plugin_navigation::settings_routes().unwrap_or_default();
 
     let body = if let Some(target) = active_plugin_route.as_ref() {
@@ -94,8 +90,8 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             SharedString::from(format!("settings-plugin-route-{}", target.summary.qualified_id)),
             target.summary.title.clone(),
             active,
-            cx.listener(move |_, _, _, cx| {
-                plugin_navigation::navigate(cx, &target_for_click);
+            cx.listener(move |this, _, _, cx| {
+                plugin_navigation::navigate(this, cx, &target_for_click);
             }),
         ));
     }

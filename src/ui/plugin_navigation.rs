@@ -1,10 +1,14 @@
 use anyhow::{Result, bail};
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
+use gpui_tokio::Tokio;
 
-use crate::plugin::management::{self, PluginRouteSummary};
-use crate::plugin::ui::manifest::UiRoutePlacement;
+use crate::{
+    model::AppPage,
+    plugin::management::{self, PluginRouteSummary},
+    plugin::ui::manifest::UiRoutePlacement,
+};
 
-use super::{route, shell::MusicApp, theme};
+use super::{plugin_page_renderer, route, shell::MusicApp, theme};
 
 const PLUGIN_ROUTE_PREFIX: &str = "/plugins/";
 
@@ -58,18 +62,101 @@ pub fn current(cx: &gpui::App) -> Result<Option<PluginNavigationRoute>> {
     resolve_path(&route::current_pathname(cx))
 }
 
-pub fn navigate(cx: &mut Context<MusicApp>, target: &PluginNavigationRoute) {
+pub fn navigate(
+    app: &mut MusicApp,
+    cx: &mut Context<MusicApp>,
+    target: &PluginNavigationRoute,
+) {
+    if app.stage_open {
+        app.close_stage(cx);
+    }
+    // Reuse the existing Settings content surface as the host container for dynamic plugin pages.
+    // The router pathname remains `/plugins/...`, so native Settings and plugin routes stay distinct.
+    app.page = AppPage::Settings;
     route::navigate_path(cx, &target.pathname);
+    ensure_page_loaded(target, cx);
     cx.notify();
 }
 
-/// Temporary Host-owned route surface used until Component page-model exports are wired in.
-/// It deliberately renders only validated Host metadata and never invokes guest code from paint.
+fn ensure_page_loaded(target: &PluginNavigationRoute, cx: &mut Context<MusicApp>) {
+    let already_cached = management::page_snapshot(&target.summary.plugin_id, &target.summary.page_id)
+        .ok()
+        .flatten()
+        .is_some();
+    if already_cached || !management::ui_client_ready() {
+        return;
+    }
+
+    let plugin_id = target.summary.plugin_id.clone();
+    let page_id = target.summary.page_id.clone();
+    let task = Tokio::spawn_result(cx, async move {
+        management::load_page(&plugin_id, &page_id).await
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |this, cx| {
+            match result {
+                Ok(snapshot) => {
+                    this.status = format!(
+                        "插件页面已加载：{}/{} · rev {}",
+                        snapshot.plugin_id, snapshot.page_id, snapshot.revision
+                    );
+                }
+                Err(error) => {
+                    this.status = format!("插件页面加载失败：{error:#}");
+                }
+            }
+            cx.notify();
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+/// Render only Host-validated immutable snapshots. Loading/guest execution happens in the async
+/// navigation controller above; this function never calls the plugin runtime from paint.
 pub fn render_route_shell(
     target: &PluginNavigationRoute,
     _app: &MusicApp,
     _cx: &mut Context<MusicApp>,
 ) -> gpui::AnyElement {
+    let snapshot = management::page_snapshot(&target.summary.plugin_id, &target.summary.page_id)
+        .ok()
+        .flatten();
+
+    let body = if let Some(snapshot) = snapshot {
+        plugin_page_renderer::render_page(snapshot.model.as_ref(), None)
+    } else {
+        let runtime_ready = management::ui_client_ready();
+        div()
+            .p_4()
+            .rounded_xl()
+            .bg(theme::BG_CARD)
+            .border_1()
+            .border_color(theme::BORDER_CARD)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT_PRIMARY)
+                    .child(if runtime_ready {
+                        "正在等待插件页面快照"
+                    } else {
+                        "插件 Component UI runtime 尚未就绪"
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::TEXT_TERTIARY)
+                    .child("页面加载与 WASM 调用只在异步 controller 中发生；GPUI render/paint 不执行 guest。"),
+            )
+            .into_any_element()
+    };
+
     div()
         .size_full()
         .overflow_y_scroll()
@@ -92,39 +179,14 @@ pub fn render_route_shell(
                 )
                 .child(
                     div()
-                        .p_4()
-                        .rounded_xl()
-                        .bg(theme::BG_CARD)
-                        .border_1()
-                        .border_color(theme::BORDER_CARD)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::TEXT_PRIMARY)
-                                .child("插件页面已注册"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_SECONDARY)
-                                .child(format!(
-                                    "{} · page {} · {}",
-                                    target.summary.plugin_id,
-                                    target.summary.page_id,
-                                    target.summary.qualified_id
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_TERTIARY)
-                                .child("当前仅渲染 Host 已验证的路由壳层；声明式 UiPageModel 将由 Component runtime 异步获取并缓存，paint 阶段不会调用 WASM。"),
-                        ),
-                ),
+                        .text_xs()
+                        .text_color(theme::TEXT_TERTIARY)
+                        .child(format!(
+                            "{} · page {}",
+                            target.summary.plugin_id, target.summary.page_id
+                        )),
+                )
+                .child(body),
         )
         .into_any_element()
 }
@@ -166,7 +228,6 @@ pub fn sidebar_entry(
     active: bool,
     cx: &mut Context<MusicApp>,
 ) -> gpui::AnyElement {
-    let pathname = target.pathname.clone();
     let label = target.summary.title.clone();
     let id = SharedString::from(format!("side-plugin-{}", target.summary.qualified_id));
     let text_color = if active {
@@ -175,6 +236,7 @@ pub fn sidebar_entry(
         theme::TEXT_PRIMARY
     };
 
+    let target_for_click = target.clone();
     div()
         .id(id)
         .flex()
@@ -223,11 +285,7 @@ pub fn sidebar_entry(
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(move |this, _, _, cx| {
-                if this.stage_open {
-                    this.close_stage(cx);
-                }
-                route::navigate_path(cx, &pathname);
-                cx.notify();
+                navigate(this, cx, &target_for_click);
             }),
         )
         .into_any_element()
