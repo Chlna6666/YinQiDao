@@ -35,6 +35,8 @@ pub struct PluginUiPageLoadTicket {
     key: PluginUiPageKey,
     plugin_generation: u64,
     global_generation: u64,
+    /// Exact page revision observed when the async operation started. `None` means the page must
+    /// still be absent when the result is published; it is not a wildcard.
     expected_revision: Option<u64>,
 }
 
@@ -88,8 +90,8 @@ impl PageCacheState {
 /// Guest code never controls cache capacity, eviction, revisions or invalidation. Async runtime code
 /// obtains a generation/revision ticket before calling the guest and can publish only while that
 /// state is still current. Plugin update/uninstall prevents obsolete results from reappearing, and
-/// slower UI events cannot overwrite newer snapshots. GPUI paint reads only validated
-/// `Arc<UiPageModel>` snapshots.
+/// slower initial loads or UI events cannot overwrite newer snapshots. GPUI paint reads only
+/// validated `Arc<UiPageModel>` snapshots.
 #[derive(Debug)]
 pub struct PluginUiPageCache {
     max_entries: usize,
@@ -172,13 +174,12 @@ impl PluginUiPageCache {
         {
             bail!("插件 UI page 在加载期间已失效，拒绝发布旧页面模型");
         }
-        if let Some(expected_revision) = ticket.expected_revision {
-            let actual_revision = state.entries.get(&ticket.key).map(|entry| entry.revision);
-            if actual_revision != Some(expected_revision) {
-                bail!(
-                    "插件 UI page 在异步执行期间已被更新，拒绝乱序覆盖: expected={expected_revision}, actual={actual_revision:?}"
-                );
-            }
+        let actual_revision = state.entries.get(&ticket.key).map(|entry| entry.revision);
+        if actual_revision != ticket.expected_revision {
+            bail!(
+                "插件 UI page 在异步执行期间已被更新，拒绝乱序覆盖: expected={:?}, actual={actual_revision:?}",
+                ticket.expected_revision
+            );
         }
 
         let revision = state.next_revision();
@@ -323,12 +324,28 @@ mod tests {
     }
 
     #[test]
+    fn competing_initial_loads_use_compare_and_swap() {
+        let cache = PluginUiPageCache::new(4, UiSchemaLimits::default()).expect("cache");
+        let slow = cache.begin_load("plugin.demo", "home").expect("slow");
+        let fast = cache.begin_load("plugin.demo", "home").expect("fast");
+        let fast = cache.publish(fast, page("fast")).expect("publish fast");
+        assert!(cache.publish(slow, page("slow")).is_err());
+        let current = cache.get("plugin.demo", "home").expect("get").expect("page");
+        assert_eq!(current.revision, fast.revision);
+        assert_eq!(current.model.root, UiNode::Text { text: "fast".into() });
+    }
+
+    #[test]
     fn stale_event_cannot_overwrite_newer_revision() {
         let cache = PluginUiPageCache::new(4, UiSchemaLimits::default()).expect("cache");
         let initial = cache.begin_load("plugin.demo", "home").expect("initial");
         let initial = cache.publish(initial, page("initial")).expect("publish initial");
-        let slow = cache.begin_load("plugin.demo", "home").expect("slow event");
-        let fast = cache.begin_load("plugin.demo", "home").expect("fast event");
+        let slow = cache
+            .begin_update("plugin.demo", "home", initial.revision)
+            .expect("slow event");
+        let fast = cache
+            .begin_update("plugin.demo", "home", initial.revision)
+            .expect("fast event");
         let fast = cache.publish(fast, page("fast")).expect("publish fast");
         assert!(cache.publish(slow, page("slow")).is_err());
         let current = cache.get("plugin.demo", "home").expect("get").expect("page");
