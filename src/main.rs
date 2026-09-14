@@ -33,6 +33,7 @@ pub mod media_controls;
 mod model;
 mod online;
 mod plugin_components;
+mod plugin_engine_policy;
 mod plugin_host;
 mod plugin_http;
 mod plugin_permissions;
@@ -80,6 +81,8 @@ fn main() -> Result<()> {
         config.log.level
     );
 
+    let plugin_engine_policy = plugin_engine_policy::PluginEnginePolicy::default();
+    plugin_engine_policy.validate()?;
     let plugin_host = plugin_host::initialize(&base_dir);
     let plugin_sessions = plugin_sessions::initialize(&plugin_host);
     let plugin_components = plugin_components::initialize(&base_dir);
@@ -106,6 +109,14 @@ fn main() -> Result<()> {
         selected_wasmtime = plugin_components.selected_runtime_version(),
         cache_root = %plugin_components.cache_root().display(),
         "插件 Component 懒加载与编译缓存身份已初始化"
+    );
+    tracing::info!(
+        max_store_memory_mib = plugin_engine_policy.max_memory_mib(),
+        max_compiled_artifact_mib = plugin_engine_policy.max_compiled_artifact_mib(),
+        fuel_per_call = plugin_engine_policy.fuel_per_call,
+        epoch_tick_ms = plugin_engine_policy.epoch_tick_interval.as_millis(),
+        epoch_deadline_ticks = plugin_engine_policy.epoch_deadline_ticks(),
+        "Wasmtime Engine/Store 资源策略已校验"
     );
     if let Some(runtime) = plugin_runtime.as_ref() {
         tracing::info!(
