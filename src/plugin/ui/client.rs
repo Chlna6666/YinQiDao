@@ -31,19 +31,56 @@ pub enum PluginUiEvent {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginUiResponse {
-    /// Replacement page model. `None` means the current Host snapshot remains valid.
     pub page: Option<UiPageModel>,
-    /// Optional short status text for the Host UI surface.
     pub toast: Option<String>,
-    /// Request that the Host leave the plugin route after applying the response.
     pub close: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCommandSurface {
+    CommandPalette,
+    TrackContext,
+    PlaylistContext,
+    PageLocal,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiCommandTrackContext {
+    pub title: String,
+    pub artists: Vec<String>,
+    pub album: String,
+    pub duration_ms: Option<u64>,
+    pub provider_id: Option<String>,
+    pub source_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiCommandPlaylistContext {
+    pub name: Option<String>,
+    pub provider_id: Option<String>,
+    pub source_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiCommandContext {
+    pub surface: UiCommandSurface,
+    pub page_id: Option<String>,
+    pub track: Option<UiCommandTrackContext>,
+    pub playlist: Option<UiCommandPlaylistContext>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiCommandResponse {
+    pub toast: Option<String>,
+    /// Local page id in the same plugin namespace. Host validates it before navigation.
+    pub open_page_id: Option<String>,
 }
 
 /// Runtime-neutral semantic boundary for Component UI exports.
 ///
 /// The Wasmtime adapter implements this trait. GPUI must never invoke it from `render`/paint;
-/// ordinary async controller code loads a page or dispatches an event, validates the returned model,
-/// and publishes an immutable snapshot into `PluginUiPageCache`.
+/// ordinary async controller code loads a page, dispatches an event, or invokes a command. The
+/// runtime-port layer wraps this adapter with Host call budgets before publishing it to UI callers.
 pub trait PluginUiClient: Send + Sync {
     fn load_page<'a>(
         &'a self,
@@ -57,12 +94,15 @@ pub trait PluginUiClient: Send + Sync {
         page_id: &'a str,
         event: PluginUiEvent,
     ) -> PluginUiFuture<'a, PluginUiResponse>;
+
+    fn invoke_command<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        command_id: &'a str,
+        context: UiCommandContext,
+    ) -> PluginUiFuture<'a, UiCommandResponse>;
 }
 
-/// Process-wide hot-swappable UI client slot. A runtime reload swaps the `Arc`; existing async
-/// operations retain their old client until completion and page-cache generation checks prevent an
-/// obsolete result from being published after plugin update/uninstall. During the coordinated
-/// Provider/UI swap window, reads fail closed so no caller observes mismatched adapters.
 #[derive(Default)]
 pub struct PluginUiClientRegistry {
     client: RwLock<Option<Arc<dyn PluginUiClient>>>,

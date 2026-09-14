@@ -10,7 +10,10 @@ use super::{
     host::runtime::{self as host_runtime, PluginCallKey, PluginHostServices},
     ui::{
         self,
-        client::{PluginUiClient, PluginUiEvent, PluginUiFuture, PluginUiResponse},
+        client::{
+            PluginUiClient, PluginUiEvent, PluginUiFuture, PluginUiResponse, UiCommandContext,
+            UiCommandResponse,
+        },
         schema::UiPageModel,
     },
 };
@@ -50,8 +53,8 @@ fn begin_swap() -> Result<PortSwapGuard> {
 }
 
 /// Host-owned proxy for every plugin-level UI export. Provider calls already pass through
-/// `PluginServiceFrontend`; this proxy gives UI page/event calls the same concurrency, deadline and
-/// circuit policy without making `plugin::ui` depend on Host runtime internals.
+/// `PluginServiceFrontend`; this proxy gives UI page/event/command calls the same concurrency,
+/// deadline and circuit policy without making `plugin::ui` depend on Host runtime internals.
 struct BudgetedUiAdapter<T> {
     inner: Arc<T>,
     runtime: Arc<PluginHostServices>,
@@ -87,6 +90,22 @@ where
                 .execute_guest_call(
                     PluginCallKey::plugin(plugin_id),
                     self.inner.handle_event(plugin_id, page_id, event),
+                )
+                .await
+        })
+    }
+
+    fn invoke_command<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        command_id: &'a str,
+        context: UiCommandContext,
+    ) -> PluginUiFuture<'a, UiCommandResponse> {
+        Box::pin(async move {
+            self.runtime
+                .execute_guest_call(
+                    PluginCallKey::plugin(plugin_id),
+                    self.inner.invoke_command(plugin_id, command_id, context),
                 )
                 .await
         })

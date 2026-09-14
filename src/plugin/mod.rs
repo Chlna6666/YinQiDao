@@ -13,6 +13,7 @@
 //!   Component internals directly.
 //! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
 //!   plugin package paths into GPUI.
+//! - `commands` owns Host-authorized command invocation and context minimization.
 //! - `runtime_ports` coordinates Provider/UI adapter replacement so readers never observe a
 //!   half-swapped Component runtime.
 //! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
@@ -26,6 +27,7 @@ use anyhow::Result;
 
 pub(crate) mod abi;
 pub(crate) mod client;
+pub(crate) mod commands;
 pub(crate) mod extensions;
 pub(crate) mod frontend;
 pub(crate) mod management;
