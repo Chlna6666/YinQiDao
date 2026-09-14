@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +22,14 @@ pub struct PluginRuntimeLimits {
     pub max_concurrent_calls_per_route: usize,
     pub failure_threshold: u32,
     pub circuit_open_for: Duration,
+    /// Wall-clock deadline for one guest export invocation. Wasmtime epoch interruption will use
+    /// the same policy once the engine integration lands, while this timeout also protects the Host
+    /// from a future that stalls outside Wasmtime itself.
+    pub call_timeout: Duration,
+    /// Backoff used when a provider returns HTTP 429 without an integer Retry-After value.
+    pub rate_limit_default_backoff: Duration,
+    /// Upper bound for plugin-controlled/server-provided Retry-After delays.
+    pub rate_limit_max_backoff: Duration,
 }
 
 impl Default for PluginRuntimeLimits {
@@ -29,6 +38,9 @@ impl Default for PluginRuntimeLimits {
             max_concurrent_calls_per_route: 4,
             failure_threshold: 5,
             circuit_open_for: Duration::from_secs(30),
+            call_timeout: Duration::from_secs(30),
+            rate_limit_default_backoff: Duration::from_secs(30),
+            rate_limit_max_backoff: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -63,6 +75,21 @@ struct RouteHealth {
     in_flight: usize,
     consecutive_failures: u32,
     circuit_open_until: Option<Instant>,
+    retry_not_before: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PluginRouteHealthSnapshot {
+    pub in_flight: usize,
+    pub consecutive_failures: u32,
+    pub circuit_open_for: Option<Duration>,
+    pub retry_after: Option<Duration>,
+}
+
+impl PluginRouteHealthSnapshot {
+    pub fn is_available(&self) -> bool {
+        self.circuit_open_for.is_none() && self.retry_after.is_none()
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +102,15 @@ impl RuntimeHealthState {
     fn new(mut limits: PluginRuntimeLimits) -> Self {
         limits.max_concurrent_calls_per_route = limits.max_concurrent_calls_per_route.max(1);
         limits.failure_threshold = limits.failure_threshold.max(1);
+        if limits.call_timeout.is_zero() {
+            limits.call_timeout = Duration::from_millis(1);
+        }
+        if limits.rate_limit_max_backoff.is_zero() {
+            limits.rate_limit_max_backoff = Duration::from_millis(1);
+        }
+        limits.rate_limit_default_backoff = limits
+            .rate_limit_default_backoff
+            .min(limits.rate_limit_max_backoff);
         Self {
             limits,
             routes: HashMap::new(),
@@ -122,6 +158,8 @@ impl PluginCallPermit {
                 route.circuit_open_until = Some(Instant::now() + limits.circuit_open_for);
             }
         }
+        // Deliberately do not clear `retry_not_before` on guest success. A guest may treat a 429 as
+        // a handled result; the Host-level provider backoff must still protect future calls.
         self.finished = true;
         Ok(())
     }
@@ -189,13 +227,32 @@ impl PluginHostServices {
             .map_err(|error| anyhow!("插件运行健康状态锁已损坏: {error}"))?;
         let limits = health.limits.clone();
         let route = health.routes.entry(key.clone()).or_default();
+        let now = Instant::now();
+
+        if let Some(until) = route.retry_not_before {
+            if let Some(remaining) = until.checked_duration_since(now) {
+                if !remaining.is_zero() {
+                    bail!(
+                        "插件路由处于限流退避: {}/{}，剩余 {} ms",
+                        key.plugin_id,
+                        key.provider_id.as_deref().unwrap_or("*"),
+                        remaining.as_millis()
+                    );
+                }
+            }
+            route.retry_not_before = None;
+        }
+
         if let Some(until) = route.circuit_open_until {
-            if until > Instant::now() {
-                bail!(
-                    "插件路由熔断中: {}/{}",
-                    key.plugin_id,
-                    key.provider_id.as_deref().unwrap_or("*")
-                );
+            if let Some(remaining) = until.checked_duration_since(now) {
+                if !remaining.is_zero() {
+                    bail!(
+                        "插件路由熔断中: {}/{}，剩余 {} ms",
+                        key.plugin_id,
+                        key.provider_id.as_deref().unwrap_or("*"),
+                        remaining.as_millis()
+                    );
+                }
             }
             route.circuit_open_until = None;
             route.consecutive_failures = 0;
@@ -213,6 +270,89 @@ impl PluginHostServices {
             key,
             health: self.health.clone(),
             finished: false,
+        })
+    }
+
+    /// Execute one guest export under the shared route budget and wall-clock deadline.
+    ///
+    /// Generated Wasmtime bindings should use this wrapper for every exported provider operation.
+    /// Wasmtime epoch interruption will provide engine-level preemption too; this outer deadline is
+    /// still required for Host futures/import work around the guest call.
+    pub async fn execute_guest_call<T, F>(&self, key: PluginCallKey, call: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let timeout = self
+            .health
+            .lock()
+            .map_err(|error| anyhow!("插件运行健康状态锁已损坏: {error}"))?
+            .limits
+            .call_timeout;
+        let permit = self.acquire_call(key.clone())?;
+        match tokio::time::timeout(timeout, call).await {
+            Ok(Ok(value)) => {
+                permit.finish_success()?;
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                let _ = permit.finish_failure();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = permit.finish_failure();
+                bail!(
+                    "插件调用超过 {} ms: {}/{}",
+                    timeout.as_millis(),
+                    key.plugin_id,
+                    key.provider_id.as_deref().unwrap_or("*")
+                )
+            }
+        }
+    }
+
+    /// Record provider throttling independently from the failure circuit. A 429 may be a valid API
+    /// response that the guest handles, but future calls still need to respect server backoff.
+    pub fn record_rate_limit(
+        &self,
+        key: &PluginCallKey,
+        retry_after: Option<Duration>,
+    ) -> Result<Duration> {
+        self.validate_call_key(key)?;
+        let mut health = self
+            .health
+            .lock()
+            .map_err(|error| anyhow!("插件运行健康状态锁已损坏: {error}"))?;
+        let limits = health.limits.clone();
+        let applied = retry_after
+            .unwrap_or(limits.rate_limit_default_backoff)
+            .min(limits.rate_limit_max_backoff);
+        let route = health.routes.entry(key.clone()).or_default();
+        if applied.is_zero() {
+            route.retry_not_before = None;
+            return Ok(applied);
+        }
+
+        let candidate = Instant::now() + applied;
+        route.retry_not_before = Some(match route.retry_not_before {
+            Some(existing) if existing > candidate => existing,
+            _ => candidate,
+        });
+        Ok(applied)
+    }
+
+    pub fn route_health(&self, key: &PluginCallKey) -> Result<PluginRouteHealthSnapshot> {
+        self.validate_call_key(key)?;
+        let health = self
+            .health
+            .lock()
+            .map_err(|error| anyhow!("插件运行健康状态锁已损坏: {error}"))?;
+        let route = health.routes.get(key).cloned().unwrap_or_default();
+        let now = Instant::now();
+        Ok(PluginRouteHealthSnapshot {
+            in_flight: route.in_flight,
+            consecutive_failures: route.consecutive_failures,
+            circuit_open_for: remaining_deadline(route.circuit_open_until, now),
+            retry_after: remaining_deadline(route.retry_not_before, now),
         })
     }
 
@@ -238,7 +378,12 @@ impl PluginHostServices {
             .grant_for(plugin_id)
             .cloned()
             .ok_or_else(|| anyhow!("插件 {plugin_id} 尚未获得网络权限"))?;
-        self.http.execute(&plugin.manifest, &grant, request).await
+        let response = self.http.execute(&plugin.manifest, &grant, request).await?;
+        if response.status == 429 {
+            let key = PluginCallKey::provider(plugin_id, provider_id);
+            self.record_rate_limit(&key, retry_after_delay(&response))?;
+        }
+        Ok(response)
     }
 
     pub fn secret_get(
@@ -325,6 +470,21 @@ impl PluginHostServices {
     }
 }
 
+fn remaining_deadline(until: Option<Instant>, now: Instant) -> Option<Duration> {
+    until
+        .and_then(|until| until.checked_duration_since(now))
+        .filter(|duration| !duration.is_zero())
+}
+
+fn retry_after_delay(response: &PluginHttpResponse) -> Option<Duration> {
+    response
+        .headers
+        .iter()
+        .find(|header| header.key.eq_ignore_ascii_case("retry-after"))
+        .and_then(|header| header.value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
 fn validate_optional_account_id(account_id: Option<&str>) -> Result<()> {
     if let Some(account_id) = account_id
         && (account_id.trim().is_empty() || account_id.len() > 512 || account_id.contains('\0'))
@@ -364,6 +524,26 @@ impl PluginStoreContext {
     pub fn services(&self) -> &Arc<PluginHostServices> {
         &self.services
     }
+
+    pub fn call_key(&self, provider_id: Option<&str>) -> PluginCallKey {
+        match provider_id {
+            Some(provider_id) => PluginCallKey::provider(&self.plugin_id, provider_id),
+            None => PluginCallKey::plugin(&self.plugin_id),
+        }
+    }
+
+    pub async fn execute_guest_call<T, F>(
+        &self,
+        provider_id: Option<&str>,
+        call: F,
+    ) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.services
+            .execute_guest_call(self.call_key(provider_id), call)
+            .await
+    }
 }
 
 /// Initialize the process-wide runtime-neutral Host service façade.
@@ -395,6 +575,7 @@ pub fn global() -> Option<Arc<PluginHostServices>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::KeyValue;
 
     #[test]
     fn dropped_permit_counts_as_failure_and_eventually_opens_circuit() {
@@ -402,6 +583,7 @@ mod tests {
             max_concurrent_calls_per_route: 1,
             failure_threshold: 2,
             circuit_open_for: Duration::from_secs(60),
+            ..PluginRuntimeLimits::default()
         })));
         let key = PluginCallKey::provider("plugin.test", "qqmusic");
 
@@ -421,6 +603,25 @@ mod tests {
         let route = state.routes.get(&key).expect("route");
         assert_eq!(route.consecutive_failures, 2);
         assert!(route.circuit_open_until.is_some());
+    }
+
+    #[test]
+    fn retry_after_seconds_header_is_parsed() {
+        let response = PluginHttpResponse {
+            status: 429,
+            headers: vec![KeyValue {
+                key: "Retry-After".into(),
+                value: "120".into(),
+            }],
+            body: Vec::new(),
+        };
+        assert_eq!(retry_after_delay(&response), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn expired_deadline_is_not_reported_as_active() {
+        let now = Instant::now();
+        assert_eq!(remaining_deadline(Some(now), now), None);
     }
 
     #[test]
