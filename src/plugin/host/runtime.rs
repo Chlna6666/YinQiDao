@@ -59,10 +59,7 @@ impl PluginCallKey {
         }
     }
 
-    pub fn provider(
-        plugin_id: impl Into<String>,
-        provider_id: impl Into<String>,
-    ) -> Self {
+    pub fn provider(plugin_id: impl Into<String>, provider_id: impl Into<String>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             provider_id: Some(provider_id.into()),
@@ -194,7 +191,9 @@ impl Drop for PluginCallPermit {
 /// authority for security decisions.
 #[derive(Clone)]
 pub struct PluginHostServices {
-    catalog: PluginCatalog,
+    /// Live package catalog. Package management swaps this snapshot only after a package operation
+    /// has committed, so Host imports never authorize against stale provider/domain metadata.
+    catalog: Arc<RwLock<PluginCatalog>>,
     permissions: Arc<RwLock<PluginPermissionState>>,
     http: PluginHttpExecutor,
     secrets: Arc<dyn PluginSecretStore>,
@@ -210,7 +209,7 @@ impl PluginHostServices {
         limits: PluginRuntimeLimits,
     ) -> Self {
         Self {
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             permissions,
             http,
             secrets,
@@ -218,8 +217,37 @@ impl PluginHostServices {
         }
     }
 
-    pub fn catalog(&self) -> &PluginCatalog {
-        &self.catalog
+    pub fn catalog_snapshot(&self) -> Result<PluginCatalog> {
+        self.catalog
+            .read()
+            .map(|catalog| catalog.clone())
+            .map_err(|error| anyhow!("插件 runtime catalog 锁已损坏: {error}"))
+    }
+
+    /// Atomically publish a newly discovered package catalog to Host execution paths and drop route
+    /// health belonging to providers that no longer exist. In-flight calls retain their immutable
+    /// Component/package snapshot and cannot make the new catalog stale again.
+    pub fn replace_catalog(&self, catalog: PluginCatalog) -> Result<()> {
+        {
+            let mut current = self
+                .catalog
+                .write()
+                .map_err(|error| anyhow!("插件 runtime catalog 锁已损坏: {error}"))?;
+            *current = catalog.clone();
+        }
+        let mut health = self
+            .health
+            .lock()
+            .map_err(|error| anyhow!("插件运行健康状态锁已损坏: {error}"))?;
+        health.routes.retain(|key, _| {
+            let Some(plugin) = catalog.plugin(&key.plugin_id) else {
+                return false;
+            };
+            key.provider_id
+                .as_deref()
+                .is_none_or(|provider_id| plugin.provider(provider_id).is_some())
+        });
+        Ok(())
     }
 
     pub fn acquire_call(&self, key: PluginCallKey) -> Result<PluginCallPermit> {
@@ -367,10 +395,7 @@ impl PluginHostServices {
         account_id: Option<&str>,
         request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse> {
-        let plugin = self
-            .catalog
-            .plugin(plugin_id)
-            .ok_or_else(|| anyhow!("未安装插件: {plugin_id}"))?;
+        let plugin = self.plugin_snapshot(plugin_id)?;
         if plugin.provider(provider_id).is_none() {
             bail!("插件 {plugin_id} 未声明 provider {provider_id}");
         }
@@ -424,10 +449,9 @@ impl PluginHostServices {
         self.secrets.delete(&slot)
     }
 
+    /// Host cleanup is allowed after the package disappeared from the live catalog. This function is
+    /// not exposed to the guest; package management owns the plugin id passed here.
     pub fn revoke_all_plugin_secrets(&self, plugin_id: &str) -> Result<usize> {
-        if self.catalog.plugin(plugin_id).is_none() {
-            bail!("未安装插件: {plugin_id}");
-        }
         self.secrets.delete_plugin(plugin_id)
     }
 
@@ -446,10 +470,7 @@ impl PluginHostServices {
         account_id: Option<&str>,
         key: &str,
     ) -> Result<SecretSlot> {
-        let plugin = self
-            .catalog
-            .plugin(plugin_id)
-            .ok_or_else(|| anyhow!("未安装插件: {plugin_id}"))?;
+        let plugin = self.plugin_snapshot(plugin_id)?;
         if plugin.provider(provider_id).is_none() {
             bail!("插件 {plugin_id} 未声明 provider {provider_id}");
         }
@@ -460,11 +481,25 @@ impl PluginHostServices {
         }
     }
 
+    fn plugin_snapshot(&self, plugin_id: &str) -> Result<crate::plugin_host::InstalledPlugin> {
+        self.ensure_plugin_enabled(plugin_id)?;
+        self.catalog
+            .read()
+            .map_err(|error| anyhow!("插件 runtime catalog 锁已损坏: {error}"))?
+            .plugin(plugin_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未安装插件: {plugin_id}"))
+    }
+
+    fn ensure_plugin_enabled(&self, plugin_id: &str) -> Result<()> {
+        if super::package_manager::global().is_some_and(|manager| !manager.is_enabled(plugin_id)) {
+            bail!("插件已禁用，拒绝 Host runtime 调用: {plugin_id}");
+        }
+        Ok(())
+    }
+
     fn validate_call_key(&self, key: &PluginCallKey) -> Result<()> {
-        let plugin = self
-            .catalog
-            .plugin(&key.plugin_id)
-            .ok_or_else(|| anyhow!("未安装插件: {}", key.plugin_id))?;
+        let plugin = self.plugin_snapshot(&key.plugin_id)?;
         if let Some(provider_id) = key.provider_id.as_deref()
             && plugin.provider(provider_id).is_none()
         {
@@ -512,9 +547,7 @@ pub struct PluginStoreContext {
 impl PluginStoreContext {
     pub fn new(plugin_id: impl Into<String>, services: Arc<PluginHostServices>) -> Result<Self> {
         let plugin_id = plugin_id.into();
-        if services.catalog.plugin(&plugin_id).is_none() {
-            bail!("不能为未安装插件创建 Store context: {plugin_id}");
-        }
+        services.validate_call_key(&PluginCallKey::plugin(plugin_id.clone()))?;
         Ok(Self {
             plugin_id,
             services,
