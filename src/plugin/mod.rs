@@ -10,6 +10,8 @@
 //! - `assets` owns Host-authorized static plugin image loading/normalization and its bounded cache.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
+//! - `recognition` extends that façade with Host-computed fingerprint Recognition while reusing the
+//!   same session, routing, health and runtime boundaries.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
 //! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
@@ -43,6 +45,8 @@ pub(crate) mod extensions;
 pub(crate) mod frontend;
 #[path = "application/management.rs"]
 pub(crate) mod management;
+#[path = "application/recognition.rs"]
+pub(crate) mod recognition;
 #[path = "runtime/ports.rs"]
 pub(crate) mod runtime_ports;
 
