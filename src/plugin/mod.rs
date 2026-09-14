@@ -20,17 +20,27 @@
 //!   it must not depend on GPUI or Wasmtime.
 //! - `online` may consume `frontend` plus selected `abi` values, never Host/Component internals.
 //! - No path in this subsystem may be invoked from the realtime audio callback.
+//!
+//! Physical source layout follows the same ownership model: application-facing façades live under
+//! `application/`, runtime semantic ports live under `runtime/`, while Host/Component/UI internals
+//! remain in their dedicated directories. `#[path]` keeps the public Rust module paths stable.
 
 use std::path::Path;
 
 use anyhow::Result;
 
 pub(crate) mod abi;
+#[path = "runtime/client.rs"]
 pub(crate) mod client;
+#[path = "application/commands.rs"]
 pub(crate) mod commands;
+#[path = "application/extensions.rs"]
 pub(crate) mod extensions;
+#[path = "application/frontend.rs"]
 pub(crate) mod frontend;
+#[path = "application/management.rs"]
 pub(crate) mod management;
+#[path = "runtime/ports.rs"]
 pub(crate) mod runtime_ports;
 
 pub(crate) mod component;
