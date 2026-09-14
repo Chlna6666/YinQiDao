@@ -32,17 +32,23 @@
 - [ ] 使用 Wasmtime Component `bindgen!` 从开发期 WIT v1 生成宿主与 guest binding，禁止手写易漂移 ABI。
 - [x] 建立 runtime-neutral `PluginHostServices` / `PluginStoreContext`，后续 Wasmtime generated Host traits 只负责类型转换，权限/网络/Secret/熔断决策继续留在独立 Host service 层。
 - [x] 建立 per-plugin/per-provider call permit：限制并发，连续错误/timeout/cancel/panic 累积失败并短时熔断对应 route，成功调用清零连续失败。
+- [x] 建立统一 guest-call wrapper：普通 Host future 有 30 秒 wall-clock deadline；429 根据整数 `Retry-After` 或默认退避写入 provider route，退避时间有 Host 上限且不会被 guest “成功处理 429”意外清除。
+- [x] 暴露 `PluginRouteHealthSnapshot`，包含 in-flight、连续失败、circuit 剩余时间和 rate-limit 剩余时间，为 P3 routing health 接入提供稳定数据面。
+- [x] 建立 runtime-neutral `PluginEnginePolicy`：集中定义 Store memory/table/instance、route warm pool、fuel、epoch tick/deadline 和 compiled artifact 上限，并在应用启动时校验硬上限。
 - [x] 插件目录：`<config>/plugins/<plugin-id>/`；`plugin.toml` v1 描述 component、manifest 与网络域名声明。
 - [x] 启动时仅扫描/校验 manifest 与 component 路径，不 instantiate WASM；为后续 component 懒加载保留边界。
+- [x] Component 首次使用时重新 canonicalize 路径、限制体积、读取不可变 snapshot，并基于 ABI/Wasmtime/OS/arch/内容生成 cache bucket locator。
+- [x] compiled cache 信任边界已收紧：MD5 只负责目录分桶，未来 `.cwasm` 反序列化前必须存在 Host sidecar，且 `source.wasm` 与当前 snapshot 逐字节完全一致；碰撞不能获得复用资格。
 - [x] 校验插件/Provider ID、ABI、重复 capability/auth method、component 路径逃逸与静态 network domain allowlist。
 - [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
 - [x] 建立 Host HTTP preflight：目标必须同时命中 manifest 声明和用户 grant；首版仅允许 HTTPS，redirect 必须重新授权，并拒绝 IP literal/明显本地域名。
 - [x] 建立 `<config>/plugin-permissions.json` 权限索引；用户 grant 只能等于或缩小 manifest 声明范围，插件更新不能借已有授权静默扩大网络/PlaybackEvents 权限。
 - [x] 建立 Host HTTP executor：DNS 在阻塞 worker 解析，过滤 loopback/private/link-local/documentation/benchmark/NAT64/Teredo/6to4 等特殊地址后使用 `resolve_to_addrs` 固定到本次 hop；关闭自动 redirect/系统代理继承，redirect 逐 hop 重新授权和解析。
 - [x] Host HTTP executor 限制 method/header/request body/response body/timeout/redirect 次数；跨 origin redirect 自动剥离 Authorization/Cookie，response 使用 bounded chunk 读取。
-- [ ] 将 Host HTTP executor 接到 generated WIT `host.http-request`，并加入 429/backoff、连接池和显式 Host proxy 策略。
-- [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/Wasmtime/CPU feature 变化自动失效。
-- [ ] 对 Wasmtime Store/实例设置 memory limit、fuel/epoch interruption、call timeout 与实例池上限。
+- [x] Host runtime 已接入 429 provider backoff；非法/过长 `Retry-After` 不可无限延长 Host route block。
+- [ ] 将 Host HTTP executor 接到 generated WIT `host.http-request`，并加入连接池复用和显式 Host proxy 策略。
+- [ ] 真正接入 Wasmtime `Component::new` / serialize / deserialize；compiled artifact 必须写入大小上限并使用上述 source verifier，CPU feature/engine config 变化需要纳入失效条件。
+- [ ] 将 `PluginEnginePolicy` 映射到 Wasmtime `Config` / `StoreLimits` / fuel / epoch interruption / 实例池，不能只停留在声明层。
 - [ ] 默认不授予 filesystem、raw socket、process、environment 权限。
 - [ ] 所有 HTTP 走 host-mediated HTTP import，WASM 不持有 raw socket。
 - [ ] 插件调用只允许运行在普通 async/worker 路径，严禁进入 realtime audio callback。
@@ -73,7 +79,7 @@
 - [ ] 识别流程改为：Host 计算一次 fingerprint -> 已登录插件 Recognition fan-out/priority -> built-in remote recognition -> AcoustID/local fallback。
 - [ ] 保持“元数据 Provider 与歌词 Provider 解耦”：QQ 元数据命中仍可选择网易云 YRC/TTML 等更高质量 authored word timing。
 - [ ] artwork 同样独立选择最匹配来源，不能因 metadata winner 强制绑定封面来源。
-- [ ] 将 `PluginHostServices` 的健康状态接入 routing：连续 timeout/429/5xx 触发短时 circuit breaker，并在健康恢复后自动重新参与路由。
+- [ ] 将现有 `PluginRouteHealthSnapshot` 接入 routing：circuit/rate-limit route 暂时不参与选择；连续 5xx 的 guest/provider 策略在 generated binding 接入后补齐。
 
 ### P4：统一在线曲库与播放
 
