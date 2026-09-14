@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::PluginManifest;
+use crate::plugin::abi::PluginManifest;
 
 const SECRET_KEY_SCHEMA_VERSION: &str = "v1";
 
@@ -277,14 +277,14 @@ fn valid_namespace_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::PluginManifest;
+    use crate::plugin::abi::PLUGIN_ABI_VERSION;
 
     fn manifest(domains: &[&str]) -> PluginManifest {
         PluginManifest {
             id: "plugin.test".into(),
             name: "Test".into(),
             version: "0.1.0".into(),
-            abi_version: crate::plugins::PLUGIN_ABI_VERSION,
+            abi_version: PLUGIN_ABI_VERSION,
             description: String::new(),
             homepage: None,
             providers: Vec::new(),
