@@ -12,7 +12,7 @@ use crate::plugin::{
     },
 };
 
-use super::{shell::MusicApp, theme};
+use super::{plugin_theme, shell::MusicApp, theme};
 
 #[derive(Clone, Debug, Default)]
 struct PluginExtensionsSnapshot {
@@ -185,7 +185,8 @@ fn load_home_section(qualified_id: String, cx: &mut Context<MusicApp>) {
     .detach();
 }
 
-fn validate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
+fn activate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
+    let expected_generation = extensions::theme_registry_generation();
     {
         let Ok(mut state) = state().lock() else {
             return;
@@ -194,13 +195,14 @@ fn validate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
             return;
         }
         state.operation_in_flight = true;
-        state.status = format!("正在校验 Theme {qualified_id}…");
+        state.status = format!("正在应用 Theme {qualified_id}…");
     }
 
     let task = Tokio::spawn_result(cx, async move {
-        tokio::task::spawn_blocking(move || extensions::load_theme(&qualified_id))
+        let snapshot = tokio::task::spawn_blocking(move || extensions::load_theme(&qualified_id))
             .await
-            .map_err(|_| anyhow!("插件 Theme 校验任务异常退出"))?
+            .map_err(|_| anyhow!("插件 Theme 加载任务异常退出"))??;
+        Ok((expected_generation, snapshot))
     });
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
@@ -208,28 +210,16 @@ fn validate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
             if let Ok(mut state) = state().lock() {
                 state.operation_in_flight = false;
                 state.status = match result {
-                    Ok(theme) => {
-                        let semantic_colors = [
-                            theme.background.as_ref(),
-                            theme.surface.as_ref(),
-                            theme.surface_elevated.as_ref(),
-                            theme.text_primary.as_ref(),
-                            theme.text_secondary.as_ref(),
-                            theme.accent.as_ref(),
-                            theme.border.as_ref(),
-                            theme.success.as_ref(),
-                            theme.warning.as_ref(),
-                            theme.error.as_ref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .count();
-                        format!(
-                            "Theme {} 校验通过：{} 个颜色 token",
-                            theme.display_name, semantic_colors
-                        )
+                    Ok((generation, snapshot)) => {
+                        match plugin_theme::activate_snapshot(&snapshot, generation) {
+                            Ok(selection) => format!(
+                                "Theme {} 已应用到插件页面；Host 主界面主题保持不变",
+                                selection.display_name
+                            ),
+                            Err(error) => format!("Theme 应用失败：{error}"),
+                        }
                     }
-                    Err(error) => format!("Theme 校验失败：{error:#}"),
+                    Err(error) => format!("Theme 应用失败：{error:#}"),
                 };
             }
             cx.notify();
@@ -239,18 +229,27 @@ fn validate_theme(qualified_id: String, cx: &mut Context<MusicApp>) {
     .detach();
 }
 
+fn restore_host_theme(cx: &mut Context<MusicApp>) {
+    plugin_theme::clear_active_theme();
+    if let Ok(mut state) = state().lock() {
+        state.status = "已恢复 Host Theme；插件页面不再使用插件 Theme".into();
+    }
+    cx.notify();
+}
+
 pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     let current = snapshot();
     if !current.loaded && !current.loading && !current.operation_in_flight {
         refresh(cx);
     }
     let current = snapshot();
+    let active_theme = plugin_theme::active_selection();
 
     let mut command_list = div().flex().flex_col().gap_2();
     if current.commands.is_empty() {
         command_list = command_list.child(empty_state("暂无 Command contribution"));
     } else {
-        for command in current.commands.iter().cloned() {
+        for command in current.commands.iter() {
             let can_invoke = command
                 .surfaces
                 .contains(&PluginCommandSurface::CommandPalette);
@@ -282,7 +281,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT_PRIMARY)
-                                    .child(command.title),
+                                    .child(command.title.clone()),
                             )
                             .child(
                                 div()
@@ -321,7 +320,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
     if current.home_sections.is_empty() {
         home = home.child(empty_state("暂无 Home section contribution"));
     } else {
-        for section in current.home_sections.iter().cloned() {
+        for section in current.home_sections.iter() {
             let qualified = section.qualified_id.clone();
             home = home.child(
                 div()
@@ -344,7 +343,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT_PRIMARY)
-                                    .child(section.title),
+                                    .child(section.title.clone()),
                             )
                             .child(
                                 div()
@@ -382,18 +381,86 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
         }
     }
 
-    let mut themes = div().flex().flex_col().gap_2();
+    let mut themes = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .p_3()
+                .rounded_lg()
+                .bg(if active_theme.is_none() {
+                    theme::accent_red_muted()
+                } else {
+                    theme::BG_CANVAS
+                })
+                .border_1()
+                .border_color(theme::BORDER_CARD)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::TEXT_PRIMARY)
+                                .child("Host Theme"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::TEXT_TERTIARY)
+                                .child("使用 YinQiDao 默认页面颜色；不会读取插件 Theme asset"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("plugin-theme-host")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .bg(theme::accent_red_muted())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::ACCENT_RED)
+                        .hover(|style| style.opacity(0.86))
+                        .active(|style| style.scale(0.98))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|_, _, _, cx| restore_host_theme(cx)),
+                        )
+                        .child(if active_theme.is_none() { "当前" } else { "恢复" }),
+                ),
+        );
+
     if current.themes.is_empty() {
         themes = themes.child(empty_state("暂无 Theme contribution"));
     } else {
-        for plugin_theme in current.themes.iter().cloned() {
-            let qualified = plugin_theme.qualified_id.clone();
+        for contributed_theme in current.themes.iter() {
+            let qualified = contributed_theme.qualified_id.clone();
+            let is_active = active_theme
+                .as_ref()
+                .is_some_and(|selection| selection.qualified_id == contributed_theme.qualified_id);
             themes = themes.child(
                 div()
-                    .id(SharedString::from(format!("plugin-theme-{}", plugin_theme.qualified_id)))
+                    .id(SharedString::from(format!(
+                        "plugin-theme-{}",
+                        contributed_theme.qualified_id
+                    )))
                     .p_3()
                     .rounded_lg()
-                    .bg(theme::BG_CARD)
+                    .bg(if is_active {
+                        theme::accent_red_muted()
+                    } else {
+                        theme::BG_CARD
+                    })
                     .border_1()
                     .border_color(theme::BORDER_CARD)
                     .flex()
@@ -411,19 +478,19 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT_PRIMARY)
-                                    .child(plugin_theme.display_name),
+                                    .child(contributed_theme.display_name.clone()),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme::TEXT_TERTIARY)
                                     .truncate()
-                                    .child(plugin_theme.qualified_id),
+                                    .child(contributed_theme.qualified_id.clone()),
                             ),
                     )
                     .child(
                         div()
-                            .id(SharedString::from(format!("validate-{qualified}")))
+                            .id(SharedString::from(format!("apply-{qualified}")))
                             .px_3()
                             .py_1p5()
                             .rounded_lg()
@@ -436,9 +503,11 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                             .active(|style| style.scale(0.98))
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
-                                cx.listener(move |_, _, _, cx| validate_theme(qualified.clone(), cx)),
+                                cx.listener(move |_, _, _, cx| {
+                                    activate_theme(qualified.clone(), cx)
+                                }),
                             )
-                            .child("Host 校验"),
+                            .child(if is_active { "已应用" } else { "应用" }),
                     ),
             );
         }
@@ -479,7 +548,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                     div()
                                         .text_sm()
                                         .text_color(theme::TEXT_SECONDARY)
-                                        .child("查看并验证已注册的 Command、Home Section 与 Theme；所有运行时调用均经过 Host 边界。"),
+                                        .child("查看 Command、Home Section 与 Theme；所有插件调用和静态资源读取均经过 Host 边界。"),
                                 ),
                         )
                         .child(
@@ -515,7 +584,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                             theme::TEXT_TERTIARY
                         })
                         .child(if current.status.is_empty() {
-                            "Command/Home 都经过共享 guest-call budget；Theme 文件只在选择/校验时由 Host 读取；paint 阶段不执行 I/O 或 guest code。".to_string()
+                            "Command/Home 使用共享 guest-call budget；Theme 仅在显式选择时读取并解析，paint/layout 只消费 Host 预解析 palette。".to_string()
                         } else {
                             current.status
                         }),
