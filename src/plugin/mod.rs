@@ -59,6 +59,16 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
             None
         }
     };
+
+    let ui_sync = match (catalog.as_ref(), ui_registry.write()) {
+        (Some(catalog), Ok(mut registry)) => Some(ui::catalog::sync_from_catalog(catalog, &mut registry)),
+        (Some(_), Err(error)) => {
+            tracing::error!(%error, "插件 UI contribution registry 锁已损坏");
+            None
+        }
+        (None, _) => None,
+    };
+
     let permissions = catalog
         .as_ref()
         .map(|catalog| host::permissions::initialize(base_dir, catalog));
@@ -117,6 +127,26 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         );
     } else {
         tracing::warn!("插件 Host service runtime 未初始化，Catalog 或权限状态不可用");
+    }
+
+    if let Some(report) = ui_sync.as_ref() {
+        tracing::info!(
+            registered_plugins = report.registered_plugins,
+            routes = report.routes,
+            pages = report.pages,
+            commands = report.commands,
+            home_sections = report.home_sections,
+            themes = report.themes,
+            failures = report.failures.len(),
+            "插件静态 UI contributions 已从 plugin.toml 注册"
+        );
+        for failure in &report.failures {
+            tracing::warn!(
+                plugin_id = %failure.plugin_id,
+                error = %failure.error,
+                "插件 UI contribution 加载失败"
+            );
+        }
     }
 
     match ui_registry.read() {
