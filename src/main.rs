@@ -32,6 +32,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod plugin_compiled_cache;
 mod plugin_components;
 mod plugin_engine_policy;
 mod plugin_host;
@@ -83,6 +84,8 @@ fn main() -> Result<()> {
 
     let plugin_engine_policy = plugin_engine_policy::PluginEnginePolicy::default();
     plugin_engine_policy.validate()?;
+    let plugin_compiled_cache =
+        plugin_compiled_cache::initialize(plugin_engine_policy.max_compiled_artifact_bytes);
     let plugin_host = plugin_host::initialize(&base_dir);
     let plugin_sessions = plugin_sessions::initialize(&plugin_host);
     let plugin_components = plugin_components::initialize(&base_dir);
@@ -108,7 +111,8 @@ fn main() -> Result<()> {
     tracing::info!(
         selected_wasmtime = plugin_components.selected_runtime_version(),
         cache_root = %plugin_components.cache_root().display(),
-        "插件 Component 懒加载与编译缓存身份已初始化"
+        max_compiled_artifact_bytes = plugin_compiled_cache.max_artifact_bytes(),
+        "插件 Component 懒加载与 compiled cache 边界已初始化"
     );
     tracing::info!(
         max_store_memory_mib = plugin_engine_policy.max_memory_mib(),
