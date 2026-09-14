@@ -1,14 +1,23 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
+use anyhow::Result;
 use gpui::{
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity, div, hsla,
     img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
+use gpui_tokio::Tokio;
 use lucide_gpui::icon;
 
-use crate::model::Track;
+use crate::{
+    model::Track,
+    plugin::{
+        extensions::{self, PluginHomeSectionSummary},
+        management::{self, PluginFieldValue},
+    },
+};
 
 use super::{
+    plugin_page_renderer::{self, PluginUiInteraction, PluginUiInteractionHandler},
     shell::{MusicApp, app_listener},
     theme::{
         self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
@@ -28,6 +37,7 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
             .gap_8()
             .child(header(app, view))
             .child(empty_state(app, view))
+            .children(plugin_home_sections(view))
             .into_any_element();
     }
 
@@ -41,9 +51,171 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
         .gap_8()
         .child(header(app, view))
         .child(stats_overview(app))
+        .children(plugin_home_sections(view))
         .child(featured_albums_section(app, view))
         .child(recent_tracks_section(app, view))
         .into_any_element()
+}
+
+fn plugin_home_sections(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement> {
+    let sections = extensions::home_sections().ok()?;
+    if sections.is_empty() {
+        return None;
+    }
+    let interactive = management::ui_client_ready();
+    let mut list = div().w_full().flex().flex_col().gap_4();
+    for section in sections {
+        let body = match extensions::home_section_snapshot(&section.qualified_id) {
+            Ok(Some(snapshot)) => {
+                let handler = interactive.then(|| home_plugin_interaction_handler(&section, view));
+                plugin_page_renderer::render_plugin_page(
+                    &section.plugin_id,
+                    snapshot.model.as_ref(),
+                    handler,
+                )
+            }
+            Ok(None) => plugin_home_placeholder("正在加载插件扩展内容…"),
+            Err(_) => plugin_home_placeholder("插件扩展暂不可用"),
+        };
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("plugin-home-section-{}", section.qualified_id)))
+                .w_full()
+                .p_4()
+                .rounded_xl()
+                .bg(theme::BG_CARD)
+                .border_1()
+                .border_color(BORDER_CARD)
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(TEXT_PRIMARY)
+                                .child(section.title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(TEXT_TERTIARY)
+                                .child(section.plugin_id),
+                        ),
+                )
+                .child(body),
+        );
+    }
+
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(TEXT_PRIMARY)
+                    .child("插件扩展"),
+            )
+            .child(list)
+            .into_any_element(),
+    )
+}
+
+fn plugin_home_placeholder(text: &'static str) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_h(px(72.0))
+        .rounded_lg()
+        .bg(theme::BG_CANVAS)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(TEXT_TERTIARY)
+        .child(text)
+        .into_any_element()
+}
+
+fn home_plugin_interaction_handler(
+    section: &PluginHomeSectionSummary,
+    view: &WeakEntity<MusicApp>,
+) -> PluginUiInteractionHandler {
+    let plugin_id = section.plugin_id.clone();
+    let page_id = section.page_id.clone();
+    let view = view.clone();
+    Rc::new(move |interaction, _window, cx| {
+        let plugin_id = plugin_id.clone();
+        let page_id = page_id.clone();
+        let _ = view.update(cx, |app, app_cx| {
+            let interaction = match interaction {
+                PluginUiInteraction::BeginInput { .. } => {
+                    app.status = "插件文本输入正在等待 Host 输入组件接入".into();
+                    app_cx.notify();
+                    return;
+                }
+                interaction => interaction,
+            };
+
+            app.status = format!("正在处理首页插件操作：{plugin_id}/{page_id}");
+            app_cx.notify();
+            let task = Tokio::spawn_result(app_cx, async move {
+                match interaction {
+                    PluginUiInteraction::Action { action_id } => {
+                        management::dispatch_action(&plugin_id, &page_id, &action_id).await
+                    }
+                    PluginUiInteraction::SelectChanged { field_id, value } => {
+                        management::dispatch_field_changed(
+                            &plugin_id,
+                            &page_id,
+                            &field_id,
+                            PluginFieldValue::Text(value),
+                        )
+                        .await
+                    }
+                    PluginUiInteraction::ToggleChanged { field_id, value } => {
+                        management::dispatch_field_changed(
+                            &plugin_id,
+                            &page_id,
+                            &field_id,
+                            PluginFieldValue::Bool(value),
+                        )
+                        .await
+                    }
+                    PluginUiInteraction::BeginInput { .. } => unreachable!("handled before dispatch"),
+                }
+            });
+            app_cx
+                .spawn(async move |this, cx| -> Result<()> {
+                    let result = task.await;
+                    this.update(cx, |this, cx| {
+                        this.status = match result {
+                            Ok(result) => result.toast.unwrap_or_else(|| {
+                                format!(
+                                    "首页插件内容已更新：{}/{} · rev {}",
+                                    result.snapshot.plugin_id,
+                                    result.snapshot.page_id,
+                                    result.snapshot.revision
+                                )
+                            }),
+                            Err(error) => format!("首页插件操作失败：{error:#}"),
+                        };
+                        cx.notify();
+                    })?;
+                    Ok(())
+                })
+                .detach();
+        });
+    })
 }
 
 fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
@@ -219,8 +391,6 @@ fn stat_badge(label: &'static str, val: String, icon: &'static str) -> impl Into
 }
 
 fn featured_albums_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
-    // 最多只展示 8 张专辑：用固定栈数组去重，避免每次 Home 重绘临时分配
-    // `Vec<&Track> + HashSet<String>` 并复制专辑名。
     let mut albums: [Option<&Track>; 8] = [None; 8];
     let mut album_count = 0_usize;
     for track in &app.tracks {
@@ -239,7 +409,6 @@ fn featured_albums_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl 
     }
 
     let mut grid = div().flex().flex_wrap().gap_5();
-
     for track in albums[..album_count].iter().flatten().copied() {
         grid = grid.child(album_card(track, app, view));
     }
@@ -315,7 +484,6 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                 .overflow_hidden()
                 .relative()
                 .child(cover)
-                // 悬停播放指示层
                 .child(
                     div()
                         .absolute()
@@ -624,7 +792,6 @@ fn current_time_greeting() -> &'static str {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // 粗略按当地时间换算（以东八区 UTC+8 为主，也可按当前系统时区）：
     let hour = ((now + 8 * 3600) % 86400) / 3600;
     if hour < 12 {
         "早上好，开启今日动听旋律"
