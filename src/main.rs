@@ -34,8 +34,8 @@ mod model;
 mod online;
 mod plugin;
 
-// Transitional crate-root aliases keep the physical module move behavior-neutral. The next
-// boundary-tightening pass rewrites call sites to `crate::plugin::*` and removes these aliases.
+// Transitional crate-root aliases keep moved plugin internals source-compatible while the next
+// boundary pass rewrites those imports to the nested module paths and removes the aliases.
 pub(crate) use plugin::abi as plugins;
 pub(crate) use plugin::client as plugin_client;
 pub(crate) use plugin::component::cache as plugin_compiled_cache;
@@ -90,118 +90,7 @@ fn main() -> Result<()> {
         config.log.level
     );
 
-    let plugin_engine_policy = plugin_engine_policy::PluginEnginePolicy::default();
-    plugin_engine_policy.validate()?;
-    let plugin_compiled_cache =
-        plugin_compiled_cache::initialize(plugin_engine_policy.max_compiled_artifact_bytes);
-    let plugin_host = plugin_host::initialize(&base_dir);
-    let plugin_secret_store = std::sync::Arc::new(plugin_secrets::MemorySecretStore::default());
-    let plugin_secret_backend =
-        plugin_secrets::PluginSecretStore::backend_name(plugin_secret_store.as_ref());
-    let plugin_secret_protection =
-        plugin_secrets::PluginSecretStore::protection(plugin_secret_store.as_ref());
-    let plugin_sessions = plugin_sessions::initialize(&plugin_host, plugin_secret_protection);
-    let plugin_components = plugin_components::initialize(&base_dir);
-    let plugin_catalog = match plugin_host.read() {
-        Ok(host) => Some(host.catalog().clone()),
-        Err(error) => {
-            tracing::error!(%error, "读取插件目录用于权限初始化失败");
-            None
-        }
-    };
-    let plugin_permissions = plugin_catalog
-        .as_ref()
-        .map(|catalog| plugin_permissions::initialize(&base_dir, catalog));
-    let plugin_runtime = match (plugin_catalog.as_ref(), plugin_permissions.as_ref()) {
-        (Some(catalog), Some(permissions)) => Some(plugin_runtime::initialize(
-            catalog.clone(),
-            permissions.clone(),
-            plugin_secret_store.clone(),
-        )),
-        _ => None,
-    };
-    let plugin_clients = plugin_client::initialize();
-    let plugin_frontend = plugin_runtime.as_ref().map(|runtime| {
-        plugin_frontend::initialize(
-            plugin_host.clone(),
-            plugin_sessions.clone(),
-            runtime.clone(),
-            plugin_clients.clone(),
-        )
-    });
-
-    tracing::info!(
-        selected_wasmtime = plugin_components.selected_runtime_version(),
-        cache_root = %plugin_components.cache_root().display(),
-        max_compiled_artifact_bytes = plugin_compiled_cache.max_artifact_bytes(),
-        "插件 Component 懒加载与 compiled cache 边界已初始化"
-    );
-    tracing::info!(
-        max_store_memory_mib = plugin_engine_policy.max_memory_mib(),
-        max_compiled_artifact_mib = plugin_engine_policy.max_compiled_artifact_mib(),
-        fuel_per_call = plugin_engine_policy.fuel_per_call,
-        epoch_tick_ms = plugin_engine_policy.epoch_tick_interval.as_millis(),
-        epoch_deadline_ticks = plugin_engine_policy.epoch_deadline_ticks(),
-        "Wasmtime Engine/Store 资源策略已校验"
-    );
-    if let Some(runtime) = plugin_runtime.as_ref() {
-        tracing::info!(
-            installed_plugins = runtime.catalog().plugins().len(),
-            provider_frontend_ready = plugin_frontend.is_some(),
-            provider_client_ready = plugin_clients.is_ready().unwrap_or(false),
-            secret_backend = plugin_secret_backend,
-            secret_persistent = plugin_secret_protection.is_persistent(),
-            "插件 Host service runtime 已初始化"
-        );
-    } else {
-        tracing::warn!("插件 Host service runtime 未初始化，Catalog 或权限状态不可用");
-    }
-
-    match plugin_host.read() {
-        Ok(host) => {
-            tracing::info!(
-                installed_plugins = host.catalog().plugins().len(),
-                restored_accounts = host.router().accounts().len(),
-                startup_errors = host.startup_errors().len(),
-                plugin_root = %host.catalog().root().display(),
-                "WASM 插件宿主基础状态已初始化"
-            );
-            for error in host.startup_errors() {
-                tracing::warn!(%error, "插件启动检查失败");
-            }
-        }
-        Err(error) => {
-            tracing::error!(%error, "插件宿主状态锁已损坏");
-        }
-    }
-    match plugin_sessions.read() {
-        Ok(sessions) => {
-            tracing::info!(
-                pending_validation = sessions.pending_count(),
-                startup_errors = sessions.startup_errors().len(),
-                "插件账号会话恢复状态已初始化"
-            );
-            for error in sessions.startup_errors() {
-                tracing::warn!(%error, "插件会话恢复检查失败");
-            }
-        }
-        Err(error) => tracing::error!(%error, "插件会话状态锁已损坏"),
-    }
-    if let Some(plugin_permissions) = plugin_permissions.as_ref() {
-        match plugin_permissions.read() {
-            Ok(permissions) => {
-                tracing::info!(
-                    permission_grants = permissions.grants().len(),
-                    startup_errors = permissions.startup_errors().len(),
-                    "插件用户权限状态已初始化"
-                );
-                for error in permissions.startup_errors() {
-                    tracing::warn!(%error, "插件权限恢复检查失败");
-                }
-            }
-            Err(error) => tracing::error!(%error, "插件权限状态锁已损坏"),
-        }
-    }
+    plugin::initialize(&base_dir)?;
 
     ensure_gpui_outside_tokio_runtime()?;
 
