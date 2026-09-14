@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::{
+    assets,
     component::gc,
     host::package_manager::PluginPackageManager,
     ui::{
@@ -124,6 +125,7 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
     if let Some(cache) = ui::page_cache::global() {
         let _ = cache.invalidate_plugin(&result.plugin_id);
     }
+    let _ = assets::invalidate_plugin(&result.plugin_id);
     Ok(PluginImportSummary {
         plugin_id: result.plugin_id,
         version: result.version,
@@ -136,20 +138,22 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
 
 pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<bool> {
     let changed = manager()?.set_enabled(plugin_id, enabled)?;
-    if changed && !enabled
-        && let Some(cache) = ui::page_cache::global()
-    {
-        let _ = cache.invalidate_plugin(plugin_id);
+    if changed && !enabled {
+        if let Some(cache) = ui::page_cache::global() {
+            let _ = cache.invalidate_plugin(plugin_id);
+        }
+        let _ = assets::invalidate_plugin(plugin_id);
     }
     Ok(changed)
 }
 
 pub fn uninstall(plugin_id: &str) -> Result<bool> {
     let removed = manager()?.uninstall(plugin_id)?;
-    if removed
-        && let Some(cache) = ui::page_cache::global()
-    {
-        let _ = cache.invalidate_plugin(plugin_id);
+    if removed {
+        if let Some(cache) = ui::page_cache::global() {
+            let _ = cache.invalidate_plugin(plugin_id);
+        }
+        let _ = assets::invalidate_plugin(plugin_id);
     }
     Ok(removed)
 }
@@ -217,7 +221,9 @@ pub async fn load_page(plugin_id: &str, page_id: &str) -> Result<PluginPageSnaps
         .load_page(plugin_id, page_id)
         .await
         .with_context(|| format!("加载插件页面失败: {plugin_id}/{page_id}"))?;
-    Ok(page_snapshot_to_summary(cache.publish(ticket, model)?))
+    let snapshot = page_snapshot_to_summary(cache.publish(ticket, model)?);
+    preload_snapshot_images(&snapshot).await;
+    Ok(snapshot)
 }
 
 pub async fn dispatch_action(
@@ -302,11 +308,46 @@ async fn dispatch_event(
         .page
         .unwrap_or_else(|| current.model.as_ref().clone());
     let snapshot = page_snapshot_to_summary(cache.publish(ticket, model)?);
+    preload_snapshot_images(&snapshot).await;
     Ok(PluginPageEventResult {
         snapshot,
         toast: response.toast,
         close: response.close,
     })
+}
+
+/// Preload static image assets away from GPUI paint. Asset failures are isolated to the image node:
+/// the validated page stays usable and the renderer falls back to its alt/placeholder surface.
+async fn preload_snapshot_images(snapshot: &PluginPageSnapshot) {
+    let plugin_id = snapshot.plugin_id.clone();
+    let task_plugin_id = plugin_id.clone();
+    let model = snapshot.model.clone();
+    match tokio::task::spawn_blocking(move || {
+        assets::preload_page_images(&task_plugin_id, model.as_ref())
+    })
+    .await
+    {
+        Ok(Ok(report)) => {
+            for failure in report.failures {
+                tracing::warn!(
+                    plugin_id = %plugin_id,
+                    asset = %failure.asset,
+                    error = %failure.error,
+                    "插件页面图片预取失败，保留占位渲染"
+                );
+            }
+        }
+        Ok(Err(error)) => tracing::warn!(
+            plugin_id = %plugin_id,
+            %error,
+            "插件页面图片预取被 Host 资源策略拒绝"
+        ),
+        Err(error) => tracing::warn!(
+            plugin_id = %plugin_id,
+            %error,
+            "插件页面图片预取任务异常退出"
+        ),
+    }
 }
 
 fn ensure_page_access(plugin_id: &str, page_id: &str) -> Result<()> {
