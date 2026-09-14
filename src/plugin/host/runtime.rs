@@ -261,9 +261,19 @@ impl PluginHostServices {
     }
 
     /// Atomically publish a newly discovered package catalog to Host execution paths and drop route
-    /// health belonging to providers that no longer exist. In-flight calls retain their immutable
-    /// Component/package snapshot and cannot make the new catalog stale again.
+    /// health belonging to providers that no longer exist. User grants are reconciled first so a
+    /// package update can only preserve or reduce authority; it can never acquire newly requested
+    /// permissions merely by changing its manifest.
     pub fn replace_catalog(&self, catalog: PluginCatalog) -> Result<()> {
+        let permission_changes = self
+            .permissions
+            .write()
+            .map_err(|error| anyhow!("插件权限状态锁已损坏: {error}"))?
+            .reconcile_catalog(&catalog)?;
+        if permission_changes > 0 {
+            tracing::debug!(permission_changes, "已随 live catalog 收紧插件权限授权");
+        }
+
         {
             let mut current = self
                 .catalog
