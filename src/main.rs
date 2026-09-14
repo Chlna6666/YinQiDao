@@ -32,6 +32,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod plugin_client;
 mod plugin_compiled_cache;
 mod plugin_components;
 mod plugin_engine_policy;
