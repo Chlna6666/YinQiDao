@@ -279,7 +279,8 @@ impl OnlineServices {
 
 fn recognition_duration_is_compatible(local: &Track, remote: &RemoteTrack) -> bool {
     remote.duration_ms.is_none_or(|duration_ms| {
-        local.duration_ms == 0 || local.duration_ms.abs_diff(duration_ms) <= MAX_RECOGNITION_DURATION_DELTA_MS
+        local.duration_ms == 0
+            || local.duration_ms.abs_diff(duration_ms) <= MAX_RECOGNITION_DURATION_DELTA_MS
     })
 }
 
@@ -299,15 +300,34 @@ async fn validate_recognition_cover_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use crate::plugin::abi::SourceTrackRef;
+    use crate::{
+        model::TrackData,
+        plugin::abi::SourceTrackRef,
+    };
+
+    fn local_track(duration_ms: u64) -> Track {
+        Track::new(TrackData {
+            id: 1,
+            path: PathBuf::from("track.flac"),
+            title: "Track".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            year: None,
+            genre: None,
+            duration_ms,
+            codec: "flac".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: None,
+        })
+    }
 
     #[test]
     fn recognition_duration_rejects_obvious_wrong_song() {
-        let track = Track {
-            duration_ms: 180_000,
-            ..Track::default()
-        };
+        let track = local_track(180_000);
         let close = RemoteTrack {
             source: SourceTrackRef {
                 provider_id: "qqmusic".into(),
