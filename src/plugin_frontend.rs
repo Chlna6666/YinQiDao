@@ -9,6 +9,7 @@ use crate::{
     lyrics::LyricsDocument,
     plugin_client::{PluginClientRegistry, PluginProviderClient},
     plugin_host::PluginHostState,
+    plugin_http::PluginHttpRequest,
     plugin_route_gate::{GatedRoutePlan, plan_routes},
     plugin_runtime::{PluginCallKey, PluginHostServices},
     plugin_sessions::{PluginAccountKey, PluginSessionCoordinator},
@@ -188,10 +189,6 @@ impl PluginServiceFrontend {
     }
 
     /// Query provider-owned sessions and validate a previously quarantined account.
-    ///
-    /// A pending account becomes routable only when the current process can see the exact account id
-    /// in the provider's authenticated account list. A missing account finishes this restore attempt
-    /// as `Expired` rather than silently trusting the previous process' state.
     pub async fn restore_pending_account(&self, key: &PluginAccountKey) -> Result<bool> {
         self.validate_auth_provider(&key.plugin_id, &key.provider_id)?;
         let client = self.require_client()?;
@@ -256,11 +253,6 @@ impl PluginServiceFrontend {
         }
     }
 
-    /// Resolve a local/canonical identity through authenticated provider APIs.
-    ///
-    /// Single-route planning still retains all eligible accounts for execution-time retry. If the
-    /// selected account becomes saturated between planning and permit acquisition, or the guest call
-    /// fails, the next eligible account is attempted before the caller falls back to built-ins.
     pub async fn resolve_track(
         &self,
         query: &TrackQuery,
@@ -307,30 +299,13 @@ impl PluginServiceFrontend {
         })
     }
 
-    /// Resolve lyrics for an already-resolved provider track.
     pub async fn lyrics_for_route(
         &self,
         metadata_route: &PluginRoute,
         track: &SourceTrackRef,
     ) -> Result<PluginSingleResult<PluginLyricDocument>> {
-        if track.provider_id != metadata_route.provider_id {
-            bail!(
-                "歌词 source provider 与 metadata route 不一致: source={}, route={}",
-                track.provider_id,
-                metadata_route.provider_id
-            );
-        }
-        let policy = RoutingPolicy {
-            preferred_provider: Some(metadata_route.provider_id.clone()),
-            ..RoutingPolicy::default()
-        };
-        let mut plan = self.plan(ServiceKind::Lyrics, &policy)?;
-        plan.eligible_routes.retain(|route| {
-            route.plugin_id == metadata_route.plugin_id
-                && route.provider_id == metadata_route.provider_id
-        });
-        plan.plan.plugin_routes = plan.eligible_routes.first().cloned().into_iter().collect();
-
+        self.validate_source_route(metadata_route, track, "歌词")?;
+        let mut plan = self.same_provider_plan(ServiceKind::Lyrics, metadata_route)?;
         let Some(client) = self.clients.client()? else {
             return Ok(PluginSingleResult::unavailable(plan));
         };
@@ -369,6 +344,154 @@ impl PluginServiceFrontend {
             failures,
             client_ready: true,
         })
+    }
+
+    /// Fetch authenticated artwork through the Host HTTP boundary. The guest returns only a
+    /// descriptor; it never owns the socket or response body.
+    pub async fn artwork_for_route(
+        &self,
+        metadata_route: &PluginRoute,
+        track: &SourceTrackRef,
+    ) -> Result<PluginSingleResult<Vec<u8>>> {
+        self.validate_source_route(metadata_route, track, "封面")?;
+        let mut plan = self.same_provider_plan(ServiceKind::Artwork, metadata_route)?;
+        let Some(client) = self.clients.client()? else {
+            return Ok(PluginSingleResult::unavailable(plan));
+        };
+
+        let mut failures = Vec::new();
+        for route in &plan.eligible_routes {
+            let key = PluginCallKey::provider(&route.plugin_id, &route.provider_id);
+            let descriptor = match self
+                .runtime
+                .execute_guest_call(
+                    key,
+                    client.artwork(
+                        &route.plugin_id,
+                        &route.provider_id,
+                        Some(&route.account_id),
+                        track,
+                    ),
+                )
+                .await
+            {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => continue,
+                Err(error) => {
+                    failures.push(PluginCallFailure {
+                        route: route.clone(),
+                        error: format!("{error:#}"),
+                    });
+                    continue;
+                }
+            };
+
+            if descriptor.url.trim().is_empty() {
+                failures.push(PluginCallFailure {
+                    route: route.clone(),
+                    error: "插件 artwork descriptor URL 为空".into(),
+                });
+                continue;
+            }
+            if descriptor
+                .expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= self.runtime.now_ms())
+            {
+                failures.push(PluginCallFailure {
+                    route: route.clone(),
+                    error: "插件 artwork descriptor 已过期".into(),
+                });
+                continue;
+            }
+
+            let response = match self
+                .runtime
+                .http_request(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    Some(&route.account_id),
+                    PluginHttpRequest {
+                        method: "GET".into(),
+                        url: descriptor.url,
+                        headers: descriptor.headers,
+                        body: Vec::new(),
+                    },
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    failures.push(PluginCallFailure {
+                        route: route.clone(),
+                        error: format!("artwork Host HTTP 失败: {error:#}"),
+                    });
+                    continue;
+                }
+            };
+            if !(200..300).contains(&response.status) {
+                failures.push(PluginCallFailure {
+                    route: route.clone(),
+                    error: format!("artwork HTTP 状态码 {}", response.status),
+                });
+                continue;
+            }
+            if response.body.is_empty() {
+                failures.push(PluginCallFailure {
+                    route: route.clone(),
+                    error: "artwork HTTP body 为空".into(),
+                });
+                continue;
+            }
+            return Ok(PluginSingleResult {
+                value: Some(response.body),
+                route: Some(route.clone()),
+                plan,
+                failures,
+                client_ready: true,
+            });
+        }
+
+        Ok(PluginSingleResult {
+            value: None,
+            route: None,
+            plan,
+            failures,
+            client_ready: true,
+        })
+    }
+
+    fn same_provider_plan(
+        &self,
+        service: ServiceKind,
+        metadata_route: &PluginRoute,
+    ) -> Result<GatedRoutePlan> {
+        let policy = RoutingPolicy {
+            preferred_provider: Some(metadata_route.provider_id.clone()),
+            ..RoutingPolicy::default()
+        };
+        let mut plan = self.plan(service, &policy)?;
+        plan.eligible_routes.retain(|route| {
+            route.plugin_id == metadata_route.plugin_id
+                && route.provider_id == metadata_route.provider_id
+        });
+        plan.plan.plugin_routes = plan.eligible_routes.first().cloned().into_iter().collect();
+        Ok(plan)
+    }
+
+    fn validate_source_route(
+        &self,
+        metadata_route: &PluginRoute,
+        track: &SourceTrackRef,
+        operation: &str,
+    ) -> Result<()> {
+        if track.provider_id != metadata_route.provider_id {
+            bail!(
+                "{operation} source provider 与 metadata route 不一致: source={}, route={}",
+                track.provider_id,
+                metadata_route.provider_id
+            );
+        }
+        Ok(())
     }
 
     fn require_client(&self) -> Result<Arc<dyn PluginProviderClient>> {
@@ -422,8 +545,6 @@ impl PluginServiceFrontend {
             .write()
             .map_err(|error| anyhow!("插件会话状态锁已损坏: {error}"))?;
 
-        // Preserve Host-owned routing preferences when the same account logs in again. For a new
-        // account, make it default only when the provider has no existing default account.
         let (priority, is_default) = {
             let host = self
                 .host
@@ -537,11 +658,6 @@ fn validate_provider_account(account: &ProviderAccount, provider_id: &str) -> Re
     Ok(())
 }
 
-/// Convert structured guest lyrics into a persistence-safe player document.
-///
-/// The guest never supplies markup. The Host emits canonical TTML with escaped text, then feeds it
-/// through the same parser used for local/online TTML. Library persistence already stores `synced`,
-/// so authored line/word timing and inline translations survive application restarts.
 pub fn plugin_lyrics_to_player(
     document: PluginLyricDocument,
     source_prefix: &str,
