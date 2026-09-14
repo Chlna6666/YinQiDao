@@ -39,9 +39,9 @@ pub struct PluginUiResponse {
     pub close: bool,
 }
 
-/// Runtime-neutral semantic boundary for future Component UI exports.
+/// Runtime-neutral semantic boundary for Component UI exports.
 ///
-/// The Wasmtime adapter will implement this trait. GPUI must never invoke it from `render`/paint;
+/// The Wasmtime adapter implements this trait. GPUI must never invoke it from `render`/paint;
 /// ordinary async controller code loads a page or dispatches an event, validates the returned model,
 /// and publishes an immutable snapshot into `PluginUiPageCache`.
 pub trait PluginUiClient: Send + Sync {
@@ -61,7 +61,8 @@ pub trait PluginUiClient: Send + Sync {
 
 /// Process-wide hot-swappable UI client slot. A runtime reload swaps the `Arc`; existing async
 /// operations retain their old client until completion and page-cache generation checks prevent an
-/// obsolete result from being published after plugin update/uninstall.
+/// obsolete result from being published after plugin update/uninstall. During the coordinated
+/// Provider/UI swap window, reads fail closed so no caller observes mismatched adapters.
 #[derive(Default)]
 pub struct PluginUiClientRegistry {
     client: RwLock<Option<Arc<dyn PluginUiClient>>>,
@@ -78,6 +79,9 @@ impl std::fmt::Debug for PluginUiClientRegistry {
 
 impl PluginUiClientRegistry {
     pub fn client(&self) -> Result<Option<Arc<dyn PluginUiClient>>> {
+        if crate::plugin::runtime_ports::is_swapping() {
+            return Err(anyhow!("插件 Component runtime 正在切换，UI 调用暂不可用"));
+        }
         Ok(self
             .client
             .read()
@@ -86,6 +90,9 @@ impl PluginUiClientRegistry {
     }
 
     pub fn is_ready(&self) -> Result<bool> {
+        if crate::plugin::runtime_ports::is_swapping() {
+            return Ok(false);
+        }
         Ok(self
             .client
             .read()
@@ -93,7 +100,7 @@ impl PluginUiClientRegistry {
             .is_some())
     }
 
-    pub(super) fn install(
+    pub(in crate::plugin) fn install(
         &self,
         client: Arc<dyn PluginUiClient>,
     ) -> Result<Option<Arc<dyn PluginUiClient>>> {
@@ -104,7 +111,7 @@ impl PluginUiClientRegistry {
             .replace(client))
     }
 
-    pub(super) fn clear(&self) -> Result<Option<Arc<dyn PluginUiClient>>> {
+    pub(in crate::plugin) fn clear(&self) -> Result<Option<Arc<dyn PluginUiClient>>> {
         Ok(self
             .client
             .write()

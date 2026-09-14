@@ -11,6 +11,8 @@
 //! - `frontend` is the only ordinary application-facing execution façade.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
+//! - `runtime_ports` coordinates Provider/UI adapter replacement so readers never observe a
+//!   half-swapped Component runtime.
 //! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
 //!   it must not depend on GPUI or Wasmtime.
 //! - `online` may consume `frontend` plus selected `abi` values, never Host/Component internals.
@@ -24,6 +26,7 @@ pub(crate) mod abi;
 pub(crate) mod client;
 pub(crate) mod frontend;
 pub(crate) mod management;
+pub(crate) mod runtime_ports;
 
 pub(crate) mod component;
 pub(crate) mod host;
@@ -84,6 +87,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         _ => None,
     };
     let clients = client::initialize();
+    let ui_clients = ui::client::initialize();
     let frontend = runtime.as_ref().map(|runtime| {
         frontend::initialize(
             plugin_host.clone(),
@@ -129,6 +133,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
             installed_plugins = runtime.catalog().plugins().len(),
             provider_frontend_ready = frontend.is_some(),
             provider_client_ready = clients.is_ready().unwrap_or(false),
+            ui_client_ready = ui_clients.is_ready().unwrap_or(false),
             secret_backend,
             secret_persistent = secret_protection.is_persistent(),
             "插件 Host service runtime 已初始化"

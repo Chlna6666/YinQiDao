@@ -201,9 +201,8 @@ pub trait PluginProviderClient: Send + Sync {
 /// Process-wide provider client slot.
 ///
 /// Readers clone the current `Arc` before invoking it, so a Component-runtime reload can replace
-/// the adapter without invalidating in-flight calls. Mutation is intentionally restricted to the
-/// `plugin` subsystem; OnlineServices/UI callers can observe readiness but cannot install an
-/// arbitrary execution backend.
+/// the adapter without invalidating in-flight calls. During a coordinated Provider/UI port swap,
+/// reads fail closed so callers cannot observe a half-swapped runtime adapter.
 #[derive(Default)]
 pub struct PluginClientRegistry {
     client: RwLock<Option<Arc<dyn PluginProviderClient>>>,
@@ -220,6 +219,9 @@ impl std::fmt::Debug for PluginClientRegistry {
 
 impl PluginClientRegistry {
     pub fn client(&self) -> Result<Option<Arc<dyn PluginProviderClient>>> {
+        if super::runtime_ports::is_swapping() {
+            return Err(anyhow!("插件 Component runtime 正在切换，Provider 调用暂不可用"));
+        }
         Ok(self
             .client
             .read()
@@ -228,6 +230,9 @@ impl PluginClientRegistry {
     }
 
     pub fn is_ready(&self) -> Result<bool> {
+        if super::runtime_ports::is_swapping() {
+            return Ok(false);
+        }
         Ok(self
             .client
             .read()
