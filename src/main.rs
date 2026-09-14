@@ -38,6 +38,7 @@ mod plugin_engine_policy;
 mod plugin_host;
 mod plugin_http;
 mod plugin_permissions;
+mod plugin_route_gate;
 mod plugin_runtime;
 mod plugin_security;
 mod plugin_secrets;
