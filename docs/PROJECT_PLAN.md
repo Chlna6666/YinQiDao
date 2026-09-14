@@ -32,7 +32,9 @@
 - [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
 - [x] 建立 Host HTTP preflight：目标必须同时命中 manifest 声明和用户 grant；首版仅允许 HTTPS，redirect 必须重新授权，并拒绝 IP literal/明显本地域名。
 - [x] 建立 `<config>/plugin-permissions.json` 权限索引；用户 grant 只能等于或缩小 manifest 声明范围，插件更新不能借已有授权静默扩大网络/PlaybackEvents 权限。
-- [ ] Host HTTP executor 在 DNS 解析后拒绝 loopback/private/link-local/特殊用途地址，并在每次 redirect 后重新执行完整 SSRF 校验。
+- [x] 建立 Host HTTP executor：DNS 在阻塞 worker 解析，过滤 loopback/private/link-local/documentation/benchmark 等特殊地址后使用 `resolve_to_addrs` 固定到本次 hop；关闭自动 redirect/系统代理继承，redirect 逐 hop 重新授权和解析。
+- [x] Host HTTP executor 限制 method/header/request body/response body/timeout/redirect 次数；跨 origin redirect 自动剥离 Authorization/Cookie，response 使用 bounded chunk 读取。
+- [ ] 将 Host HTTP executor 接到 WIT `host.http-request`，并加入 per-plugin/per-provider concurrency、429/backoff、连接池和显式 Host proxy 策略。
 - [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/CPU feature 变化自动失效。
 - [ ] 对实例设置 memory limit、fuel/epoch interruption、call timeout、最大 response/body、最大并发。
 - [ ] 默认不授予 filesystem、raw socket、process、environment 权限。
