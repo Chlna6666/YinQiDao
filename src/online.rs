@@ -5,10 +5,11 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::{audio::fingerprint_file, lyrics::LyricsDocument, model::Track};
+use crate::{audio::fingerprint_file_payload, lyrics::LyricsDocument, model::Track};
 
 mod provider_chain;
 mod providers;
+mod recognition;
 
 const USER_AGENT: &str = "YinQiDao/0.1.0 (https://github.com/Chlna6666)";
 const LRCLIB_MIN_IDENTITY_SCORE: i32 = 75;
@@ -76,12 +77,48 @@ impl OnlineServices {
             return Ok(result);
         }
 
-        let recording_mbid = if let Some(key) = self.acoustid_api_key.clone() {
+        let plugin_recognition_available =
+            track.duration_ms > 0 && self.authenticated_plugin_recognition_available();
+        let acoustid_enabled = self.acoustid_api_key.is_some();
+        let fingerprint = if plugin_recognition_available || acoustid_enabled {
             let path = track.path.clone();
-            let fingerprint = tokio::task::spawn_blocking(move || fingerprint_file(&path))
-                .await
-                .context("AcoustID 指纹任务异常退出")??;
-            self.lookup_acoustid(&key, track.duration_ms, &fingerprint)
+            match tokio::task::spawn_blocking(move || fingerprint_file_payload(&path)).await {
+                Ok(Ok(fingerprint)) => Some(fingerprint),
+                Ok(Err(error)) if acoustid_enabled => return Err(error),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "插件识曲指纹生成失败，继续无指纹兜底链");
+                    None
+                }
+                Err(error) if acoustid_enabled => {
+                    return Err(error).context("AcoustID 指纹任务异常退出");
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "插件识曲指纹任务异常退出，继续无指纹兜底链");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if plugin_recognition_available
+            && let Some(fingerprint) = fingerprint.as_ref()
+            && let Some(result) = self
+                .enrich_from_authenticated_recognition(
+                    track,
+                    fingerprint,
+                    fetch_lyrics,
+                    fetch_artwork,
+                )
+                .await?
+        {
+            return Ok(result);
+        }
+
+        let recording_mbid = if let (Some(key), Some(fingerprint)) =
+            (self.acoustid_api_key.as_deref(), fingerprint.as_ref())
+        {
+            self.lookup_acoustid(key, track.duration_ms, &fingerprint.acoustid)
                 .await?
         } else {
             None
