@@ -4,13 +4,13 @@
 
 本文件记录当前主线开发计划。实现顺序遵循：稳定播放与实时音频安全 > Provider/插件基础设施 > 账号与在线能力 > 推荐体验 > 生态扩展。
 
-## 当前主线：WASM 音乐服务插件系统
+## 当前主线：WASM 插件系统（音乐服务 + UI 扩展）
 
-目标不是把现有 `src/online/providers` 简单改成可加载脚本，而是建立完整的跨平台音乐服务层：网易云音乐、QQ 音乐及后续其他服务通过同一 ABI 接入，多个账号可以同时在线，搜索/识别/歌词/串流/歌单/推荐按能力自动路由，不要求用户反复切换“当前平台”。
+目标不是把现有 `src/online/providers` 简单改成可加载脚本，而是建立完整的跨平台插件体系：网易云音乐、QQ 音乐及后续其他服务通过同一 ABI 接入，多个账号可以同时在线，搜索/识别/歌词/串流/歌单/推荐按能力自动路由，不要求用户反复切换“当前平台”；同时允许插件在 Host 控制下贡献路由、页面、设置页、导航入口、命令、Home 区块与主题，而不把 GPUI/native window 或 realtime 音频能力直接交给 WASM。
 
 当前仍处于开发阶段：`PLUGIN_ABI_VERSION = 1` / WIT `@0.1.0` 继续作为开发期 ABI。首个稳定第三方插件 ABI 发布前可以直接修正 v1 设计，不人为引入 v2 兼容层。
 
-详细设计见 [`docs/PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md)，组件 ABI 见 [`plugins/wit/yinqidao-plugin.wit`](../plugins/wit/yinqidao-plugin.wit)。插件包结构与当前 Host 校验见 [`plugins/README.md`](../plugins/README.md)。
+详细设计见 [`docs/PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md)，UI 扩展边界见 [`docs/PLUGIN_UI_EXTENSIONS.md`](PLUGIN_UI_EXTENSIONS.md)，组件 ABI 见 [`plugins/wit/yinqidao-plugin.wit`](../plugins/wit/yinqidao-plugin.wit)。插件包结构与当前 Host 校验见 [`plugins/README.md`](../plugins/README.md)。
 
 ### P0：协议与路由基础
 
@@ -23,6 +23,7 @@
 - [x] 为 Lyrics / Metadata / Recognition / Streaming 等单结果请求定义按账号默认值、优先级、临时 provider preference 选择的路由。
 - [x] 默认策略确定为 `authenticated plugin API -> built-in provider fallback -> local fallback`。
 - [x] 建立 WebAssembly Component Model WIT world，网络、Secret、时钟、日志均由 Host import 提供。
+- [ ] 定义独立的 plugin-level UI contribution contract；Route/Page/Theme/Command 不加入 `ProviderDescriptor.capabilities`，避免 UI 与账号/Provider 状态错误耦合。
 - [ ] 在有 Rust toolchain 的环境执行 `cargo fmt --all -- --check`、`cargo check --locked`、`cargo test --locked`。
 
 ### P1：Wasmtime Component Host
@@ -114,7 +115,7 @@
 - [ ] 跨平台歌单复制采用 preview -> resolve -> conflict report -> apply 四阶段，避免错误匹配批量污染歌单。
 - [ ] 支持 provider-specific playlist metadata，但 UI 模型保持统一。
 
-### P7：插件管理与开发者生态
+### P7：插件管理、UI 扩展与开发者生态
 
 - [ ] 插件安装、启用、禁用、更新、权限变更、健康状态、日志查看。
 - [ ] 签名插件显示发布者身份；未签名插件默认需要显式开发者模式确认。
@@ -122,7 +123,21 @@
 - [ ] 提供 Rust SDK；WIT 保证未来可以生成 TypeScript/Go/C# 等 guest bindings。
 - [ ] 提供 reference plugin：本地 mock provider，不访问真实音乐服务，用于测试当前开发期 ABI。
 - [ ] 提供插件 conformance tests：manifest、Provider 显式路由、超时、分页、auth state、provider/account Secret scope、URL expiry、错误映射。
-- [ ] 插件 UI 第一阶段只允许 Host-owned schema/form/action；不向插件暴露 GPUI 对象或任意 native window。
+- [ ] UI 扩展保持 plugin-level contribution，不与 Provider/account capability 绑定；静态 contribution 优先写入 `plugin.toml`，启动扫描时无需 instantiate WASM。
+- [ ] 建立 namespaced Route Registry：`plugin:<plugin-id>/<route-id>`；禁止覆盖 Host 核心 route 或其他插件 route，enable/update/disable/uninstall 必须事务化注册/撤销。
+- [ ] 支持插件页面：sidebar route、settings route、hidden/detail route；页面使用 Host-owned declarative schema，由 GPUI renderer 统一渲染。
+- [ ] 声明式页面限制 tree depth/node count/string/list/table/image/action payload，guest 不能返回 GPUI element、Window、Entity 或 native handle。
+- [ ] 页面打开时才 lazy instantiate Component；render/action 都走 async/control path，UI thread 不同步等待 guest，timeout/trap 只影响当前 page/action。
+- [ ] 支持固定 navigation extension points：sidebar、settings、home、library secondary navigation、track/playlist context action、command palette。
+- [ ] 支持 namespaced Commands/Actions；Host 只传 canonical id/必要 context，不把数据库连接、GPUI entity 或内部对象交给 guest。
+- [ ] 支持插件设置页与 Host-owned form schema；普通设置写入插件 namespace，token/cookie/refresh token 仍只能走 `PluginSecretStore`。
+- [ ] 支持 Home section contribution；Host 负责缓存、刷新节流、virtual list/viewport 生命周期，禁止 WASM paint callback 或每帧 widget runtime。
+- [ ] 支持 Theme contribution：semantic design tokens + 受控 package assets；用户显式启用，插件不能自动切换全局主题。
+- [ ] Theme 在启用阶段一次校验/解析并生成 Host theme snapshot；paint/layout 期间禁止调用 WASM，禁止任意 CSS/native shader/script paint callback。
+- [ ] 插件 disable/uninstall 后若当前主题来自该插件，必须自动回退到有效 Host theme；route/page/navigation/command/theme registry 与 Component lifecycle generation 同步失效。
+- [ ] UI contribution 本身不隐式授予网络、Secret、filesystem、process 等权限；页面 action 仍进入现有 Host permission/runtime/security façade。
+- [ ] 第一阶段 mock UI plugin 验收：注册 sidebar/settings route、lazy 页面、异步 action、disable 后撤销 route、静态主题显式启用/回退。
+- [ ] 详细实现按 [`docs/PLUGIN_UI_EXTENSIONS.md`](PLUGIN_UI_EXTENSIONS.md) 的模块和安全边界推进。
 
 ### P8：稳定性、性能和安全收口
 
@@ -133,6 +148,7 @@
 - [ ] fuzz WIT boundary decoder 与 manifest parser。
 - [ ] 恶意插件测试：无限循环、内存膨胀、redirect escape、secret probing、超大 JSON、压缩炸弹。
 - [ ] Windows/Linux/macOS 都使用同一 WIT ABI，平台差异只留在 Host capability implementation。
+- [ ] fuzz/压力测试 UI contribution：route collision、深层 page tree、巨量 nodes、超大图片、action flood、theme asset bomb、disable/update race。
 
 ## 关键行为准则
 
@@ -145,3 +161,4 @@
 7. **权限最小化。** 网络、Secret、文件、UI 能力都由 Host 显式授权；默认没有 raw OS 权限。
 8. **会话跨进程 fail-closed。** 上一进程保存的 Authenticated 只代表历史状态；新进程必须重新验证 Secret/session 后才能获得 authenticated route。
 9. **Provider 身份必须显式。** 一个 component 暴露多个 Provider 时，guest/Host 调用都不能依赖 account id 或隐式“当前平台”推断 Provider。
+10. **UI 由 Host 掌控。** 插件可以注册受限 route/page/theme/command contribution，但不能获得 GPUI/native window、任意 paint callback 或每帧执行权；Route/Theme 注册与插件生命周期必须可原子撤销。
