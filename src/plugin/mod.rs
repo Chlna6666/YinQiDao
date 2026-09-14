@@ -12,6 +12,8 @@
 //! - `frontend` is the only ordinary application-facing execution façade.
 //! - `recognition` extends that façade with Host-computed fingerprint Recognition while reusing the
 //!   same session, routing, health and runtime boundaries.
+//! - `recommendations` extends the same façade with bounded concurrent authenticated fan-out; local
+//!   recommendation fusion remains an application/Library responsibility rather than guest policy.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
 //! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
@@ -47,6 +49,8 @@ pub(crate) mod frontend;
 pub(crate) mod management;
 #[path = "application/recognition.rs"]
 pub(crate) mod recognition;
+#[path = "application/recommendations.rs"]
+pub(crate) mod recommendations;
 #[path = "runtime/ports.rs"]
 pub(crate) mod runtime_ports;
 
