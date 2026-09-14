@@ -4,12 +4,35 @@ use anyhow::{Result, anyhow};
 
 use super::{
     component::gc,
-    host::package_manager::{InstalledPluginSummary, PluginImportResult, PluginPackageManager},
+    host::package_manager::PluginPackageManager,
     ui::{
         manifest::UiRoutePlacement,
         registry::{self, RegisteredUiRoute},
     },
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginSummary {
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub provider_count: usize,
+    pub route_count: usize,
+    pub page_count: usize,
+    pub theme_count: usize,
+    pub network_domain_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginImportSummary {
+    pub plugin_id: String,
+    pub version: String,
+    pub updated_existing: bool,
+    pub enabled: bool,
+    pub ui_registered: bool,
+    pub provider_runtime_refresh_pending: bool,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginRouteSummary {
@@ -33,16 +56,46 @@ pub struct PluginGcOverview {
     pub max_disk_cache_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PluginGcCollectionSummary {
+    pub released_memory_resources: usize,
+    pub removed_disk_buckets: usize,
+    pub disk_bytes_before: u64,
+    pub disk_bytes_after: u64,
+}
+
 fn manager() -> Result<std::sync::Arc<PluginPackageManager>> {
     super::host::package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))
 }
 
-pub fn list_installed() -> Result<Vec<InstalledPluginSummary>> {
-    manager()?.list_installed()
+pub fn list_installed() -> Result<Vec<PluginSummary>> {
+    Ok(manager()?
+        .list_installed()?
+        .into_iter()
+        .map(|plugin| PluginSummary {
+            plugin_id: plugin.plugin_id,
+            name: plugin.name,
+            version: plugin.version,
+            enabled: plugin.enabled,
+            provider_count: plugin.provider_count,
+            route_count: plugin.route_count,
+            page_count: plugin.page_count,
+            theme_count: plugin.theme_count,
+            network_domain_count: plugin.network_domain_count,
+        })
+        .collect())
 }
 
-pub fn import_directory(path: &Path) -> Result<PluginImportResult> {
-    manager()?.import_directory(path)
+pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
+    let result = manager()?.import_directory(path)?;
+    Ok(PluginImportSummary {
+        plugin_id: result.plugin_id,
+        version: result.version,
+        updated_existing: result.updated_existing,
+        enabled: result.enabled,
+        ui_registered: result.ui_registered,
+        provider_runtime_refresh_pending: result.provider_runtime_refresh_pending,
+    })
 }
 
 pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<bool> {
@@ -104,10 +157,16 @@ pub fn gc_overview() -> Option<PluginGcOverview> {
 
 /// Manual Host maintenance hook for the settings diagnostics surface. This never invokes guest
 /// code; it only collects Host-owned idle pools and compiled-cache buckets.
-pub fn collect_host_resources_now() -> Result<super::component::gc::PluginGcStats> {
-    gc::global()
+pub fn collect_host_resources_now() -> Result<PluginGcCollectionSummary> {
+    let stats = gc::global()
         .ok_or_else(|| anyhow!("插件 Host GC 尚未初始化"))?
-        .sweep_once()
+        .sweep_once()?;
+    Ok(PluginGcCollectionSummary {
+        released_memory_resources: stats.released_memory_resources,
+        removed_disk_buckets: stats.removed_disk_buckets,
+        disk_bytes_before: stats.disk_bytes_before,
+        disk_bytes_after: stats.disk_bytes_after,
+    })
 }
 
 fn route_to_summary(route: &RegisteredUiRoute) -> PluginRouteSummary {
