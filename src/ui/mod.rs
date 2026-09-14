@@ -16,6 +16,7 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+mod plugin_extensions;
 mod plugin_navigation;
 mod plugin_page_renderer;
 mod plugin_settings;

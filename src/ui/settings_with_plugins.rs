@@ -2,7 +2,9 @@ use std::sync::{Mutex, OnceLock};
 
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 
-use super::{components, plugin_navigation, plugin_settings, route, shell, theme};
+use super::{
+    components, plugin_extensions, plugin_navigation, plugin_settings, route, shell, theme,
+};
 use shell::MusicApp;
 
 // Keep the existing large settings implementation unchanged and embed it as the Preferences tab.
@@ -16,6 +18,7 @@ enum SettingsWorkspace {
     #[default]
     Preferences,
     Plugins,
+    Extensions,
 }
 
 static SETTINGS_WORKSPACE: OnceLock<Mutex<SettingsWorkspace>> = OnceLock::new();
@@ -52,6 +55,7 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         match selected {
             SettingsWorkspace::Preferences => base::render(app, cx),
             SettingsWorkspace::Plugins => plugin_settings::render(app, cx),
+            SettingsWorkspace::Extensions => plugin_extensions::render(app, cx),
         }
     };
 
@@ -79,6 +83,12 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             "插件与扩展",
             active_plugin_route.is_none() && selected == SettingsWorkspace::Plugins,
             cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Plugins, cx)),
+        ))
+        .child(workspace_button(
+            "settings-workspace-contributions",
+            "扩展贡献",
+            active_plugin_route.is_none() && selected == SettingsWorkspace::Extensions,
+            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Extensions, cx)),
         ));
 
     for target in settings_routes {
