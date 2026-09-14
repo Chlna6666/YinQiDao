@@ -184,6 +184,27 @@ impl Drop for PluginCallPermit {
     }
 }
 
+/// Owned compatibility view for application code that only needs catalog metadata. Provider lookups
+/// return cloned descriptors, so callers never keep references tied to the runtime catalog lock.
+#[derive(Clone, Debug)]
+pub struct PluginCatalogView {
+    catalog: PluginCatalog,
+}
+
+impl PluginCatalogView {
+    pub fn plugins(&self) -> &[crate::plugin_host::InstalledPlugin] {
+        self.catalog.plugins()
+    }
+
+    pub fn provider(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+    ) -> Option<crate::plugins::ProviderDescriptor> {
+        self.catalog.provider(plugin_id, provider_id).cloned()
+    }
+}
+
 /// Runtime-neutral Host services that generated Wasmtime Component bindings will delegate to.
 ///
 /// This type deliberately contains no Wasmtime objects. That keeps permission, Secret, networking,
@@ -222,6 +243,21 @@ impl PluginHostServices {
             .read()
             .map(|catalog| catalog.clone())
             .map_err(|error| anyhow!("插件 runtime catalog 锁已损坏: {error}"))
+    }
+
+    /// Compatibility metadata view for existing application/frontend callers. Poisoned catalog state
+    /// is converted to an empty view so non-execution diagnostics fail closed instead of exposing
+    /// stale metadata; actual Host calls still return the lock error through `plugin_snapshot`.
+    pub fn catalog(&self) -> PluginCatalogView {
+        match self.catalog_snapshot() {
+            Ok(catalog) => PluginCatalogView { catalog },
+            Err(error) => {
+                tracing::error!(%error, "读取插件 runtime catalog 失败，返回空只读视图");
+                PluginCatalogView {
+                    catalog: PluginCatalog::default(),
+                }
+            }
+        }
     }
 
     /// Atomically publish a newly discovered package catalog to Host execution paths and drop route
