@@ -1,8 +1,14 @@
 use std::rc::Rc;
 
-use gpui::{App, AnyElement, IntoElement, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    App, AnyElement, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Window,
+    div, img, prelude::*, px,
+};
 
-use crate::plugin::ui::schema::{UiNode, UiPageModel, UiSpacerSize};
+use crate::plugin::{
+    assets,
+    ui::schema::{UiNode, UiPageModel, UiSpacerSize},
+};
 
 use super::theme;
 
@@ -21,14 +27,30 @@ pub enum PluginUiInteraction {
 pub type PluginUiInteractionHandler =
     Rc<dyn Fn(PluginUiInteraction, &mut Window, &mut App) + 'static>;
 
+/// Render a page without package asset context. Kept for non-plugin callers/tests; image nodes fall
+/// back to their alt placeholder because paint is never allowed to resolve plugin files directly.
 pub fn render_page(
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
-    render_node(&model.root, handler).into_any_element()
+    render_node(None, &model.root, handler).into_any_element()
 }
 
-fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> AnyElement {
+/// Render one plugin page from Host-validated immutable models and already-normalized image bytes.
+/// This function performs no filesystem I/O, image decoding or guest execution.
+pub fn render_plugin_page(
+    plugin_id: &str,
+    model: &UiPageModel,
+    handler: Option<PluginUiInteractionHandler>,
+) -> AnyElement {
+    render_node(Some(plugin_id), &model.root, handler).into_any_element()
+}
+
+fn render_node(
+    plugin_id: Option<&str>,
+    node: &UiNode,
+    handler: Option<PluginUiInteractionHandler>,
+) -> AnyElement {
     match node {
         UiNode::Text { text } => div()
             .text_sm()
@@ -49,8 +71,8 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
                 _ => heading.text_sm().into_any_element(),
             }
         }
-        UiNode::Column { children } => render_children(children, handler, false),
-        UiNode::Row { children } => render_children(children, handler, true),
+        UiNode::Column { children } => render_children(plugin_id, children, handler, false),
+        UiNode::Row { children } => render_children(plugin_id, children, handler, true),
         UiNode::Section { title, children } => {
             let mut section = div().w_full().flex().flex_col().gap_3();
             if let Some(title) = title {
@@ -63,7 +85,7 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
                 );
             }
             for child in children {
-                section = section.child(render_node(child, handler.clone()));
+                section = section.child(render_node(plugin_id, child, handler.clone()));
             }
             section.into_any_element()
         }
@@ -79,7 +101,7 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
                 .border_1()
                 .border_color(theme::BORDER_CARD);
             for child in children {
-                card = card.child(render_node(child, handler.clone()));
+                card = card.child(render_node(plugin_id, child, handler.clone()));
             }
             card.into_any_element()
         }
@@ -101,6 +123,7 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
                                 .child(format!("{}.", index + 1)),
                         )
                         .child(div().flex_1().min_w(px(0.0)).child(render_node(
+                            plugin_id,
                             child,
                             handler.clone(),
                         ))),
@@ -108,34 +131,7 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
             }
             list.into_any_element()
         }
-        UiNode::Image { asset, alt } => div()
-            .w_full()
-            .min_h(px(92.0))
-            .rounded_xl()
-            .bg(theme::BG_CARD)
-            .border_1()
-            .border_color(theme::BORDER_CARD)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .px_4()
-            .py_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT_SECONDARY)
-                    .child(alt.clone().unwrap_or_else(|| "插件图片资源".into())),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::TEXT_TERTIARY)
-                    .child(asset.clone()),
-            )
-            .into_any_element(),
+        UiNode::Image { asset, alt } => render_image(plugin_id, asset, alt.as_deref()),
         UiNode::Button {
             label,
             action_id,
@@ -409,7 +405,68 @@ fn render_node(node: &UiNode, handler: Option<PluginUiInteractionHandler>) -> An
     }
 }
 
+fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyElement {
+    let image = plugin_id.and_then(|plugin_id| assets::cached_image(plugin_id, asset).ok().flatten());
+    if let Some(image) = image {
+        let mut container = div().w_full().flex().flex_col().gap_1p5();
+        container = container.child(
+            div()
+                .w_full()
+                .h(px(220.0))
+                .rounded_xl()
+                .overflow_hidden()
+                .bg(theme::BG_CARD)
+                .border_1()
+                .border_color(theme::BORDER_CARD)
+                .child(
+                    img(EncodedImageBytes::new(ImageFormat::Png, image.png))
+                        .size_full()
+                        .object_fit(ObjectFit::Contain),
+                ),
+        );
+        if let Some(alt) = alt.filter(|alt| !alt.is_empty()) {
+            container = container.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::TEXT_TERTIARY)
+                    .child(alt.to_owned()),
+            );
+        }
+        return container.into_any_element();
+    }
+
+    div()
+        .w_full()
+        .min_h(px(92.0))
+        .rounded_xl()
+        .bg(theme::BG_CARD)
+        .border_1()
+        .border_color(theme::BORDER_CARD)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .px_4()
+        .py_3()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::TEXT_SECONDARY)
+                .child(alt.unwrap_or("插件图片资源").to_owned()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::TEXT_TERTIARY)
+                .child(asset.to_owned()),
+        )
+        .into_any_element()
+}
+
 fn render_children(
+    plugin_id: Option<&str>,
     children: &[UiNode],
     handler: Option<PluginUiInteractionHandler>,
     row: bool,
@@ -421,7 +478,7 @@ fn render_children(
         container = container.flex_col();
     }
     for child in children {
-        container = container.child(render_node(child, handler.clone()));
+        container = container.child(render_node(plugin_id, child, handler.clone()));
     }
     container.into_any_element()
 }
