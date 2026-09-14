@@ -11,6 +11,8 @@
 //! - `frontend` is the only ordinary application-facing execution façade.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
+//! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
+//!   plugin package paths into GPUI.
 //! - `runtime_ports` coordinates Provider/UI adapter replacement so readers never observe a
 //!   half-swapped Component runtime.
 //! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
@@ -24,6 +26,7 @@ use anyhow::Result;
 
 pub(crate) mod abi;
 pub(crate) mod client;
+pub(crate) mod extensions;
 pub(crate) mod frontend;
 pub(crate) mod management;
 pub(crate) mod runtime_ports;
