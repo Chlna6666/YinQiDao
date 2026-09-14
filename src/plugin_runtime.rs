@@ -84,11 +84,14 @@ pub struct PluginRouteHealthSnapshot {
     pub consecutive_failures: u32,
     pub circuit_open_for: Option<Duration>,
     pub retry_after: Option<Duration>,
+    /// Snapshot hint only. `acquire_call` remains authoritative because another caller can race
+    /// between planning and permit acquisition.
+    pub saturated: bool,
 }
 
 impl PluginRouteHealthSnapshot {
     pub fn is_available(&self) -> bool {
-        self.circuit_open_for.is_none() && self.retry_after.is_none()
+        self.circuit_open_for.is_none() && self.retry_after.is_none() && !self.saturated
     }
 }
 
@@ -353,6 +356,7 @@ impl PluginHostServices {
             consecutive_failures: route.consecutive_failures,
             circuit_open_for: remaining_deadline(route.circuit_open_until, now),
             retry_after: remaining_deadline(route.retry_not_before, now),
+            saturated: route.in_flight >= health.limits.max_concurrent_calls_per_route,
         })
     }
 
@@ -616,6 +620,16 @@ mod tests {
             body: Vec::new(),
         };
         assert_eq!(retry_after_delay(&response), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn saturated_route_snapshot_is_unavailable() {
+        let snapshot = PluginRouteHealthSnapshot {
+            in_flight: 4,
+            saturated: true,
+            ..PluginRouteHealthSnapshot::default()
+        };
+        assert!(!snapshot.is_available());
     }
 
     #[test]
