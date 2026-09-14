@@ -38,6 +38,9 @@ pub trait PluginSecretStore: Send + Sync {
     fn get(&self, slot: &SecretSlot) -> Result<Option<Vec<u8>>>;
     fn set(&self, slot: &SecretSlot, value: &[u8]) -> Result<()>;
     fn delete(&self, slot: &SecretSlot) -> Result<bool>;
+    /// Delete every Secret in one exact account namespace while preserving provider-scope secrets
+    /// and sibling accounts. Host logout owns this operation; it is never exposed as a guest import.
+    fn delete_account(&self, plugin_id: &str, provider_id: &str, account_id: &str) -> Result<usize>;
     fn delete_plugin(&self, plugin_id: &str) -> Result<usize>;
 
     /// Human-readable backend identifier for diagnostics. It must not contain paths, account ids or
@@ -91,6 +94,24 @@ impl MemorySecretStore {
         }
         values.clear();
     }
+
+    fn remove_matching(
+        values: &mut HashMap<SecretSlot, Vec<u8>>,
+        predicate: impl Fn(&SecretSlot) -> bool,
+    ) -> usize {
+        let keys = values
+            .keys()
+            .filter(|slot| predicate(slot))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = keys.len();
+        for key in keys {
+            if let Some(mut value) = values.remove(&key) {
+                value.fill(0);
+            }
+        }
+        removed
+    }
 }
 
 impl PluginSecretStore for MemorySecretStore {
@@ -135,23 +156,26 @@ impl PluginSecretStore for MemorySecretStore {
         Ok(true)
     }
 
+    fn delete_account(&self, plugin_id: &str, provider_id: &str, account_id: &str) -> Result<usize> {
+        let mut values = self
+            .values
+            .write()
+            .map_err(|error| anyhow!("插件 Secret 内存存储锁已损坏: {error}"))?;
+        Ok(Self::remove_matching(&mut values, |slot| {
+            slot.plugin_id() == plugin_id
+                && slot.provider_id() == provider_id
+                && slot.account_id() == Some(account_id)
+        }))
+    }
+
     fn delete_plugin(&self, plugin_id: &str) -> Result<usize> {
         let mut values = self
             .values
             .write()
             .map_err(|error| anyhow!("插件 Secret 内存存储锁已损坏: {error}"))?;
-        let keys = values
-            .keys()
-            .filter(|slot| slot.plugin_id() == plugin_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let removed = keys.len();
-        for key in keys {
-            if let Some(mut value) = values.remove(&key) {
-                value.fill(0);
-            }
-        }
-        Ok(removed)
+        Ok(Self::remove_matching(&mut values, |slot| {
+            slot.plugin_id() == plugin_id
+        }))
     }
 
     fn backend_name(&self) -> &'static str {
@@ -213,6 +237,34 @@ mod tests {
             store.get(&account).expect("get account"),
             Some(b"account".to_vec())
         );
+    }
+
+    #[test]
+    fn account_delete_wipes_only_exact_account_namespace() {
+        let store = MemorySecretStore::default();
+        let provider = SecretSlot::provider("plugin.test", "qqmusic", "device_secret")
+            .expect("provider slot");
+        let first = SecretSlot::account("plugin.test", "qqmusic", "10001", "refresh_token")
+            .expect("first account");
+        let first_cookie = SecretSlot::account("plugin.test", "qqmusic", "10001", "cookie")
+            .expect("first cookie");
+        let second = SecretSlot::account("plugin.test", "qqmusic", "10002", "refresh_token")
+            .expect("second account");
+        store.set(&provider, b"provider").expect("set provider");
+        store.set(&first, b"first").expect("set first");
+        store.set(&first_cookie, b"cookie").expect("set first cookie");
+        store.set(&second, b"second").expect("set second");
+
+        assert_eq!(
+            store
+                .delete_account("plugin.test", "qqmusic", "10001")
+                .expect("delete account"),
+            2
+        );
+        assert!(store.get(&first).expect("get first").is_none());
+        assert!(store.get(&first_cookie).expect("get first cookie").is_none());
+        assert!(store.get(&provider).expect("get provider").is_some());
+        assert!(store.get(&second).expect("get second").is_some());
     }
 
     #[test]
