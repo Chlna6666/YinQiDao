@@ -7,8 +7,18 @@ use rusty_chromaprint::{Configuration, FingerprintCompressor, Fingerprinter};
 use super::decoder::DecoderStream;
 
 const MAX_FINGERPRINT_DURATION: Duration = Duration::from_secs(120);
+pub(crate) const CHROMAPRINT_ALGORITHM: &str = "chromaprint-v1-compressed";
 
-pub(crate) fn fingerprint_file(path: &Path) -> Result<String> {
+/// One Host-computed Chromaprint payload shared by authenticated plugin recognition and AcoustID.
+/// `compressed` is the binary output of `FingerprintCompressor`; `acoustid` is the URL-safe base64
+/// representation required by AcoustID. Keeping both forms avoids decoding the audio twice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AudioFingerprint {
+    pub compressed: Vec<u8>,
+    pub acoustid: String,
+}
+
+pub(crate) fn fingerprint_file_payload(path: &Path) -> Result<AudioFingerprint> {
     let mut decoder = DecoderStream::open(path)?;
     let configuration = Configuration::preset_test2();
     let mut fingerprinter = Fingerprinter::new(&configuration);
@@ -55,7 +65,14 @@ pub(crate) fn fingerprint_file(path: &Path) -> Result<String> {
     if fingerprinter.fingerprint().is_empty() {
         bail!("音频过短，无法生成 AcoustID 指纹");
     }
-    let compressed =
-        FingerprintCompressor::from(&configuration).compress(fingerprinter.fingerprint());
-    Ok(URL_SAFE_NO_PAD.encode(compressed))
+    let compressed = FingerprintCompressor::from(&configuration).compress(fingerprinter.fingerprint());
+    let acoustid = URL_SAFE_NO_PAD.encode(&compressed);
+    Ok(AudioFingerprint {
+        compressed,
+        acoustid,
+    })
+}
+
+pub(crate) fn fingerprint_file(path: &Path) -> Result<String> {
+    Ok(fingerprint_file_payload(path)?.acoustid)
 }
