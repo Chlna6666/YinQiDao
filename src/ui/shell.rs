@@ -130,6 +130,7 @@ pub struct MusicApp {
 struct HomePageRenderKey {
     active: bool,
     content_revision: u64,
+    plugin_ui_revision: u64,
     scan_in_progress: bool,
     current_track: Option<TrackId>,
     playback_state: PlaybackState,
@@ -139,6 +140,7 @@ fn home_page_render_key(app: &MusicApp) -> HomePageRenderKey {
     HomePageRenderKey {
         active: app.page == AppPage::Home,
         content_revision: app.ui_content_revision,
+        plugin_ui_revision: crate::plugin::management::ui_observable_revision(),
         scan_in_progress: app.scan_in_progress,
         current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
         playback_state: app.snapshot.state,
@@ -196,6 +198,8 @@ struct HomePage {
     parent: WeakEntity<MusicApp>,
     last_key: HomePageRenderKey,
     refresh_pending: bool,
+    plugin_home_loading: HashMap<String, u64>,
+    plugin_home_failed: HashMap<String, u64>,
     _subscription: Subscription,
 }
 
@@ -228,13 +232,76 @@ impl HomePage {
             parent: parent.downgrade(),
             last_key: initial_key,
             refresh_pending: false,
+            plugin_home_loading: HashMap::new(),
+            plugin_home_failed: HashMap::new(),
             _subscription: subscription,
+        }
+    }
+
+    fn ensure_plugin_home_sections(&mut self, cx: &mut Context<Self>) {
+        if !self.last_key.active || !crate::plugin::management::ui_client_ready() {
+            return;
+        }
+        let Ok(sections) = crate::plugin::extensions::home_sections() else {
+            return;
+        };
+        let generation = self.last_key.plugin_ui_revision;
+        for section in sections {
+            let qualified_id = section.qualified_id;
+            match crate::plugin::extensions::home_section_snapshot(&qualified_id) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    self.plugin_home_failed.insert(qualified_id.clone(), generation);
+                    tracing::warn!(section = %qualified_id, %error, "读取插件 Home Section 快照失败");
+                    continue;
+                }
+            }
+            if self.plugin_home_loading.get(&qualified_id).copied() == Some(generation)
+                || self.plugin_home_failed.get(&qualified_id).copied() == Some(generation)
+            {
+                continue;
+            }
+
+            self.plugin_home_loading.insert(qualified_id.clone(), generation);
+            let task_id = qualified_id.clone();
+            let parent = self.parent.clone();
+            let task = Tokio::spawn_result(cx, async move {
+                crate::plugin::extensions::load_home_section(&task_id).await
+            });
+            cx.spawn(async move |this, cx| -> Result<()> {
+                let result = task.await;
+                let succeeded = result.is_ok();
+                let status = match &result {
+                    Ok(snapshot) => format!(
+                        "首页插件内容已加载：{}/{} · rev {}",
+                        snapshot.plugin_id, snapshot.page_id, snapshot.revision
+                    ),
+                    Err(error) => format!("首页插件内容加载失败：{error:#}"),
+                };
+                this.update(cx, |this, cx| {
+                    if this.plugin_home_loading.get(&qualified_id).copied() == Some(generation) {
+                        this.plugin_home_loading.remove(&qualified_id);
+                    }
+                    if !succeeded && this.last_key.plugin_ui_revision == generation {
+                        this.plugin_home_failed.insert(qualified_id.clone(), generation);
+                    }
+                    cx.notify();
+                })?;
+                let _ = parent.update(cx, |app, cx| {
+                    app.status = status;
+                    cx.notify();
+                });
+                Ok(())
+            })
+            .detach();
         }
     }
 }
 
 impl Render for HomePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_plugin_home_sections(cx);
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
@@ -554,12 +621,6 @@ impl MusicApp {
             (STAGE_TRANSITION_DURATION.as_secs_f32() * distance).max(0.001),
         );
         self.stage_animating = true;
-
-        // The renderer-owned animation is armed from `render` after the sampled start frame has
-        // actually been presented. Do not begin a wall-clock timer here: on a cold first open the
-        // stage may still be compiling its shader pipeline, uploading artwork, shaping text or
-        // materializing retained layers. Starting the clock before those operations finish makes
-        // the visible animation jump directly into its middle.
         cx.notify();
     }
 
@@ -597,10 +658,6 @@ impl MusicApp {
                 return;
             };
 
-            // `with_animation` creates the scene animation during paint. Wait for that first
-            // animated frame to finish as well before starting the completion timer. This can make
-            // the logical state live for at most one extra presented frame, but can never cut a
-            // renderer animation short because a cold frame took longer than expected.
             let finish_entity = entity.clone();
             window.on_next_frame(move |_window, cx| {
                 let _ = finish_entity.update(cx, |this, cx| {
@@ -2154,8 +2211,6 @@ impl Render for MusicApp {
             .as_ref()
             .map_or(0, |track| track.id);
         let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        // Do not run a full-screen shader RAF while the whole stage is itself moving. The retained
-        // drawer animation replays the already painted stage; fluid resumes once the drawer settles.
         let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
         let fluid_dynamic = self.config.dynamic_blur;
         fluid_background.update(cx, |view, cx| {
