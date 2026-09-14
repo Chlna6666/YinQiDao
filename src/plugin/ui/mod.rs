@@ -11,3 +11,4 @@ pub(crate) mod page_cache;
 pub(crate) mod registry;
 pub(crate) mod schema;
 pub(crate) mod theme;
+pub(crate) mod wire;

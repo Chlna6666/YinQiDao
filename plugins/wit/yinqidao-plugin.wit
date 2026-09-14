@@ -304,7 +304,131 @@ interface provider {
     report-playback: func(provider-id: string, account-id: string, signal: playback-signal) -> result<bool, string>;
 }
 
+/// Declarative plugin UI transport. The wire format is a flat node arena rather than a recursive
+/// WIT type. Child references are indices into `ui-page.nodes`; the Host validates bounds, cycles,
+/// shared subtrees, reachability, schema limits and text/ID constraints before GPUI sees a page.
+interface ui {
+    enum spacer-size {
+        small,
+        medium,
+        large,
+    }
+
+    record select-option {
+        value: string,
+        label: string,
+    }
+
+    record heading-node {
+        level: u8,
+        text: string,
+    }
+
+    record section-node {
+        title: option<string>,
+        children: list<u32>,
+    }
+
+    record image-node {
+        asset: string,
+        alt: option<string>,
+    }
+
+    record button-node {
+        label: string,
+        action-id: string,
+        disabled: bool,
+    }
+
+    record input-node {
+        field-id: string,
+        value: string,
+        placeholder: option<string>,
+        secret: bool,
+    }
+
+    record select-node {
+        field-id: string,
+        selected: option<string>,
+        options: list<select-option>,
+    }
+
+    record toggle-node {
+        field-id: string,
+        label: string,
+        value: bool,
+    }
+
+    record progress-node {
+        value-basis-points: u16,
+        label: option<string>,
+    }
+
+    variant node-kind {
+        text(string),
+        heading(heading-node),
+        column(list<u32>),
+        row(list<u32>),
+        section(section-node),
+        card(list<u32>),
+        %list(list<u32>),
+        image(image-node),
+        button(button-node),
+        input(input-node),
+        select(select-node),
+        toggle(toggle-node),
+        progress(progress-node),
+        badge(string),
+        divider,
+        spacer(spacer-size),
+    }
+
+    record ui-node {
+        kind: node-kind,
+    }
+
+    record ui-page {
+        root: u32,
+        nodes: list<ui-node>,
+    }
+
+    variant field-value {
+        text(string),
+        boolean(bool),
+    }
+
+    record field-entry {
+        field-id: string,
+        value: field-value,
+    }
+
+    record action-event {
+        action-id: string,
+        fields: list<field-entry>,
+    }
+
+    record field-change-event {
+        field-id: string,
+        value: field-value,
+    }
+
+    variant ui-event {
+        action(action-event),
+        field-changed(field-change-event),
+    }
+
+    record ui-response {
+        page: option<ui-page>,
+        toast: option<string>,
+        close: bool,
+    }
+
+    load-page: func(page-id: string) -> result<ui-page, string>;
+    handle-event: func(page-id: string, event: ui-event) -> result<ui-response, string>;
+}
+
 world music-plugin {
     import host;
     export provider;
+    export ui;
 }
