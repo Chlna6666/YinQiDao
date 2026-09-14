@@ -174,6 +174,65 @@ impl PluginPermissionState {
         self.grants = next;
         Ok(true)
     }
+
+    /// Reconcile user grants after a committed live package-catalog change.
+    ///
+    /// This operation can only narrow authority: removed plugins lose their grant, removed network
+    /// domains are dropped, and playback-event access is revoked when the updated manifest no longer
+    /// exposes that capability. New manifest permissions are never granted automatically.
+    pub fn reconcile_catalog(&mut self, catalog: &PluginCatalog) -> Result<usize> {
+        let mut next = Vec::with_capacity(self.grants.len());
+        let mut changed = 0usize;
+        for grant in &self.grants {
+            let Some(plugin) = catalog.plugin(&grant.plugin_id) else {
+                changed = changed.saturating_add(1);
+                continue;
+            };
+            let reconciled = reconcile_grant(&plugin.manifest, grant);
+            if reconciled != *grant {
+                changed = changed.saturating_add(1);
+            }
+            next.push(reconciled);
+        }
+        next.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        if changed > 0 {
+            self.store.save(&next)?;
+            self.grants = next;
+        }
+        Ok(changed)
+    }
+}
+
+fn reconcile_grant(
+    manifest: &PluginManifest,
+    grant: &PluginPermissionGrant,
+) -> PluginPermissionGrant {
+    let mut network_domains = grant
+        .network_domains
+        .iter()
+        .filter_map(|raw_domain| normalize_domain_pattern(raw_domain).ok())
+        .filter(|domain| {
+            manifest
+                .network_domains
+                .iter()
+                .any(|requested| pattern_is_within(domain, requested))
+        })
+        .collect::<Vec<_>>();
+    network_domains.sort();
+    network_domains.dedup();
+
+    let playback_events = grant.playback_events
+        && manifest.providers.iter().any(|provider| {
+            provider
+                .capabilities
+                .contains(&PluginCapability::PlaybackEvents)
+        });
+
+    PluginPermissionGrant {
+        plugin_id: grant.plugin_id.clone(),
+        network_domains,
+        playback_events,
+    }
 }
 
 fn normalize_and_validate_grant(
@@ -345,5 +404,21 @@ mod tests {
             playback_events: true,
         };
         assert!(normalize_and_validate_grant(&manifest(&[], false), grant).is_err());
+    }
+
+    #[test]
+    fn live_reconcile_only_narrows_existing_authority() {
+        let grant = PluginPermissionGrant {
+            plugin_id: "plugin.test".into(),
+            network_domains: vec![
+                "api.example.com".into(),
+                "old.example.net".into(),
+                "API.EXAMPLE.COM.".into(),
+            ],
+            playback_events: true,
+        };
+        let reconciled = reconcile_grant(&manifest(&["*.example.com"], false), &grant);
+        assert_eq!(reconciled.network_domains, ["api.example.com"]);
+        assert!(!reconciled.playback_events);
     }
 }
