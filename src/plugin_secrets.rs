@@ -9,6 +9,27 @@ use crate::plugin_security::SecretSlot;
 
 pub const DEFAULT_MAX_SECRET_BYTES: usize = 64 * 1024;
 
+/// Security properties of one Host-owned Secret backend.
+///
+/// This is deliberately explicit so account/session code can distinguish a development-only
+/// process-local store from a backend that can safely restore refresh tokens across launches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretStoreProtection {
+    /// Values exist only in the current process and disappear on shutdown.
+    Ephemeral,
+    /// Values are persisted by an operating-system credential/keychain facility.
+    OsProtected,
+    /// Values are persisted by a Host-owned authenticated-encryption store with external key
+    /// protection. No such implementation exists yet; never report this for plaintext storage.
+    HostEncrypted,
+}
+
+impl SecretStoreProtection {
+    pub const fn is_persistent(self) -> bool {
+        matches!(self, Self::OsProtected | Self::HostEncrypted)
+    }
+}
+
 /// Host-owned secret storage boundary used by WASM music-service plugins.
 ///
 /// Implementations must never expose filesystem/keychain paths to guest components. The guest only
@@ -18,6 +39,13 @@ pub trait PluginSecretStore: Send + Sync {
     fn set(&self, slot: &SecretSlot, value: &[u8]) -> Result<()>;
     fn delete(&self, slot: &SecretSlot) -> Result<bool>;
     fn delete_plugin(&self, plugin_id: &str) -> Result<usize>;
+
+    /// Human-readable backend identifier for diagnostics. It must not contain paths, account ids or
+    /// any other secret-bearing information.
+    fn backend_name(&self) -> &'static str;
+
+    /// Persistence/protection level used by session restoration policy.
+    fn protection(&self) -> SecretStoreProtection;
 }
 
 /// In-memory backend for tests and early Host wiring.
@@ -56,6 +84,13 @@ impl MemorySecretStore {
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }
+
+    fn wipe_all(values: &mut HashMap<SecretSlot, Vec<u8>>) {
+        for value in values.values_mut() {
+            value.fill(0);
+        }
+        values.clear();
+    }
 }
 
 impl PluginSecretStore for MemorySecretStore {
@@ -69,6 +104,9 @@ impl PluginSecretStore for MemorySecretStore {
     }
 
     fn set(&self, slot: &SecretSlot, value: &[u8]) -> Result<()> {
+        if value.is_empty() {
+            bail!("插件 Secret 不能为空");
+        }
         if value.len() > self.max_secret_bytes {
             bail!(
                 "插件 Secret 超过 {} bytes 限制",
@@ -114,6 +152,23 @@ impl PluginSecretStore for MemorySecretStore {
             }
         }
         Ok(removed)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "memory-ephemeral"
+    }
+
+    fn protection(&self) -> SecretStoreProtection {
+        SecretStoreProtection::Ephemeral
+    }
+}
+
+impl Drop for MemorySecretStore {
+    fn drop(&mut self) {
+        match self.values.get_mut() {
+            Ok(values) => Self::wipe_all(values),
+            Err(poisoned) => Self::wipe_all(poisoned.into_inner()),
+        }
     }
 }
 
@@ -161,9 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn oversized_secret_is_rejected() {
+    fn empty_and_oversized_secrets_are_rejected() {
         let store = MemorySecretStore::new(4);
         let slot = SecretSlot::provider("plugin.test", "qqmusic", "token").expect("slot");
+        assert!(store.set(&slot, b"").is_err());
         assert!(store.set(&slot, b"12345").is_err());
+        assert!(store.get(&slot).expect("get").is_none());
+    }
+
+    #[test]
+    fn memory_backend_is_explicitly_ephemeral() {
+        let store = MemorySecretStore::default();
+        assert_eq!(store.backend_name(), "memory-ephemeral");
+        assert_eq!(store.protection(), SecretStoreProtection::Ephemeral);
+        assert!(!store.protection().is_persistent());
     }
 }
