@@ -10,7 +10,7 @@ use crate::plugin::{
     ui::schema::{UiNode, UiPageModel, UiSpacerSize},
 };
 
-use super::{plugin_input, theme};
+use super::{plugin_input, plugin_theme};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginUiInteraction {
@@ -33,35 +33,68 @@ pub fn render_page(
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
-    render_node(None, &model.root, handler).into_any_element()
+    let palette = plugin_theme::PluginPageTheme::host();
+    render_node(None, &model.root, handler, &palette).into_any_element()
 }
 
-/// Render one plugin page from Host-validated immutable models and already-normalized image bytes.
-/// This function performs no filesystem I/O, image decoding or guest execution.
+/// Render one plugin page with the Host palette.
+///
+/// Theme contributions are never activated implicitly. Call `render_plugin_page_with_theme` only
+/// after a controller has explicitly selected and pre-parsed a Host-owned plugin Theme snapshot.
 pub fn render_plugin_page(
     plugin_id: &str,
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
+    render_plugin_page_with_theme(plugin_id, model, handler, None)
+}
+
+/// Render one plugin page with an optional pre-parsed scoped Theme.
+///
+/// This path performs no filesystem I/O, Theme parsing, registry access, image decoding or guest
+/// execution. The palette is copied once at the render root and passed through the declarative tree.
+pub fn render_plugin_page_with_theme(
+    plugin_id: &str,
+    model: &UiPageModel,
+    handler: Option<PluginUiInteractionHandler>,
+    scoped_theme: Option<&plugin_theme::PluginPageTheme>,
+) -> AnyElement {
     let _input_surface = plugin_input::begin_surface(plugin_id, model);
-    render_node(Some(plugin_id), &model.root, handler).into_any_element()
+    let themed = scoped_theme.is_some();
+    let palette = scoped_theme
+        .copied()
+        .unwrap_or_else(plugin_theme::PluginPageTheme::host);
+    let body = render_node(Some(plugin_id), &model.root, handler, &palette);
+
+    if themed {
+        div()
+            .w_full()
+            .p_4()
+            .rounded(px(palette.radius_large))
+            .bg(palette.background)
+            .child(body)
+            .into_any_element()
+    } else {
+        body.into_any_element()
+    }
 }
 
 fn render_node(
     plugin_id: Option<&str>,
     node: &UiNode,
     handler: Option<PluginUiInteractionHandler>,
+    palette: &plugin_theme::PluginPageTheme,
 ) -> AnyElement {
     match node {
         UiNode::Text { text } => div()
             .text_sm()
-            .text_color(theme::TEXT_SECONDARY)
+            .text_color(palette.text_secondary)
             .child(text.clone())
             .into_any_element(),
         UiNode::Heading { level, text } => {
             let heading = div()
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(theme::TEXT_PRIMARY)
+                .text_color(palette.text_primary)
                 .child(text.clone());
             match level {
                 1 => heading.text_3xl().into_any_element(),
@@ -72,8 +105,10 @@ fn render_node(
                 _ => heading.text_sm().into_any_element(),
             }
         }
-        UiNode::Column { children } => render_children(plugin_id, children, handler, false),
-        UiNode::Row { children } => render_children(plugin_id, children, handler, true),
+        UiNode::Column { children } => {
+            render_children(plugin_id, children, handler, false, palette)
+        }
+        UiNode::Row { children } => render_children(plugin_id, children, handler, true, palette),
         UiNode::Section { title, children } => {
             let mut section = div().w_full().flex().flex_col().gap_3();
             if let Some(title) = title {
@@ -81,12 +116,12 @@ fn render_node(
                     div()
                         .text_base()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::TEXT_PRIMARY)
+                        .text_color(palette.text_primary)
                         .child(title.clone()),
                 );
             }
             for child in children {
-                section = section.child(render_node(plugin_id, child, handler.clone()));
+                section = section.child(render_node(plugin_id, child, handler.clone(), palette));
             }
             section.into_any_element()
         }
@@ -97,12 +132,12 @@ fn render_node(
                 .flex_col()
                 .gap_3()
                 .p_4()
-                .rounded_xl()
-                .bg(theme::BG_CARD)
+                .rounded(px(palette.radius_large))
+                .bg(palette.surface_elevated)
                 .border_1()
-                .border_color(theme::BORDER_CARD);
+                .border_color(palette.border);
             for child in children {
-                card = card.child(render_node(plugin_id, child, handler.clone()));
+                card = card.child(render_node(plugin_id, child, handler.clone(), palette));
             }
             card.into_any_element()
         }
@@ -120,19 +155,22 @@ fn render_node(
                                 .w(px(22.0))
                                 .flex_none()
                                 .text_xs()
-                                .text_color(theme::TEXT_TERTIARY)
+                                .text_color(palette.text_tertiary)
                                 .child(format!("{}.", index + 1)),
                         )
                         .child(div().flex_1().min_w(px(0.0)).child(render_node(
                             plugin_id,
                             child,
                             handler.clone(),
+                            palette,
                         ))),
                 );
             }
             list.into_any_element()
         }
-        UiNode::Image { asset, alt } => render_image(plugin_id, asset, alt.as_deref()),
+        UiNode::Image { asset, alt } => {
+            render_image(plugin_id, asset, alt.as_deref(), palette)
+        }
         UiNode::Button {
             label,
             action_id,
@@ -143,24 +181,24 @@ fn render_node(
                 .id(SharedString::from(format!("plugin-ui-action-{action_id}")))
                 .px_4()
                 .py_2()
-                .rounded_lg()
+                .rounded(px(palette.radius_medium))
                 .bg(if enabled {
-                    theme::ACCENT_RED.into()
+                    palette.accent
                 } else {
-                    theme::BG_CARD.into()
+                    palette.surface
                 })
                 .border_1()
                 .border_color(if enabled {
-                    theme::ACCENT_RED
+                    palette.accent
                 } else {
-                    theme::BORDER_CARD
+                    palette.border
                 })
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(if enabled {
-                    theme::TEXT_WHITE
+                    palette.accent_foreground()
                 } else {
-                    theme::TEXT_TERTIARY
+                    palette.text_tertiary
                 })
                 .child(label.clone());
             if enabled {
@@ -208,15 +246,15 @@ fn render_node(
                 .w_full()
                 .px_3()
                 .py_2p5()
-                .rounded_lg()
-                .bg(theme::BG_CARD)
+                .rounded(px(palette.radius_medium))
+                .bg(palette.surface)
                 .border_1()
-                .border_color(theme::BORDER_CARD)
+                .border_color(palette.border)
                 .text_sm()
                 .text_color(if value.is_empty() {
-                    theme::TEXT_TERTIARY
+                    palette.text_tertiary
                 } else {
-                    theme::TEXT_PRIMARY
+                    palette.text_primary
                 })
                 .child(display);
             if enabled {
@@ -226,9 +264,10 @@ fn render_node(
                 let placeholder = placeholder.clone().unwrap_or_default();
                 let secret = *secret;
                 let handler = handler.expect("enabled requires interaction handler");
+                let accent = palette.accent;
                 input = input
                     .cursor_text()
-                    .hover(|style| style.border_color(theme::ACCENT_RED))
+                    .hover(move |style| style.border_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                         let commit_handler = handler.clone();
                         let commit_field_id = field_id.clone();
@@ -286,20 +325,21 @@ fn render_node(
                 .w_full()
                 .px_3()
                 .py_2p5()
-                .rounded_lg()
-                .bg(theme::BG_CARD)
+                .rounded(px(palette.radius_medium))
+                .bg(palette.surface)
                 .border_1()
-                .border_color(theme::BORDER_CARD)
+                .border_color(palette.border)
                 .text_sm()
-                .text_color(theme::TEXT_PRIMARY)
+                .text_color(palette.text_primary)
                 .child(current_label);
             if enabled {
                 let field_id = field_id.clone();
                 let value = next_value.expect("enabled select has next value");
                 let handler = handler.expect("enabled requires interaction handler");
+                let accent = palette.accent;
                 select = select
                     .cursor_pointer()
-                    .hover(|style| style.border_color(theme::ACCENT_RED))
+                    .hover(move |style| style.border_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                         handler(
                             PluginUiInteraction::SelectChanged {
@@ -328,32 +368,32 @@ fn render_node(
                 .gap_3()
                 .px_3()
                 .py_2()
-                .rounded_lg()
-                .bg(theme::BG_CARD)
+                .rounded(px(palette.radius_medium))
+                .bg(palette.surface)
                 .border_1()
-                .border_color(theme::BORDER_CARD)
+                .border_color(palette.border)
                 .child(
                     div()
                         .text_sm()
-                        .text_color(theme::TEXT_PRIMARY)
+                        .text_color(palette.text_primary)
                         .child(label.clone()),
                 )
                 .child(
                     div()
                         .px_2()
                         .py_1()
-                        .rounded_full()
+                        .rounded(px(palette.radius_small))
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .bg(if *value {
-                            theme::accent_red_muted()
+                            palette.accent_muted()
                         } else {
-                            theme::BG_CANVAS.into()
+                            palette.background
                         })
                         .text_color(if *value {
-                            theme::ACCENT_RED
+                            palette.accent
                         } else {
-                            theme::TEXT_TERTIARY
+                            palette.text_tertiary
                         })
                         .child(if *value { "开启" } else { "关闭" }),
                 );
@@ -361,9 +401,10 @@ fn render_node(
                 let field_id = field_id.clone();
                 let next_value = !*value;
                 let handler = handler.expect("enabled requires interaction handler");
+                let accent = palette.accent;
                 toggle = toggle
                     .cursor_pointer()
-                    .hover(|style| style.border_color(theme::ACCENT_RED))
+                    .hover(move |style| style.border_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                         handler(
                             PluginUiInteraction::ToggleChanged {
@@ -389,35 +430,35 @@ fn render_node(
             .child(
                 div()
                     .text_sm()
-                    .text_color(theme::TEXT_SECONDARY)
+                    .text_color(palette.text_secondary)
                     .child(label.clone().unwrap_or_else(|| "进度".into())),
             )
             .child(
                 div()
                     .px_2()
                     .py_1()
-                    .rounded_full()
-                    .bg(theme::BG_CARD)
+                    .rounded(px(palette.radius_small))
+                    .bg(palette.surface)
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT_PRIMARY)
+                    .text_color(palette.text_primary)
                     .child(format!("{:.1}%", f32::from(*value_basis_points) / 100.0)),
             )
             .into_any_element(),
         UiNode::Badge { text } => div()
             .px_2()
             .py_1()
-            .rounded_full()
-            .bg(theme::accent_red_muted())
+            .rounded(px(palette.radius_small))
+            .bg(palette.accent_muted())
             .text_xs()
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme::ACCENT_RED)
+            .text_color(palette.accent)
             .child(text.clone())
             .into_any_element(),
         UiNode::Divider => div()
             .w_full()
             .h(px(1.0))
-            .bg(theme::BORDER_HAIRLINE)
+            .bg(palette.border)
             .into_any_element(),
         UiNode::Spacer { size } => div()
             .h(match size {
@@ -429,7 +470,12 @@ fn render_node(
     }
 }
 
-fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyElement {
+fn render_image(
+    plugin_id: Option<&str>,
+    asset: &str,
+    alt: Option<&str>,
+    palette: &plugin_theme::PluginPageTheme,
+) -> AnyElement {
     let image = plugin_id.and_then(|plugin_id| assets::cached_image(plugin_id, asset).ok().flatten());
     if let Some(image) = image {
         let mut container = div().w_full().flex().flex_col().gap_1p5();
@@ -437,11 +483,11 @@ fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyE
             div()
                 .w_full()
                 .h(px(220.0))
-                .rounded_xl()
+                .rounded(px(palette.radius_large))
                 .overflow_hidden()
-                .bg(theme::BG_CARD)
+                .bg(palette.surface)
                 .border_1()
-                .border_color(theme::BORDER_CARD)
+                .border_color(palette.border)
                 .child(
                     img(EncodedImageBytes::new(ImageFormat::Png, image.png))
                         .size_full()
@@ -452,7 +498,7 @@ fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyE
             container = container.child(
                 div()
                     .text_xs()
-                    .text_color(theme::TEXT_TERTIARY)
+                    .text_color(palette.text_tertiary)
                     .child(alt.to_owned()),
             );
         }
@@ -462,10 +508,10 @@ fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyE
     div()
         .w_full()
         .min_h(px(92.0))
-        .rounded_xl()
-        .bg(theme::BG_CARD)
+        .rounded(px(palette.radius_large))
+        .bg(palette.surface)
         .border_1()
-        .border_color(theme::BORDER_CARD)
+        .border_color(palette.border)
         .flex()
         .flex_col()
         .items_center()
@@ -477,13 +523,13 @@ fn render_image(plugin_id: Option<&str>, asset: &str, alt: Option<&str>) -> AnyE
             div()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::TEXT_SECONDARY)
+                .text_color(palette.text_secondary)
                 .child(alt.unwrap_or("插件图片资源").to_owned()),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(theme::TEXT_TERTIARY)
+                .text_color(palette.text_tertiary)
                 .child(asset.to_owned()),
         )
         .into_any_element()
@@ -494,6 +540,7 @@ fn render_children(
     children: &[UiNode],
     handler: Option<PluginUiInteractionHandler>,
     row: bool,
+    palette: &plugin_theme::PluginPageTheme,
 ) -> AnyElement {
     let mut container = div().w_full().flex().gap_3();
     if row {
@@ -502,7 +549,7 @@ fn render_children(
         container = container.flex_col();
     }
     for child in children {
-        container = container.child(render_node(plugin_id, child, handler.clone()));
+        container = container.child(render_node(plugin_id, child, handler.clone(), palette));
     }
     container.into_any_element()
 }

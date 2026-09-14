@@ -26,6 +26,8 @@ mod plugin_navigation;
 mod plugin_page_renderer;
 #[path = "plugin/settings.rs"]
 mod plugin_settings;
+#[path = "plugin/theme.rs"]
+mod plugin_theme;
 mod stage_chrome;
 mod stage_controls;
 mod stage_lyrics;
