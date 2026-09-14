@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::Read,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -19,6 +19,8 @@ pub const SELECTED_WASMTIME_VERSION: &str = "48.0.1";
 const COMPONENT_CACHE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6d];
+const COMPILED_ARTIFACT_FILE: &str = "component.cwasm";
+const SOURCE_VERIFIER_FILE: &str = "source.wasm";
 
 static PLUGIN_COMPONENTS: OnceLock<Arc<PluginComponentRegistry>> = OnceLock::new();
 
@@ -47,20 +49,83 @@ struct CachedSnapshot {
     snapshot: Arc<PluginComponentSnapshot>,
 }
 
-/// Immutable bytes and deterministic cache identity for one installed component.
+/// Immutable bytes and cache location for one installed component.
 ///
-/// Wasmtime integration must compile from `bytes` instead of reopening the component path. This
-/// keeps path validation and the bytes that produced a serialized artifact tied to the same
-/// snapshot, and lets the compiled-cache key include the exact component digest.
+/// The MD5-derived locator below is deliberately *not* a trust boundary. A future serialized
+/// Wasmtime artifact may be reused only when `source_verifier_path` exists and its bytes are exactly
+/// equal to this snapshot. That byte-for-byte verifier prevents an attacker-controlled MD5 collision
+/// from making a different component eligible for deserialization.
 #[derive(Clone, Debug)]
 pub struct PluginComponentSnapshot {
     pub plugin_id: String,
     pub plugin_version: String,
     pub source_path: PathBuf,
     pub bytes: Arc<[u8]>,
-    pub digest_hex: String,
+    /// Diagnostic/cache-bucketing digest only. Never use this value as proof of component identity.
+    pub locator_digest_hex: String,
     pub compiled_cache_key: String,
+    pub cache_dir: PathBuf,
+    pub source_verifier_path: PathBuf,
     pub compiled_cache_path: PathBuf,
+}
+
+impl PluginComponentSnapshot {
+    /// A serialized Wasmtime artifact is reusable only if both files exist and the sidecar source is
+    /// byte-for-byte identical to the already validated immutable snapshot.
+    pub fn cached_artifact_is_reusable(&self) -> Result<bool> {
+        if !self.compiled_cache_path.is_file() || !self.source_verifier_path.is_file() {
+            return Ok(false);
+        }
+        file_contents_equal(&self.source_verifier_path, self.bytes.as_ref())
+    }
+
+    /// Persist the exact source bytes next to a successfully written compiled artifact.
+    ///
+    /// The future Wasmtime cache writer must write/flush the `.cwasm` first, then call this method.
+    /// A crash before the verifier rename simply makes that artifact ineligible for reuse.
+    pub fn persist_source_verifier(&self) -> Result<()> {
+        fs::create_dir_all(&self.cache_dir).with_context(|| {
+            format!("创建插件 compiled cache 目录失败: {}", self.cache_dir.display())
+        })?;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_path = self.cache_dir.join(format!(
+            ".{SOURCE_VERIFIER_FILE}.tmp-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .with_context(|| format!("创建插件 source verifier 临时文件失败: {}", temp_path.display()))?;
+        if let Err(error) = file.write_all(self.bytes.as_ref()).and_then(|_| file.sync_all()) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).context("写入插件 source verifier 失败");
+        }
+        drop(file);
+
+        if self.source_verifier_path.exists() {
+            fs::remove_file(&self.source_verifier_path).with_context(|| {
+                format!(
+                    "替换插件 source verifier 前删除旧文件失败: {}",
+                    self.source_verifier_path.display()
+                )
+            })?;
+        }
+        if let Err(error) = fs::rename(&temp_path, &self.source_verifier_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!(
+                    "提交插件 source verifier 失败: {}",
+                    self.source_verifier_path.display()
+                )
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -220,17 +285,21 @@ fn load_snapshot(
         bail!("插件 Component 缺少 WebAssembly magic header");
     }
 
-    let digest_hex = digest_hex(&bytes);
+    let locator_digest_hex = digest_hex(&bytes);
     let compiled_cache_key = compiled_cache_key(&plugin.manifest.id, &bytes);
-    let compiled_cache_path = cache_root.join(format!("{compiled_cache_key}.cwasm"));
+    let cache_dir = cache_root.join(&compiled_cache_key);
+    let source_verifier_path = cache_dir.join(SOURCE_VERIFIER_FILE);
+    let compiled_cache_path = cache_dir.join(COMPILED_ARTIFACT_FILE);
 
     Ok(PluginComponentSnapshot {
         plugin_id: plugin.manifest.id.clone(),
         plugin_version: plugin.manifest.version.clone(),
         source_path: component_path,
         bytes: Arc::<[u8]>::from(bytes),
-        digest_hex,
+        locator_digest_hex,
         compiled_cache_key,
+        cache_dir,
+        source_verifier_path,
         compiled_cache_path,
     })
 }
@@ -240,6 +309,9 @@ fn digest_hex(bytes: &[u8]) -> String {
     to_hex(&digest)
 }
 
+/// Produce a compact directory locator. This intentionally is not a cryptographic identity check;
+/// `PluginComponentSnapshot::cached_artifact_is_reusable` performs the authoritative byte equality
+/// check before any future `.cwasm` deserialization.
 fn compiled_cache_key(plugin_id: &str, bytes: &[u8]) -> String {
     let mut hasher = Md5::new();
     hasher.update(b"yinqidao-plugin-component-cache\0");
@@ -255,6 +327,32 @@ fn compiled_cache_key(plugin_id: &str, bytes: &[u8]) -> String {
     hasher.update([0]);
     hasher.update(bytes);
     format!("component-v{COMPONENT_CACHE_SCHEMA_VERSION}-{}", to_hex(&hasher.finalize()))
+}
+
+fn file_contents_equal(path: &Path, expected: &[u8]) -> Result<bool> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("读取插件 cache verifier metadata 失败: {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
+
+    let mut file = File::open(path)
+        .with_context(|| format!("打开插件 cache verifier 失败: {}", path.display()))?;
+    let mut buffer = [0u8; 16 * 1024];
+    let mut offset = 0usize;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("读取插件 cache verifier 失败: {}", path.display()))?;
+        if read == 0 {
+            return Ok(offset == expected.len());
+        }
+        let end = offset.saturating_add(read);
+        if end > expected.len() || expected[offset..end] != buffer[..read] {
+            return Ok(false);
+        }
+        offset = end;
+    }
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -333,18 +431,34 @@ mod tests {
     }
 
     #[test]
-    fn lazy_snapshot_builds_future_compiled_cache_path() {
+    fn lazy_snapshot_builds_future_compiled_cache_paths() {
         let root = unique_temp_root("component-cache");
         let plugin = installed_plugin(&root, b"\0asm\x0d\x00\x01\x00");
         let registry = PluginComponentRegistry::new(&root, PluginComponentLimits::default());
         let snapshot = registry.snapshot(&plugin).expect("snapshot");
         assert_eq!(snapshot.plugin_id, "plugin.test");
         assert!(snapshot.compiled_cache_key.starts_with("component-v1-"));
-        assert_eq!(
-            snapshot.compiled_cache_path.parent(),
-            Some(registry.cache_root())
-        );
+        assert_eq!(snapshot.cache_dir.parent(), Some(registry.cache_root()));
+        assert_eq!(snapshot.compiled_cache_path.parent(), Some(snapshot.cache_dir.as_path()));
+        assert_eq!(snapshot.source_verifier_path.parent(), Some(snapshot.cache_dir.as_path()));
         assert_eq!(snapshot.bytes.as_ref(), b"\0asm\x0d\x00\x01\x00");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compiled_artifact_requires_exact_source_verifier() {
+        let root = unique_temp_root("component-verifier");
+        let plugin = installed_plugin(&root, b"\0asm\x0d\x00\x01\x00");
+        let registry = PluginComponentRegistry::new(&root, PluginComponentLimits::default());
+        let snapshot = registry.snapshot(&plugin).expect("snapshot");
+        fs::create_dir_all(&snapshot.cache_dir).expect("cache dir");
+        fs::write(&snapshot.compiled_cache_path, b"compiled").expect("compiled artifact");
+
+        fs::write(&snapshot.source_verifier_path, b"different").expect("wrong verifier");
+        assert!(!snapshot.cached_artifact_is_reusable().expect("wrong verifier check"));
+
+        snapshot.persist_source_verifier().expect("persist verifier");
+        assert!(snapshot.cached_artifact_is_reusable().expect("exact verifier check"));
         let _ = fs::remove_dir_all(root);
     }
 }
