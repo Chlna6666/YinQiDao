@@ -3,6 +3,7 @@ use anyhow::Result;
 use super::super::{
     abi::{PluginAccount, PluginRoute, PluginServiceRouter, RoutePlan, RoutingPolicy, ServiceKind},
     host::{
+        package_manager,
         runtime::{PluginCallKey, PluginHostServices, PluginRouteHealthSnapshot},
         sessions::{PluginSessionCoordinator, PluginSessionState},
     },
@@ -22,6 +23,8 @@ impl PluginRouteHealthSource for PluginHostServices {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginRouteRejectionReason {
+    /// User-disabled plugins fail closed before session/health evaluation.
+    Disabled,
     /// Current-process session validation is authoritative over persisted account metadata.
     Session(PluginSessionState),
     /// Circuit breaker, provider 429 backoff, or route concurrency saturation is active.
@@ -53,12 +56,12 @@ impl GatedRoutePlan {
     }
 }
 
-/// Build the final plugin route plan after both session and runtime-health gates.
+/// Build the final plugin route plan after enablement, session and runtime-health gates.
 ///
 /// Ordering is computed over *all* authenticated candidates first. Filtering then happens before a
 /// single-route service exposes its current winner, so a preferred/default account under
-/// 429/circuit/saturation cannot hide a healthy secondary account. `eligible_routes` intentionally
-/// retains every accepted route for execution-time retry.
+/// disable/429/circuit/saturation cannot hide a healthy secondary account. `eligible_routes`
+/// intentionally retains every accepted route for execution-time retry.
 pub fn plan_routes<H: PluginRouteHealthSource>(
     router: &PluginServiceRouter,
     sessions: &PluginSessionCoordinator,
@@ -77,6 +80,17 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
     let mut eligible_routes = Vec::with_capacity(candidates.len());
     let mut rejected = Vec::new();
     for route in candidates {
+        // Missing package manager occurs only in isolated unit tests/very early startup. Once the
+        // plugin subsystem is initialized, enablement is authoritative and poisoned state fails
+        // closed through `is_enabled`.
+        if package_manager::global().is_some_and(|manager| !manager.is_enabled(&route.plugin_id)) {
+            rejected.push(RejectedPluginRoute {
+                route,
+                reason: PluginRouteRejectionReason::Disabled,
+            });
+            continue;
+        }
+
         let Some(account) = find_account(router, &route) else {
             // Route came directly from this router snapshot, so this is defensive only.
             rejected.push(RejectedPluginRoute {
