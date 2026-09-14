@@ -217,7 +217,11 @@ pub fn render_route_shell(
 
     let body = if let Some(snapshot) = snapshot {
         let handler = runtime_ready.then(|| interaction_handler(target, cx));
-        plugin_page_renderer::render_page(snapshot.model.as_ref(), handler)
+        plugin_page_renderer::render_plugin_page(
+            &target.summary.plugin_id,
+            snapshot.model.as_ref(),
+            handler,
+        )
     } else {
         div()
             .p_4()
