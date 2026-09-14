@@ -82,6 +82,9 @@ pub struct UiCommandContribution {
 pub struct UiHomeSectionContribution {
     pub id: String,
     pub title: String,
+    /// Declarative plugin page rendered inside this Home section. Home content therefore reuses the
+    /// same bounded `UiPageModel` runtime and does not create a second guest rendering protocol.
+    pub page_id: String,
     #[serde(default)]
     pub order: i32,
 }
@@ -158,7 +161,15 @@ pub fn validate_contributions(plugin_id: &str, contributions: &PluginUiContribut
     let mut section_ids = HashSet::new();
     for section in &contributions.home_sections {
         validate_local_id(&section.id, "home section id")?;
+        validate_local_id(&section.page_id, "home section page id")?;
         validate_label(&section.title, "home section title")?;
+        if !page_ids.contains(section.page_id.as_str()) {
+            bail!(
+                "插件 UI home section {} 引用了不存在的 page {}",
+                section.id,
+                section.page_id
+            );
+        }
         if !section_ids.insert(section.id.as_str()) {
             bail!("插件 UI home section id 重复: {}", section.id);
         }
@@ -262,6 +273,20 @@ mod tests {
         let mut contributions = sample();
         contributions.routes[0].page_id = "missing".into();
         assert!(validate_contributions("plugin.test", &contributions).is_err());
+    }
+
+    #[test]
+    fn home_section_must_reference_declared_page() {
+        let mut contributions = sample();
+        contributions.home_sections.push(UiHomeSectionContribution {
+            id: "daily".into(),
+            title: "Daily".into(),
+            page_id: "missing".into(),
+            order: 0,
+        });
+        assert!(validate_contributions("plugin.test", &contributions).is_err());
+        contributions.home_sections[0].page_id = "library".into();
+        assert!(validate_contributions("plugin.test", &contributions).is_ok());
     }
 
     #[test]

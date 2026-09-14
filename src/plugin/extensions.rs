@@ -34,6 +34,7 @@ pub struct PluginHomeSectionSummary {
     pub plugin_id: String,
     pub qualified_id: String,
     pub title: String,
+    pub page_id: String,
     pub order: i32,
 }
 
@@ -106,7 +107,8 @@ pub fn commands(surface: PluginCommandSurface) -> Result<Vec<PluginCommandSummar
 }
 
 /// Return Host-validated Home extension metadata. Dynamic section contents are intentionally not
-/// loaded here; the future Home controller loads immutable page-model snapshots asynchronously.
+/// loaded here; the Home controller loads the referenced immutable page-model snapshot
+/// asynchronously through the same bounded page runtime used by plugin routes.
 pub fn home_sections() -> Result<Vec<PluginHomeSectionSummary>> {
     let registry = registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
     let registry = registry
@@ -118,6 +120,7 @@ pub fn home_sections() -> Result<Vec<PluginHomeSectionSummary>> {
             plugin_id: section.plugin_id.clone(),
             qualified_id: section.qualified_id.clone(),
             title: section.contribution.title.clone(),
+            page_id: section.contribution.page_id.clone(),
             order: section.contribution.order,
         })
         .collect::<Vec<_>>();
