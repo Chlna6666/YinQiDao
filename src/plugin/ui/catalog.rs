@@ -27,6 +27,7 @@ pub struct PluginUiLoadFailure {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginUiCatalogSyncReport {
     pub registered_plugins: usize,
+    pub skipped_disabled_plugins: usize,
     pub routes: usize,
     pub pages: usize,
     pub commands: usize,
@@ -58,8 +59,26 @@ pub fn sync_from_catalog(
     catalog: &PluginCatalog,
     registry: &mut PluginUiRegistry,
 ) -> PluginUiCatalogSyncReport {
+    sync_from_catalog_filtered(catalog, registry, |_| true)
+}
+
+/// Register only enabled plugins. Disabled plugins are explicitly removed from the registry so an
+/// old in-process snapshot can never keep a sidebar/settings/theme contribution alive after disable.
+pub fn sync_from_catalog_filtered<F>(
+    catalog: &PluginCatalog,
+    registry: &mut PluginUiRegistry,
+    mut is_enabled: F,
+) -> PluginUiCatalogSyncReport
+where
+    F: FnMut(&str) -> bool,
+{
     let mut report = PluginUiCatalogSyncReport::default();
     for plugin in catalog.plugins() {
+        if !is_enabled(&plugin.manifest.id) {
+            registry.remove_plugin(&plugin.manifest.id);
+            report.skipped_disabled_plugins = report.skipped_disabled_plugins.saturating_add(1);
+            continue;
+        }
         match register_plugin(registry, plugin) {
             Ok(delta) => {
                 report.registered_plugins = report.registered_plugins.saturating_add(1);
