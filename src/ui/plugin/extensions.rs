@@ -4,8 +4,12 @@ use anyhow::{Result, anyhow};
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 use gpui_tokio::Tokio;
 
-use crate::plugin::extensions::{
-    self, PluginCommandSummary, PluginCommandSurface, PluginHomeSectionSummary, PluginThemeSummary,
+use crate::plugin::{
+    commands::{self, PluginCommandContext},
+    extensions::{
+        self, PluginCommandSummary, PluginCommandSurface, PluginHomeSectionSummary,
+        PluginThemeSummary,
+    },
 };
 
 use super::{shell::MusicApp, theme};
@@ -86,6 +90,58 @@ fn refresh(cx: &mut Context<MusicApp>) {
                     }
                     Err(error) => state.status = format!("插件扩展快照读取失败：{error:#}"),
                 }
+            }
+            cx.notify();
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn invoke_palette_command(qualified_id: String, cx: &mut Context<MusicApp>) {
+    {
+        let Ok(mut state) = state().lock() else {
+            return;
+        };
+        if state.operation_in_flight {
+            return;
+        }
+        state.operation_in_flight = true;
+        state.status = format!("正在执行 Command {qualified_id}…");
+    }
+
+    let task = Tokio::spawn_result(cx, async move {
+        commands::invoke_command(
+            &qualified_id,
+            PluginCommandContext {
+                surface: PluginCommandSurface::CommandPalette,
+                page_id: None,
+                track: None,
+                playlist: None,
+            },
+        )
+        .await
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if let Ok(mut state) = state().lock() {
+                state.operation_in_flight = false;
+                state.status = match result {
+                    Ok(result) => {
+                        if let Some(toast) = result.toast {
+                            toast
+                        } else if let Some(open_page) = result.open_page {
+                            format!(
+                                "Command 执行完成；插件请求打开已验证页面 {}/{}",
+                                open_page.plugin_id, open_page.page_id
+                            )
+                        } else {
+                            "Command 执行完成".into()
+                        }
+                    }
+                    Err(error) => format!("Command 执行失败：{error:#}"),
+                };
             }
             cx.notify();
         })?;
@@ -190,16 +246,74 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
     }
     let current = snapshot();
 
-    let mut commands = div().flex().flex_col().gap_2();
+    let mut command_list = div().flex().flex_col().gap_2();
     if current.commands.is_empty() {
-        commands = commands.child(empty_state("暂无 Command contribution"));
+        command_list = command_list.child(empty_state("暂无 Command contribution"));
     } else {
-        for command in current.commands.iter() {
-            commands = commands.child(extension_row(
-                SharedString::from(format!("plugin-command-{}", command.qualified_id)),
-                command.title.clone(),
-                format!("{} · {}", command.plugin_id, command.qualified_id),
-            ));
+        for command in current.commands.iter().cloned() {
+            let can_invoke = command
+                .surfaces
+                .contains(&PluginCommandSurface::CommandPalette);
+            let qualified = command.qualified_id.clone();
+            let surfaces = command
+                .surfaces
+                .iter()
+                .map(|surface| format!("{surface:?}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            command_list = command_list.child(
+                div()
+                    .id(SharedString::from(format!("plugin-command-{}", command.qualified_id)))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(theme::BG_CANVAS)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child(command.title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_TERTIARY)
+                                    .truncate()
+                                    .child(format!("{} · {surfaces}", command.plugin_id)),
+                            ),
+                    )
+                    .child_if(can_invoke, || {
+                        div()
+                            .id(SharedString::from(format!("invoke-{qualified}")))
+                            .px_3()
+                            .py_1p5()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .bg(theme::accent_red_muted())
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::ACCENT_RED)
+                            .hover(|style| style.opacity(0.86))
+                            .active(|style| style.scale(0.98))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |_, _, _, cx| {
+                                    invoke_palette_command(qualified.clone(), cx)
+                                }),
+                            )
+                            .child("执行")
+                    }),
+            );
         }
     }
 
@@ -389,7 +503,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                                 .child("刷新"),
                         ),
                 )
-                .child(section_card("Commands", commands))
+                .child(section_card("Commands", command_list))
                 .child(section_card("Home Sections", home))
                 .child(section_card("Themes", themes))
                 .child(
@@ -401,7 +515,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                             theme::TEXT_TERTIARY
                         })
                         .child(if current.status.is_empty() {
-                            "Home 页面通过共享 page cache 加载；Theme 文件只在选择/校验时由 Host 读取；paint 阶段不执行文件 I/O 或 guest code。".to_string()
+                            "Command/Home 都经过共享 guest-call budget；Theme 文件只在选择/校验时由 Host 读取；paint 阶段不执行 I/O 或 guest code。".to_string()
                         } else {
                             current.status
                         }),
@@ -428,32 +542,6 @@ fn section_card(title: &'static str, content: impl IntoElement) -> gpui::AnyElem
                 .child(title),
         )
         .child(content)
-        .into_any_element()
-}
-
-fn extension_row(id: SharedString, title: String, detail: String) -> gpui::AnyElement {
-    div()
-        .id(id)
-        .px_3()
-        .py_2()
-        .rounded_lg()
-        .bg(theme::BG_CANVAS)
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::TEXT_PRIMARY)
-                .child(title),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::TEXT_TERTIARY)
-                .child(detail),
-        )
         .into_any_element()
 }
 
