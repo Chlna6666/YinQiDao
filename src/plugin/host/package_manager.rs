@@ -371,15 +371,6 @@ impl PluginPackageManager {
                 }
             }
         }
-        if let Some(session_state) = sessions::global()
-            && let Ok(mut sessions) = session_state.write()
-        {
-            // Account rows were removed above; pending overlays are harmless but should not survive
-            // a reinstall under the same id. Reinitialization on next process rebuilds the set from
-            // the persisted account index. Runtime session-map compaction is completed with the
-            // Wasmtime hot-reload integration.
-            let _ = &mut *sessions;
-        }
 
         {
             let mut disabled = self
@@ -466,7 +457,32 @@ fn reconcile_host_catalog(base_dir: &Path, catalog: &PluginCatalog) {
     let refreshed = PluginHostState::load(base_dir);
     match host.write() {
         Ok(mut current) => *current = refreshed,
-        Err(error) => tracing::error!(%error, "发布插件 live Host catalog 失败"),
+        Err(error) => {
+            tracing::error!(%error, "发布插件 live Host catalog 失败");
+            return;
+        }
+    }
+
+    let Some(session_state) = sessions::global() else {
+        return;
+    };
+    let mut sessions = match session_state.write() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::error!(%error, "写入插件 Session overlay 进行 live catalog reconcile 失败");
+            return;
+        }
+    };
+    let host = match host.read() {
+        Ok(host) => host,
+        Err(error) => {
+            tracing::error!(%error, "读取插件 Host router 进行 Session overlay reconcile 失败");
+            return;
+        }
+    };
+    let removed = sessions.retain_host_accounts(host.router().accounts());
+    if removed > 0 {
+        tracing::debug!(removed, "已裁剪 live catalog 中不可达的插件 Session overlay");
     }
 }
 
