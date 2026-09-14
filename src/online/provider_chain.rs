@@ -6,8 +6,10 @@ use image::GenericImageView;
 use crate::{
     lyrics::LyricsDocument,
     model::Track,
-    plugin_frontend::{self, plugin_lyrics_to_player},
-    plugins::{RemoteTrack, RoutingPolicy, TrackQuery},
+    plugin::{
+        abi::{RemoteTrack, RoutingPolicy, TrackQuery},
+        frontend::{self as plugin_frontend, plugin_lyrics_to_player},
+    },
 };
 
 use super::{EnrichmentResult, MetadataMatch, OnlineServices, SpotifyTokenResponse, providers};
@@ -67,15 +69,18 @@ impl OnlineServices {
         // or when every authenticated route is gated/unmatched, this returns None and the existing
         // built-in chain below is unchanged.
         let mut authenticated = self
-            .enrich_from_authenticated_plugin(track, fetch_lyrics)
+            .enrich_from_authenticated_plugin(track, fetch_lyrics, fetch_artwork)
             .await?;
-        if authenticated.is_some() && !fetch_artwork {
+        if authenticated.as_ref().is_some_and(|enrichment| {
+            !fetch_artwork || enrichment.result.artwork.is_some()
+        }) {
             return Ok(authenticated.take().map(|enrichment| enrichment.result));
         }
 
         // Search every built-in provider before committing to an anonymous identity. When an
-        // authenticated plugin already resolved the track these searches are used only for artwork;
-        // search with the resolved identity so stale local tags cannot poison that fallback.
+        // authenticated plugin already resolved the track but did not provide valid artwork, these
+        // searches are used only for artwork; search with the resolved identity so stale local tags
+        // cannot poison that fallback.
         let search_track = authenticated
             .as_ref()
             .map_or_else(|| track.clone(), |enrichment| enrichment.identity_track.clone());
@@ -126,10 +131,12 @@ impl OnlineServices {
 
         let matched = providers::choose_global_best(&search_track, candidates.clone());
 
-        // Authenticated metadata remains the winner. Artwork is intentionally independent: only a
-        // built-in candidate confidently matching that authenticated identity may supply a URL.
+        // Authenticated metadata remains the winner. Artwork is intentionally independent: an
+        // authenticated descriptor is attempted first inside enrich_from_authenticated_plugin();
+        // only when that path is unavailable/invalid do matching built-in candidates or CAA fill
+        // the artwork field.
         if let Some(mut enrichment) = authenticated {
-            if fetch_artwork {
+            if fetch_artwork && enrichment.result.artwork.is_none() {
                 let (artwork, artwork_key) = if let Some(matched) = matched.as_ref() {
                     self.resolve_online_artwork(
                         &enrichment.identity_track,
@@ -241,6 +248,7 @@ impl OnlineServices {
         &self,
         track: &Track,
         fetch_lyrics: bool,
+        fetch_artwork: bool,
     ) -> Result<Option<AuthenticatedPluginEnrichment>> {
         let Some(frontend) = plugin_frontend::global() else {
             return Ok(None);
@@ -293,7 +301,7 @@ impl OnlineServices {
             duration_ms: remote.duration_ms,
             release_date: None,
             // Never feed guest-provided artwork URLs into the anonymous reqwest path. Artwork from
-            // plugin descriptors will later be downloaded only by Host-mediated HTTP.
+            // plugin descriptors is downloaded only by Host-mediated HTTP.
             cover_url: None,
             lyric_url: None,
             score: 0,
@@ -410,6 +418,63 @@ impl OnlineServices {
             }
         }
 
+        let (artwork, artwork_key) = if fetch_artwork {
+            match frontend.artwork_for_route(&route, &remote.source).await {
+                Ok(result) => {
+                    for failure in &result.failures {
+                        tracing::debug!(
+                            plugin = %failure.route.plugin_id,
+                            provider = %failure.route.provider_id,
+                            account = %failure.route.account_id,
+                            error = %failure.error,
+                            "authenticated plugin 封面调用失败，尝试下一账号"
+                        );
+                    }
+                    match result.value {
+                        Some(bytes) => match validate_cover_bytes(bytes).await {
+                            Some(bytes) => {
+                                tracing::debug!(
+                                    plugin = %route.plugin_id,
+                                    provider = %route.provider_id,
+                                    source_id = %remote.source.source_id,
+                                    "采用 authenticated plugin 封面"
+                                );
+                                (
+                                    Some(bytes),
+                                    Some(format!(
+                                        "plugin:{}:{}:{}",
+                                        route.plugin_id,
+                                        route.provider_id,
+                                        remote.source.source_id
+                                    )),
+                                )
+                            }
+                            None => {
+                                tracing::warn!(
+                                    plugin = %route.plugin_id,
+                                    provider = %route.provider_id,
+                                    "authenticated plugin 封面数据无效，回退其他封面来源"
+                                );
+                                (None, None)
+                            }
+                        },
+                        None => (None, None),
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        plugin = %route.plugin_id,
+                        provider = %route.provider_id,
+                        %error,
+                        "authenticated plugin 封面规划失败，回退其他封面来源"
+                    );
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         tracing::debug!(
             plugin = %route.plugin_id,
             provider = %route.provider_id,
@@ -423,8 +488,8 @@ impl OnlineServices {
             result: EnrichmentResult {
                 metadata: Some(metadata),
                 lyrics,
-                artwork: None,
-                artwork_key: None,
+                artwork,
+                artwork_key,
             },
             identity_track,
         }))
