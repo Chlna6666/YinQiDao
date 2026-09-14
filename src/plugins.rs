@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-/// First stable host/component contract for YinQiDao music-provider plugins.
+/// Development host/component contract for YinQiDao music-provider plugins.
 ///
-/// The Rust types in this module mirror the WIT contract under `plugins/wit/`. Runtime-specific
-/// Wasmtime objects deliberately do not live here: routing and account fusion must remain testable
-/// without loading a WebAssembly engine.
+/// ABI-facing Rust records in this module mirror the WIT contract under `plugins/wit/`. Host-only
+/// routing/account state is kept in separate types in the same module so Wasmtime adapters do not
+/// accidentally expose local ids, persisted session state, priorities, or defaults to guests.
 pub const PLUGIN_ABI_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -99,6 +99,30 @@ pub struct AuthChallenge {
     pub expires_at_ms: Option<u64>,
 }
 
+/// Exact host-side semantic mirror of WIT `types.account`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderAccount {
+    pub account_id: String,
+    pub provider_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapability>,
+}
+
+/// Exact host-side semantic mirror of WIT `types.auth-poll`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthPollResult {
+    Pending,
+    Authenticated(ProviderAccount),
+    Expired,
+    Denied(String),
+}
+
+/// Persisted Host routing state. This is deliberately richer than WIT `types.account` and must not
+/// be exported to a guest as-is.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountState {
@@ -142,6 +166,27 @@ pub struct SourceTrackRef {
     pub source_id: String,
 }
 
+/// Exact semantic mirror of WIT `types.track-query`. Local database ids and cross-provider source
+/// mappings intentionally do not cross the guest boundary.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrackQuery {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artists: Vec<String>,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub isrc: Option<String>,
+    #[serde(default)]
+    pub musicbrainz_recording_id: Option<String>,
+    #[serde(default)]
+    pub fingerprint_id: Option<String>,
+}
+
+/// Host-side identity envelope used by future canonical-library work. This is not a WIT record.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrackIdentity {
     #[serde(default)]
@@ -164,6 +209,20 @@ pub struct TrackIdentity {
     pub sources: Vec<SourceTrackRef>,
 }
 
+impl From<&TrackIdentity> for TrackQuery {
+    fn from(identity: &TrackIdentity) -> Self {
+        Self {
+            title: identity.title.clone(),
+            artists: identity.artists.clone(),
+            album: identity.album.clone(),
+            duration_ms: identity.duration_ms,
+            isrc: identity.isrc.clone(),
+            musicbrainz_recording_id: identity.musicbrainz_recording_id.clone(),
+            fingerprint_id: identity.fingerprint_id.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RemoteTrack {
     pub source: SourceTrackRef,
@@ -182,6 +241,51 @@ pub struct RemoteTrack {
     pub playable: bool,
     #[serde(default)]
     pub explicit: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LyricWord {
+    pub timestamp_ms: u64,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LyricLine {
+    pub timestamp_ms: u64,
+    pub text: String,
+    #[serde(default)]
+    pub translation: Option<String>,
+    #[serde(default)]
+    pub words: Vec<LyricWord>,
+}
+
+/// ABI lyric payload. Conversion into the player's richer `lyrics::LyricsDocument` remains a Host
+/// responsibility so guest data never gains ownership of rendering/runtime objects.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PluginLyricDocument {
+    pub source: String,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<LyricLine>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtworkDescriptor {
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<KeyValue>,
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StreamRequest {
+    pub track: SourceTrackRef,
+    #[serde(default)]
+    pub quality: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,7 +320,7 @@ pub enum RecommendationSurface {
 pub struct RecommendationRequest {
     pub surface: RecommendationSurface,
     #[serde(default)]
-    pub seed: Option<TrackIdentity>,
+    pub seed: Option<TrackQuery>,
     #[serde(default = "default_recommendation_limit")]
     pub limit: u16,
     #[serde(default)]
@@ -252,6 +356,19 @@ pub struct RecognitionResult {
     pub confidence: Option<f32>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlaylistDescriptor {
+    pub provider_id: String,
+    pub source_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub track_count: Option<u32>,
+    #[serde(default)]
+    pub editable: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackSignalKind {
@@ -266,7 +383,9 @@ pub enum PlaybackSignalKind {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PlaybackSignal {
     pub kind: PlaybackSignalKind,
-    pub identity: TrackIdentity,
+    pub track: TrackQuery,
+    #[serde(default)]
+    pub source: Option<SourceTrackRef>,
     pub position_ms: u64,
     pub duration_ms: u64,
     pub occurred_at_ms: u64,
@@ -470,6 +589,23 @@ mod tests {
             priority,
             is_default: true,
         }
+    }
+
+    #[test]
+    fn track_query_does_not_expose_host_only_identity_fields() {
+        let identity = TrackIdentity {
+            local_track_id: Some(42),
+            title: "Track".into(),
+            artists: vec!["Artist".into()],
+            sources: vec![SourceTrackRef {
+                provider_id: "qqmusic".into(),
+                source_id: "mid".into(),
+            }],
+            ..TrackIdentity::default()
+        };
+        let query = TrackQuery::from(&identity);
+        assert_eq!(query.title, "Track");
+        assert_eq!(query.artists, vec!["Artist"]);
     }
 
     #[test]
