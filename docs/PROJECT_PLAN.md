@@ -31,6 +31,7 @@
 - [x] 校验插件/Provider ID、ABI、重复 capability/auth method、component 路径逃逸与静态 network domain allowlist。
 - [x] 插件扫描失败局部化：单个坏包记录 failure，不阻止其他合法插件进入 Catalog，也不阻止播放器启动。
 - [x] 建立 Host HTTP preflight：目标必须同时命中 manifest 声明和用户 grant；首版仅允许 HTTPS，redirect 必须重新授权，并拒绝 IP literal/明显本地域名。
+- [x] 建立 `<config>/plugin-permissions.json` 权限索引；用户 grant 只能等于或缩小 manifest 声明范围，插件更新不能借已有授权静默扩大网络/PlaybackEvents 权限。
 - [ ] Host HTTP executor 在 DNS 解析后拒绝 loopback/private/link-local/特殊用途地址，并在每次 redirect 后重新执行完整 SSRF 校验。
 - [ ] Component 编译产物建立版本化磁盘 cache；Host/ABI/CPU feature 变化自动失效。
 - [ ] 对实例设置 memory limit、fuel/epoch interruption、call timeout、最大 response/body、最大并发。
@@ -41,23 +42,24 @@
 
 ### P2：统一账号中心与融合登录
 
-- [x] 建立 Host 级 `PluginHostState` 与非 Secret 的 `plugin-accounts.json` 账号索引，启动恢复全部已安装插件账号路由。
+- [x] 建立 Host 级 `PluginHostState` 与非 Secret 的 `plugin-accounts.json` 账号索引，启动恢复全部已安装插件账号路由元数据。
 - [x] 同一 `plugin_id + provider_id` 可以保存多个账号，并规范化为最多一个默认账号；不会产生全局平台切换状态。
 - [x] 账号索引只保存路由元数据和状态，明确禁止 cookie/token/refresh token/device secret 进入普通配置文件。
 - [x] 建立 Host-owned `SecretSlot`，使用 `plugin/provider/account/key` 的结构化 namespace 和长度前缀 storage key，避免分隔符逃逸/跨账号碰撞。
-- [ ] 设置页增加“音乐服务与插件”入口，显示所有插件、Provider、账号状态与权限。
+- [x] 建立 `PluginSessionCoordinator`：新进程启动时历史 Authenticated/Expired 会话进入 `PendingValidation` 恢复队列；历史 Authenticated 先从可路由状态降级，Secret/session 验证成功后才重新启用。
+- [x] 建立宿主会话转换接口：fresh login 可直接注册当前进程已验证账号；restore success / restore failure / logout 分别落到 Authenticated / Expired / LoggedOut，不要求重启播放器。
+- [ ] 设置页增加“音乐服务与插件”入口，显示所有插件、Provider、账号状态、待验证状态与权限。
 - [ ] 支持 QR 登录、浏览器 OAuth、Device Code、Cookie Import、Host-owned Custom Form。
-- [ ] 登录完成后账号立即注册到 `PluginServiceRouter`，不重启应用、不重建播放器。
+- [ ] 将 WIT `auth-poll`/refresh 结果接入 `PluginSessionCoordinator`，登录完成后立即注册，不重启应用、不重建播放器。
 - [ ] 用户可以在一次具体操作中临时指定平台/账号，该偏好只作用于本次请求，不产生全局切换。
-- [ ] Session/refresh token/cookie 不写入 `config.toml`；迁移到 OS credential store 或 Host 加密 Secret Store。
-- [ ] 新进程启动后，磁盘中的历史 Authenticated 状态必须先进入待校验状态；只有 Secret/session refresh 成功后才能重新进入可路由 Authenticated。
+- [ ] Session/refresh token/cookie 不写入 `config.toml`；实现 OS credential store 或 Host 加密 Secret Store，并通过 `SecretSlot` 访问。
 - [ ] Session 即将过期时由后台刷新；刷新失败标记 `Expired`，不阻塞其他已登录平台。
 - [ ] 支持 logout 单账号、logout 单平台全部账号、撤销插件全部 secret。
 
 ### P3：Provider Router 接管现有在线链路
 
 - [ ] 将现有 `ProviderKind` 视为 built-in compatibility backend，而不是未来唯一 Provider 模型。
-- [ ] `OnlineServices` 前置统一 Service Router。
+- [ ] `OnlineServices` 前置统一 Service Router，并把 `PluginSessionCoordinator` 作为路由资格门：PendingValidation/Expired/LoggedOut 都不得产生 authenticated route。
 - [ ] 已登录插件具备 Metadata/Search/Lyrics/Artwork 能力时优先走插件官方/登录 API。
 - [ ] 插件无结果、异常、超时或置信度不足时才进入现有匿名 provider chain。
 - [ ] 识别流程改为：Host 计算一次 fingerprint -> 已登录插件 Recognition fan-out/priority -> built-in remote recognition -> AcoustID/local fallback。
@@ -121,9 +123,10 @@
 ## 关键行为准则
 
 1. **不需要切换平台。** 登录网易云和 QQ 后，两者一直在线；每个功能按 capability 自动选择或 fan-out。
-2. **登录后优先使用登录 API。** 对搜索、元数据、识别、歌词、推荐、云歌单等，存在健康的 authenticated plugin route 时先走插件；本地/匿名链路只是容错。
+2. **登录后优先使用登录 API。** 对搜索、元数据、识别、歌词、推荐、云歌单等，存在健康且当前进程已验证的 authenticated plugin route 时先走插件；本地/匿名链路只是容错。
 3. **本地文件仍是本地文件。** 路径、codec、sample rate、channels 等技术信息永远由 Host/本地扫描负责；插件只增强音乐身份与在线能力。
 4. **播放核心不插件化。** 解码、DSP、空间音频、输出和 realtime callback 始终由 Host 管理，WASM 插件绝不能进入 realtime audio block。
 5. **身份统一而来源独立。** 同一 canonical track 可以分别从 QQ 获得 metadata、网易云获得 YRC、本地获得无损文件、另一个平台获得推荐理由。
 6. **失败局部化。** 一个插件超时不能卡 UI、不能阻塞其他 provider、不能影响已经在播放的 PCM。
 7. **权限最小化。** 网络、Secret、文件、UI 能力都由 Host 显式授权；默认没有 raw OS 权限。
+8. **会话跨进程 fail-closed。** 上一进程保存的 Authenticated 只代表历史状态；新进程必须重新验证 Secret/session 后才能获得 authenticated route。

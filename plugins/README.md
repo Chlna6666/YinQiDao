@@ -1,6 +1,6 @@
 # YinQiDao WASM 插件包
 
-YinQiDao 音乐服务插件使用 WebAssembly Component Model。当前仓库已经定义 WIT ABI 与宿主侧插件目录/账号路由基础；真正的 Wasmtime Component 实例化将在 P1 后续阶段接入。
+YinQiDao 音乐服务插件使用 WebAssembly Component Model。当前仓库已经定义 WIT ABI 与宿主侧插件目录、账号、会话和权限路由基础；真正的 Wasmtime Component 实例化将在 P1 后续阶段接入。
 
 ## 安装目录
 
@@ -67,7 +67,30 @@ auth_methods = ["qr_code", "cookie_import"]
 - `network_domains` 携带 URL scheme、path、port、空白字符或非法 host label；
 - 同一个插件 id 被多个目录重复声明。
 
-这里的 domain allowlist 只是静态请求声明。后续 Host-mediated HTTP 仍会在每次请求、重定向和 DNS 解析后执行运行时安全检查，静态 manifest 校验不能替代网络沙箱。
+这里的 domain allowlist 只是静态请求声明。Host HTTP preflight 还要求目标同时命中用户授权；redirect 必须重新授权。后续 HTTP executor 仍需要在 DNS 解析后拒绝 loopback/private/link-local/特殊用途地址，静态 manifest 与 URL 检查不能替代完整 SSRF 防护。
+
+## 权限索引
+
+Host 在配置目录保存：
+
+```text
+<config>/plugin-permissions.json
+```
+
+该文件保存用户明确授予的非 Secret 权限，例如网络域名和是否允许向对应平台回传播放行为。授权范围必须是 `plugin.toml` 声明范围的子集：
+
+```text
+manifest: *.example.com
+user grant: api.example.com       ✓
+user grant: *.api.example.com     ✓
+user grant: *.example.com         ✓
+user grant: example.com           ✗
+user grant: *.com                 ✗
+```
+
+因此插件更新、损坏的权限文件或 UI bug 都不能利用历史 grant 静默扩大网络访问。`playback_events = true` 也只有插件实际声明 `playback_events` capability 时才有效。
+
+该文件不保存 Cookie、token 或其他登录秘密。
 
 ## 账号索引
 
@@ -84,11 +107,45 @@ Host 在配置目录保存：
 - capability；
 - priority；
 - provider 内默认账号；
-- authenticated/expired/logged-out 状态。
+- authenticated/expired/logged-out 历史状态。
 
 **Cookie、access token、refresh token、device secret 不允许进入该文件。** Secret Store 会作为独立 Host capability 实现，并按插件/Provider/账号 namespace 隔离。
 
-同一个 Provider 可以保存多个账号，但 Host 会保证同一个 `plugin_id + provider_id` 最多只有一个 `is_default = true`。其他账号继续保持登录并参与 fan-out 服务，不需要全局切换音乐平台。
+同一个 Provider 可以保存多个账号，但 Host 会保证同一个 `plugin_id + provider_id` 最多只有一个 `is_default = true`。其他账号继续存在并可在验证成功后参与 fan-out 服务，不需要全局切换音乐平台。
+
+## 跨进程会话恢复
+
+账号索引中的 `Authenticated` 只描述上一进程最后一次确认的状态，不能作为新进程的登录凭据。
+
+启动顺序为：
+
+```text
+plugin-accounts.json
+        ↓
+PluginSessionCoordinator
+        ↓
+PendingValidation
+        ↓ Secret/session refresh 成功
+Authenticated → PluginServiceRouter 可路由
+        ↓ 失败
+Expired → built-in/local fallback
+```
+
+Host 启动时会先把历史 `Authenticated` 从可路由状态降级，并放入 `PendingValidation` 恢复队列。历史 `Expired` 也可以进入恢复队列，因为 refresh token 仍可能有效；用户明确 `LoggedOut` 的账号不会自动重试。
+
+fresh login 是例外：当前进程刚完成登录并拿到有效 session 后，可以直接通过会话协调器注册 `Authenticated`，无需重启播放器。
+
+未来 Wasmtime `auth-poll` / refresh 流程必须通过这个协调器改变路由资格，不能直接信任磁盘状态。
+
+## Secret namespace
+
+Host-owned `SecretSlot` 使用：
+
+```text
+plugin-id / provider-id / account-id / key
+```
+
+逻辑 namespace。底层 storage key 使用长度前缀编码，账号 ID 中即使包含 `/` 等分隔字符，也不能逃逸到其他账号或插件的 Secret namespace。真正的系统 credential store / Host 加密 Secret Store 仍在后续阶段实现。
 
 ## ABI
 

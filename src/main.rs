@@ -33,7 +33,9 @@ pub mod media_controls;
 mod model;
 mod online;
 mod plugin_host;
+mod plugin_permissions;
 mod plugin_security;
+mod plugin_sessions;
 mod plugins;
 mod preferences;
 pub mod runtime;
@@ -75,6 +77,18 @@ fn main() -> Result<()> {
     );
 
     let plugin_host = plugin_host::initialize(&base_dir);
+    let plugin_sessions = plugin_sessions::initialize(&plugin_host);
+    let plugin_catalog = match plugin_host.read() {
+        Ok(host) => Some(host.catalog().clone()),
+        Err(error) => {
+            tracing::error!(%error, "读取插件目录用于权限初始化失败");
+            None
+        }
+    };
+    let plugin_permissions = plugin_catalog
+        .as_ref()
+        .map(|catalog| plugin_permissions::initialize(&base_dir, catalog));
+
     match plugin_host.read() {
         Ok(host) => {
             tracing::info!(
@@ -90,6 +104,34 @@ fn main() -> Result<()> {
         }
         Err(error) => {
             tracing::error!(%error, "插件宿主状态锁已损坏");
+        }
+    }
+    match plugin_sessions.read() {
+        Ok(sessions) => {
+            tracing::info!(
+                pending_validation = sessions.pending_count(),
+                startup_errors = sessions.startup_errors().len(),
+                "插件账号会话恢复状态已初始化"
+            );
+            for error in sessions.startup_errors() {
+                tracing::warn!(%error, "插件会话恢复检查失败");
+            }
+        }
+        Err(error) => tracing::error!(%error, "插件会话状态锁已损坏"),
+    }
+    if let Some(plugin_permissions) = plugin_permissions {
+        match plugin_permissions.read() {
+            Ok(permissions) => {
+                tracing::info!(
+                    permission_grants = permissions.grants().len(),
+                    startup_errors = permissions.startup_errors().len(),
+                    "插件用户权限状态已初始化"
+                );
+                for error in permissions.startup_errors() {
+                    tracing::warn!(%error, "插件权限恢复检查失败");
+                }
+            }
+            Err(error) => tracing::error!(%error, "插件权限状态锁已损坏"),
         }
     }
 
