@@ -3,6 +3,7 @@ use image::GenericImageView;
 
 use crate::{
     audio::{AudioFingerprint, CHROMAPRINT_ALGORITHM},
+    lyrics::LyricsDocument,
     model::Track,
     plugin::{
         abi::{RecognitionRequest, RemoteTrack, RoutingPolicy},
@@ -177,12 +178,15 @@ impl OnlineServices {
         if fetch_lyrics {
             if lyrics
                 .as_ref()
-                .is_none_or(|lyrics| !lyrics.timed_lines().iter().any(|line| !line.words.is_empty()))
+                .is_none_or(|lyrics| !lyrics_have_word_timing(lyrics))
                 && let Some(word_timed) = self
                     .fetch_word_timed_lyrics_for_track(&identity_track)
                     .await
             {
-                lyrics = Some(word_timed);
+                lyrics = Some(match lyrics {
+                    Some(primary) => prefer_richer_lyrics(primary, word_timed),
+                    None => word_timed,
+                });
             }
             if lyrics
                 .as_ref()
@@ -191,9 +195,10 @@ impl OnlineServices {
                     .fetch_translated_lyrics_for_track(&identity_track)
                     .await
             {
-                if lyrics.is_none() {
-                    lyrics = Some(translated);
-                }
+                lyrics = Some(match lyrics {
+                    Some(primary) => prefer_richer_lyrics(primary, translated),
+                    None => translated,
+                });
             }
             if lyrics.is_none() {
                 lyrics = self.fetch_lyrics(Some(&metadata), &identity_track).await?;
@@ -284,6 +289,49 @@ fn recognition_duration_is_compatible(local: &Track, remote: &RemoteTrack) -> bo
     })
 }
 
+fn lyrics_have_word_timing(lyrics: &LyricsDocument) -> bool {
+    lyrics
+        .timed_lines()
+        .iter()
+        .any(|line| !line.words.is_empty())
+}
+
+fn lyric_quality(lyrics: &LyricsDocument) -> u8 {
+    u8::from(lyrics_have_word_timing(lyrics)) * 4
+        + u8::from(lyrics.has_translation()) * 2
+        + u8::from(!lyrics.timed_lines().is_empty())
+}
+
+fn attach_raw_translation(
+    target: LyricsDocument,
+    translation: Option<String>,
+) -> LyricsDocument {
+    if target.has_translation() {
+        return target;
+    }
+    let Some(translation) = translation.filter(|value| !value.trim().is_empty()) else {
+        return target;
+    };
+    LyricsDocument::from_sources(
+        target.plain.clone(),
+        target.synced.clone(),
+        Some(translation),
+        target.source.clone(),
+    )
+}
+
+fn prefer_richer_lyrics(primary: LyricsDocument, candidate: LyricsDocument) -> LyricsDocument {
+    let primary_translation = primary.translation.clone();
+    let candidate_translation = candidate.translation.clone();
+    let primary = attach_raw_translation(primary, candidate_translation);
+    let candidate = attach_raw_translation(candidate, primary_translation);
+    if lyric_quality(&candidate) > lyric_quality(&primary) {
+        candidate
+    } else {
+        primary
+    }
+}
+
 async fn validate_recognition_cover_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
     if bytes.len() < MIN_COVER_BYTES {
         return None;
@@ -303,10 +351,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{
-        model::TrackData,
-        plugin::abi::SourceTrackRef,
-    };
+    use crate::{model::TrackData, plugin::abi::SourceTrackRef};
 
     fn local_track(duration_ms: u64) -> Track {
         Track::new(TrackData {
