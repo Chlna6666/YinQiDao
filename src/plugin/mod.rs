@@ -9,6 +9,8 @@
 //!   Wasmtime adapter. Generated Wasmtime binding types must not escape this module.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
+//! - `management` is the narrow application/UI management façade; UI must not import Host or
+//!   Component internals directly.
 //! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
 //!   it must not depend on GPUI or Wasmtime.
 //! - `online` may consume `frontend` plus selected `abi` values, never Host/Component internals.
@@ -21,6 +23,7 @@ use anyhow::Result;
 pub(crate) mod abi;
 pub(crate) mod client;
 pub(crate) mod frontend;
+pub(crate) mod management;
 
 pub(crate) mod component;
 pub(crate) mod host;
