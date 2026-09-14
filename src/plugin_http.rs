@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
     Client, Method, Response, Url,
     header::{
@@ -14,9 +16,7 @@ use reqwest::{
 };
 
 use crate::{
-    plugin_security::{
-        PluginPermissionGrant, authorize_http_target, authorize_redirect,
-    },
+    plugin_security::{PluginPermissionGrant, authorize_http_target, authorize_redirect},
     plugins::{KeyValue, PluginManifest},
 };
 
@@ -27,6 +27,18 @@ const DEFAULT_MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_HEADER_COUNT: usize = 96;
 const DEFAULT_MAX_HEADER_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 5;
+const DEFAULT_PINNED_CLIENT_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_PINNED_CLIENTS: usize = 32;
+
+/// Network egress policy owned by YinQiDao rather than by the guest or process environment.
+///
+/// The development Host intentionally supports only direct connections. A future explicit proxy
+/// variant must define its own SSRF/DNS semantics instead of silently inheriting system proxy vars.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PluginHttpProxyPolicy {
+    #[default]
+    Direct,
+}
 
 #[derive(Clone, Debug)]
 pub struct PluginHttpLimits {
@@ -38,6 +50,11 @@ pub struct PluginHttpLimits {
     pub max_header_count: usize,
     pub max_header_bytes: usize,
     pub max_redirects: usize,
+    /// Reused Clients are short-lived; every request still performs Host DNS validation before a
+    /// cache lookup, so this TTL controls only connection-pool retention, not DNS trust lifetime.
+    pub pinned_client_ttl: Duration,
+    pub max_pinned_clients: usize,
+    pub proxy_policy: PluginHttpProxyPolicy,
 }
 
 impl Default for PluginHttpLimits {
@@ -50,6 +67,9 @@ impl Default for PluginHttpLimits {
             max_header_count: DEFAULT_MAX_HEADER_COUNT,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
+            pinned_client_ttl: DEFAULT_PINNED_CLIENT_TTL,
+            max_pinned_clients: DEFAULT_MAX_PINNED_CLIENTS,
+            proxy_policy: PluginHttpProxyPolicy::Direct,
         }
     }
 }
@@ -69,21 +89,63 @@ pub struct PluginHttpResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PinnedClientKey {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+#[derive(Clone)]
+struct CachedPinnedClient {
+    client: Client,
+    last_used: Instant,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct PinnedClientCache {
+    entries: HashMap<PinnedClientKey, CachedPinnedClient>,
+}
+
+#[derive(Clone)]
 pub struct PluginHttpExecutor {
     limits: PluginHttpLimits,
+    clients: Arc<Mutex<PinnedClientCache>>,
+}
+
+impl std::fmt::Debug for PluginHttpExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginHttpExecutor")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for PluginHttpExecutor {
+    fn default() -> Self {
+        Self::new(PluginHttpLimits::default())
+    }
 }
 
 impl PluginHttpExecutor {
-    pub fn new(limits: PluginHttpLimits) -> Self {
-        Self { limits }
+    pub fn new(mut limits: PluginHttpLimits) -> Self {
+        if limits.pinned_client_ttl.is_zero() {
+            limits.pinned_client_ttl = Duration::from_millis(1);
+        }
+        limits.max_pinned_clients = limits.max_pinned_clients.max(1);
+        Self {
+            limits,
+            clients: Arc::new(Mutex::new(PinnedClientCache::default())),
+        }
     }
 
     /// Execute one Host-mediated plugin request under a total deadline.
     ///
     /// DNS is resolved by the Host, private/special addresses are removed, and the surviving
-    /// addresses are pinned into the reqwest client for this hop. Reqwest automatic redirects are
-    /// disabled so every redirect repeats permission + DNS checks before another socket is opened.
+    /// addresses are pinned into a reqwest Client. Automatic redirects are disabled so every
+    /// redirect repeats permission + DNS checks before another socket is opened. Client/TLS pools
+    /// may be reused only after the current request resolves to the same vetted address set.
     pub async fn execute(
         &self,
         manifest: &PluginManifest,
@@ -110,7 +172,10 @@ impl PluginHttpExecutor {
         request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse> {
         if request.body.len() > self.limits.max_request_body {
-            bail!("插件 HTTP request body 超过 {} bytes", self.limits.max_request_body);
+            bail!(
+                "插件 HTTP request body 超过 {} bytes",
+                self.limits.max_request_body
+            );
         }
 
         let mut method = parse_method(&request.method)?;
@@ -125,7 +190,7 @@ impl PluginHttpExecutor {
                 authorize_redirect(manifest, grant, &url)?
             };
             let addresses = resolve_public_addresses(&authorized.host).await?;
-            let client = build_pinned_client(&authorized.host, &addresses, &self.limits)?;
+            let client = self.pinned_client(&authorized.host, &addresses)?;
 
             let response = client
                 .request(method.clone(), authorized.url.clone())
@@ -146,7 +211,7 @@ impl PluginHttpExecutor {
             let location = response
                 .headers()
                 .get(LOCATION)
-                .ok_or_else(|| anyhow::anyhow!("插件 HTTP redirect 缺少 Location"))?
+                .ok_or_else(|| anyhow!("插件 HTTP redirect 缺少 Location"))?
                 .to_str()
                 .context("插件 HTTP redirect Location 不是有效文本")?;
             let next_url = authorized
@@ -166,6 +231,67 @@ impl PluginHttpExecutor {
         }
 
         unreachable!("redirect loop always returns or errors")
+    }
+
+    fn pinned_client(&self, host: &str, addresses: &[SocketAddr]) -> Result<Client> {
+        let key = PinnedClientKey {
+            host: host.to_ascii_lowercase(),
+            addresses: addresses.to_vec(),
+        };
+        let now = Instant::now();
+        {
+            let mut cache = self
+                .clients
+                .lock()
+                .map_err(|error| anyhow!("插件 HTTP client cache 锁已损坏: {error}"))?;
+            cache.entries.retain(|_, entry| entry.expires_at > now);
+            if let Some(entry) = cache.entries.get_mut(&key) {
+                entry.last_used = now;
+                return Ok(entry.client.clone());
+            }
+        }
+
+        let client = build_pinned_client(host, addresses, &self.limits)?;
+        let mut cache = self
+            .clients
+            .lock()
+            .map_err(|error| anyhow!("插件 HTTP client cache 锁已损坏: {error}"))?;
+        cache.entries.retain(|_, entry| entry.expires_at > now);
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.last_used = now;
+            return Ok(entry.client.clone());
+        }
+
+        while cache.entries.len() >= self.limits.max_pinned_clients {
+            let Some(oldest_key) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            cache.entries.remove(&oldest_key);
+        }
+        cache.entries.insert(
+            key,
+            CachedPinnedClient {
+                client: client.clone(),
+                last_used: now,
+                expires_at: now + self.limits.pinned_client_ttl,
+            },
+        );
+        Ok(client)
+    }
+
+    #[cfg(test)]
+    fn cached_client_count(&self) -> Result<usize> {
+        Ok(self
+            .clients
+            .lock()
+            .map_err(|error| anyhow!("插件 HTTP client cache 锁已损坏: {error}"))?
+            .entries
+            .len())
     }
 }
 
@@ -271,16 +397,19 @@ fn build_pinned_client(
     addresses: &[SocketAddr],
     limits: &PluginHttpLimits,
 ) -> Result<Client> {
-    Client::builder()
-        // Plugin networking must not inherit HTTP(S)_PROXY/ALL_PROXY from the launcher process.
-        // Explicit Host proxy support can be added later with the same destination checks.
-        .no_proxy()
+    let mut builder = Client::builder()
         .redirect(Policy::none())
         .connect_timeout(limits.connect_timeout)
         .timeout(limits.request_timeout)
-        .resolve_to_addrs(host, addresses)
-        .build()
-        .context("创建插件 HTTP 客户端失败")
+        .resolve_to_addrs(host, addresses);
+    match limits.proxy_policy {
+        PluginHttpProxyPolicy::Direct => {
+            // Never inherit HTTP(S)_PROXY/ALL_PROXY from the launcher process. A future explicit
+            // proxy variant must be selected by Host configuration and preserve destination policy.
+            builder = builder.no_proxy();
+        }
+    }
+    builder.build().context("创建插件 HTTP 客户端失败")
 }
 
 async fn collect_response(
@@ -302,9 +431,16 @@ async fn collect_response(
         .unwrap_or(0)
         .min(limits.max_response_body);
     let mut body = Vec::with_capacity(initial_capacity);
-    while let Some(chunk) = response.chunk().await.context("读取插件 HTTP response 失败")? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("读取插件 HTTP response 失败")?
+    {
         if body.len().saturating_add(chunk.len()) > limits.max_response_body {
-            bail!("插件 HTTP response body 超过 {} bytes", limits.max_response_body);
+            bail!(
+                "插件 HTTP response body 超过 {} bytes",
+                limits.max_response_body
+            );
         }
         body.extend_from_slice(&chunk);
     }
@@ -471,5 +607,27 @@ mod tests {
         strip_cross_origin_credentials(&mut headers);
         assert!(!headers.contains_key(AUTHORIZATION));
         assert!(!headers.contains_key(COOKIE));
+    }
+
+    #[test]
+    fn pinned_clients_reuse_only_identical_vetted_dns_sets() {
+        let executor = PluginHttpExecutor::default();
+        let first = ["1.1.1.1:443".parse().expect("socket")];
+        let second = ["1.0.0.1:443".parse().expect("socket")];
+
+        executor.pinned_client("api.example.com", &first).expect("first client");
+        executor.pinned_client("api.example.com", &first).expect("reused client");
+        assert_eq!(executor.cached_client_count().expect("count"), 1);
+
+        executor.pinned_client("api.example.com", &second).expect("second dns set");
+        assert_eq!(executor.cached_client_count().expect("count"), 2);
+    }
+
+    #[test]
+    fn host_proxy_policy_is_explicitly_direct_by_default() {
+        assert_eq!(
+            PluginHttpLimits::default().proxy_policy,
+            PluginHttpProxyPolicy::Direct
+        );
     }
 }
