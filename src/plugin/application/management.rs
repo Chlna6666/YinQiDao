@@ -138,11 +138,16 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
 
 pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<bool> {
     let changed = manager()?.set_enabled(plugin_id, enabled)?;
-    if changed && !enabled {
+    if changed {
+        // Even enabling a plugin changes the visible UI contribution set. Advance the Host page
+        // generation so retained surfaces can observe the registration change through the same
+        // monotonic revision used for page publishes and invalidation.
         if let Some(cache) = ui::page_cache::global() {
             let _ = cache.invalidate_plugin(plugin_id);
         }
-        let _ = assets::invalidate_plugin(plugin_id);
+        if !enabled {
+            let _ = assets::invalidate_plugin(plugin_id);
+        }
     }
     Ok(changed)
 }
@@ -198,6 +203,14 @@ pub fn ui_client_ready() -> bool {
         .or_else(|| Some(ui::client::initialize()))
         .and_then(|clients| clients.is_ready().ok())
         .unwrap_or(false)
+}
+
+/// Monotonic Host-owned change token for retained plugin UI surfaces. This is intentionally cheap
+/// and never invokes guest code; cache reads/LRU touches do not advance it.
+pub fn ui_observable_revision() -> u64 {
+    page_cache()
+        .and_then(|cache| cache.observable_revision())
+        .unwrap_or_default()
 }
 
 pub fn page_snapshot(plugin_id: &str, page_id: &str) -> Result<Option<PluginPageSnapshot>> {
