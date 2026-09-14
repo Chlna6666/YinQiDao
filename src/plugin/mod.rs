@@ -9,6 +9,8 @@
 //!   Generated Wasmtime binding types must not escape this module.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
+//! - `ui` owns validated plugin-level route/page/command/theme contribution models and registries;
+//!   it must not depend on GPUI or Wasmtime.
 //! - `online` may consume `frontend` plus selected `abi` values, never Host/Component internals.
 //! - No path in this subsystem may be invoked from the realtime audio callback.
 
@@ -23,6 +25,7 @@ pub(crate) mod frontend;
 pub(crate) mod component;
 pub(crate) mod host;
 pub(crate) mod routing;
+pub(crate) mod ui;
 
 /// Initialize the complete plugin control plane.
 ///
@@ -41,6 +44,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     let secret_protection = host::secrets::PluginSecretStore::protection(secret_store.as_ref());
     let sessions = host::sessions::initialize(&plugin_host, secret_protection);
     let components = component::registry::initialize(base_dir);
+    let ui_registry = ui::registry::initialize();
 
     let catalog = match plugin_host.read() {
         Ok(host) => Some(host.catalog().clone()),
@@ -95,6 +99,18 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         );
     } else {
         tracing::warn!("插件 Host service runtime 未初始化，Catalog 或权限状态不可用");
+    }
+
+    match ui_registry.read() {
+        Ok(registry) => tracing::info!(
+            routes = registry.routes().count(),
+            pages = registry.pages().count(),
+            commands = registry.commands().count(),
+            home_sections = registry.home_sections().count(),
+            themes = registry.themes().count(),
+            "插件 UI contribution registry 已初始化"
+        ),
+        Err(error) => tracing::error!(%error, "插件 UI contribution registry 锁已损坏"),
     }
 
     match plugin_host.read() {
