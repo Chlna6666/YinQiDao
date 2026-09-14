@@ -16,9 +16,13 @@ mod player_facade;
 mod player_legacy;
 #[rustfmt::skip]
 mod player_stage;
+#[path = "plugin/extensions.rs"]
 mod plugin_extensions;
+#[path = "plugin/navigation.rs"]
 mod plugin_navigation;
+#[path = "plugin/page_renderer.rs"]
 mod plugin_page_renderer;
+#[path = "plugin/settings.rs"]
 mod plugin_settings;
 mod stage_chrome;
 mod stage_controls;
