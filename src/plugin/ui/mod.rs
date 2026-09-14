@@ -4,6 +4,7 @@
 //! not depend on GPUI or Wasmtime. GPUI renders validated snapshots in `src/ui`; the Component
 //! adapter converts generated WIT values into these semantic types before they enter the registry.
 
+pub(crate) mod catalog;
 pub(crate) mod manifest;
 pub(crate) mod registry;
 pub(crate) mod schema;
