@@ -423,8 +423,43 @@ interface ui {
         close: bool,
     }
 
+    enum command-surface {
+        command-palette,
+        track-context,
+        playlist-context,
+        page-local,
+    }
+
+    record command-track-context {
+        title: string,
+        artists: list<string>,
+        album: string,
+        duration-ms: option<u64>,
+        provider-id: option<string>,
+        source-id: option<string>,
+    }
+
+    record command-playlist-context {
+        name: option<string>,
+        provider-id: option<string>,
+        source-id: option<string>,
+    }
+
+    record command-context {
+        surface: command-surface,
+        page-id: option<string>,
+        track: option<command-track-context>,
+        playlist: option<command-playlist-context>,
+    }
+
+    record command-response {
+        toast: option<string>,
+        open-page-id: option<string>,
+    }
+
     load-page: func(page-id: string) -> result<ui-page, string>;
     handle-event: func(page-id: string, event: ui-event) -> result<ui-response, string>;
+    invoke-command: func(command-id: string, context: command-context) -> result<command-response, string>;
 }
 
 world music-plugin {
