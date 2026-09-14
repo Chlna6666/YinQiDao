@@ -36,6 +36,7 @@ mod plugin_client;
 mod plugin_compiled_cache;
 mod plugin_components;
 mod plugin_engine_policy;
+mod plugin_frontend;
 mod plugin_host;
 mod plugin_http;
 mod plugin_permissions;
@@ -109,6 +110,15 @@ fn main() -> Result<()> {
         )),
         _ => None,
     };
+    let plugin_clients = plugin_client::initialize();
+    let plugin_frontend = plugin_runtime.as_ref().map(|runtime| {
+        plugin_frontend::initialize(
+            plugin_host.clone(),
+            plugin_sessions.clone(),
+            runtime.clone(),
+            plugin_clients.clone(),
+        )
+    });
 
     tracing::info!(
         selected_wasmtime = plugin_components.selected_runtime_version(),
@@ -127,6 +137,8 @@ fn main() -> Result<()> {
     if let Some(runtime) = plugin_runtime.as_ref() {
         tracing::info!(
             installed_plugins = runtime.catalog().plugins().len(),
+            provider_frontend_ready = plugin_frontend.is_some(),
+            provider_client_ready = plugin_clients.is_ready().unwrap_or(false),
             secret_backend = "memory-nonpersistent",
             "插件 Host service runtime 已初始化"
         );

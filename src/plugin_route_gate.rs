@@ -24,7 +24,7 @@ impl PluginRouteHealthSource for PluginHostServices {
 pub enum PluginRouteRejectionReason {
     /// Current-process session validation is authoritative over persisted account metadata.
     Session(PluginSessionState),
-    /// Circuit breaker or provider 429 backoff is active.
+    /// Circuit breaker, provider 429 backoff, or route concurrency saturation is active.
     Unhealthy(PluginRouteHealthSnapshot),
     /// Health state itself could not be read. Routing fails closed for this plugin route.
     HealthUnavailable(String),
@@ -38,21 +38,27 @@ pub struct RejectedPluginRoute {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatedRoutePlan {
+    /// Public service plan. Single-route services expose only the current best route here.
     pub plan: RoutePlan,
+    /// Every currently eligible route in preference/default/priority order. The execution frontend
+    /// uses this list to retry a secondary account when permit acquisition races or a guest call
+    /// fails after planning.
+    pub eligible_routes: Vec<PluginRoute>,
     pub rejected: Vec<RejectedPluginRoute>,
 }
 
 impl GatedRoutePlan {
     pub fn has_authenticated_plugin(&self) -> bool {
-        self.plan.has_authenticated_plugin()
+        !self.eligible_routes.is_empty()
     }
 }
 
 /// Build the final plugin route plan after both session and runtime-health gates.
 ///
 /// Ordering is computed over *all* authenticated candidates first. Filtering then happens before a
-/// single-route service is truncated to one route, so a preferred/default account under 429/circuit
-/// backoff cannot hide a healthy secondary account.
+/// single-route service exposes its current winner, so a preferred/default account under
+/// 429/circuit/saturation cannot hide a healthy secondary account. `eligible_routes` intentionally
+/// retains every accepted route for execution-time retry.
 pub fn plan_routes<H: PluginRouteHealthSource>(
     router: &PluginServiceRouter,
     sessions: &PluginSessionCoordinator,
@@ -68,7 +74,7 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
         .collect::<Vec<_>>();
     sort_routes(&mut candidates, policy.preferred_provider.as_deref());
 
-    let mut accepted = Vec::with_capacity(candidates.len());
+    let mut eligible_routes = Vec::with_capacity(candidates.len());
     let mut rejected = Vec::new();
     for route in candidates {
         let Some(account) = find_account(router, &route) else {
@@ -93,7 +99,7 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
 
         let key = PluginCallKey::provider(&route.plugin_id, &route.provider_id);
         match health.health_for(&key) {
-            Ok(snapshot) if snapshot.is_available() => accepted.push(route),
+            Ok(snapshot) if snapshot.is_available() => eligible_routes.push(route),
             Ok(snapshot) => rejected.push(RejectedPluginRoute {
                 route,
                 reason: PluginRouteRejectionReason::Unhealthy(snapshot),
@@ -105,18 +111,20 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
         }
     }
 
+    let mut selected_routes = eligible_routes.clone();
     if !service.fan_out() {
-        accepted.truncate(1);
+        selected_routes.truncate(1);
     }
 
     GatedRoutePlan {
         plan: RoutePlan {
             service,
-            plugin_routes: accepted,
+            plugin_routes: selected_routes,
             authenticated_plugin_first: policy.authenticated_plugin_first,
             allow_builtin_fallback: policy.allow_builtin_fallback,
             allow_local_fallback: policy.allow_local_fallback,
         },
+        eligible_routes,
         rejected,
     }
 }
@@ -224,7 +232,26 @@ mod tests {
         );
         assert_eq!(gated.plan.plugin_routes.len(), 1);
         assert_eq!(gated.plan.plugin_routes[0].provider_id, "qqmusic");
+        assert_eq!(gated.eligible_routes.len(), 1);
         assert_eq!(gated.rejected.len(), 1);
+    }
+
+    #[test]
+    fn single_route_plan_keeps_secondary_execution_candidates() {
+        let mut router = PluginServiceRouter::default();
+        router.upsert_account(account("netease", "primary", 100, PluginCapability::Metadata));
+        router.upsert_account(account("qqmusic", "secondary", 10, PluginCapability::Metadata));
+        let gated = plan_routes(
+            &router,
+            &PluginSessionCoordinator::default(),
+            &MockHealth::default(),
+            ServiceKind::Metadata,
+            &RoutingPolicy::default(),
+        );
+        assert_eq!(gated.plan.plugin_routes.len(), 1);
+        assert_eq!(gated.eligible_routes.len(), 2);
+        assert_eq!(gated.eligible_routes[0].provider_id, "netease");
+        assert_eq!(gated.eligible_routes[1].provider_id, "qqmusic");
     }
 
     #[test]
@@ -277,6 +304,7 @@ mod tests {
         );
         assert_eq!(gated.plan.plugin_routes.len(), 1);
         assert_eq!(gated.plan.plugin_routes[0].provider_id, "netease");
+        assert_eq!(gated.eligible_routes.len(), 1);
         assert!(matches!(
             gated.rejected[0].reason,
             PluginRouteRejectionReason::HealthUnavailable(_)
