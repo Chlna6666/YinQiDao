@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow};
 
 use crate::{
     plugin_host::PluginHostState,
+    plugin_secrets::SecretStoreProtection,
     plugins::{AccountState, PluginAccount},
 };
 
@@ -60,7 +61,10 @@ pub struct PluginSessionCoordinator {
 }
 
 impl PluginSessionCoordinator {
-    fn quarantine_restored_sessions(host: &Arc<RwLock<PluginHostState>>) -> Self {
+    fn quarantine_restored_sessions(
+        host: &Arc<RwLock<PluginHostState>>,
+        secret_protection: SecretStoreProtection,
+    ) -> Self {
         let mut coordinator = Self::default();
         let restored = match host.read() {
             Ok(host) => host.router().accounts().to_vec(),
@@ -72,10 +76,7 @@ impl PluginSessionCoordinator {
             }
         };
 
-        // `Expired` accounts are also queued once at process start: a refresh token may still be
-        // valid even though the short-lived provider session expired before the previous shutdown.
-        // `LoggedOut` is explicit user intent and is therefore never retried automatically.
-        let candidates = restored
+        let restorable = restored
             .iter()
             .filter(|account| {
                 matches!(
@@ -83,15 +84,26 @@ impl PluginSessionCoordinator {
                     AccountState::Authenticated | AccountState::Expired
                 )
             })
-            .map(PluginAccountKey::from)
             .collect::<Vec<_>>();
-        coordinator
-            .pending_validation
-            .extend(candidates.iter().cloned());
+
+        // Only a persistent protected Secret backend can make cross-process refresh meaningful.
+        // With the development memory backend, queueing PendingValidation would promise a restore
+        // path even though every refresh token/cookie disappeared with the previous process.
+        if secret_protection.is_persistent() {
+            coordinator.pending_validation.extend(
+                restorable
+                    .iter()
+                    .map(|account| PluginAccountKey::from(*account)),
+            );
+        } else if !restorable.is_empty() {
+            coordinator.startup_errors.push(format!(
+                "当前插件 Secret 后端为 {secret_protection:?}，不支持跨进程会话恢复；历史账号保持 Expired"
+            ));
+        }
 
         // The account index can say `Authenticated` only about the process that wrote it. Before a
         // new process validates its Secret/session, downgrade that state in the routing model. This
-        // keeps PluginServiceRouter fail-closed and preserves built-in/local fallbacks.
+        // is required for both persistent and ephemeral Secret backends.
         let authenticated = restored
             .iter()
             .filter(|account| account.state == AccountState::Authenticated)
@@ -187,7 +199,8 @@ impl PluginSessionCoordinator {
     }
 
     /// Finish one restore attempt without enabling the provider. The account stays `Expired` so UI
-    /// can still show it and the next application start may retry refresh if Secret material exists.
+    /// can still show it. A future application start retries only when the active Secret backend is
+    /// persistent and can still contain refresh material.
     pub fn mark_validation_failed(
         &mut self,
         host: &Arc<RwLock<PluginHostState>>,
@@ -243,11 +256,12 @@ impl PluginSessionCoordinator {
 
 pub fn initialize(
     host: &Arc<RwLock<PluginHostState>>,
+    secret_protection: SecretStoreProtection,
 ) -> Arc<RwLock<PluginSessionCoordinator>> {
     PLUGIN_SESSIONS
         .get_or_init(|| {
             Arc::new(RwLock::new(
-                PluginSessionCoordinator::quarantine_restored_sessions(host),
+                PluginSessionCoordinator::quarantine_restored_sessions(host, secret_protection),
             ))
         })
         .clone()
@@ -297,5 +311,12 @@ mod tests {
             coordinator.state_for(&account),
             PluginSessionState::LoggedOut
         );
+    }
+
+    #[test]
+    fn ephemeral_secret_backend_is_never_persistent() {
+        assert!(!SecretStoreProtection::Ephemeral.is_persistent());
+        assert!(SecretStoreProtection::OsProtected.is_persistent());
+        assert!(SecretStoreProtection::HostEncrypted.is_persistent());
     }
 }

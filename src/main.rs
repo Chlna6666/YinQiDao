@@ -90,7 +90,12 @@ fn main() -> Result<()> {
     let plugin_compiled_cache =
         plugin_compiled_cache::initialize(plugin_engine_policy.max_compiled_artifact_bytes);
     let plugin_host = plugin_host::initialize(&base_dir);
-    let plugin_sessions = plugin_sessions::initialize(&plugin_host);
+    let plugin_secret_store = std::sync::Arc::new(plugin_secrets::MemorySecretStore::default());
+    let plugin_secret_backend =
+        plugin_secrets::PluginSecretStore::backend_name(plugin_secret_store.as_ref());
+    let plugin_secret_protection =
+        plugin_secrets::PluginSecretStore::protection(plugin_secret_store.as_ref());
+    let plugin_sessions = plugin_sessions::initialize(&plugin_host, plugin_secret_protection);
     let plugin_components = plugin_components::initialize(&base_dir);
     let plugin_catalog = match plugin_host.read() {
         Ok(host) => Some(host.catalog().clone()),
@@ -106,7 +111,7 @@ fn main() -> Result<()> {
         (Some(catalog), Some(permissions)) => Some(plugin_runtime::initialize(
             catalog.clone(),
             permissions.clone(),
-            std::sync::Arc::new(plugin_secrets::MemorySecretStore::default()),
+            plugin_secret_store.clone(),
         )),
         _ => None,
     };
@@ -139,7 +144,8 @@ fn main() -> Result<()> {
             installed_plugins = runtime.catalog().plugins().len(),
             provider_frontend_ready = plugin_frontend.is_some(),
             provider_client_ready = plugin_clients.is_ready().unwrap_or(false),
-            secret_backend = "memory-nonpersistent",
+            secret_backend = plugin_secret_backend,
+            secret_persistent = plugin_secret_protection.is_persistent(),
             "插件 Host service runtime 已初始化"
         );
     } else {
