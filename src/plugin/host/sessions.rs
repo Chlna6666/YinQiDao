@@ -215,8 +215,8 @@ impl PluginSessionCoordinator {
                 &key.account_id,
                 AccountState::Authenticated,
             )?;
-        if changed {
-            self.pending_validation.remove(key);
+        let pending_removed = self.pending_validation.remove(key);
+        if changed || pending_removed {
             bump_session_generation();
         }
         Ok(changed)
@@ -283,13 +283,16 @@ impl PluginSessionCoordinator {
             .accounts()
             .iter()
             .any(|existing| existing == &account);
-        let pending_removed = self.pending_validation.remove(&key);
 
+        // Keep the pending overlay intact until all Host persistence/validation has succeeded. If
+        // `upsert_account` fails, returning with PendingValidation unchanged is safer than exposing a
+        // partially committed Expired/Authenticated state to routing and retained UI snapshots.
         if !already_current {
             host.write()
                 .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
                 .upsert_account(account)?;
         }
+        let pending_removed = self.pending_validation.remove(&key);
         if !already_current || pending_removed {
             bump_session_generation();
         }
