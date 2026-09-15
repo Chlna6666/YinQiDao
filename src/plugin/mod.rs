@@ -78,6 +78,19 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     engine_policy.validate()?;
     let compiled_cache = component::cache::initialize(engine_policy.max_compiled_artifact_bytes);
     let plugin_host = host::catalog::initialize(base_dir);
+    let state_recovery = {
+        let host = plugin_host
+            .read()
+            .map_err(|error| anyhow::anyhow!("插件宿主状态锁已损坏: {error}"))?;
+        host::state_guard::repair_fail_closed_state(base_dir, host.catalog())?
+    };
+    if let Some(recovery) = state_recovery {
+        tracing::error!(
+            reason = %recovery.reason,
+            disabled_plugins = recovery.disabled_plugins,
+            "插件启停状态损坏，已 fail-closed 重建为全部禁用"
+        );
+    }
     let package_manager = host::package_manager::initialize(base_dir);
 
     let secret_store = host::secrets::initialize(std::sync::Arc::new(
