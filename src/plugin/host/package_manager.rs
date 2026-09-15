@@ -276,15 +276,11 @@ impl PluginPackageManager {
             .disabled_plugins
             .lock()
             .map_err(|error| anyhow!("插件启停状态锁已损坏: {error}"))?;
-        let changed = if enabled {
-            disabled.remove(plugin_id)
-        } else {
-            disabled.insert(plugin_id.to_owned())
-        };
-        if !changed {
+        let Some(next_disabled) = next_disabled_plugins(&disabled, plugin_id, enabled) else {
             return Ok(false);
-        }
-        save_disabled_plugins(&self.state_path, &disabled)?;
+        };
+        save_disabled_plugins(&self.state_path, &next_disabled)?;
+        *disabled = next_disabled;
         drop(disabled);
 
         if enabled {
@@ -377,8 +373,9 @@ impl PluginPackageManager {
                 .disabled_plugins
                 .lock()
                 .map_err(|error| anyhow!("插件启停状态锁已损坏: {error}"))?;
-            if disabled.remove(plugin_id) {
-                save_disabled_plugins(&self.state_path, &disabled)?;
+            if let Some(next_disabled) = next_disabled_plugins(&disabled, plugin_id, true) {
+                save_disabled_plugins(&self.state_path, &next_disabled)?;
+                *disabled = next_disabled;
             }
         }
 
@@ -504,6 +501,29 @@ fn load_disabled_plugins(path: &Path) -> Result<HashSet<String>> {
     Ok(file.disabled_plugins.into_iter().collect())
 }
 
+fn next_disabled_plugins(
+    current: &HashSet<String>,
+    plugin_id: &str,
+    enabled: bool,
+) -> Option<HashSet<String>> {
+    let changed = if enabled {
+        current.contains(plugin_id)
+    } else {
+        !current.contains(plugin_id)
+    };
+    if !changed {
+        return None;
+    }
+
+    let mut next = current.clone();
+    if enabled {
+        next.remove(plugin_id);
+    } else {
+        next.insert(plugin_id.to_owned());
+    }
+    Some(next)
+}
+
 fn save_disabled_plugins(path: &Path, disabled: &HashSet<String>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -581,5 +601,17 @@ mod tests {
     fn state_file_defaults_to_all_enabled() {
         let path = std::env::temp_dir().join(format!("yinqidao-plugin-state-missing-{}", unique_nonce()));
         assert!(load_disabled_plugins(&path).expect("state").is_empty());
+    }
+
+    #[test]
+    fn disabled_state_transition_is_copy_on_write() {
+        let current = HashSet::from(["plugin.test".to_string()]);
+        let enabled = next_disabled_plugins(&current, "plugin.test", true).expect("enable");
+        assert!(current.contains("plugin.test"));
+        assert!(!enabled.contains("plugin.test"));
+
+        let disabled = next_disabled_plugins(&enabled, "plugin.test", false).expect("disable");
+        assert!(disabled.contains("plugin.test"));
+        assert!(next_disabled_plugins(&disabled, "plugin.test", false).is_none());
     }
 }
