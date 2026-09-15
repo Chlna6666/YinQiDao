@@ -276,11 +276,23 @@ impl PluginSessionCoordinator {
     ) -> Result<()> {
         account.state = AccountState::Authenticated;
         let key = PluginAccountKey::from(&account);
-        host.write()
+        let already_current = host
+            .read()
             .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
-            .upsert_account(account)?;
-        self.pending_validation.remove(&key);
-        bump_session_generation();
+            .router()
+            .accounts()
+            .iter()
+            .any(|existing| existing == &account);
+        let pending_removed = self.pending_validation.remove(&key);
+
+        if !already_current {
+            host.write()
+                .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
+                .upsert_account(account)?;
+        }
+        if !already_current || pending_removed {
+            bump_session_generation();
+        }
         Ok(())
     }
 }
