@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::plugin_security::SecretSlot;
 
 pub const DEFAULT_MAX_SECRET_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_SECRET_ENTRIES: usize = 4_096;
 
 /// Security properties of one Host-owned Secret backend.
 ///
@@ -76,6 +77,7 @@ pub fn global() -> Option<Arc<dyn PluginSecretStore>> {
 pub struct MemorySecretStore {
     values: RwLock<HashMap<SecretSlot, Vec<u8>>>,
     max_secret_bytes: usize,
+    max_entries: usize,
 }
 
 impl Default for MemorySecretStore {
@@ -86,9 +88,14 @@ impl Default for MemorySecretStore {
 
 impl MemorySecretStore {
     pub fn new(max_secret_bytes: usize) -> Self {
+        Self::with_limits(max_secret_bytes, DEFAULT_MAX_SECRET_ENTRIES)
+    }
+
+    pub fn with_limits(max_secret_bytes: usize, max_entries: usize) -> Self {
         Self {
             values: RwLock::new(HashMap::new()),
             max_secret_bytes: max_secret_bytes.max(1),
+            max_entries: max_entries.max(1),
         }
     }
 
@@ -115,17 +122,16 @@ impl MemorySecretStore {
         values: &mut HashMap<SecretSlot, Vec<u8>>,
         predicate: impl Fn(&SecretSlot) -> bool,
     ) -> usize {
-        let keys = values
-            .keys()
-            .filter(|slot| predicate(slot))
-            .cloned()
-            .collect::<Vec<_>>();
-        let removed = keys.len();
-        for key in keys {
-            if let Some(mut value) = values.remove(&key) {
+        let mut removed = 0usize;
+        values.retain(|slot, value| {
+            if predicate(slot) {
                 value.fill(0);
+                removed = removed.saturating_add(1);
+                false
+            } else {
+                true
             }
-        }
+        });
         removed
     }
 }
@@ -154,6 +160,9 @@ impl PluginSecretStore for MemorySecretStore {
             .values
             .write()
             .map_err(|error| anyhow!("插件 Secret 内存存储锁已损坏: {error}"))?;
+        if !values.contains_key(slot) && values.len() >= self.max_entries {
+            bail!("插件 Secret 条目数达到 {} 上限", self.max_entries);
+        }
         if let Some(mut previous) = values.insert(slot.clone(), value.to_vec()) {
             previous.fill(0);
         }
@@ -352,6 +361,19 @@ mod tests {
         assert!(store.set(&slot, b"").is_err());
         assert!(store.set(&slot, b"12345").is_err());
         assert!(store.get(&slot).expect("get").is_none());
+    }
+
+    #[test]
+    fn secret_entry_limit_allows_overwrite_but_rejects_new_slot() {
+        let store = MemorySecretStore::with_limits(64, 1);
+        let first = SecretSlot::provider("plugin.test", "qqmusic", "token").expect("first slot");
+        let second = SecretSlot::provider("plugin.test", "qqmusic", "cookie").expect("second slot");
+
+        store.set(&first, b"one").expect("set first");
+        store.set(&first, b"two").expect("overwrite first");
+        assert!(store.set(&second, b"three").is_err());
+        assert_eq!(store.len().expect("len"), 1);
+        assert_eq!(store.get(&first).expect("get first"), Some(b"two".to_vec()));
     }
 
     #[test]
