@@ -8,7 +8,8 @@ use crate::{
     plugin::{
         abi::{AuthMethod, PluginCapability},
         accounts::{self, PluginAccountSessionStatus, PluginProviderSummary, PluginServiceSummary},
-        extensions,
+        extensions, frontend,
+        logout::{PluginAccountLogoutOutcome, PluginLogoutAllResult},
     },
     ui::{MusicApp, theme},
 };
@@ -17,9 +18,11 @@ use crate::{
 struct ServiceAccountsSnapshot {
     loading: bool,
     loaded: bool,
+    action_in_flight: bool,
     generation: u64,
     services: Arc<Vec<PluginServiceSummary>>,
     status: String,
+    action_status: String,
 }
 
 static SERVICE_ACCOUNTS_STATE: OnceLock<Mutex<ServiceAccountsSnapshot>> = OnceLock::new();
@@ -36,6 +39,7 @@ fn snapshot_for_generation(generation: u64) -> (ServiceAccountsSnapshot, bool) {
         state.loaded = false;
         state.services = Arc::new(Vec::new());
         state.status = "插件已更新，正在刷新音乐服务账号状态…".into();
+        state.action_status.clear();
     }
     let should_refresh = !state.loaded && !state.loading;
     (state.clone(), should_refresh)
@@ -45,7 +49,7 @@ fn begin_refresh(generation: u64) -> bool {
     let Ok(mut state) = state().lock() else {
         return false;
     };
-    if state.loading {
+    if state.loading || state.action_in_flight {
         return false;
     }
     state.loading = true;
@@ -118,6 +122,178 @@ fn refresh_services(cx: &mut Context<MusicApp>) {
     .detach();
 }
 
+fn begin_action(generation: u64, message: &str) -> bool {
+    let current_generation = extensions::theme_registry_generation();
+    let Ok(mut state) = state().lock() else {
+        return false;
+    };
+    if current_generation != generation {
+        state.loaded = false;
+        state.generation = current_generation;
+        state.services = Arc::new(Vec::new());
+        state.action_status = "插件已更新，请刷新账号状态后重试".into();
+        return false;
+    }
+    if state.loading || state.action_in_flight {
+        return false;
+    }
+    state.action_in_flight = true;
+    state.action_status = message.into();
+    true
+}
+
+fn complete_action(generation: u64, result: Result<String>) -> bool {
+    let current_generation = extensions::theme_registry_generation();
+    let Ok(mut state) = state().lock() else {
+        return false;
+    };
+    state.action_in_flight = false;
+    state.loaded = false;
+    state.services = Arc::new(Vec::new());
+    if current_generation != generation {
+        state.generation = current_generation;
+        state.action_status = "插件在账号操作期间已更新，旧操作结果未复用".into();
+        return true;
+    }
+    state.generation = generation;
+    state.action_status = match result {
+        Ok(status) => status,
+        Err(error) => format!("账号操作失败：{error:#}"),
+    };
+    true
+}
+
+fn logout_account_action(
+    plugin_id: String,
+    provider_id: String,
+    account_id: String,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) {
+    if !begin_action(generation, "正在退出账号并撤销 Host 凭据…") {
+        cx.notify();
+        return;
+    }
+    cx.notify();
+    let task = Tokio::spawn_result(cx, async move {
+        let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
+        let outcome = frontend
+            .logout_account_by_id(&plugin_id, &provider_id, &account_id)
+            .await?;
+        Ok::<_, anyhow::Error>(summarize_account_logout(&outcome))
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if complete_action(generation, result) {
+                refresh_services(cx);
+            } else {
+                cx.notify();
+            }
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn logout_provider_action(
+    plugin_id: String,
+    provider_id: String,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) {
+    if !begin_action(generation, "正在退出该 Provider 的全部账号并撤销凭据…") {
+        cx.notify();
+        return;
+    }
+    cx.notify();
+    let task = Tokio::spawn_result(cx, async move {
+        let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
+        let result = frontend.logout_provider_all(&plugin_id, &provider_id).await?;
+        Ok::<_, anyhow::Error>(summarize_bulk_logout("Provider", &result))
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if complete_action(generation, result) {
+                refresh_services(cx);
+            } else {
+                cx.notify();
+            }
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn logout_plugin_action(plugin_id: String, generation: u64, cx: &mut Context<MusicApp>) {
+    if !begin_action(generation, "正在退出该插件的全部账号并撤销凭据…") {
+        cx.notify();
+        return;
+    }
+    cx.notify();
+    let task = Tokio::spawn_result(cx, async move {
+        let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
+        let result = frontend.logout_plugin_all(&plugin_id).await?;
+        Ok::<_, anyhow::Error>(summarize_bulk_logout("插件", &result))
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if complete_action(generation, result) {
+                refresh_services(cx);
+            } else {
+                cx.notify();
+            }
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn summarize_account_logout(outcome: &PluginAccountLogoutOutcome) -> String {
+    if outcome.operation_error.is_some() {
+        return format!(
+            "账号退出未完整完成：本地会话操作失败；Host 已撤销 {} 项账号凭据",
+            outcome.secrets_revoked
+        );
+    }
+    if outcome.secret_cleanup_error.is_some() {
+        return "账号已退出，但 Host Secret 清理失败；请重试清理凭据".into();
+    }
+    if !outcome.remote_acknowledged || outcome.remote_error.is_some() {
+        return format!(
+            "账号已从本地路由退出并撤销 {} 项 Host 凭据；远端注销未确认",
+            outcome.secrets_revoked
+        );
+    }
+    format!(
+        "账号已退出，远端已确认，并撤销 {} 项 Host 凭据",
+        outcome.secrets_revoked
+    )
+}
+
+fn summarize_bulk_logout(scope: &str, result: &PluginLogoutAllResult) -> String {
+    let local_failures = result.local_failures();
+    let remote_failures = result.remote_failures();
+    let secret_failures = result.secret_cleanup_failures();
+    let account_count = result.accounts.len();
+    if local_failures != 0 || secret_failures != 0 {
+        return format!(
+            "{scope} 批量退出完成但存在异常：{account_count} 个账号 · 本地失败 {local_failures} · 凭据清理失败 {secret_failures}"
+        );
+    }
+    if remote_failures != 0 {
+        return format!(
+            "{scope} 的 {account_count} 个账号已完成本地退出与凭据清理；{remote_failures} 个远端注销未确认"
+        );
+    }
+    format!(
+        "{scope} 的 {account_count} 个账号已安全退出；额外撤销 {} 项残余 Host 凭据",
+        result.secrets_revoked
+    )
+}
+
 pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     let generation = extensions::theme_registry_generation();
     let (initial, should_refresh) = snapshot_for_generation(generation);
@@ -128,6 +304,7 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
         .lock()
         .map(|state| state.clone())
         .unwrap_or(initial);
+    let interaction_busy = current.loading || current.action_in_flight;
 
     let mut services = div().flex().flex_col().gap_4();
     if current.services.is_empty() {
@@ -148,6 +325,8 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                         .text_color(theme::TEXT_PRIMARY)
                         .child(if current.loading {
                             "正在读取音乐服务…"
+                        } else if current.action_in_flight {
+                            "正在处理账号操作…"
                         } else {
                             "当前没有可显示的音乐服务插件"
                         }),
@@ -156,8 +335,8 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                     div()
                         .text_xs()
                         .text_color(theme::TEXT_TERTIARY)
-                        .child(if current.loading {
-                            "Host 正在后台生成只读账号/权限快照，不会在 render 路径执行插件代码。"
+                        .child(if interaction_busy {
+                            "Host 正在后台执行账号/凭据操作，不会在 render 路径执行插件代码。"
                         } else {
                             "安装带 Provider 的插件后，可在此查看账号会话、能力和 Host 权限授权状态。"
                         }),
@@ -165,9 +344,22 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
         );
     } else {
         for service in current.services.iter().cloned() {
-            services = services.child(service_card(service));
+            services = services.child(service_card(
+                service,
+                interaction_busy,
+                generation,
+                cx,
+            ));
         }
     }
+
+    let refresh_label = if current.action_in_flight {
+        "操作中…"
+    } else if current.loading {
+        "刷新中…"
+    } else {
+        "刷新状态"
+    };
 
     div()
         .size_full()
@@ -208,16 +400,15 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                                 ),
                         )
                         .child(refresh_button(
-                            current.loading,
+                            interaction_busy,
+                            refresh_label,
                             cx.listener(|_, _, _, cx| refresh_services(cx)),
                         )),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(if current.status.starts_with("读取")
-                            || current.status.contains("已丢弃")
-                        {
+                        .text_color(if status_is_error(&current.status) {
                             theme::ACCENT_RED
                         } else {
                             theme::TEXT_TERTIARY
@@ -228,6 +419,21 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                             current.status
                         }),
                 )
+                .child_if(!current.action_status.is_empty(), || {
+                    div()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(theme::BG_CARD)
+                        .border_1()
+                        .border_color(theme::BORDER_HAIRLINE)
+                        .text_xs()
+                        .text_color(if status_is_error(&current.action_status) {
+                            theme::ACCENT_RED
+                        } else {
+                            theme::TEXT_SECONDARY
+                        })
+                        .child(current.action_status.clone())
+                })
                 .child(services)
                 .child(
                     div()
@@ -238,13 +444,18 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                         .border_color(theme::BORDER_CARD)
                         .text_xs()
                         .text_color(theme::TEXT_TERTIARY)
-                        .child("当前页面只展示 Host 已验证的非 Secret 元数据。QR/OAuth/Device Code/Cookie Import 与安全持久化凭据后端仍需在 generated Component binding 接入后实现。"),
+                        .child("本页只展示 Host 已验证的非 Secret 元数据。退出操作先使本地 Session 失效，再 best-effort 注销远端，最后由 Host 精确撤销账号、Provider 或插件 Secret namespace。"),
                 ),
         )
         .into_any_element()
 }
 
-fn service_card(service: PluginServiceSummary) -> gpui::AnyElement {
+fn service_card(
+    service: PluginServiceSummary,
+    interaction_busy: bool,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) -> gpui::AnyElement {
     let enabled = service.enabled;
     let provider_count = service.providers.len();
     let requested_domains = service.permissions.requested_network_domains.len();
@@ -261,6 +472,7 @@ fn service_card(service: PluginServiceSummary) -> gpui::AnyElement {
     } else {
         "播放事件：未授权"
     };
+    let plugin_id = service.plugin_id.clone();
 
     let mut providers = div().flex().flex_col().gap_3();
     if service.providers.is_empty() {
@@ -275,10 +487,17 @@ fn service_card(service: PluginServiceSummary) -> gpui::AnyElement {
         );
     } else {
         for provider in service.providers {
-            providers = providers.child(provider_card(provider));
+            providers = providers.child(provider_card(
+                &plugin_id,
+                provider,
+                interaction_busy,
+                generation,
+                cx,
+            ));
         }
     }
 
+    let plugin_id_for_logout = plugin_id.clone();
     div()
         .p_4()
         .rounded_xl()
@@ -318,15 +537,32 @@ fn service_card(service: PluginServiceSummary) -> gpui::AnyElement {
                             div()
                                 .text_xs()
                                 .text_color(theme::TEXT_SECONDARY)
-                                .child(format!("{} · v{}", service.plugin_id, service.version)),
+                                .child(format!("{} · v{}", plugin_id, service.version)),
                         ),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
-                        .text_color(theme::TEXT_TERTIARY)
-                        .child(format!("{provider_count} 个 Provider")),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::TEXT_TERTIARY)
+                                .child(format!("{provider_count} 个 Provider")),
+                        )
+                        .child(action_button(
+                            "退出全部",
+                            interaction_busy,
+                            cx.listener(move |_, _, _, cx| {
+                                logout_plugin_action(
+                                    plugin_id_for_logout.clone(),
+                                    generation,
+                                    cx,
+                                )
+                            }),
+                        )),
                 ),
         )
         .child(
@@ -375,10 +611,17 @@ fn service_card(service: PluginServiceSummary) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn provider_card(provider: PluginProviderSummary) -> gpui::AnyElement {
+fn provider_card(
+    plugin_id: &str,
+    provider: PluginProviderSummary,
+    interaction_busy: bool,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) -> gpui::AnyElement {
     let capability_text = capability_list(&provider.capabilities);
     let auth_text = auth_method_list(&provider.auth_methods);
     let account_count = provider.accounts.len();
+    let provider_id = provider.provider_id.clone();
     let mut accounts = div().flex().flex_col().gap_2();
     if provider.accounts.is_empty() {
         accounts = accounts.child(
@@ -389,11 +632,19 @@ fn provider_card(provider: PluginProviderSummary) -> gpui::AnyElement {
                 .bg(theme::BG_CARD)
                 .text_xs()
                 .text_color(theme::TEXT_TERTIARY)
-                .child("尚无已登记账号；认证流程尚未在此设置页开放。"),
+                .child("尚无已登记账号；可使用 Provider 级清理撤销残余 Host 凭据。"),
         );
     } else {
         for account in provider.accounts {
             let account_capabilities = capability_list(&account.capabilities);
+            let account_id = account.account_id.clone();
+            let plugin_id_for_account = plugin_id.to_owned();
+            let provider_id_for_account = provider_id.clone();
+            let action_label = if account.state == PluginAccountSessionStatus::LoggedOut {
+                "清理凭据"
+            } else {
+                "退出"
+            };
             accounts = accounts.child(
                 div()
                     .px_3()
@@ -436,11 +687,33 @@ fn provider_card(provider: PluginProviderSummary) -> gpui::AnyElement {
                                     )),
                             ),
                     )
-                    .child(session_badge(account.state)),
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(session_badge(account.state))
+                            .child(action_button(
+                                action_label,
+                                interaction_busy,
+                                cx.listener(move |_, _, _, cx| {
+                                    logout_account_action(
+                                        plugin_id_for_account.clone(),
+                                        provider_id_for_account.clone(),
+                                        account_id.clone(),
+                                        generation,
+                                        cx,
+                                    )
+                                }),
+                            )),
+                    ),
             );
         }
     }
 
+    let plugin_id_for_provider = plugin_id.to_owned();
+    let provider_id_for_logout = provider_id.clone();
     div()
         .p_3()
         .rounded_lg()
@@ -473,15 +746,33 @@ fn provider_card(provider: PluginProviderSummary) -> gpui::AnyElement {
                             div()
                                 .text_xs()
                                 .text_color(theme::TEXT_SECONDARY)
-                                .child(provider.provider_id),
+                                .child(provider_id),
                         ),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
-                        .text_color(theme::TEXT_TERTIARY)
-                        .child(format!("{account_count} 个账号")),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::TEXT_TERTIARY)
+                                .child(format!("{account_count} 个账号")),
+                        )
+                        .child(action_button(
+                            "退出全部",
+                            interaction_busy,
+                            cx.listener(move |_, _, _, cx| {
+                                logout_provider_action(
+                                    plugin_id_for_provider.clone(),
+                                    provider_id_for_logout.clone(),
+                                    generation,
+                                    cx,
+                                )
+                            }),
+                        )),
                 ),
         )
         .child(
@@ -567,7 +858,34 @@ fn small_badge(label: &'static str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn refresh_button<F>(loading: bool, on_press: F) -> gpui::AnyElement
+fn action_button<F>(label: &'static str, disabled: bool, on_press: F) -> gpui::AnyElement
+where
+    F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+{
+    let button = div()
+        .flex_none()
+        .px_2()
+        .py(px(4.0))
+        .rounded_lg()
+        .border_1()
+        .border_color(theme::BORDER_HAIRLINE)
+        .bg(theme::accent_red_muted())
+        .text_xs()
+        .text_color(theme::ACCENT_RED)
+        .child(label);
+    if disabled {
+        button.opacity(0.40).into_any_element()
+    } else {
+        button
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::bg_hover()))
+            .active(|style| style.scale(0.98))
+            .on_mouse_down(gpui::MouseButton::Left, on_press)
+            .into_any_element()
+    }
+}
+
+fn refresh_button<F>(disabled: bool, label: &'static str, on_press: F) -> gpui::AnyElement
 where
     F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 {
@@ -580,8 +898,8 @@ where
         .bg(theme::BG_CARD)
         .text_sm()
         .text_color(theme::TEXT_PRIMARY)
-        .child(if loading { "刷新中…" } else { "刷新状态" });
-    if loading {
+        .child(label);
+    if disabled {
         button.opacity(0.45).into_any_element()
     } else {
         button
@@ -591,6 +909,10 @@ where
             .on_mouse_down(gpui::MouseButton::Left, on_press)
             .into_any_element()
     }
+}
+
+fn status_is_error(status: &str) -> bool {
+    status.contains("失败") || status.contains("异常") || status.contains("未确认") || status.contains("已丢弃")
 }
 
 fn capability_list(capabilities: &[PluginCapability]) -> String {
