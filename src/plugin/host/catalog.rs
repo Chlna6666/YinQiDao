@@ -17,6 +17,10 @@ pub const PLUGIN_PACKAGE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
 const PLUGIN_ACCOUNT_STORE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_ACCOUNT_STORE_FILE: &str = "plugin-accounts.json";
+const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_PERSISTED_PLUGIN_ACCOUNTS: usize = 4_096;
+const MAX_ACCOUNT_ID_BYTES: usize = 512;
+const MAX_ACCOUNT_TEXT_BYTES: usize = 8 * 1_024;
 
 static PLUGIN_HOST: OnceLock<Arc<RwLock<PluginHostState>>> = OnceLock::new();
 
@@ -299,6 +303,7 @@ fn auth_method_key(method: AuthMethod) -> u8 {
 fn valid_identifier(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
         && !value.starts_with('.')
         && !value.ends_with('.')
         && value.bytes().all(|byte| {
@@ -392,11 +397,20 @@ impl PluginAccountStore {
 }
 
 fn validate_accounts(accounts: &[PluginAccount]) -> Result<()> {
+    if accounts.len() > MAX_PERSISTED_PLUGIN_ACCOUNTS {
+        bail!(
+            "插件账号数量超过 {} Host 上限",
+            MAX_PERSISTED_PLUGIN_ACCOUNTS
+        );
+    }
+
     let mut identities = HashSet::new();
     for account in accounts {
         if !valid_identifier(&account.plugin_id)
             || !valid_identifier(&account.provider_id)
             || account.account_id.trim().is_empty()
+            || account.account_id.len() > MAX_ACCOUNT_ID_BYTES
+            || account.account_id.contains('\0')
         {
             bail!(
                 "插件账号标识非法: {}/{}/{}",
@@ -404,6 +418,23 @@ fn validate_accounts(accounts: &[PluginAccount]) -> Result<()> {
                 account.provider_id,
                 account.account_id
             );
+        }
+        let text_bytes = account
+            .display_name
+            .len()
+            .saturating_add(account.avatar_url.as_ref().map_or(0, String::len));
+        if text_bytes > MAX_ACCOUNT_TEXT_BYTES {
+            bail!("插件账号展示信息超过 {} bytes Host 上限", MAX_ACCOUNT_TEXT_BYTES);
+        }
+        let mut capabilities = HashSet::with_capacity(account.capabilities.len());
+        for capability in &account.capabilities {
+            if !capabilities.insert(*capability) {
+                bail!(
+                    "插件账号重复声明 capability: {}/{}/{capability:?}",
+                    account.plugin_id,
+                    account.provider_id
+                );
+            }
         }
         let identity = (
             account.plugin_id.clone(),
@@ -714,6 +745,22 @@ auth_methods = ["qr_code"]
         assert!(restored.iter().any(|account| account.account_id == "b" && !account.is_default));
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn account_store_rejects_oversized_identity_and_duplicate_capabilities() {
+        let mut oversized = account(&"a".repeat(MAX_ACCOUNT_ID_BYTES + 1), 0, true);
+        assert!(validate_accounts(std::slice::from_ref(&oversized)).is_err());
+
+        oversized.account_id = "valid".into();
+        oversized.capabilities = vec![PluginCapability::Search, PluginCapability::Search];
+        assert!(validate_accounts(std::slice::from_ref(&oversized)).is_err());
+    }
+
+    #[test]
+    fn identifiers_have_a_host_length_budget() {
+        assert!(valid_identifier("plugin.valid"));
+        assert!(!valid_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES + 1)));
     }
 
     #[test]
