@@ -132,13 +132,18 @@ impl PluginServiceFrontend {
 /// Secure single-account logout implementation. Session state becomes locally authoritative first,
 /// guest cleanup runs best-effort, then exact account Secret deletion runs last so a guest cannot
 /// recreate a cookie/token during its own logout callback and leave it behind.
+///
+/// A stale or arbitrary account identity is never forwarded to guest code. If the exact Host router
+/// row disappeared after the caller took its snapshot, guest logout is skipped while Host Secret
+/// cleanup still runs fail-closed for that exact namespace.
 async fn logout_account_key(
     frontend: &PluginServiceFrontend,
     key: &PluginAccountKey,
 ) -> Result<PluginAccountLogoutOutcome> {
     validate_account_key(key)?;
+    let registered = account_is_registered(key)?;
 
-    let (local_state_changed, remote_acknowledged, remote_error, operation_error) =
+    let (local_state_changed, remote_acknowledged, remote_error, operation_error) = if registered {
         match frontend.logout(key).await {
             Ok(PluginLogoutResult {
                 local_state_changed,
@@ -151,7 +156,15 @@ async fn logout_account_key(
                 None,
             ),
             Err(error) => (false, false, None, Some(format!("{error:#}"))),
-        };
+        }
+    } else {
+        (
+            false,
+            false,
+            None,
+            Some("账号已不在 Host router 中，已跳过 guest 注销".into()),
+        )
+    };
 
     let (secrets_revoked, secret_cleanup_error) = match secrets::global() {
         Some(store) => match store.delete_account(
@@ -211,6 +224,18 @@ async fn logout_keys(
         }
     }
     Ok(result)
+}
+
+fn account_is_registered(key: &PluginAccountKey) -> Result<bool> {
+    let host = catalog::global().ok_or_else(|| anyhow!("插件宿主状态尚未初始化"))?;
+    let host = host
+        .read()
+        .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?;
+    Ok(host.router().accounts().iter().any(|account| {
+        account.plugin_id == key.plugin_id
+            && account.provider_id == key.provider_id
+            && account.account_id == key.account_id
+    }))
 }
 
 fn account_keys(plugin_id: &str, provider_id: Option<&str>) -> Result<Vec<PluginAccountKey>> {
