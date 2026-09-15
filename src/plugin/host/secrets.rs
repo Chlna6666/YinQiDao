@@ -41,6 +41,9 @@ pub trait PluginSecretStore: Send + Sync {
     /// Delete every Secret in one exact account namespace while preserving provider-scope secrets
     /// and sibling accounts. Host logout owns this operation; it is never exposed as a guest import.
     fn delete_account(&self, plugin_id: &str, provider_id: &str, account_id: &str) -> Result<usize>;
+    /// Delete provider-scope Secrets plus every account namespace belonging to one exact Provider,
+    /// while preserving sibling Providers owned by the same plugin.
+    fn delete_provider(&self, plugin_id: &str, provider_id: &str) -> Result<usize>;
     fn delete_plugin(&self, plugin_id: &str) -> Result<usize>;
 
     /// Human-readable backend identifier for diagnostics. It must not contain paths, account ids or
@@ -181,6 +184,16 @@ impl PluginSecretStore for MemorySecretStore {
         }))
     }
 
+    fn delete_provider(&self, plugin_id: &str, provider_id: &str) -> Result<usize> {
+        let mut values = self
+            .values
+            .write()
+            .map_err(|error| anyhow!("插件 Secret 内存存储锁已损坏: {error}"))?;
+        Ok(Self::remove_matching(&mut values, |slot| {
+            slot.plugin_id() == plugin_id && slot.provider_id() == provider_id
+        }))
+    }
+
     fn delete_plugin(&self, plugin_id: &str) -> Result<usize> {
         let mut values = self
             .values
@@ -278,6 +291,58 @@ mod tests {
         assert!(store.get(&first_cookie).expect("get first cookie").is_none());
         assert!(store.get(&provider).expect("get provider").is_some());
         assert!(store.get(&second).expect("get second").is_some());
+    }
+
+    #[test]
+    fn provider_delete_wipes_provider_scope_and_accounts_only() {
+        let store = MemorySecretStore::default();
+        let first_provider = SecretSlot::provider("plugin.test", "qqmusic", "device_secret")
+            .expect("first provider");
+        let first_account = SecretSlot::account(
+            "plugin.test",
+            "qqmusic",
+            "10001",
+            "refresh_token",
+        )
+        .expect("first account");
+        let sibling_provider = SecretSlot::provider("plugin.test", "netease", "device_secret")
+            .expect("sibling provider");
+        let sibling_account = SecretSlot::account(
+            "plugin.test",
+            "netease",
+            "20001",
+            "refresh_token",
+        )
+        .expect("sibling account");
+        store.set(&first_provider, b"provider").expect("set provider");
+        store.set(&first_account, b"account").expect("set account");
+        store
+            .set(&sibling_provider, b"sibling-provider")
+            .expect("set sibling provider");
+        store
+            .set(&sibling_account, b"sibling-account")
+            .expect("set sibling account");
+
+        assert_eq!(
+            store
+                .delete_provider("plugin.test", "qqmusic")
+                .expect("delete provider"),
+            2
+        );
+        assert!(store.get(&first_provider).expect("get provider").is_none());
+        assert!(store.get(&first_account).expect("get account").is_none());
+        assert!(
+            store
+                .get(&sibling_provider)
+                .expect("get sibling provider")
+                .is_some()
+        );
+        assert!(
+            store
+                .get(&sibling_account)
+                .expect("get sibling account")
+                .is_some()
+        );
     }
 
     #[test]

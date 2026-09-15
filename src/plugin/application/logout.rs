@@ -30,8 +30,8 @@ pub struct PluginAccountLogoutOutcome {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginLogoutAllResult {
     pub accounts: Vec<PluginAccountLogoutOutcome>,
-    /// Residual plugin secrets removed after per-account cleanup. This includes provider-scope and
-    /// orphaned entries that intentionally cannot be attributed to one account.
+    /// Residual scope Secrets removed after per-account cleanup. For Provider logout this contains
+    /// provider-scope/orphan entries for that Provider; for plugin logout it covers the whole plugin.
     pub secrets_revoked: usize,
     pub secret_cleanup_error: Option<String>,
 }
@@ -55,7 +55,8 @@ impl PluginLogoutAllResult {
     }
 
     pub fn secret_cleanup_failures(&self) -> usize {
-        usize::from(self.secret_cleanup_error.is_some())
+        let scope_failure = if self.secret_cleanup_error.is_some() { 1 } else { 0 };
+        scope_failure
             + self
                 .accounts
                 .iter()
@@ -112,6 +113,29 @@ impl PluginServiceFrontend {
         })
     }
 
+    /// Log out every account owned by one Provider and revoke that Provider's complete Secret scope
+    /// without touching sibling Providers from the same plugin.
+    pub async fn logout_provider_all(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+    ) -> Result<PluginLogoutAllResult> {
+        validate_provider_scope(plugin_id, provider_id)?;
+        let keys = account_keys(plugin_id, Some(provider_id))?;
+        let mut result = logout_keys(self, keys).await?;
+
+        match secrets::global() {
+            Some(store) => match store.delete_provider(plugin_id, provider_id) {
+                Ok(removed) => result.secrets_revoked = removed,
+                Err(error) => result.secret_cleanup_error = Some(format!("{error:#}")),
+            },
+            None => {
+                result.secret_cleanup_error = Some("插件 Secret backend 尚未初始化".into());
+            }
+        }
+        Ok(result)
+    }
+
     /// Log out every account owned by one exact plugin and then revoke the plugin's complete Host
     /// Secret namespace.
     ///
@@ -120,34 +144,8 @@ impl PluginServiceFrontend {
     /// also runs when the Host currently has zero account rows for the plugin.
     pub async fn logout_plugin_all(&self, plugin_id: &str) -> Result<PluginLogoutAllResult> {
         validate_plugin_id(plugin_id)?;
-        let keys = plugin_account_keys(plugin_id)?;
-        if keys.len() > MAX_PLUGIN_LOGOUT_ACCOUNTS {
-            bail!(
-                "插件账号数量超过批量退出上限 {}: {}",
-                MAX_PLUGIN_LOGOUT_ACCOUNTS,
-                keys.len()
-            );
-        }
-
-        let mut result = PluginLogoutAllResult {
-            accounts: Vec::with_capacity(keys.len()),
-            ..PluginLogoutAllResult::default()
-        };
-
-        for key in keys {
-            match self.logout_account(&key).await {
-                Ok(outcome) => result.accounts.push(outcome),
-                Err(error) => result.accounts.push(PluginAccountLogoutOutcome {
-                    key,
-                    local_state_changed: false,
-                    remote_acknowledged: false,
-                    remote_error: None,
-                    operation_error: Some(format!("{error:#}")),
-                    secrets_revoked: 0,
-                    secret_cleanup_error: None,
-                }),
-            }
-        }
+        let keys = account_keys(plugin_id, None)?;
+        let mut result = logout_keys(self, keys).await?;
 
         match secrets::global() {
             Some(store) => match store.delete_plugin(plugin_id) {
@@ -158,12 +156,44 @@ impl PluginServiceFrontend {
                 result.secret_cleanup_error = Some("插件 Secret backend 尚未初始化".into());
             }
         }
-
         Ok(result)
     }
 }
 
-fn plugin_account_keys(plugin_id: &str) -> Result<Vec<PluginAccountKey>> {
+async fn logout_keys(
+    frontend: &PluginServiceFrontend,
+    keys: Vec<PluginAccountKey>,
+) -> Result<PluginLogoutAllResult> {
+    if keys.len() > MAX_PLUGIN_LOGOUT_ACCOUNTS {
+        bail!(
+            "插件账号数量超过批量退出上限 {}: {}",
+            MAX_PLUGIN_LOGOUT_ACCOUNTS,
+            keys.len()
+        );
+    }
+
+    let mut result = PluginLogoutAllResult {
+        accounts: Vec::with_capacity(keys.len()),
+        ..PluginLogoutAllResult::default()
+    };
+    for key in keys {
+        match frontend.logout_account(&key).await {
+            Ok(outcome) => result.accounts.push(outcome),
+            Err(error) => result.accounts.push(PluginAccountLogoutOutcome {
+                key,
+                local_state_changed: false,
+                remote_acknowledged: false,
+                remote_error: None,
+                operation_error: Some(format!("{error:#}")),
+                secrets_revoked: 0,
+                secret_cleanup_error: None,
+            }),
+        }
+    }
+    Ok(result)
+}
+
+fn account_keys(plugin_id: &str, provider_id: Option<&str>) -> Result<Vec<PluginAccountKey>> {
     let host = catalog::global().ok_or_else(|| anyhow!("插件宿主状态尚未初始化"))?;
     let host = host
         .read()
@@ -172,7 +202,10 @@ fn plugin_account_keys(plugin_id: &str) -> Result<Vec<PluginAccountKey>> {
         .router()
         .accounts()
         .iter()
-        .filter(|account| account.plugin_id == plugin_id)
+        .filter(|account| {
+            account.plugin_id == plugin_id
+                && provider_id.is_none_or(|provider_id| account.provider_id == provider_id)
+        })
         .map(PluginAccountKey::from)
         .collect::<Vec<_>>();
     keys.sort_by(|left, right| {
@@ -190,6 +223,15 @@ fn validate_plugin_id(plugin_id: &str) -> Result<()> {
     {
         bail!("插件 id 非法");
     }
+    Ok(())
+}
+
+fn validate_provider_scope(plugin_id: &str, provider_id: &str) -> Result<()> {
+    let _ = SecretSlot::provider(
+        plugin_id.to_owned(),
+        provider_id.to_owned(),
+        "logout_probe",
+    )?;
     Ok(())
 }
 
