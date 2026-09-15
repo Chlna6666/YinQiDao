@@ -12,6 +12,7 @@
 //! - `assets` owns Host-authorized static plugin image loading/normalization and its bounded cache.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
+//! - `logout` extends that façade with bounded whole-plugin account shutdown and Host Secret revocation.
 //! - `recognition` extends that façade with Host-computed fingerprint Recognition while reusing the
 //!   same session, routing, health and runtime boundaries.
 //! - `recommendations` extends the same façade with bounded concurrent authenticated fan-out; local
@@ -53,6 +54,8 @@ pub(crate) mod commands;
 pub(crate) mod extensions;
 #[path = "application/frontend.rs"]
 pub(crate) mod frontend;
+#[path = "application/logout.rs"]
+pub(crate) mod logout;
 #[path = "application/management.rs"]
 pub(crate) mod management;
 #[path = "application/playlists.rs"]
