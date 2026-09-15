@@ -58,10 +58,12 @@ impl GatedRoutePlan {
 
 /// Build the final plugin route plan after enablement, session and runtime-health gates.
 ///
-/// Ordering is computed over *all* authenticated candidates first. Filtering then happens before a
-/// single-route service exposes its current winner, so a preferred/default account under
-/// disable/429/circuit/saturation cannot hide a healthy secondary account. `eligible_routes`
-/// intentionally retains every accepted route for execution-time retry.
+/// Ordering is computed over every account declaring the requested capability first. Persisted
+/// account state is deliberately not used as a pre-filter: `PluginSessionCoordinator` is the
+/// current-process authority for Authenticated/PendingValidation/Expired/LoggedOut. Filtering then
+/// happens before a single-route service exposes its current winner, so a preferred/default account
+/// under disable/session/429/circuit/saturation cannot hide a healthy secondary account.
+/// `eligible_routes` intentionally retains every accepted route for execution-time retry.
 pub fn plan_routes<H: PluginRouteHealthSource>(
     router: &PluginServiceRouter,
     sessions: &PluginSessionCoordinator,
@@ -69,10 +71,11 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
     service: ServiceKind,
     policy: &RoutingPolicy,
 ) -> GatedRoutePlan {
+    let capability = service.capability();
     let mut candidates = router
         .accounts()
         .iter()
-        .filter(|account| account.supports(service.capability()))
+        .filter(|account| account.capabilities.contains(&capability))
         .map(route_from_account)
         .collect::<Vec<_>>();
     sort_routes(&mut candidates, policy.preferred_provider.as_deref());
@@ -266,6 +269,53 @@ mod tests {
         assert_eq!(gated.eligible_routes.len(), 2);
         assert_eq!(gated.eligible_routes[0].provider_id, "netease");
         assert_eq!(gated.eligible_routes[1].provider_id, "qqmusic");
+    }
+
+    #[test]
+    fn expired_capable_account_is_rejected_by_session_gate() {
+        let mut router = PluginServiceRouter::default();
+        let mut expired = account("netease", "expired", 100, PluginCapability::Playlists);
+        expired.state = AccountState::Expired;
+        router.upsert_account(expired);
+
+        let gated = plan_routes(
+            &router,
+            &PluginSessionCoordinator::default(),
+            &MockHealth::default(),
+            ServiceKind::Playlists,
+            &RoutingPolicy::default(),
+        );
+
+        assert!(gated.eligible_routes.is_empty());
+        assert!(gated.plan.plugin_routes.is_empty());
+        assert_eq!(gated.rejected.len(), 1);
+        assert!(matches!(
+            gated.rejected[0].reason,
+            PluginRouteRejectionReason::Session(PluginSessionState::Expired)
+        ));
+    }
+
+    #[test]
+    fn logged_out_capable_account_is_rejected_by_session_gate() {
+        let mut router = PluginServiceRouter::default();
+        let mut logged_out = account("qqmusic", "logged-out", 100, PluginCapability::Search);
+        logged_out.state = AccountState::LoggedOut;
+        router.upsert_account(logged_out);
+
+        let gated = plan_routes(
+            &router,
+            &PluginSessionCoordinator::default(),
+            &MockHealth::default(),
+            ServiceKind::Search,
+            &RoutingPolicy::default(),
+        );
+
+        assert!(gated.eligible_routes.is_empty());
+        assert_eq!(gated.rejected.len(), 1);
+        assert!(matches!(
+            gated.rejected[0].reason,
+            PluginRouteRejectionReason::Session(PluginSessionState::LoggedOut)
+        ));
     }
 
     #[test]
