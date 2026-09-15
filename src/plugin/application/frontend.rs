@@ -33,6 +33,7 @@ const MAX_PLUGIN_ACCOUNT_TEXT_BYTES: usize = 8 * 1024;
 const MAX_AUTH_CHALLENGE_ID_BYTES: usize = 1_024;
 const MAX_AUTH_CHALLENGE_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_AUTH_CHALLENGE_FIELDS: usize = 64;
+const MAX_AUTH_DENIED_REASON_BYTES: usize = 8 * 1024;
 
 static PLUGIN_FRONTEND: OnceLock<Arc<PluginServiceFrontend>> = OnceLock::new();
 
@@ -168,6 +169,7 @@ impl PluginServiceFrontend {
                 client.auth_poll(plugin_id, provider_id, challenge_id),
             )
             .await?;
+        validate_auth_poll_result(&result, provider_id)?;
         if let AuthPollResult::Authenticated(account) = &result {
             self.accept_authenticated_account(plugin_id, provider_id, account.clone())?;
         }
@@ -611,10 +613,35 @@ fn validate_challenge_id(challenge_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_auth_poll_result(result: &AuthPollResult, provider_id: &str) -> Result<()> {
+    match result {
+        AuthPollResult::Authenticated(account) => validate_provider_account(account, provider_id),
+        AuthPollResult::Denied(reason) => {
+            if reason.len() > MAX_AUTH_DENIED_REASON_BYTES || reason.contains('\0') {
+                bail!("插件认证拒绝原因超过 Host 文本限制或包含 NUL");
+            }
+            Ok(())
+        }
+        AuthPollResult::Pending | AuthPollResult::Expired => Ok(()),
+    }
+}
+
 fn validate_auth_challenge(challenge: &AuthChallenge) -> Result<()> {
     validate_challenge_id(&challenge.challenge_id)?;
     if challenge.fields.len() > MAX_AUTH_CHALLENGE_FIELDS {
         bail!("插件 auth challenge fields 数量超过限制");
+    }
+    for value in [
+        challenge.verification_uri.as_deref(),
+        challenge.user_code.as_deref(),
+        challenge.qr_payload.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.contains('\0') {
+            bail!("插件 auth challenge 文本包含 NUL");
+        }
     }
     let mut payload_bytes = challenge
         .verification_uri
@@ -623,6 +650,9 @@ fn validate_auth_challenge(challenge: &AuthChallenge) -> Result<()> {
         .saturating_add(challenge.user_code.as_ref().map_or(0, String::len))
         .saturating_add(challenge.qr_payload.as_ref().map_or(0, String::len));
     for field in &challenge.fields {
+        if field.key.contains('\0') || field.value.contains('\0') {
+            bail!("插件 auth challenge field 包含 NUL");
+        }
         payload_bytes = payload_bytes
             .saturating_add(field.key.len())
             .saturating_add(field.value.len());
@@ -663,8 +693,14 @@ fn validate_provider_account(account: &ProviderAccount, provider_id: &str) -> Re
         .display_name
         .len()
         .saturating_add(account.avatar_url.as_ref().map_or(0, String::len));
-    if text_bytes > MAX_PLUGIN_ACCOUNT_TEXT_BYTES {
-        bail!("插件账号展示信息超过大小限制");
+    if text_bytes > MAX_PLUGIN_ACCOUNT_TEXT_BYTES
+        || account.display_name.contains('\0')
+        || account
+            .avatar_url
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+    {
+        bail!("插件账号展示信息超过大小限制或包含 NUL");
     }
     Ok(())
 }
@@ -867,6 +903,27 @@ mod tests {
         assert_eq!(
             routes.iter().map(|route| route.account_id.as_str()).collect::<Vec<_>>(),
             vec!["metadata", "default", "backup"]
+        );
+    }
+
+    #[test]
+    fn generic_auth_challenge_rejects_nul_payload() {
+        let challenge = AuthChallenge {
+            challenge_id: "challenge".into(),
+            qr_payload: Some("bad\0payload".into()),
+            ..AuthChallenge::default()
+        };
+        assert!(validate_auth_challenge(&challenge).is_err());
+    }
+
+    #[test]
+    fn low_level_auth_poll_rejects_unbounded_denied_reason() {
+        assert!(
+            validate_auth_poll_result(
+                &AuthPollResult::Denied("x".repeat(MAX_AUTH_DENIED_REASON_BYTES + 1)),
+                "test"
+            )
+            .is_err()
         );
     }
 
