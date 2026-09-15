@@ -7,10 +7,10 @@ use std::{
 use anyhow::{Result, anyhow};
 
 use super::abi::{
-    ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, PlaybackSignal, PlaylistDescriptor,
-    PluginLyricDocument, PluginManifest, ProviderAccount, RecognitionRequest, RecognitionResult,
-    RecommendationItem, RecommendationRequest, RemoteTrack, SourceTrackRef, StreamDescriptor,
-    StreamRequest, TrackQuery,
+    ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, KeyValue, PlaybackSignal,
+    PlaylistDescriptor, PluginLyricDocument, PluginManifest, ProviderAccount, RecognitionRequest,
+    RecognitionResult, RecommendationItem, RecommendationRequest, RemoteTrack, SourceTrackRef,
+    StreamDescriptor, StreamRequest, TrackQuery,
 };
 
 /// Future returned by the runtime-neutral provider client boundary.
@@ -46,6 +46,14 @@ pub trait PluginProviderClient: Send + Sync {
         plugin_id: &'a str,
         provider_id: &'a str,
         challenge_id: &'a str,
+    ) -> PluginClientFuture<'a, AuthPollResult>;
+
+    fn auth_submit<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        challenge_id: &'a str,
+        values: &'a [KeyValue],
     ) -> PluginClientFuture<'a, AuthPollResult>;
 
     fn auth_cancel<'a>(

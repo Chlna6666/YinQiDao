@@ -8,6 +8,7 @@
 //! - `component` owns Component loading/compiled cache, Host-owned GC and, later, the private
 //!   Wasmtime adapter. Generated Wasmtime binding types must not escape this module.
 //! - `accounts` exposes non-Secret Provider/account/session/permission snapshots for application UI.
+//! - `auth` extends the application frontend with bounded Host-owned authentication form submission.
 //! - `assets` owns Host-authorized static plugin image loading/normalization and its bounded cache.
 //! - `client` is the semantic port implemented by the Component runtime.
 //! - `frontend` is the only ordinary application-facing execution façade.
@@ -40,6 +41,8 @@ use anyhow::Result;
 pub(crate) mod abi;
 #[path = "application/accounts.rs"]
 pub(crate) mod accounts;
+#[path = "application/auth.rs"]
+pub(crate) mod auth;
 #[path = "application/assets.rs"]
 pub(crate) mod assets;
 #[path = "runtime/client.rs"]

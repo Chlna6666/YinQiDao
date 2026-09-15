@@ -61,6 +61,8 @@ interface types {
         verification-uri: option<string>,
         user-code: option<string>,
         qr-payload: option<string>,
+        /// For form challenges each entry is `field-id -> Host display label`. Host-provided field
+        /// values are sensitive, one-shot inputs returned only through `provider.auth-submit`.
         fields: list<key-value>,
         expires-at-ms: option<u64>,
     }
@@ -260,6 +262,7 @@ interface provider {
         auth-challenge,
         auth-method,
         auth-poll,
+        key-value,
         lyric-document,
         playback-signal,
         playlist,
@@ -280,6 +283,9 @@ interface provider {
     accounts: func(provider-id: string) -> result<list<account>, string>;
     auth-begin: func(provider-id: string, method: auth-method) -> result<auth-challenge, string>;
     auth-poll: func(provider-id: string, challenge-id: string) -> result<auth-poll, string>;
+    /// Submit one Host-rendered form. Values are one-shot sensitive inputs; persistent credentials
+    /// must be stored by the guest through the Host `secret-set` import.
+    auth-submit: func(provider-id: string, challenge-id: string, values: list<key-value>) -> result<auth-poll, string>;
     auth-cancel: func(provider-id: string, challenge-id: string) -> result<bool, string>;
     logout: func(provider-id: string, account-id: string) -> result<bool, string>;
 
