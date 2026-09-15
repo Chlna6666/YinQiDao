@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -21,6 +21,7 @@ use super::{
 
 static PORT_SWAP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static PORT_SWAP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static PACKAGE_MUTATION_GENERATION: AtomicU64 = AtomicU64::new(1);
 static HOT_SWAP_ADAPTER: OnceLock<Mutex<Option<Arc<dyn PluginRuntimeHotSwap>>>> = OnceLock::new();
 
 struct PortSwapGuard {
@@ -67,6 +68,16 @@ pub(crate) fn is_swapping() -> bool {
     PORT_SWAP_IN_PROGRESS.load(Ordering::Acquire)
 }
 
+/// Monotonic Host-owned token for package mutations coordinated through this runtime gate.
+/// UI/application snapshots may compare it without touching package-manager or runtime locks.
+pub(crate) fn package_mutation_generation() -> u64 {
+    PACKAGE_MUTATION_GENERATION.load(Ordering::Acquire)
+}
+
+fn bump_package_mutation_generation() {
+    PACKAGE_MUTATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 fn begin_swap() -> Result<PortSwapGuard> {
     let guard = PORT_SWAP_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -103,6 +114,10 @@ where
         Ok(result) => result,
         Err(error) => {
             fail_closed_after_mutation_error();
+            // The package manager documents that an error may happen after the atomic filesystem
+            // replacement. Conservatively invalidate Host snapshots even when the final outcome is
+            // uncertain; an extra refresh is safe, a stale Provider/account snapshot is not.
+            bump_package_mutation_generation();
             return Err(error);
         }
     };
@@ -110,6 +125,7 @@ where
         return Ok((result, RuntimePluginRefreshReport::default()));
     };
     let refresh = refresh_plugin_under_swap(&plugin_id);
+    bump_package_mutation_generation();
     Ok((result, refresh))
 }
 
