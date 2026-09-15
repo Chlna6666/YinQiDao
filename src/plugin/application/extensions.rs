@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::{
     host::{catalog::PluginCatalog, package_manager},
     management::{self, PluginPageSnapshot},
+    runtime_ports,
     ui::{
         manifest::UiCommandPlacement,
         registry,
@@ -190,12 +191,14 @@ pub fn themes() -> Result<Vec<PluginThemeSummary>> {
     Ok(themes)
 }
 
-/// Lock-free generation of the Host-validated static UI contribution registry.
+/// Lock-free Host-owned generation for retained plugin UI/application snapshots.
 ///
-/// GPUI may use this value only to invalidate already parsed Host-side snapshots. It must not read
-/// the registry itself from paint/layout paths.
+/// The UI contribution registry tracks validated static contributions, while the runtime swap gate
+/// tracks every package mutation even for Provider-only plugins with no UI declarations. Combining
+/// both monotonic tokens makes update/disable/uninstall invalidate retained GPUI snapshots without
+/// taking either registry/package-manager lock from paint/layout paths.
 pub fn theme_registry_generation() -> u64 {
-    registry::generation()
+    registry::generation().wrapping_add(runtime_ports::package_mutation_generation())
 }
 
 /// Load one static plugin theme on an ordinary controller/worker path.
