@@ -206,15 +206,7 @@ impl PluginSessionCoordinator {
         if !self.pending_validation.contains(key) {
             return Ok(false);
         }
-        let changed = host
-            .write()
-            .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
-            .mark_account_state(
-                &key.plugin_id,
-                &key.provider_id,
-                &key.account_id,
-                AccountState::Authenticated,
-            )?;
+        let changed = mark_host_account_state(host, key, AccountState::Authenticated)?;
         let pending_removed = self.pending_validation.remove(key);
         if changed || pending_removed {
             bump_session_generation();
@@ -230,15 +222,7 @@ impl PluginSessionCoordinator {
         host: &Arc<RwLock<PluginHostState>>,
         key: &PluginAccountKey,
     ) -> Result<bool> {
-        let changed = host
-            .write()
-            .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
-            .mark_account_state(
-                &key.plugin_id,
-                &key.provider_id,
-                &key.account_id,
-                AccountState::Expired,
-            )?;
+        let changed = mark_host_account_state(host, key, AccountState::Expired)?;
         let pending_removed = self.pending_validation.remove(key);
         if changed || pending_removed {
             bump_session_generation();
@@ -251,15 +235,7 @@ impl PluginSessionCoordinator {
         host: &Arc<RwLock<PluginHostState>>,
         key: &PluginAccountKey,
     ) -> Result<bool> {
-        let changed = host
-            .write()
-            .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
-            .mark_account_state(
-                &key.plugin_id,
-                &key.provider_id,
-                &key.account_id,
-                AccountState::LoggedOut,
-            )?;
+        let changed = mark_host_account_state(host, key, AccountState::LoggedOut)?;
         let pending_removed = self.pending_validation.remove(key);
         if changed || pending_removed {
             bump_session_generation();
@@ -298,6 +274,43 @@ impl PluginSessionCoordinator {
         }
         Ok(())
     }
+}
+
+/// Persist one account-state transition only when it actually changes the live Host router.
+///
+/// The Host write lock spans both the comparison and persistence call, so this optimization cannot
+/// race with another account mutation. It prevents repeated logout/validation-failed paths from
+/// cloning the full account list, rewriting `plugin-accounts.json`, and rebuilding the router when
+/// the account is already in the requested state.
+fn mark_host_account_state(
+    host: &Arc<RwLock<PluginHostState>>,
+    key: &PluginAccountKey,
+    target: AccountState,
+) -> Result<bool> {
+    let mut host = host
+        .write()
+        .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?;
+    let current = host
+        .router()
+        .accounts()
+        .iter()
+        .find(|account| {
+            account.plugin_id == key.plugin_id
+                && account.provider_id == key.provider_id
+                && account.account_id == key.account_id
+        })
+        .map(|account| account.state);
+    match current {
+        None => return Ok(false),
+        Some(state) if state == target => return Ok(false),
+        Some(_) => {}
+    }
+    host.mark_account_state(
+        &key.plugin_id,
+        &key.provider_id,
+        &key.account_id,
+        target,
+    )
 }
 
 pub fn initialize(
@@ -373,7 +386,11 @@ mod tests {
 
         assert_eq!(coordinator.retain_host_accounts(std::slice::from_ref(&kept)), 1);
         assert_eq!(coordinator.pending_count(), 1);
-        assert!(coordinator.pending_validation.contains(&PluginAccountKey::from(&kept)));
+        assert!(
+            coordinator
+                .pending_validation
+                .contains(&PluginAccountKey::from(&kept))
+        );
     }
 
     #[test]
