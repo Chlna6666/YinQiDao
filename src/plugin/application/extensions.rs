@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::{
-    host::{catalog::PluginCatalog, package_manager},
+    host::{catalog::PluginCatalog, package_manager, sessions},
     management::{self, PluginPageSnapshot},
     runtime_ports,
     ui::{
@@ -193,12 +193,14 @@ pub fn themes() -> Result<Vec<PluginThemeSummary>> {
 
 /// Lock-free Host-owned generation for retained plugin UI/application snapshots.
 ///
-/// The UI contribution registry tracks validated static contributions, while the runtime swap gate
-/// tracks every package mutation even for Provider-only plugins with no UI declarations. Combining
-/// both monotonic tokens makes update/disable/uninstall invalidate retained GPUI snapshots without
-/// taking either registry/package-manager lock from paint/layout paths.
+/// Static contribution changes, package mutations and account/session eligibility each have an
+/// independent monotonic generation. Combining all three lets update/disable/uninstall and future
+/// login/logout/refresh transitions invalidate retained GPUI snapshots without taking registry,
+/// package-manager or SessionCoordinator locks from paint/layout paths.
 pub fn theme_registry_generation() -> u64 {
-    registry::generation().wrapping_add(runtime_ports::package_mutation_generation())
+    registry::generation()
+        .wrapping_add(runtime_ports::package_mutation_generation())
+        .wrapping_add(sessions::generation())
 }
 
 /// Load one static plugin theme on an ordinary controller/worker path.
