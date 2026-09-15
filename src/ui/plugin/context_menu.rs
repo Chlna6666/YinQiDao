@@ -93,21 +93,64 @@ pub(super) fn open_playlist(
     viewport: Size<Pixels>,
     cx: &mut Context<MusicApp>,
 ) {
+    open_playlist_context(
+        app,
+        &playlist.name,
+        "local",
+        &playlist.id.to_string(),
+        position,
+        viewport,
+        cx,
+    );
+}
+
+/// Capture a PlaylistContext command snapshot for a Provider playlist already validated by the
+/// application playlist façade. Account identity remains Host-private and is deliberately omitted
+/// from the minimized command context.
+pub(super) fn open_provider_playlist(
+    app: &mut MusicApp,
+    name: &str,
+    provider_id: &str,
+    source_id: &str,
+    position: Point<Pixels>,
+    viewport: Size<Pixels>,
+    cx: &mut Context<MusicApp>,
+) {
+    open_playlist_context(
+        app,
+        name,
+        provider_id,
+        source_id,
+        position,
+        viewport,
+        cx,
+    );
+}
+
+fn open_playlist_context(
+    app: &mut MusicApp,
+    name: &str,
+    provider_id: &str,
+    source_id: &str,
+    position: Point<Pixels>,
+    viewport: Size<Pixels>,
+    cx: &mut Context<MusicApp>,
+) {
     let context = PluginCommandContext {
         surface: PluginCommandSurface::PlaylistContext,
         page_id: None,
         track: None,
         playlist: Some(PluginPlaylistCommandContext {
-            name: playlist.name.clone(),
-            provider_id: Some("local".into()),
-            source_id: Some(playlist.id.to_string()),
+            name: name.to_owned(),
+            provider_id: Some(provider_id.to_owned()),
+            source_id: Some(source_id.to_owned()),
         }),
     };
     open(
         app,
         context,
         "PlaylistContext",
-        format!("播放列表插件操作：{}", playlist.name),
+        format!("播放列表插件操作：{name}"),
         position,
         viewport,
         cx,

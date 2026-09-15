@@ -13,6 +13,8 @@ use crate::{
 
 #[path = "plugin/context_menu.rs"]
 mod plugin_context_menu;
+#[path = "plugin/provider_playlists.rs"]
+mod provider_playlists;
 
 use super::{
     shell::{MusicApp, app_listener},
@@ -910,6 +912,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
         .gap_4()
         .overflow_hidden()
         .child(local_playlists_section(playlists, view))
+        .child(provider_playlists::render(view))
         .child(
             div()
                 .flex()
