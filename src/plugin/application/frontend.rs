@@ -34,6 +34,12 @@ const MAX_AUTH_CHALLENGE_ID_BYTES: usize = 1_024;
 const MAX_AUTH_CHALLENGE_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_AUTH_CHALLENGE_FIELDS: usize = 64;
 const MAX_AUTH_DENIED_REASON_BYTES: usize = 8 * 1024;
+const MAX_PLUGIN_TRACK_ARTISTS: usize = 128;
+const MAX_PLUGIN_TRACK_TEXT_BYTES: usize = 32 * 1024;
+const MAX_PLUGIN_SOURCE_PROVIDER_BYTES: usize = 128;
+const MAX_PLUGIN_SOURCE_ID_BYTES: usize = 4 * 1024;
+const MAX_PLUGIN_COVER_URL_BYTES: usize = 16 * 1024;
+const MAX_PLUGIN_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 static PLUGIN_FRONTEND: OnceLock<Arc<PluginServiceFrontend>> = OnceLock::new();
 
@@ -263,6 +269,7 @@ impl PluginServiceFrontend {
         query: &TrackQuery,
         policy: &RoutingPolicy,
     ) -> Result<PluginSingleResult<RemoteTrack>> {
+        validate_track_query(query)?;
         let plan = self.plan(ServiceKind::Metadata, policy)?;
         let Some(client) = self.clients.client()? else {
             return Ok(PluginSingleResult::unavailable(plan));
@@ -278,15 +285,21 @@ impl PluginServiceFrontend {
                 query,
             );
             match self.runtime.execute_guest_call(key, call).await {
-                Ok(Some(track)) => {
-                    return Ok(PluginSingleResult {
-                        value: Some(track),
-                        route: Some(route.clone()),
-                        plan,
-                        failures,
-                        client_ready: true,
-                    });
-                }
+                Ok(Some(track)) => match validate_remote_track(route, &track) {
+                    Ok(()) => {
+                        return Ok(PluginSingleResult {
+                            value: Some(track),
+                            route: Some(route.clone()),
+                            plan,
+                            failures,
+                            client_ready: true,
+                        });
+                    }
+                    Err(error) => failures.push(PluginCallFailure {
+                        route: route.clone(),
+                        error: format!("Metadata 返回值非法: {error:#}"),
+                    }),
+                },
                 Ok(None) => {}
                 Err(error) => failures.push(PluginCallFailure {
                     route: route.clone(),
@@ -705,6 +718,120 @@ fn validate_provider_account(account: &ProviderAccount, provider_id: &str) -> Re
     Ok(())
 }
 
+fn validate_track_query(query: &TrackQuery) -> Result<()> {
+    if query.artists.len() > MAX_PLUGIN_TRACK_ARTISTS {
+        bail!("Metadata track query artists 数量超过限制");
+    }
+    if query
+        .duration_ms
+        .is_some_and(|duration_ms| duration_ms == 0 || duration_ms > MAX_PLUGIN_TRACK_DURATION_MS)
+    {
+        bail!("Metadata track query duration_ms 超出允许范围");
+    }
+    let mut bytes = query
+        .title
+        .len()
+        .saturating_add(query.album.len())
+        .saturating_add(query.isrc.as_ref().map_or(0, String::len))
+        .saturating_add(
+            query
+                .musicbrainz_recording_id
+                .as_ref()
+                .map_or(0, String::len),
+        )
+        .saturating_add(query.fingerprint_id.as_ref().map_or(0, String::len));
+    for artist in &query.artists {
+        if artist.contains('\0') {
+            bail!("Metadata track query artist 包含 NUL");
+        }
+        bytes = bytes.saturating_add(artist.len());
+    }
+    if query.title.contains('\0')
+        || query.album.contains('\0')
+        || query.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || query
+            .musicbrainz_recording_id
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+        || query
+            .fingerprint_id
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+    {
+        bail!("Metadata track query 文本包含 NUL");
+    }
+    if bytes > MAX_PLUGIN_TRACK_TEXT_BYTES {
+        bail!("Metadata track query 文本超过 {} bytes", MAX_PLUGIN_TRACK_TEXT_BYTES);
+    }
+    Ok(())
+}
+
+fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()> {
+    if track.source.provider_id.trim().is_empty()
+        || track.source.provider_id.len() > MAX_PLUGIN_SOURCE_PROVIDER_BYTES
+        || track.source.provider_id.contains('\0')
+    {
+        bail!("Metadata track source provider id 非法");
+    }
+    if track.source.source_id.trim().is_empty()
+        || track.source.source_id.len() > MAX_PLUGIN_SOURCE_ID_BYTES
+        || track.source.source_id.contains('\0')
+    {
+        bail!("Metadata track source id 非法");
+    }
+    if track.source.provider_id != route.provider_id {
+        bail!(
+            "Metadata track provider 不匹配: expected={}, actual={}",
+            route.provider_id,
+            track.source.provider_id
+        );
+    }
+    if track.title.trim().is_empty() || track.title.contains('\0') {
+        bail!("Metadata track title 非法");
+    }
+    if track.artists.len() > MAX_PLUGIN_TRACK_ARTISTS {
+        bail!("Metadata track artists 数量超过限制");
+    }
+    if track
+        .duration_ms
+        .is_some_and(|duration_ms| duration_ms == 0 || duration_ms > MAX_PLUGIN_TRACK_DURATION_MS)
+    {
+        bail!("Metadata track duration_ms 超出允许范围");
+    }
+    if track
+        .cover_url
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_PLUGIN_COVER_URL_BYTES || value.contains('\0'))
+    {
+        bail!("Metadata track cover URL 非法或超过大小限制");
+    }
+
+    let mut bytes = track
+        .source
+        .provider_id
+        .len()
+        .saturating_add(track.source.source_id.len())
+        .saturating_add(track.title.len())
+        .saturating_add(track.album.len())
+        .saturating_add(track.isrc.as_ref().map_or(0, String::len))
+        .saturating_add(track.cover_url.as_ref().map_or(0, String::len));
+    for artist in &track.artists {
+        if artist.contains('\0') {
+            bail!("Metadata track artist 包含 NUL");
+        }
+        bytes = bytes.saturating_add(artist.len());
+    }
+    if track.album.contains('\0')
+        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+    {
+        bail!("Metadata track 文本包含 NUL");
+    }
+    if bytes > MAX_PLUGIN_TRACK_TEXT_BYTES {
+        bail!("Metadata track 文本超过 {} bytes Host 上限", MAX_PLUGIN_TRACK_TEXT_BYTES);
+    }
+    Ok(())
+}
+
 pub fn plugin_lyrics_to_player(
     document: PluginLyricDocument,
     source_prefix: &str,
@@ -892,6 +1019,18 @@ mod tests {
         }
     }
 
+    fn remote_track(provider_id: &str, source_id: &str) -> RemoteTrack {
+        RemoteTrack {
+            source: SourceTrackRef {
+                provider_id: provider_id.into(),
+                source_id: source_id.into(),
+            },
+            title: "Song".into(),
+            artists: vec!["Artist".into()],
+            ..RemoteTrack::default()
+        }
+    }
+
     #[test]
     fn same_provider_followup_prioritizes_metadata_account_without_dropping_fallbacks() {
         let mut routes = vec![
@@ -925,6 +1064,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn metadata_query_and_result_are_bounded() {
+        let query = TrackQuery {
+            title: "Song".into(),
+            artists: vec!["Artist".into()],
+            ..TrackQuery::default()
+        };
+        assert!(validate_track_query(&query).is_ok());
+        let route = route("account", 0, true);
+        assert!(validate_remote_track(&route, &remote_track("test", "song")).is_ok());
+        assert!(validate_remote_track(&route, &remote_track("other", "song")).is_err());
+    }
+
+    #[test]
+    fn metadata_query_rejects_oversized_text() {
+        let query = TrackQuery {
+            title: "x".repeat(MAX_PLUGIN_TRACK_TEXT_BYTES + 1),
+            ..TrackQuery::default()
+        };
+        assert!(validate_track_query(&query).is_err());
     }
 
     #[test]
