@@ -14,6 +14,8 @@
 //!   same session, routing, health and runtime boundaries.
 //! - `recommendations` extends the same façade with bounded concurrent authenticated fan-out; local
 //!   recommendation fusion remains an application/Library responsibility rather than guest policy.
+//! - `playlists` extends the façade with bounded authenticated playlist fan-out and explicit-route
+//!   track/mutation operations while keeping provider identity validation in Host application code.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
 //! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
@@ -47,6 +49,8 @@ pub(crate) mod extensions;
 pub(crate) mod frontend;
 #[path = "application/management.rs"]
 pub(crate) mod management;
+#[path = "application/playlists.rs"]
+pub(crate) mod playlists;
 #[path = "application/recognition.rs"]
 pub(crate) mod recognition;
 #[path = "application/recommendations.rs"]
