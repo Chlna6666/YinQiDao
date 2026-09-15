@@ -17,6 +17,7 @@ use super::{
 };
 
 const DEFAULT_UI_PAGE_CACHE_ENTRIES: usize = 128;
+const MAX_PAGE_EVENT_TOAST_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginSummary {
@@ -318,6 +319,7 @@ async fn dispatch_event(
     // Re-check Host ownership after guest execution. A disable/uninstall/update during the call must
     // fail closed even if the guest returned a seemingly valid response.
     ensure_page_access(plugin_id, page_id)?;
+    let toast = validate_page_event_toast(response.toast)?;
     let model = response
         .page
         .unwrap_or_else(|| current.model.as_ref().clone());
@@ -325,9 +327,18 @@ async fn dispatch_event(
     preload_snapshot_images(&snapshot).await;
     Ok(PluginPageEventResult {
         snapshot,
-        toast: response.toast,
+        toast,
         close: response.close,
     })
+}
+
+fn validate_page_event_toast(toast: Option<String>) -> Result<Option<String>> {
+    if let Some(value) = toast.as_deref()
+        && (value.len() > MAX_PAGE_EVENT_TOAST_BYTES || value.contains('\0'))
+    {
+        bail!("插件页面 event toast 超过 Host 文本限制");
+    }
+    Ok(toast)
 }
 
 /// Preload static image assets away from GPUI paint. Asset failures are isolated to the image node:
@@ -501,5 +512,23 @@ fn route_to_summary(route: &RegisteredUiRoute) -> PluginRouteSummary {
         icon: route.contribution.icon.clone(),
         placement: route.contribution.placement,
         order: route.contribution.order,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_event_toast_is_bounded_before_publication() {
+        assert_eq!(validate_page_event_toast(None).expect("none"), None);
+        assert_eq!(
+            validate_page_event_toast(Some("ok".into())).expect("short"),
+            Some("ok".into())
+        );
+        assert!(validate_page_event_toast(Some("bad\0toast".into())).is_err());
+        assert!(
+            validate_page_event_toast(Some("x".repeat(MAX_PAGE_EVENT_TOAST_BYTES + 1))).is_err()
+        );
     }
 }
