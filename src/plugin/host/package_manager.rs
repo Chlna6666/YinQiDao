@@ -369,6 +369,8 @@ impl PluginPackageManager {
         let Some(plugin) = catalog.plugin(plugin_id) else {
             return Ok(false);
         };
+        let registry = ui_registry::global()
+            .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
 
         let nonce = unique_nonce();
         let trash_parent = self
@@ -382,9 +384,44 @@ impl PluginPackageManager {
             format!("将插件移动到卸载暂存区失败: {}", plugin.package_dir.display())
         })?;
 
+        // Commit all reversible Host metadata before revoking credentials/accounts. If any lock or
+        // state-file write fails, the package directory is moved back and callers observe a genuine
+        // failed uninstall rather than a half-removed plugin with already-destroyed credentials.
+        let metadata_commit = (|| -> Result<()> {
+            let mut registry = registry
+                .write()
+                .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
+            let mut disabled = self
+                .disabled_plugins
+                .lock()
+                .map_err(|error| anyhow!("插件启停状态锁已损坏: {error}"))?;
+            if let Some(next_disabled) = next_disabled_plugins(&disabled, plugin_id, true) {
+                save_disabled_plugins(&self.state_path, &next_disabled)?;
+                *disabled = next_disabled;
+            }
+            registry.remove_plugin(plugin_id);
+            Ok(())
+        })();
+        if let Err(error) = metadata_commit {
+            let rollback = fs::rename(&trash, &plugin.package_dir).with_context(|| {
+                format!(
+                    "卸载失败后恢复插件目录失败: {} -> {}",
+                    trash.display(),
+                    plugin.package_dir.display()
+                )
+            });
+            if rollback.is_ok() {
+                let _ = fs::remove_dir(&trash_parent);
+                return Err(error);
+            }
+            return Err(anyhow!(
+                "插件卸载元数据提交失败: {error:#}; 文件系统回滚同时失败: {:#}",
+                rollback.expect_err("rollback checked as error")
+            ));
+        }
+
         let live_catalog = PluginCatalog::discover(self.plugin_root.clone());
         publish_runtime_catalog(&live_catalog);
-        let _ = ui_registry::unregister_plugin(plugin_id);
         if let Some(components) = component_registry::global() {
             let _ = components.invalidate(plugin_id);
         }
@@ -424,20 +461,15 @@ impl PluginPackageManager {
             }
         }
 
-        {
-            let mut disabled = self
-                .disabled_plugins
-                .lock()
-                .map_err(|error| anyhow!("插件启停状态锁已损坏: {error}"))?;
-            if let Some(next_disabled) = next_disabled_plugins(&disabled, plugin_id, true) {
-                save_disabled_plugins(&self.state_path, &next_disabled)?;
-                *disabled = next_disabled;
-            }
+        if let Err(error) = fs::remove_dir_all(&trash) {
+            tracing::warn!(
+                %error,
+                path = %trash.display(),
+                "插件已完成逻辑卸载，但清理卸载暂存目录失败"
+            );
+        } else {
+            let _ = fs::remove_dir(&trash_parent);
         }
-
-        fs::remove_dir_all(&trash)
-            .with_context(|| format!("删除插件卸载暂存目录失败: {}", trash.display()))?;
-        let _ = fs::remove_dir(&trash_parent);
         reconcile_host_catalog(&self.base_dir, &live_catalog);
         Ok(true)
     }
