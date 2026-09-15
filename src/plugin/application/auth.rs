@@ -111,6 +111,11 @@ impl PluginServiceFrontend {
         }
 
         let mut flows = lock_auth_flows()?;
+        let current_generation = runtime_ports::package_mutation_generation();
+        if current_generation != package_generation {
+            bail!("插件在认证 challenge 入队期间已更新，旧 challenge 已丢弃");
+        }
+        prune_stale_auth_flows(&mut flows, current_generation);
         if flows.len() >= MAX_ACTIVE_AUTH_FLOWS {
             bail!("Host 活跃插件认证 flow 已达到 {} 个上限", MAX_ACTIVE_AUTH_FLOWS);
         }
@@ -209,6 +214,15 @@ fn lock_auth_flows() -> Result<std::sync::MutexGuard<'static, HashMap<u64, Activ
     auth_flows()
         .lock()
         .map_err(|error| anyhow!("插件认证 flow registry 锁已损坏: {error}"))
+}
+
+fn prune_stale_auth_flows(
+    flows: &mut HashMap<u64, ActiveAuthFlow>,
+    current_generation: u64,
+) -> usize {
+    let before = flows.len();
+    flows.retain(|_, flow| flow.package_generation == current_generation);
+    before.saturating_sub(flows.len())
 }
 
 fn allocate_flow_id(flows: &HashMap<u64, ActiveAuthFlow>) -> u64 {
@@ -589,6 +603,16 @@ mod tests {
         }
     }
 
+    fn active_flow(package_generation: u64) -> ActiveAuthFlow {
+        ActiveAuthFlow {
+            plugin_id: "plugin.test".into(),
+            provider_id: "test".into(),
+            method: AuthMethod::CookieImport,
+            challenge: form_challenge(),
+            package_generation,
+        }
+    }
+
     #[test]
     fn auth_submit_accepts_unique_bounded_fields() {
         validate_submission(&[field("cookie", "MUSIC_U=secret"), field("csrf", "token")])
@@ -610,6 +634,18 @@ mod tests {
         )])
         .expect_err("oversized value must fail");
         assert!(error.to_string().contains("大小限制"));
+    }
+
+    #[test]
+    fn stale_auth_flows_are_pruned_before_capacity_check() {
+        let mut flows = HashMap::from([
+            (1, active_flow(7)),
+            (2, active_flow(8)),
+            (3, active_flow(7)),
+        ]);
+        assert_eq!(prune_stale_auth_flows(&mut flows, 8), 2);
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key(&2));
     }
 
     #[test]
