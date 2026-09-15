@@ -8,6 +8,9 @@ use lucide_gpui::icon;
 
 use crate::model::{LibraryTab, Track, TrackId};
 
+#[path = "plugin/context_menu.rs"]
+mod plugin_context_menu;
+
 use super::{
     shell::{MusicApp, app_listener},
     theme::{
@@ -36,6 +39,7 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
                 "library-queue-container"
             })
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .p_8()
@@ -49,11 +53,13 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
                     .overflow_hidden()
                     .child(content),
             )
+            .children(plugin_context_menu::render(view))
             .into_any_element()
     } else {
         div()
             .id("library-scroll")
             .size_full()
+            .relative()
             .overflow_y_scroll()
             .flex()
             .flex_col()
@@ -61,6 +67,7 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
             .gap_6()
             .child(header(app, view))
             .child(content)
+            .children(plugin_context_menu::render(view))
             .into_any_element()
     }
 }
@@ -416,6 +423,8 @@ fn song_table_row(
 
     let view_add = view.clone();
     let view_play = view.clone();
+    let view_context = view.clone();
+    let track_context = track.clone();
 
     div()
         .id(SharedString::from(format!("library-track-{track_id}")))
@@ -518,6 +527,15 @@ fn song_table_row(
                     }),
             ),
         )
+        .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+            cx.stop_propagation();
+            let position = event.position;
+            let viewport = window.viewport_size();
+            let track = track_context.clone();
+            let _ = view_context.update(cx, |this, app_cx| {
+                plugin_context_menu::open_track(this, &track, position, viewport, app_cx);
+            });
+        })
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
             let _ = view_play.update(cx, |this, cx| this.play_track(track_id, cx));
         })
