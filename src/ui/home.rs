@@ -69,7 +69,9 @@ fn plugin_home_sections(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement>
             Ok(Some(snapshot)) => {
                 let handler = interactive.then(|| home_plugin_interaction_handler(&section, view));
                 plugin_page_renderer::render_plugin_page(
-                    &section.plugin_id,
+                    &snapshot.plugin_id,
+                    &snapshot.page_id,
+                    snapshot.revision,
                     snapshot.model.as_ref(),
                     handler,
                 )

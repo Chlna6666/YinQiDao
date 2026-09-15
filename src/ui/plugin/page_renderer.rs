@@ -38,14 +38,24 @@ pub fn render_page(
 }
 
 /// Render one plugin page with the current explicitly selected scoped Theme, or the Host palette
-/// when no valid selection exists.
+/// when no valid selection exists. `page_id + revision` comes from the Host page-cache snapshot and
+/// gives input editors a stable identity independent of the `UiPageModel` allocation address.
 pub fn render_plugin_page(
     plugin_id: &str,
+    page_id: &str,
+    revision: u64,
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
 ) -> AnyElement {
     let active_theme = plugin_theme::active_palette();
-    render_plugin_page_with_theme(plugin_id, model, handler, active_theme.as_ref())
+    render_plugin_page_with_theme(
+        plugin_id,
+        page_id,
+        revision,
+        model,
+        handler,
+        active_theme.as_ref(),
+    )
 }
 
 /// Render one plugin page with an optional pre-parsed scoped Theme.
@@ -54,11 +64,13 @@ pub fn render_plugin_page(
 /// execution. The palette is copied once at the render root and passed through the declarative tree.
 pub fn render_plugin_page_with_theme(
     plugin_id: &str,
+    page_id: &str,
+    revision: u64,
     model: &UiPageModel,
     handler: Option<PluginUiInteractionHandler>,
     scoped_theme: Option<&plugin_theme::PluginPageTheme>,
 ) -> AnyElement {
-    let _input_surface = plugin_input::begin_surface(plugin_id, model);
+    let _input_surface = plugin_input::begin_surface(plugin_id, page_id, revision);
     let themed = scoped_theme.is_some();
     let palette = scoped_theme
         .copied()

@@ -7,7 +7,7 @@ use std::{
 use gpui::{App, AppContext, Entity, Focusable, Window};
 
 use crate::{
-    plugin::ui::schema::UiPageModel,
+    plugin::management,
     ui::components::input::{HostTextInput, HostTextInputCommitHandler},
 };
 
@@ -16,14 +16,16 @@ const MAX_ACTIVE_PLUGIN_INPUTS: usize = 32;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PluginInputKey {
     plugin_id: String,
-    surface_key: usize,
+    page_id: String,
+    revision: u64,
     field_id: String,
 }
 
 #[derive(Clone, Debug)]
 struct PluginInputSurface {
     plugin_id: String,
-    surface_key: usize,
+    page_id: String,
+    revision: u64,
 }
 
 thread_local! {
@@ -31,8 +33,9 @@ thread_local! {
     static ACTIVE_INPUTS: RefCell<HashMap<PluginInputKey, Entity<HostTextInput>>> = RefCell::new(HashMap::new());
 }
 
-/// Scopes field identity to one immutable page-model allocation while the declarative renderer
-/// walks the tree. The guard never stores the model itself and does not execute guest code.
+/// Scopes field identity to one Host-owned immutable page snapshot while the declarative renderer
+/// walks the tree. The stable key is `plugin_id + page_id + revision + field_id`; it never depends
+/// on allocator addresses and therefore cannot alias a later page model that reuses the same memory.
 pub struct PluginInputSurfaceGuard {
     previous: Option<PluginInputSurface>,
 }
@@ -46,10 +49,24 @@ impl Drop for PluginInputSurfaceGuard {
     }
 }
 
-pub fn begin_surface(plugin_id: &str, model: &UiPageModel) -> PluginInputSurfaceGuard {
+pub fn begin_surface(
+    plugin_id: &str,
+    page_id: &str,
+    revision: u64,
+) -> PluginInputSurfaceGuard {
+    // A page revision is immutable. Once a newer snapshot is rendered, editors belonging to any
+    // older revision of that exact plugin/page can no longer publish against the current page cache
+    // ticket and must be dropped together with their IME/selection/caret state.
+    ACTIVE_INPUTS.with(|inputs| {
+        inputs.borrow_mut().retain(|key, _| {
+            key.plugin_id != plugin_id || key.page_id != page_id || key.revision == revision
+        });
+    });
+
     let next = PluginInputSurface {
         plugin_id: plugin_id.to_owned(),
-        surface_key: model as *const UiPageModel as usize,
+        page_id: page_id.to_owned(),
+        revision,
     };
     let previous = CURRENT_SURFACE.with(|surface| surface.borrow_mut().replace(next));
     PluginInputSurfaceGuard { previous }
@@ -61,7 +78,8 @@ pub fn key_for_field(field_id: &str) -> Option<PluginInputKey> {
         let surface = surface.as_ref()?;
         Some(PluginInputKey {
             plugin_id: surface.plugin_id.clone(),
-            surface_key: surface.surface_key,
+            page_id: surface.page_id.clone(),
+            revision: surface.revision,
             field_id: field_id.to_owned(),
         })
     })
@@ -69,6 +87,21 @@ pub fn key_for_field(field_id: &str) -> Option<PluginInputKey> {
 
 pub fn active(key: &PluginInputKey) -> Option<Entity<HostTextInput>> {
     ACTIVE_INPUTS.with(|inputs| inputs.borrow().get(key).cloned())
+}
+
+/// Clear every plugin editor. This is used after package-management operations whose UI registry
+/// generation may have changed; it is intentionally Host-only and never calls guest/WASM code.
+pub fn invalidate_all() -> usize {
+    let removed = ACTIVE_INPUTS.with(|inputs| {
+        let mut inputs = inputs.borrow_mut();
+        let removed = inputs.len();
+        inputs.clear();
+        removed
+    });
+    CURRENT_SURFACE.with(|surface| {
+        surface.borrow_mut().take();
+    });
+    removed
 }
 
 /// Materialize one Host-owned input editor. IME composition, selection, clipboard and caret work
@@ -92,10 +125,23 @@ pub fn activate(
 
     let commit_key = key.clone();
     let commit: HostTextInputCommitHandler = Rc::new(move |value, window, cx| {
+        // A page may publish a newer revision between the guest response and the next GPUI render.
+        // Revalidate against the Host page cache at the final Enter boundary so an editor from the
+        // previous revision can never submit into a newer page generation during that one-frame gap.
+        let revision_is_current = management::page_snapshot(
+            &commit_key.plugin_id,
+            &commit_key.page_id,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|snapshot| snapshot.revision == commit_key.revision);
+
         ACTIVE_INPUTS.with(|inputs| {
             inputs.borrow_mut().remove(&commit_key);
         });
-        on_commit(value, window, cx);
+        if revision_is_current {
+            on_commit(value, window, cx);
+        }
         window.request_animation_frame();
     });
 

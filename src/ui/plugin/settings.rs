@@ -143,6 +143,7 @@ fn import_plugin_directory(cx: &mut Context<MusicApp>) {
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
         this.update(cx, |_this, cx| {
+            super::plugin_input::invalidate_all();
             complete_operation(result);
             cx.notify();
         })?;
@@ -176,6 +177,7 @@ fn set_plugin_enabled(plugin_id: String, enabled: bool, cx: &mut Context<MusicAp
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
         this.update(cx, |_this, cx| {
+            super::plugin_input::invalidate_all();
             complete_operation(result);
             cx.notify();
         })?;
@@ -228,6 +230,7 @@ fn request_uninstall(plugin_id: String, cx: &mut Context<MusicApp>) {
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
         this.update(cx, |_this, cx| {
+            super::plugin_input::invalidate_all();
             complete_operation(result);
             cx.notify();
         })?;
