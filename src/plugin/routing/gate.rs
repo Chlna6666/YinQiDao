@@ -1,7 +1,10 @@
 use anyhow::Result;
 
 use super::super::{
-    abi::{PluginAccount, PluginRoute, PluginServiceRouter, RoutePlan, RoutingPolicy, ServiceKind},
+    abi::{
+        PluginAccount, PluginRoute, PluginServiceRouter, RoutePlan, RoutingPolicy, ServiceKind,
+        sort_plugin_routes,
+    },
     host::{
         package_manager,
         runtime::{PluginCallKey, PluginHostServices, PluginRouteHealthSnapshot},
@@ -78,7 +81,7 @@ pub fn plan_routes<H: PluginRouteHealthSource>(
         .filter(|account| account.capabilities.contains(&capability))
         .map(route_from_account)
         .collect::<Vec<_>>();
-    sort_routes(&mut candidates, policy.preferred_provider.as_deref());
+    sort_plugin_routes(&mut candidates, policy);
 
     let mut eligible_routes = Vec::with_capacity(candidates.len());
     let mut rejected = Vec::new();
@@ -167,21 +170,6 @@ fn find_account<'a>(
     })
 }
 
-fn sort_routes(routes: &mut [PluginRoute], preferred_provider: Option<&str>) {
-    routes.sort_by(|left, right| {
-        let left_preferred =
-            preferred_provider.is_some_and(|provider| provider == left.provider_id);
-        let right_preferred =
-            preferred_provider.is_some_and(|provider| provider == right.provider_id);
-        right_preferred
-            .cmp(&left_preferred)
-            .then_with(|| right.is_default.cmp(&left.is_default))
-            .then_with(|| right.priority.cmp(&left.priority))
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-            .then_with(|| left.account_id.cmp(&right.account_id))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, time::Duration};
@@ -189,7 +177,7 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::plugin::abi::{AccountState, PluginCapability};
+    use crate::plugin::abi::{AccountState, PluginAccountPreference, PluginCapability};
 
     #[derive(Default)]
     struct MockHealth {
@@ -345,6 +333,70 @@ mod tests {
             &policy,
         );
         assert_eq!(gated.plan.plugin_routes[0].provider_id, "netease");
+    }
+
+    #[test]
+    fn preferred_account_wins_over_default_and_priority() {
+        let mut router = PluginServiceRouter::default();
+        let mut default_account = account("qqmusic", "default", 100, PluginCapability::Metadata);
+        default_account.is_default = true;
+        let mut selected = account("qqmusic", "selected", 1, PluginCapability::Metadata);
+        selected.is_default = false;
+        router.upsert_account(default_account);
+        router.upsert_account(selected);
+
+        let policy = RoutingPolicy {
+            preferred_account: Some(PluginAccountPreference {
+                plugin_id: "plugin.qqmusic".into(),
+                provider_id: "qqmusic".into(),
+                account_id: "selected".into(),
+            }),
+            ..RoutingPolicy::default()
+        };
+        let gated = plan_routes(
+            &router,
+            &PluginSessionCoordinator::default(),
+            &MockHealth::default(),
+            ServiceKind::Metadata,
+            &policy,
+        );
+        assert_eq!(gated.plan.plugin_routes[0].account_id, "selected");
+        assert_eq!(gated.eligible_routes[0].account_id, "selected");
+        assert_eq!(gated.eligible_routes[1].account_id, "default");
+    }
+
+    #[test]
+    fn unavailable_preferred_account_falls_back_to_sibling_before_other_provider() {
+        let mut router = PluginServiceRouter::default();
+        let mut selected = account("qqmusic", "selected", 1, PluginCapability::Metadata);
+        selected.state = AccountState::Expired;
+        selected.is_default = false;
+        let mut sibling = account("qqmusic", "sibling", 1, PluginCapability::Metadata);
+        sibling.is_default = false;
+        let other = account("netease", "other", 1_000, PluginCapability::Metadata);
+        router.upsert_account(selected);
+        router.upsert_account(sibling);
+        router.upsert_account(other);
+
+        let policy = RoutingPolicy {
+            preferred_account: Some(PluginAccountPreference {
+                plugin_id: "plugin.qqmusic".into(),
+                provider_id: "qqmusic".into(),
+                account_id: "selected".into(),
+            }),
+            ..RoutingPolicy::default()
+        };
+        let gated = plan_routes(
+            &router,
+            &PluginSessionCoordinator::default(),
+            &MockHealth::default(),
+            ServiceKind::Metadata,
+            &policy,
+        );
+        assert_eq!(gated.rejected.len(), 1);
+        assert_eq!(gated.rejected[0].route.account_id, "selected");
+        assert_eq!(gated.eligible_routes[0].account_id, "sibling");
+        assert_eq!(gated.eligible_routes[1].provider_id, "netease");
     }
 
     #[test]

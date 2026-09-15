@@ -444,6 +444,17 @@ pub struct PluginRoute {
     pub is_default: bool,
 }
 
+/// Request-scoped preference for one exact authenticated plugin account.
+///
+/// The full namespace is required because account ids and provider ids are not globally unique.
+/// This preference never mutates account/default state and never logs sibling accounts out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginAccountPreference {
+    pub plugin_id: String,
+    pub provider_id: String,
+    pub account_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoutingPolicy {
     /// Authenticated plugin APIs are attempted before built-in anonymous provider code.
@@ -452,8 +463,11 @@ pub struct RoutingPolicy {
     pub allow_builtin_fallback: bool,
     /// Local-only mechanisms such as AcoustID may run only after plugin/built-in routes fail.
     pub allow_local_fallback: bool,
-    /// Optional per-operation preference. It never logs other providers out.
+    /// Optional per-operation provider preference. It never logs other providers out.
     pub preferred_provider: Option<String>,
+    /// Optional exact account preference for this request only. When present it supersedes the
+    /// provider-only preference and keeps sibling accounts/providers available as fallbacks.
+    pub preferred_account: Option<PluginAccountPreference>,
 }
 
 impl Default for RoutingPolicy {
@@ -463,8 +477,51 @@ impl Default for RoutingPolicy {
             allow_builtin_fallback: true,
             allow_local_fallback: true,
             preferred_provider: None,
+            preferred_account: None,
         }
     }
+}
+
+pub(crate) fn sort_plugin_routes(routes: &mut [PluginRoute], policy: &RoutingPolicy) {
+    routes.sort_by(|left, right| {
+        let preferred_account = policy.preferred_account.as_ref();
+        let left_exact = preferred_account.is_some_and(|preference| {
+            preference.plugin_id == left.plugin_id
+                && preference.provider_id == left.provider_id
+                && preference.account_id == left.account_id
+        });
+        let right_exact = preferred_account.is_some_and(|preference| {
+            preference.plugin_id == right.plugin_id
+                && preference.provider_id == right.provider_id
+                && preference.account_id == right.account_id
+        });
+        let left_account_provider = preferred_account.is_some_and(|preference| {
+            preference.plugin_id == left.plugin_id && preference.provider_id == left.provider_id
+        });
+        let right_account_provider = preferred_account.is_some_and(|preference| {
+            preference.plugin_id == right.plugin_id && preference.provider_id == right.provider_id
+        });
+        let left_provider = preferred_account.is_none()
+            && policy
+                .preferred_provider
+                .as_deref()
+                .is_some_and(|provider| provider == left.provider_id);
+        let right_provider = preferred_account.is_none()
+            && policy
+                .preferred_provider
+                .as_deref()
+                .is_some_and(|provider| provider == right.provider_id);
+
+        right_exact
+            .cmp(&left_exact)
+            .then_with(|| right_account_provider.cmp(&left_account_provider))
+            .then_with(|| right_provider.cmp(&left_provider))
+            .then_with(|| right.is_default.cmp(&left.is_default))
+            .then_with(|| right.priority.cmp(&left.priority))
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+            .then_with(|| left.account_id.cmp(&right.account_id))
+    });
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -524,6 +581,18 @@ impl PluginServiceRouter {
         service: ServiceKind,
         preferred_provider: Option<&str>,
     ) -> Vec<PluginRoute> {
+        let policy = RoutingPolicy {
+            preferred_provider: preferred_provider.map(str::to_owned),
+            ..RoutingPolicy::default()
+        };
+        self.routes_for_policy(service, &policy)
+    }
+
+    pub fn routes_for_policy(
+        &self,
+        service: ServiceKind,
+        policy: &RoutingPolicy,
+    ) -> Vec<PluginRoute> {
         let capability = service.capability();
         let mut routes = self
             .accounts
@@ -538,18 +607,7 @@ impl PluginServiceRouter {
             })
             .collect::<Vec<_>>();
 
-        routes.sort_by(|left, right| {
-            let left_preferred =
-                preferred_provider.is_some_and(|provider| provider == left.provider_id);
-            let right_preferred =
-                preferred_provider.is_some_and(|provider| provider == right.provider_id);
-            right_preferred
-                .cmp(&left_preferred)
-                .then_with(|| right.is_default.cmp(&left.is_default))
-                .then_with(|| right.priority.cmp(&left.priority))
-                .then_with(|| left.provider_id.cmp(&right.provider_id))
-                .then_with(|| left.account_id.cmp(&right.account_id))
-        });
+        sort_plugin_routes(&mut routes, policy);
 
         if !service.fan_out() {
             routes.truncate(1);
@@ -560,7 +618,7 @@ impl PluginServiceRouter {
     pub fn plan(&self, service: ServiceKind, policy: &RoutingPolicy) -> RoutePlan {
         RoutePlan {
             service,
-            plugin_routes: self.routes_for(service, policy.preferred_provider.as_deref()),
+            plugin_routes: self.routes_for_policy(service, policy),
             authenticated_plugin_first: policy.authenticated_plugin_first,
             allow_builtin_fallback: policy.allow_builtin_fallback,
             allow_local_fallback: policy.allow_local_fallback,
@@ -650,6 +708,41 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].provider_id, "qqmusic");
         assert_eq!(router.accounts().len(), 2);
+    }
+
+    #[test]
+    fn preferred_account_is_request_scoped_and_exact() {
+        let mut router = PluginServiceRouter::default();
+        let mut high_priority = account(
+            "qqmusic",
+            "high-priority",
+            &[PluginCapability::Metadata],
+            100,
+        );
+        high_priority.is_default = true;
+        let mut selected = account(
+            "qqmusic",
+            "selected",
+            &[PluginCapability::Metadata],
+            1,
+        );
+        selected.is_default = false;
+        router.upsert_account(high_priority);
+        router.upsert_account(selected);
+
+        let policy = RoutingPolicy {
+            preferred_provider: Some("netease".into()),
+            preferred_account: Some(PluginAccountPreference {
+                plugin_id: "plugin.qqmusic".into(),
+                provider_id: "qqmusic".into(),
+                account_id: "selected".into(),
+            }),
+            ..RoutingPolicy::default()
+        };
+        let plan = router.plan(ServiceKind::Metadata, &policy);
+        assert_eq!(plan.plugin_routes.len(), 1);
+        assert_eq!(plan.plugin_routes[0].account_id, "selected");
+        assert!(router.accounts().iter().any(|account| account.account_id == "high-priority"));
     }
 
     #[test]
