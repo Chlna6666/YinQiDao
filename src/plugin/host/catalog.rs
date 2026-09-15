@@ -444,36 +444,7 @@ fn validate_accounts(accounts: &[PluginAccount]) -> Result<()> {
 
     let mut identities = HashSet::new();
     for account in accounts {
-        if !valid_identifier(&account.plugin_id)
-            || !valid_identifier(&account.provider_id)
-            || account.account_id.trim().is_empty()
-            || account.account_id.len() > MAX_ACCOUNT_ID_BYTES
-            || account.account_id.contains('\0')
-        {
-            bail!(
-                "插件账号标识非法: {}/{}/{}",
-                account.plugin_id,
-                account.provider_id,
-                account.account_id
-            );
-        }
-        let text_bytes = account
-            .display_name
-            .len()
-            .saturating_add(account.avatar_url.as_ref().map_or(0, String::len));
-        if text_bytes > MAX_ACCOUNT_TEXT_BYTES {
-            bail!("插件账号展示信息超过 {} bytes Host 上限", MAX_ACCOUNT_TEXT_BYTES);
-        }
-        let mut capabilities = HashSet::with_capacity(account.capabilities.len());
-        for capability in &account.capabilities {
-            if !capabilities.insert(*capability) {
-                bail!(
-                    "插件账号重复声明 capability: {}/{}/{capability:?}",
-                    account.plugin_id,
-                    account.provider_id
-                );
-            }
-        }
+        validate_account_shape(account)?;
         let identity = (
             account.plugin_id.clone(),
             account.provider_id.clone(),
@@ -485,6 +456,46 @@ fn validate_accounts(accounts: &[PluginAccount]) -> Result<()> {
                 account.plugin_id,
                 account.provider_id,
                 account.account_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_account_shape(account: &PluginAccount) -> Result<()> {
+    if !valid_identifier(&account.plugin_id)
+        || !valid_identifier(&account.provider_id)
+        || account.account_id.trim().is_empty()
+        || account.account_id.len() > MAX_ACCOUNT_ID_BYTES
+        || account.account_id.contains('\0')
+    {
+        bail!(
+            "插件账号标识非法: {}/{}/{}",
+            account.plugin_id,
+            account.provider_id,
+            account.account_id
+        );
+    }
+    let text_bytes = account
+        .display_name
+        .len()
+        .saturating_add(account.avatar_url.as_ref().map_or(0, String::len));
+    if text_bytes > MAX_ACCOUNT_TEXT_BYTES
+        || account.display_name.contains('\0')
+        || account
+            .avatar_url
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+    {
+        bail!("插件账号展示信息超过 {} bytes Host 上限或包含 NUL", MAX_ACCOUNT_TEXT_BYTES);
+    }
+    let mut capabilities = HashSet::with_capacity(account.capabilities.len());
+    for capability in &account.capabilities {
+        if !capabilities.insert(*capability) {
+            bail!(
+                "插件账号重复声明 capability: {}/{}/{capability:?}",
+                account.plugin_id,
+                account.provider_id
             );
         }
     }
@@ -547,10 +558,15 @@ impl PluginHostState {
                 Vec::new()
             }
         };
-        accounts.retain(|account| {
-            catalog
-                .provider(&account.plugin_id, &account.provider_id)
-                .is_some()
+        accounts.retain(|account| match validate_account_against_catalog(&catalog, account) {
+            Ok(()) => true,
+            Err(error) => {
+                startup_errors.push(format!(
+                    "忽略与当前插件 catalog 不兼容的账号 {}/{}/{}: {error:#}",
+                    account.plugin_id, account.provider_id, account.account_id
+                ));
+                false
+            }
         });
         normalize_provider_defaults(&mut accounts);
 
@@ -659,6 +675,7 @@ impl PluginHostState {
 }
 
 fn validate_account_against_catalog(catalog: &PluginCatalog, account: &PluginAccount) -> Result<()> {
+    validate_account_shape(account)?;
     let provider = catalog
         .provider(&account.plugin_id, &account.provider_id)
         .with_context(|| {
@@ -843,9 +860,41 @@ auth_methods = ["qr_code"]
     }
 
     #[test]
+    fn account_store_rejects_nul_display_metadata() {
+        let mut invalid = account("valid", 0, true);
+        invalid.display_name = "bad\0name".into();
+        assert!(validate_accounts(std::slice::from_ref(&invalid)).is_err());
+
+        invalid.display_name = "valid".into();
+        invalid.avatar_url = Some("https://example.com/bad\0avatar".into());
+        assert!(validate_accounts(std::slice::from_ref(&invalid)).is_err());
+    }
+
+    #[test]
     fn identifiers_have_a_host_length_budget() {
         assert!(valid_identifier("plugin.valid"));
         assert!(!valid_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES + 1)));
+    }
+
+    #[test]
+    fn host_restore_drops_accounts_with_stale_catalog_capabilities() {
+        let root = temp_dir("stale-account-capability");
+        let plugin_root = root.join("plugins");
+        write_plugin(&plugin_root, "plugin.test", "provider.wasm");
+        let store = PluginAccountStore::new(root.join(PLUGIN_ACCOUNT_STORE_FILE));
+        let mut stale = account("stale", 0, true);
+        stale.capabilities.push(PluginCapability::Artwork);
+        store.save(&[stale]).expect("save stale account");
+
+        let host = PluginHostState::load(&root);
+        assert!(host.router().accounts().is_empty());
+        assert!(
+            host.startup_errors()
+                .iter()
+                .any(|error| error.contains("不兼容"))
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
