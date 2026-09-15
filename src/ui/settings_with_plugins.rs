@@ -7,6 +7,9 @@ use super::{
 };
 use shell::MusicApp;
 
+#[path = "plugin/service_accounts.rs"]
+mod plugin_service_accounts;
+
 // Keep the existing large settings implementation unchanged and embed it as the Preferences tab.
 // Its `super::{components, shell, theme}` imports resolve to the aliases above.
 mod base {
@@ -17,6 +20,7 @@ mod base {
 enum SettingsWorkspace {
     #[default]
     Preferences,
+    Services,
     Plugins,
     Extensions,
 }
@@ -54,6 +58,7 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
     } else {
         match selected {
             SettingsWorkspace::Preferences => base::render(app, cx),
+            SettingsWorkspace::Services => plugin_service_accounts::render(cx),
             SettingsWorkspace::Plugins => plugin_settings::render(app, cx),
             SettingsWorkspace::Extensions => plugin_extensions::render(app, cx),
         }
@@ -77,6 +82,12 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             "偏好设置",
             active_plugin_route.is_none() && selected == SettingsWorkspace::Preferences,
             cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Preferences, cx)),
+        ))
+        .child(workspace_button(
+            "settings-workspace-services",
+            "音乐服务",
+            active_plugin_route.is_none() && selected == SettingsWorkspace::Services,
+            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Services, cx)),
         ))
         .child(workspace_button(
             "settings-workspace-plugins",
