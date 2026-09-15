@@ -338,15 +338,21 @@ impl PluginServiceFrontend {
                 track,
             );
             match self.runtime.execute_guest_call(key, call).await {
-                Ok(Some(lyrics)) => {
-                    return Ok(PluginSingleResult {
-                        value: Some(lyrics),
-                        route: Some(route.clone()),
-                        plan,
-                        failures,
-                        client_ready: true,
-                    });
-                }
+                Ok(Some(lyrics)) => match validate_plugin_lyrics_document(&lyrics) {
+                    Ok(()) => {
+                        return Ok(PluginSingleResult {
+                            value: Some(lyrics),
+                            route: Some(route.clone()),
+                            plan,
+                            failures,
+                            client_ready: true,
+                        });
+                    }
+                    Err(error) => failures.push(PluginCallFailure {
+                        route: route.clone(),
+                        error: format!("Lyrics 返回值非法: {error:#}"),
+                    }),
+                },
                 Ok(None) => {}
                 Err(error) => failures.push(PluginCallFailure {
                     route: route.clone(),
@@ -832,19 +838,21 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
     Ok(())
 }
 
-pub fn plugin_lyrics_to_player(
-    document: PluginLyricDocument,
-    source_prefix: &str,
-) -> Result<Option<LyricsDocument>> {
-    if document.source.len() > MAX_PLUGIN_LYRIC_SOURCE_BYTES {
-        bail!("插件歌词 source 超过大小限制");
+fn validate_plugin_lyrics_document(document: &PluginLyricDocument) -> Result<()> {
+    if document.source.len() > MAX_PLUGIN_LYRIC_SOURCE_BYTES || document.source.contains('\0') {
+        bail!("插件歌词 source 超过大小限制或包含 NUL");
     }
     if document.lines.len() > MAX_PLUGIN_LYRIC_LINES {
         bail!("插件歌词行数超过 {} 限制", MAX_PLUGIN_LYRIC_LINES);
     }
 
-    let plain = document.plain.filter(|value| !value.trim().is_empty());
-    let mut input_bytes = plain.as_ref().map_or(0usize, String::len);
+    let mut input_bytes = 0usize;
+    if let Some(plain) = document.plain.as_deref() {
+        if plain.contains('\0') {
+            bail!("插件歌词 plain 文本包含 NUL");
+        }
+        input_bytes = checked_lyric_bytes(input_bytes, plain.len())?;
+    }
     for line in &document.lines {
         if line.words.len() > MAX_PLUGIN_LYRIC_WORDS_PER_LINE {
             bail!(
@@ -852,15 +860,32 @@ pub fn plugin_lyrics_to_player(
                 MAX_PLUGIN_LYRIC_WORDS_PER_LINE
             );
         }
+        if line.text.contains('\0') {
+            bail!("插件歌词行文本包含 NUL");
+        }
         input_bytes = checked_lyric_bytes(input_bytes, line.text.len())?;
-        if let Some(translation) = line.translation.as_ref() {
+        if let Some(translation) = line.translation.as_deref() {
+            if translation.contains('\0') {
+                bail!("插件歌词翻译文本包含 NUL");
+            }
             input_bytes = checked_lyric_bytes(input_bytes, translation.len())?;
         }
         for word in &line.words {
+            if word.text.contains('\0') {
+                bail!("插件歌词 word 文本包含 NUL");
+            }
             input_bytes = checked_lyric_bytes(input_bytes, word.text.len())?;
         }
     }
+    Ok(())
+}
 
+pub fn plugin_lyrics_to_player(
+    document: PluginLyricDocument,
+    source_prefix: &str,
+) -> Result<Option<LyricsDocument>> {
+    validate_plugin_lyrics_document(&document)?;
+    let plain = document.plain.filter(|value| !value.trim().is_empty());
     let synced = serialize_plugin_ttml(&document.lines)?;
     if plain.is_none() && synced.is_none() {
         return Ok(None);
@@ -1086,6 +1111,23 @@ mod tests {
             ..TrackQuery::default()
         };
         assert!(validate_track_query(&query).is_err());
+    }
+
+    #[test]
+    fn plugin_lyrics_document_rejects_nul_and_oversized_text() {
+        let nul = PluginLyricDocument {
+            source: "test".into(),
+            plain: Some("bad\0lyrics".into()),
+            lines: Vec::new(),
+        };
+        assert!(validate_plugin_lyrics_document(&nul).is_err());
+
+        let oversized = PluginLyricDocument {
+            source: "test".into(),
+            plain: Some("x".repeat(MAX_PLUGIN_LYRIC_INPUT_BYTES + 1)),
+            lines: Vec::new(),
+        };
+        assert!(validate_plugin_lyrics_document(&oversized).is_err());
     }
 
     #[test]
