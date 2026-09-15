@@ -76,6 +76,7 @@ pub(crate) mod ui;
 pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     let engine_policy = component::policy::PluginEnginePolicy::default();
     engine_policy.validate()?;
+    host::state_guard::validate_preload_state_files(base_dir)?;
     let compiled_cache = component::cache::initialize(engine_policy.max_compiled_artifact_bytes);
     let plugin_host = host::catalog::initialize(base_dir);
     let state_recovery = {

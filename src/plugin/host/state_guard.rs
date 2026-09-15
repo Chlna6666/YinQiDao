@@ -7,7 +7,11 @@ use super::catalog::PluginCatalog;
 
 const PLUGIN_STATE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_STATE_FILE: &str = "plugin-state.json";
+const PLUGIN_ACCOUNT_STORE_FILE: &str = "plugin-accounts.json";
+const PLUGIN_PERMISSION_STORE_FILE: &str = "plugin-permissions.json";
 const MAX_PLUGIN_STATE_BYTES: u64 = 1024 * 1024;
+const MAX_PLUGIN_ACCOUNT_STORE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PLUGIN_PERMISSION_STORE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PluginStateFile {
@@ -20,6 +24,54 @@ struct PluginStateFile {
 pub struct PluginStateRecovery {
     pub reason: String,
     pub disabled_plugins: usize,
+}
+
+/// Validate security-sensitive persisted indexes before their loaders allocate or parse contents.
+///
+/// Account and permission loaders already fail closed on parse/schema errors, but historically read
+/// the complete file first. A corrupted multi-gigabyte file could therefore force an unbounded
+/// allocation during application startup. This preflight rejects oversized files before any read,
+/// and refuses symlink/non-regular paths instead of following them into arbitrary filesystem data.
+pub fn validate_preload_state_files(base_dir: &Path) -> Result<()> {
+    validate_bounded_regular_file(
+        base_dir,
+        PLUGIN_ACCOUNT_STORE_FILE,
+        MAX_PLUGIN_ACCOUNT_STORE_BYTES,
+        "插件账号索引",
+    )?;
+    validate_bounded_regular_file(
+        base_dir,
+        PLUGIN_PERMISSION_STORE_FILE,
+        MAX_PLUGIN_PERMISSION_STORE_BYTES,
+        "插件权限索引",
+    )?;
+    Ok(())
+}
+
+fn validate_bounded_regular_file(
+    base_dir: &Path,
+    file_name: &str,
+    max_bytes: u64,
+    label: &str,
+) -> Result<()> {
+    let path = base_dir.join(file_name);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取{label} metadata 失败: {}", path.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{label}必须是普通文件且不能是符号链接: {}", path.display());
+    }
+    if metadata.len() > max_bytes {
+        bail!(
+            "{label}超过 {max_bytes} bytes Host 启动上限: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Validate the persisted package enable/disable state before `PluginPackageManager` reads it.
@@ -105,7 +157,7 @@ pub fn repair_fail_closed_state(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{fs::File, time::{SystemTime, UNIX_EPOCH}};
 
     use super::*;
 
@@ -173,6 +225,29 @@ auth_methods = ["qr_code"]
                 .expect("parse repaired");
         assert_eq!(repaired.schema_version, PLUGIN_STATE_SCHEMA_VERSION);
         assert_eq!(repaired.disabled_plugins, vec!["plugin.test"]);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preload_rejects_oversized_account_index_before_reading_it() {
+        let root = temp_dir("oversized-account");
+        fs::create_dir_all(&root).expect("root");
+        let file = File::create(root.join(PLUGIN_ACCOUNT_STORE_FILE)).expect("account file");
+        file.set_len(MAX_PLUGIN_ACCOUNT_STORE_BYTES + 1)
+            .expect("extend account file");
+        let error = validate_preload_state_files(&root).expect_err("oversized index must fail");
+        assert!(error.to_string().contains("启动上限"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preload_accepts_missing_or_bounded_regular_indexes() {
+        let root = temp_dir("bounded-indexes");
+        fs::create_dir_all(&root).expect("root");
+        validate_preload_state_files(&root).expect("missing files");
+        fs::write(root.join(PLUGIN_ACCOUNT_STORE_FILE), b"{}").expect("accounts");
+        fs::write(root.join(PLUGIN_PERMISSION_STORE_FILE), b"{}").expect("permissions");
+        validate_preload_state_files(&root).expect("bounded files");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
