@@ -477,6 +477,7 @@ impl PluginServiceFrontend {
             route.plugin_id == metadata_route.plugin_id
                 && route.provider_id == metadata_route.provider_id
         });
+        prioritize_account_route(&mut plan.eligible_routes, &metadata_route.account_id);
         plan.plan.plugin_routes = plan.eligible_routes.first().cloned().into_iter().collect();
         Ok(plan)
     }
@@ -591,6 +592,13 @@ impl PluginServiceFrontend {
             },
         )
     }
+}
+
+fn prioritize_account_route(routes: &mut [PluginRoute], account_id: &str) {
+    let Some(index) = routes.iter().position(|route| route.account_id == account_id) else {
+        return;
+    };
+    routes[..=index].rotate_right(1);
 }
 
 fn validate_challenge_id(challenge_id: &str) -> Result<()> {
@@ -837,6 +845,30 @@ pub fn global() -> Option<Arc<PluginServiceFrontend>> {
 mod tests {
     use super::*;
     use crate::plugin::abi::{LyricWord as PluginLyricWord, PluginLyricDocument};
+
+    fn route(account_id: &str, priority: i32, is_default: bool) -> PluginRoute {
+        PluginRoute {
+            plugin_id: "plugin.test".into(),
+            provider_id: "test".into(),
+            account_id: account_id.into(),
+            priority,
+            is_default,
+        }
+    }
+
+    #[test]
+    fn same_provider_followup_prioritizes_metadata_account_without_dropping_fallbacks() {
+        let mut routes = vec![
+            route("default", 100, true),
+            route("metadata", 10, false),
+            route("backup", 5, false),
+        ];
+        prioritize_account_route(&mut routes, "metadata");
+        assert_eq!(
+            routes.iter().map(|route| route.account_id.as_str()).collect::<Vec<_>>(),
+            vec!["metadata", "default", "backup"]
+        );
+    }
 
     #[test]
     fn plugin_lyrics_round_trip_word_timing_translation_and_xml_text() {
