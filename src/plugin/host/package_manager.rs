@@ -16,7 +16,7 @@ use crate::plugin::{
 
 use super::{
     catalog::{PluginCatalog, PluginHostState},
-    permissions, runtime, sessions,
+    permissions, runtime, secrets, sessions,
 };
 
 const PLUGIN_STATE_SCHEMA_VERSION: u32 = 1;
@@ -428,36 +428,82 @@ impl PluginPackageManager {
         if let Some(gc) = gc::global() {
             let _ = gc.invalidate_plugin(plugin_id);
         }
-        if let Some(runtime) = runtime::global() {
-            let _ = runtime.revoke_all_plugin_secrets(plugin_id);
+        match secrets::global() {
+            Some(secret_store) => {
+                if let Err(error) = secret_store.delete_plugin(plugin_id) {
+                    tracing::error!(
+                        plugin_id = %plugin_id,
+                        %error,
+                        "卸载插件后撤销 Host Secret 失败；敏感凭据可能仍残留"
+                    );
+                }
+            }
+            None => tracing::error!(
+                plugin_id = %plugin_id,
+                "卸载插件时 Host Secret backend 未初始化；无法确认敏感凭据已撤销"
+            ),
         }
-        if let Some(permission_state) = permissions::global()
-            && let Ok(mut permission_state) = permission_state.write()
-        {
-            let _ = permission_state.revoke(plugin_id);
+        if let Some(permission_state) = permissions::global() {
+            match permission_state.write() {
+                Ok(mut permission_state) => {
+                    if let Err(error) = permission_state.revoke(plugin_id) {
+                        tracing::error!(
+                            plugin_id = %plugin_id,
+                            %error,
+                            "卸载插件后撤销权限记录失败"
+                        );
+                    }
+                }
+                Err(error) => tracing::error!(
+                    plugin_id = %plugin_id,
+                    %error,
+                    "卸载插件时权限状态锁已损坏"
+                ),
+            }
         }
         if let Some(host) = super::catalog::global() {
-            let accounts = host
-                .read()
-                .map(|host| {
-                    host.router()
-                        .accounts()
-                        .iter()
-                        .filter(|account| account.plugin_id == plugin_id)
-                        .map(|account| {
-                            (
-                                account.plugin_id.clone(),
-                                account.provider_id.clone(),
-                                account.account_id.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if let Ok(mut host) = host.write() {
-                for (plugin_id, provider_id, account_id) in accounts {
-                    let _ = host.remove_account(&plugin_id, &provider_id, &account_id);
+            let accounts = match host.read() {
+                Ok(host) => host
+                    .router()
+                    .accounts()
+                    .iter()
+                    .filter(|account| account.plugin_id == plugin_id)
+                    .map(|account| {
+                        (
+                            account.plugin_id.clone(),
+                            account.provider_id.clone(),
+                            account.account_id.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    tracing::error!(
+                        plugin_id = %plugin_id,
+                        %error,
+                        "卸载插件时读取 Host 账号状态失败"
+                    );
+                    Vec::new()
                 }
+            };
+            match host.write() {
+                Ok(mut host) => {
+                    for (plugin_id, provider_id, account_id) in accounts {
+                        if let Err(error) = host.remove_account(&plugin_id, &provider_id, &account_id) {
+                            tracing::error!(
+                                %error,
+                                plugin_id = %plugin_id,
+                                provider_id = %provider_id,
+                                account_id = %account_id,
+                                "卸载插件后移除账号状态失败"
+                            );
+                        }
+                    }
+                }
+                Err(error) => tracing::error!(
+                    plugin_id = %plugin_id,
+                    %error,
+                    "卸载插件时 Host 账号状态锁已损坏"
+                ),
             }
         }
 
