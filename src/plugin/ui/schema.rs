@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +119,8 @@ impl Default for UiSchemaLimits {
 struct ValidationState {
     nodes: usize,
     text_bytes: usize,
+    action_ids: HashSet<String>,
+    field_ids: HashSet<String>,
 }
 
 pub fn validate_page_model(page: &UiPageModel, limits: &UiSchemaLimits) -> Result<()> {
@@ -173,7 +177,7 @@ fn validate_node(
             ..
         } => {
             record_text(label, limits, state)?;
-            validate_local_id(action_id, "action id")?;
+            record_action_id(action_id, state)?;
         }
         UiNode::Input {
             field_id,
@@ -181,7 +185,7 @@ fn validate_node(
             placeholder,
             ..
         } => {
-            validate_local_id(field_id, "field id")?;
+            record_field_id(field_id, state)?;
             record_text(value, limits, state)?;
             if let Some(placeholder) = placeholder {
                 record_text(placeholder, limits, state)?;
@@ -192,22 +196,31 @@ fn validate_node(
             selected,
             options,
         } => {
-            validate_local_id(field_id, "field id")?;
+            record_field_id(field_id, state)?;
             if options.len() > limits.max_select_options {
                 bail!("插件 UI select options 超过 {}", limits.max_select_options);
             }
             if let Some(selected) = selected {
                 record_text(selected, limits, state)?;
             }
+            let mut option_values = HashSet::with_capacity(options.len());
             for option in options {
                 record_text(&option.value, limits, state)?;
                 record_text(&option.label, limits, state)?;
+                if !option_values.insert(option.value.as_str()) {
+                    bail!("插件 UI select option value 重复: {}", option.value);
+                }
+            }
+            if let Some(selected) = selected
+                && !option_values.contains(selected.as_str())
+            {
+                bail!("插件 UI select selected 不存在于 options: {selected}");
             }
         }
         UiNode::Toggle {
             field_id, label, ..
         } => {
-            validate_local_id(field_id, "field id")?;
+            record_field_id(field_id, state)?;
             record_text(label, limits, state)?;
         }
         UiNode::Progress {
@@ -240,6 +253,22 @@ fn validate_children(
     }
     for child in children {
         validate_node(child, depth + 1, limits, state)?;
+    }
+    Ok(())
+}
+
+fn record_action_id(value: &str, state: &mut ValidationState) -> Result<()> {
+    validate_local_id(value, "action id")?;
+    if !state.action_ids.insert(value.to_owned()) {
+        bail!("插件 UI action id 重复: {value}");
+    }
+    Ok(())
+}
+
+fn record_field_id(value: &str, state: &mut ValidationState) -> Result<()> {
+    validate_local_id(value, "field id")?;
+    if !state.field_ids.insert(value.to_owned()) {
+        bail!("插件 UI field id 重复: {value}");
     }
     Ok(())
 }
@@ -284,5 +313,81 @@ mod tests {
             },
         };
         assert!(validate_page_model(&page, &UiSchemaLimits::default()).is_err());
+    }
+
+    #[test]
+    fn duplicate_action_ids_are_rejected() {
+        let page = UiPageModel {
+            root: UiNode::Column {
+                children: vec![
+                    UiNode::Button {
+                        label: "First".into(),
+                        action_id: "run".into(),
+                        disabled: false,
+                    },
+                    UiNode::Button {
+                        label: "Second".into(),
+                        action_id: "run".into(),
+                        disabled: false,
+                    },
+                ],
+            },
+        };
+        assert!(validate_page_model(&page, &UiSchemaLimits::default()).is_err());
+    }
+
+    #[test]
+    fn duplicate_field_ids_are_rejected_across_control_types() {
+        let page = UiPageModel {
+            root: UiNode::Column {
+                children: vec![
+                    UiNode::Input {
+                        field_id: "account".into(),
+                        value: String::new(),
+                        placeholder: None,
+                        secret: false,
+                    },
+                    UiNode::Toggle {
+                        field_id: "account".into(),
+                        label: "Enabled".into(),
+                        value: true,
+                    },
+                ],
+            },
+        };
+        assert!(validate_page_model(&page, &UiSchemaLimits::default()).is_err());
+    }
+
+    #[test]
+    fn select_values_are_unique_and_selected_value_must_exist() {
+        let duplicate = UiPageModel {
+            root: UiNode::Select {
+                field_id: "quality".into(),
+                selected: Some("lossless".into()),
+                options: vec![
+                    UiSelectOption {
+                        value: "lossless".into(),
+                        label: "Lossless".into(),
+                    },
+                    UiSelectOption {
+                        value: "lossless".into(),
+                        label: "Duplicate".into(),
+                    },
+                ],
+            },
+        };
+        assert!(validate_page_model(&duplicate, &UiSchemaLimits::default()).is_err());
+
+        let unknown = UiPageModel {
+            root: UiNode::Select {
+                field_id: "quality".into(),
+                selected: Some("hires".into()),
+                options: vec![UiSelectOption {
+                    value: "lossless".into(),
+                    label: "Lossless".into(),
+                }],
+            },
+        };
+        assert!(validate_page_model(&unknown, &UiSchemaLimits::default()).is_err());
     }
 }
