@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc::Sender},
+    sync::{Arc, Mutex, RwLock, mpsc::Sender},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -50,10 +50,18 @@ impl ScanReport {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalPlaylistSummary {
+    pub id: i64,
+    pub name: String,
+    pub track_count: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Library {
     db_path: PathBuf,
     scan_gate: Arc<Mutex<()>>,
+    playlist_summaries: Arc<RwLock<Arc<[LocalPlaylistSummary]>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -71,8 +79,10 @@ impl Library {
         let library = Self {
             db_path,
             scan_gate: Arc::new(Mutex::new(())),
+            playlist_summaries: Arc::new(RwLock::new(Arc::<[LocalPlaylistSummary]>::from([]))),
         };
         library.with_connection(initialize_schema)?;
+        library.refresh_playlist_summaries()?;
         Ok(library)
     }
 
@@ -96,6 +106,13 @@ impl Library {
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(Into::into)
         })
+    }
+
+    pub fn playlist_summaries(&self) -> Arc<[LocalPlaylistSummary]> {
+        self.playlist_summaries
+            .read()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or_else(|_| Arc::<[LocalPlaylistSummary]>::from([]))
     }
 
     pub fn scan_root(&self, root: &Path) -> Result<ScanReport> {
@@ -232,6 +249,7 @@ impl Library {
             transaction.commit()?;
             Ok(())
         })?;
+        self.refresh_playlist_summaries()?;
         Ok(report)
     }
 
@@ -241,7 +259,8 @@ impl Library {
             connection.execute("DELETE FROM scan_errors", [])?;
             connection.execute("UPDATE library_roots SET scanned_at = NULL", [])?;
             Ok(())
-        })
+        })?;
+        self.refresh_playlist_summaries()
     }
 
     pub fn scan_all(&self, roots: &[PathBuf]) -> Result<Vec<ScanReport>> {
@@ -411,12 +430,41 @@ impl Library {
         Ok(watcher)
     }
 
+    fn refresh_playlist_summaries(&self) -> Result<()> {
+        let summaries = self.with_connection(load_playlist_summaries)?;
+        let mut snapshot = self
+            .playlist_summaries
+            .write()
+            .map_err(|_| anyhow!("播放列表摘要缓存锁已损坏"))?;
+        *snapshot = summaries.into();
+        Ok(())
+    }
+
     fn with_connection<T>(&self, function: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut connection = Connection::open(&self.db_path)
             .with_context(|| format!("打开歌库数据库失败: {}", self.db_path.display()))?;
         connection.busy_timeout(Duration::from_millis(500))?;
         function(&mut connection)
     }
+}
+
+fn load_playlist_summaries(connection: &mut Connection) -> Result<Vec<LocalPlaylistSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT playlists.id, playlists.name, COUNT(playlist_tracks.track_id)
+         FROM playlists
+         LEFT JOIN playlist_tracks ON playlist_tracks.playlist_id = playlists.id
+         GROUP BY playlists.id, playlists.name
+         ORDER BY playlists.name COLLATE NOCASE",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let track_count = row.get::<_, i64>(2)?.max(0) as usize;
+        Ok(LocalPlaylistSummary {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            track_count,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 fn initialize_schema(connection: &mut Connection) -> Result<()> {
@@ -606,6 +654,7 @@ mod tests {
         fs::create_dir_all(&root).expect("root");
         library.add_root(&root).expect("add root");
         assert_eq!(library.roots().expect("roots"), vec![root.clone()]);
+        assert!(library.playlist_summaries().is_empty());
         fs::remove_dir_all(root).expect("cleanup root");
         fs::remove_file(path).expect("cleanup db");
     }

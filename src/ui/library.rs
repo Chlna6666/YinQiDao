@@ -6,7 +6,10 @@ use gpui::{
 };
 use lucide_gpui::icon;
 
-use crate::model::{LibraryTab, Track, TrackId};
+use crate::{
+    library::LocalPlaylistSummary,
+    model::{LibraryTab, Track, TrackId},
+};
 
 #[path = "plugin/context_menu.rs"]
 mod plugin_context_menu;
@@ -77,7 +80,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
         LibraryTab::Songs => "所有歌曲",
         LibraryTab::Albums => "专辑资料库",
         LibraryTab::Artists => "艺术家",
-        LibraryTab::Playlists => "待播清单与队列",
+        LibraryTab::Playlists => "播放列表与队列",
     };
 
     div()
@@ -244,7 +247,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     }),
                 ))
                 .child(segmented_tab_item(
-                    "播放队列",
+                    "播放列表/队列",
                     icon!(list_music),
                     app.library_tab == LibraryTab::Playlists,
                     app_listener(view, |this, _, _, cx| {
@@ -801,11 +804,27 @@ fn artist_circle_card(
 }
 
 fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
+    let playlists = app
+        .library
+        .as_ref()
+        .map(|library| library.playlist_summaries())
+        .unwrap_or_else(|| Arc::<[LocalPlaylistSummary]>::from([]));
     let queue_ids = &app.config.queue;
-    if queue_ids.is_empty() {
-        return div()
-            .w_full()
-            .p_12()
+    let queue_ids_for_rows = queue_ids.clone();
+    let track_indices_for_rows = Arc::new(
+        app.tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect::<HashMap<TrackId, usize>>(),
+    );
+    let view_for_rows = view.clone();
+
+    let queue_body = if queue_ids.is_empty() {
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .p_8()
             .flex()
             .flex_col()
             .items_center()
@@ -817,15 +836,15 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .border_color(BORDER_CARD)
             .child(themed_icon(
                 icon!(list_music),
-                36.0,
+                32.0,
                 TEXT_TERTIARY.into(),
             ))
             .child(
                 div()
-                    .text_base()
+                    .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(TEXT_PRIMARY)
-                    .child("待播清单为空"),
+                    .child("待播队列为空"),
             )
             .child(
                 div()
@@ -833,57 +852,13 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     .text_color(TEXT_SECONDARY)
                     .child("在任意歌曲右侧点击“+”，即可将其加入待播队列"),
             )
-            .into_any_element();
-    }
-
-    let queue_ids_for_rows = queue_ids.clone();
-    let track_indices_for_rows = Arc::new(
-        app.tracks
-            .iter()
-            .enumerate()
-            .map(|(index, track)| (track.id, index))
-            .collect::<HashMap<TrackId, usize>>(),
-    );
-    let view_for_rows = view.clone();
-
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_hidden()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(TEXT_PRIMARY)
-                        .child(format!("待播队列中共有 {} 首歌曲", queue_ids.len())),
-                )
-                .child(
-                    div()
-                        .id("queue-clear-btn")
-                        .px_3()
-                        .py_1p5()
-                        .rounded_full()
-                        .cursor_pointer()
-                        .bg(rgb(0xff_ff_ff))
-                        .border_1()
-                        .border_color(BORDER_CARD)
-                        .text_xs()
-                        .text_color(TEXT_SECONDARY)
-                        .hover(|s| s.text_color(ACCENT_RED))
-                        .transition(press_transition())
-                        .child("清空队列")
-                        .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| this.clear_queue(cx))),
-                ),
-        )
-        .child(
-            div().flex_1().min_h(px(0.0)).overflow_hidden().child(
+            .into_any_element()
+    } else {
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .child(
                 uniform_list(
                     "library-queue-vlist",
                     queue_ids.len(),
@@ -924,8 +899,231 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     },
                 )
                 .size_full(),
-            ),
+            )
+            .into_any_element()
+    };
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .overflow_hidden()
+        .child(local_playlists_section(playlists, view))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(TEXT_PRIMARY)
+                        .child(format!("待播队列中共有 {} 首歌曲", queue_ids.len())),
+                )
+                .child_if(!queue_ids.is_empty(), || {
+                    div()
+                        .id("queue-clear-btn")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(rgb(0xff_ff_ff))
+                        .border_1()
+                        .border_color(BORDER_CARD)
+                        .text_xs()
+                        .text_color(TEXT_SECONDARY)
+                        .hover(|s| s.text_color(ACCENT_RED))
+                        .transition(press_transition())
+                        .child("清空队列")
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, |this, _, _, cx| this.clear_queue(cx)),
+                        )
+                }),
         )
+        .child(queue_body)
+        .into_any_element()
+}
+
+fn local_playlists_section(
+    playlists: Arc<[LocalPlaylistSummary]>,
+    view: &WeakEntity<MusicApp>,
+) -> gpui::AnyElement {
+    if playlists.is_empty() {
+        return div()
+            .flex_none()
+            .h(px(76.0))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .rounded_xl()
+            .bg(rgb(0xff_ff_ff))
+            .border_1()
+            .border_color(BORDER_CARD)
+            .child(themed_icon(
+                icon!(list_music),
+                20.0,
+                TEXT_TERTIARY.into(),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child("本地播放列表"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(TEXT_TERTIARY)
+                            .child("当前数据库中没有播放列表；待播队列不会被当作 PlaylistContext"),
+                    ),
+            )
+            .into_any_element();
+    }
+
+    let row_height = 56.0;
+    let visible_rows = playlists.len().min(3) as f32;
+    let list_height = (visible_rows * row_height).max(row_height);
+    let rows = playlists.clone();
+    let view_rows = view.clone();
+
+    div()
+        .flex_none()
+        .h(px(38.0 + list_height))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(TEXT_PRIMARY)
+                        .child(format!("本地播放列表 · {} 个", playlists.len())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(TEXT_TERTIARY)
+                        .child("右键打开插件 PlaylistContext"),
+                ),
+        )
+        .child(
+            div()
+                .h(px(list_height))
+                .overflow_hidden()
+                .child(
+                    uniform_list(
+                        "library-local-playlists-vlist",
+                        playlists.len(),
+                        move |range: Range<usize>, _window, _cx| {
+                            let mut items = Vec::with_capacity(range.end - range.start);
+                            for index in range {
+                                if let Some(playlist) = rows.get(index) {
+                                    items.push(local_playlist_row(playlist, &view_rows));
+                                }
+                            }
+                            items
+                        },
+                    )
+                    .size_full(),
+                ),
+        )
+        .into_any_element()
+}
+
+fn local_playlist_row(
+    playlist: &LocalPlaylistSummary,
+    view: &WeakEntity<MusicApp>,
+) -> gpui::AnyElement {
+    let playlist = playlist.clone();
+    let playlist_id = playlist.id;
+    let view_context = view.clone();
+
+    div()
+        .id(SharedString::from(format!("local-playlist-{playlist_id}")))
+        .h(px(52.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .px_4()
+        .rounded_xl()
+        .bg(rgb(0xff_ff_ff))
+        .border_1()
+        .border_color(BORDER_CARD)
+        .hover(|style| style.bg(theme::bg_hover()))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .size(px(32.0))
+                        .rounded_lg()
+                        .bg(theme::accent_red_muted())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(themed_icon(icon!(list_music), 15.0, ACCENT_RED.into())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(TEXT_PRIMARY)
+                                .truncate()
+                                .child(playlist.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(TEXT_TERTIARY)
+                                .child(format!("{} 首本地曲目", playlist.track_count)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(TEXT_TERTIARY)
+                .child("PlaylistContext"),
+        )
+        .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+            cx.stop_propagation();
+            let position = event.position;
+            let viewport = window.viewport_size();
+            let playlist = playlist.clone();
+            let _ = view_context.update(cx, |this, app_cx| {
+                plugin_context_menu::open_playlist(
+                    this,
+                    &playlist,
+                    position,
+                    viewport,
+                    app_cx,
+                );
+            });
+        })
         .into_any_element()
 }
 

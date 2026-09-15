@@ -11,10 +11,12 @@ use gpui::{
 use gpui_tokio::Tokio;
 
 use crate::{
+    library::LocalPlaylistSummary,
     model::Track,
     plugin::{
         commands::{
-            self, PluginCommandContext, PluginCommandOpenPage, PluginTrackCommandContext,
+            self, PluginCommandContext, PluginCommandOpenPage, PluginPlaylistCommandContext,
+            PluginTrackCommandContext,
         },
         extensions::{self, PluginCommandSummary, PluginCommandSurface},
     },
@@ -76,6 +78,36 @@ pub(super) fn open_track(
         context,
         "TrackContext",
         format!("曲目插件操作：{}", track.title),
+        position,
+        viewport,
+        cx,
+    );
+}
+
+/// Capture a PlaylistContext command snapshot for a real persisted local playlist row.
+/// The playlist identity comes from the Host library database, never from the queue UI.
+pub(super) fn open_playlist(
+    app: &mut MusicApp,
+    playlist: &LocalPlaylistSummary,
+    position: Point<Pixels>,
+    viewport: Size<Pixels>,
+    cx: &mut Context<MusicApp>,
+) {
+    let context = PluginCommandContext {
+        surface: PluginCommandSurface::PlaylistContext,
+        page_id: None,
+        track: None,
+        playlist: Some(PluginPlaylistCommandContext {
+            name: playlist.name.clone(),
+            provider_id: Some("local".into()),
+            source_id: Some(playlist.id.to_string()),
+        }),
+    };
+    open(
+        app,
+        context,
+        "PlaylistContext",
+        format!("播放列表插件操作：{}", playlist.name),
         position,
         viewport,
         cx,
