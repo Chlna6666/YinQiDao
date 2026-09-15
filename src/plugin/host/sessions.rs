@@ -1,6 +1,9 @@
 use std::{
     collections::HashSet,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
@@ -12,6 +15,7 @@ use crate::{
 };
 
 static PLUGIN_SESSIONS: OnceLock<Arc<RwLock<PluginSessionCoordinator>>> = OnceLock::new();
+static PLUGIN_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PluginAccountKey {
@@ -171,7 +175,11 @@ impl PluginSessionCoordinator {
             .collect::<HashSet<_>>();
         let before = self.pending_validation.len();
         self.pending_validation.retain(|key| valid.contains(key));
-        before.saturating_sub(self.pending_validation.len())
+        let removed = before.saturating_sub(self.pending_validation.len());
+        if removed != 0 {
+            bump_session_generation();
+        }
+        removed
     }
 
     pub fn state_for(&self, account: &PluginAccount) -> PluginSessionState {
@@ -209,6 +217,7 @@ impl PluginSessionCoordinator {
             )?;
         if changed {
             self.pending_validation.remove(key);
+            bump_session_generation();
         }
         Ok(changed)
     }
@@ -230,7 +239,10 @@ impl PluginSessionCoordinator {
                 &key.account_id,
                 AccountState::Expired,
             )?;
-        self.pending_validation.remove(key);
+        let pending_removed = self.pending_validation.remove(key);
+        if changed || pending_removed {
+            bump_session_generation();
+        }
         Ok(changed)
     }
 
@@ -248,7 +260,10 @@ impl PluginSessionCoordinator {
                 &key.account_id,
                 AccountState::LoggedOut,
             )?;
-        self.pending_validation.remove(key);
+        let pending_removed = self.pending_validation.remove(key);
+        if changed || pending_removed {
+            bump_session_generation();
+        }
         Ok(changed)
     }
 
@@ -265,6 +280,7 @@ impl PluginSessionCoordinator {
             .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
             .upsert_account(account)?;
         self.pending_validation.remove(&key);
+        bump_session_generation();
         Ok(())
     }
 }
@@ -284,6 +300,15 @@ pub fn initialize(
 
 pub fn global() -> Option<Arc<RwLock<PluginSessionCoordinator>>> {
     PLUGIN_SESSIONS.get().cloned()
+}
+
+/// Lock-free Host-owned token for account/session routing eligibility changes.
+pub fn generation() -> u64 {
+    PLUGIN_SESSION_GENERATION.load(Ordering::Acquire)
+}
+
+fn bump_session_generation() {
+    PLUGIN_SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 #[cfg(test)]
