@@ -29,6 +29,7 @@ const MAX_AUTH_FIELD_ID_BYTES: usize = 256;
 const MAX_AUTH_FIELD_LABEL_BYTES: usize = 4 * 1_024;
 const MAX_AUTH_FIELD_VALUE_BYTES: usize = 64 * 1_024;
 const MAX_AUTH_SUBMIT_PAYLOAD_BYTES: usize = 128 * 1_024;
+const MAX_AUTH_DENIED_REASON_BYTES: usize = 8 * 1_024;
 const MAX_PLUGIN_ACCOUNT_TEXT_BYTES: usize = 8 * 1_024;
 const MAX_ACTIVE_AUTH_FLOWS: usize = 32;
 
@@ -294,12 +295,14 @@ async fn execute_auth_poll(
     ensure_plugin_enabled(plugin_id)?;
     let runtime = require_auth_runtime(plugin_id, provider_id)?;
     let client = require_provider_client()?;
-    runtime
+    let result = runtime
         .execute_guest_call(
             PluginCallKey::provider(plugin_id, provider_id),
             client.auth_poll(plugin_id, provider_id, challenge_id),
         )
-        .await
+        .await?;
+    validate_auth_result(&result, provider_id)?;
+    Ok(result)
 }
 
 async fn execute_auth_submit(
@@ -313,12 +316,14 @@ async fn execute_auth_submit(
     ensure_plugin_enabled(plugin_id)?;
     let runtime = require_auth_runtime(plugin_id, provider_id)?;
     let client = require_provider_client()?;
-    runtime
+    let result = runtime
         .execute_guest_call(
             PluginCallKey::provider(plugin_id, provider_id),
             client.auth_submit(plugin_id, provider_id, challenge_id, values),
         )
-        .await
+        .await?;
+    validate_auth_result(&result, provider_id)?;
+    Ok(result)
 }
 
 fn require_auth_runtime(
@@ -362,6 +367,19 @@ fn validate_challenge_id(challenge_id: &str) -> Result<()> {
         bail!("插件 auth challenge id 非法");
     }
     Ok(())
+}
+
+fn validate_auth_result(result: &AuthPollResult, provider_id: &str) -> Result<()> {
+    match result {
+        AuthPollResult::Authenticated(account) => validate_provider_account(account, provider_id),
+        AuthPollResult::Denied(reason) => {
+            if reason.len() > MAX_AUTH_DENIED_REASON_BYTES || reason.contains('\0') {
+                bail!("插件认证拒绝原因超过 Host 文本限制或包含 NUL");
+            }
+            Ok(())
+        }
+        AuthPollResult::Pending | AuthPollResult::Expired => Ok(()),
+    }
 }
 
 fn validate_tracked_challenge(method: AuthMethod, challenge: &AuthChallenge) -> Result<()> {
@@ -574,8 +592,14 @@ fn validate_provider_account(account: &ProviderAccount, provider_id: &str) -> Re
         .display_name
         .len()
         .saturating_add(account.avatar_url.as_ref().map_or(0, String::len));
-    if text_bytes > MAX_PLUGIN_ACCOUNT_TEXT_BYTES {
-        bail!("插件账号展示信息超过大小限制");
+    if text_bytes > MAX_PLUGIN_ACCOUNT_TEXT_BYTES
+        || account.display_name.contains('\0')
+        || account
+            .avatar_url
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+    {
+        bail!("插件账号展示信息超过大小限制或包含 NUL");
     }
     Ok(())
 }
@@ -634,6 +658,33 @@ mod tests {
         )])
         .expect_err("oversized value must fail");
         assert!(error.to_string().contains("大小限制"));
+    }
+
+    #[test]
+    fn auth_result_rejects_unbounded_or_nul_denied_reason() {
+        assert!(validate_auth_result(&AuthPollResult::Denied("denied".into()), "test").is_ok());
+        assert!(
+            validate_auth_result(
+                &AuthPollResult::Denied("x".repeat(MAX_AUTH_DENIED_REASON_BYTES + 1)),
+                "test"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_auth_result(&AuthPollResult::Denied("bad\0reason".into()), "test").is_err()
+        );
+    }
+
+    #[test]
+    fn provider_account_rejects_nul_display_metadata() {
+        let account = ProviderAccount {
+            account_id: "account".into(),
+            provider_id: "test".into(),
+            display_name: "bad\0name".into(),
+            avatar_url: None,
+            capabilities: Vec::new(),
+        };
+        assert!(validate_provider_account(&account, "test").is_err());
     }
 
     #[test]
