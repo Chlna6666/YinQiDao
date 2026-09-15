@@ -6,6 +6,7 @@ use super::{
     assets,
     component::gc,
     host::package_manager::PluginPackageManager,
+    runtime_ports,
     ui::{
         self,
         client::{PluginUiEvent, UiFieldValue},
@@ -121,10 +122,11 @@ pub fn list_installed() -> Result<Vec<PluginSummary>> {
 }
 
 pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
-    let result = manager()?.import_directory(path)?;
-    if let Some(cache) = ui::page_cache::global() {
-        let _ = cache.invalidate_plugin(&result.plugin_id);
-    }
+    let manager = manager()?;
+    let (result, refresh) = runtime_ports::coordinate_plugin_change(
+        || manager.import_directory(path),
+        |result| Some(result.plugin_id.clone()),
+    )?;
     let _ = assets::invalidate_plugin(&result.plugin_id);
     Ok(PluginImportSummary {
         plugin_id: result.plugin_id,
@@ -132,32 +134,31 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
         updated_existing: result.updated_existing,
         enabled: result.enabled,
         ui_registered: result.ui_registered,
-        provider_runtime_refresh_pending: result.provider_runtime_refresh_pending,
+        provider_runtime_refresh_pending: refresh.provider_runtime_refresh_pending,
     })
 }
 
 pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<bool> {
-    let changed = manager()?.set_enabled(plugin_id, enabled)?;
-    if changed {
-        // Even enabling a plugin changes the visible UI contribution set. Advance the Host page
-        // generation so retained surfaces can observe the registration change through the same
-        // monotonic revision used for page publishes and invalidation.
-        if let Some(cache) = ui::page_cache::global() {
-            let _ = cache.invalidate_plugin(plugin_id);
-        }
-        if !enabled {
-            let _ = assets::invalidate_plugin(plugin_id);
-        }
+    let manager = manager()?;
+    let refresh_id = plugin_id.to_owned();
+    let (changed, _refresh) = runtime_ports::coordinate_plugin_change(
+        || manager.set_enabled(plugin_id, enabled),
+        move |changed| changed.then_some(refresh_id),
+    )?;
+    if changed && !enabled {
+        let _ = assets::invalidate_plugin(plugin_id);
     }
     Ok(changed)
 }
 
 pub fn uninstall(plugin_id: &str) -> Result<bool> {
-    let removed = manager()?.uninstall(plugin_id)?;
+    let manager = manager()?;
+    let refresh_id = plugin_id.to_owned();
+    let (removed, _refresh) = runtime_ports::coordinate_plugin_change(
+        || manager.uninstall(plugin_id),
+        move |removed| removed.then_some(refresh_id),
+    )?;
     if removed {
-        if let Some(cache) = ui::page_cache::global() {
-            let _ = cache.invalidate_plugin(plugin_id);
-        }
         let _ = assets::invalidate_plugin(plugin_id);
     }
     Ok(removed)

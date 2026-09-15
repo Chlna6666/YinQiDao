@@ -128,7 +128,7 @@ fn import_plugin_directory(cx: &mut Context<MusicApp>) {
             .map_err(|_| anyhow!("插件列表刷新任务异常退出"))??;
         let action = if imported.updated_existing { "更新" } else { "导入" };
         let runtime_note = if imported.provider_runtime_refresh_pending {
-            "；Provider runtime 将在 live catalog 接入后支持无重启热替换"
+            "；Provider/UI runtime 热替换未完成，旧运行时已安全停用，请重启应用恢复"
         } else {
             ""
         };
