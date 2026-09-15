@@ -15,7 +15,9 @@ const MAX_PLUGIN_ID_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginAccountLogoutOutcome {
-    pub key: PluginAccountKey,
+    pub plugin_id: String,
+    pub provider_id: String,
+    pub account_id: String,
     pub local_state_changed: bool,
     pub remote_acknowledged: bool,
     pub remote_error: Option<String>,
@@ -66,51 +68,18 @@ impl PluginLogoutAllResult {
 }
 
 impl PluginServiceFrontend {
-    /// Secure single-account logout entry for application/UI callers.
+    /// Runtime-neutral application entry for secure single-account logout.
     ///
-    /// The existing frontend logout primitive remains responsible for the authoritative local
-    /// SessionCoordinator transition and best-effort guest logout. This wrapper always follows it
-    /// with exact Host account-namespace Secret deletion. Cleanup happens after the guest call so a
-    /// buggy guest cannot recreate a cookie/token during its own logout callback and leave it behind.
-    pub async fn logout_account(&self, key: &PluginAccountKey) -> Result<PluginAccountLogoutOutcome> {
-        validate_account_key(key)?;
-
-        let (local_state_changed, remote_acknowledged, remote_error, operation_error) =
-            match self.logout(key).await {
-                Ok(PluginLogoutResult {
-                    local_state_changed,
-                    remote_acknowledged,
-                    remote_error,
-                }) => (
-                    local_state_changed,
-                    remote_acknowledged,
-                    remote_error,
-                    None,
-                ),
-                Err(error) => (false, false, None, Some(format!("{error:#}"))),
-            };
-
-        let (secrets_revoked, secret_cleanup_error) = match secrets::global() {
-            Some(store) => match store.delete_account(
-                &key.plugin_id,
-                &key.provider_id,
-                &key.account_id,
-            ) {
-                Ok(removed) => (removed, None),
-                Err(error) => (0, Some(format!("{error:#}"))),
-            },
-            None => (0, Some("插件 Secret backend 尚未初始化".into())),
-        };
-
-        Ok(PluginAccountLogoutOutcome {
-            key: key.clone(),
-            local_state_changed,
-            remote_acknowledged,
-            remote_error,
-            operation_error,
-            secrets_revoked,
-            secret_cleanup_error,
-        })
+    /// UI/application callers provide only stable string identities. The Host session key remains an
+    /// implementation detail inside this module and does not leak through application-facing DTOs.
+    pub async fn logout_account_by_id(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+        account_id: &str,
+    ) -> Result<PluginAccountLogoutOutcome> {
+        let key = PluginAccountKey::new(plugin_id, provider_id, account_id);
+        logout_account_key(self, &key).await
     }
 
     /// Log out every account owned by one Provider and revoke that Provider's complete Secret scope
@@ -160,6 +129,55 @@ impl PluginServiceFrontend {
     }
 }
 
+/// Secure single-account logout implementation. Session state becomes locally authoritative first,
+/// guest cleanup runs best-effort, then exact account Secret deletion runs last so a guest cannot
+/// recreate a cookie/token during its own logout callback and leave it behind.
+async fn logout_account_key(
+    frontend: &PluginServiceFrontend,
+    key: &PluginAccountKey,
+) -> Result<PluginAccountLogoutOutcome> {
+    validate_account_key(key)?;
+
+    let (local_state_changed, remote_acknowledged, remote_error, operation_error) =
+        match frontend.logout(key).await {
+            Ok(PluginLogoutResult {
+                local_state_changed,
+                remote_acknowledged,
+                remote_error,
+            }) => (
+                local_state_changed,
+                remote_acknowledged,
+                remote_error,
+                None,
+            ),
+            Err(error) => (false, false, None, Some(format!("{error:#}"))),
+        };
+
+    let (secrets_revoked, secret_cleanup_error) = match secrets::global() {
+        Some(store) => match store.delete_account(
+            &key.plugin_id,
+            &key.provider_id,
+            &key.account_id,
+        ) {
+            Ok(removed) => (removed, None),
+            Err(error) => (0, Some(format!("{error:#}"))),
+        },
+        None => (0, Some("插件 Secret backend 尚未初始化".into())),
+    };
+
+    Ok(PluginAccountLogoutOutcome {
+        plugin_id: key.plugin_id.clone(),
+        provider_id: key.provider_id.clone(),
+        account_id: key.account_id.clone(),
+        local_state_changed,
+        remote_acknowledged,
+        remote_error,
+        operation_error,
+        secrets_revoked,
+        secret_cleanup_error,
+    })
+}
+
 async fn logout_keys(
     frontend: &PluginServiceFrontend,
     keys: Vec<PluginAccountKey>,
@@ -177,10 +195,12 @@ async fn logout_keys(
         ..PluginLogoutAllResult::default()
     };
     for key in keys {
-        match frontend.logout_account(&key).await {
+        match logout_account_key(frontend, &key).await {
             Ok(outcome) => result.accounts.push(outcome),
             Err(error) => result.accounts.push(PluginAccountLogoutOutcome {
-                key,
+                plugin_id: key.plugin_id,
+                provider_id: key.provider_id,
+                account_id: key.account_id,
                 local_state_changed: false,
                 remote_acknowledged: false,
                 remote_error: None,
