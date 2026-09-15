@@ -18,6 +18,15 @@ const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
 const PLUGIN_ACCOUNT_STORE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_ACCOUNT_STORE_FILE: &str = "plugin-accounts.json";
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_MANIFEST_NAME_BYTES: usize = 256;
+const MAX_MANIFEST_VERSION_BYTES: usize = 128;
+const MAX_MANIFEST_DESCRIPTION_BYTES: usize = 8 * 1_024;
+const MAX_MANIFEST_HOMEPAGE_BYTES: usize = 2 * 1_024;
+const MAX_PROVIDERS_PER_PLUGIN: usize = 64;
+const MAX_PROVIDER_DISPLAY_NAME_BYTES: usize = 256;
+const MAX_NETWORK_DOMAINS_PER_PLUGIN: usize = 128;
+const MAX_NETWORK_DOMAIN_BYTES: usize = 255;
+const MAX_NETWORK_DOMAIN_LABEL_BYTES: usize = 63;
 const MAX_PERSISTED_PLUGIN_ACCOUNTS: usize = 4_096;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_ACCOUNT_TEXT_BYTES: usize = 8 * 1_024;
@@ -228,14 +237,38 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     if !valid_identifier(&manifest.id) {
         bail!("manifest id 非法: {:?}", manifest.id);
     }
-    if manifest.name.trim().is_empty() {
-        bail!("manifest name 不能为空");
+    if manifest.name.trim().is_empty()
+        || manifest.name.len() > MAX_MANIFEST_NAME_BYTES
+        || manifest.name.contains('\0')
+    {
+        bail!("manifest name 为空或超过 Host 文本上限");
     }
-    if manifest.version.trim().is_empty() {
-        bail!("manifest version 不能为空");
+    if manifest.version.trim().is_empty()
+        || manifest.version.len() > MAX_MANIFEST_VERSION_BYTES
+        || manifest.version.contains('\0')
+    {
+        bail!("manifest version 为空或超过 Host 文本上限");
+    }
+    if manifest.description.len() > MAX_MANIFEST_DESCRIPTION_BYTES
+        || manifest.description.contains('\0')
+    {
+        bail!("manifest description 超过 Host 文本上限或包含 NUL");
+    }
+    if let Some(homepage) = manifest.homepage.as_deref()
+        && (homepage.trim().is_empty()
+            || homepage.len() > MAX_MANIFEST_HOMEPAGE_BYTES
+            || homepage.contains('\0'))
+    {
+        bail!("manifest homepage 为空或超过 Host 文本上限");
     }
     if manifest.providers.is_empty() {
         bail!("插件必须声明至少一个 provider");
+    }
+    if manifest.providers.len() > MAX_PROVIDERS_PER_PLUGIN {
+        bail!("插件 provider 数量超过 {MAX_PROVIDERS_PER_PLUGIN} Host 上限");
+    }
+    if manifest.network_domains.len() > MAX_NETWORK_DOMAINS_PER_PLUGIN {
+        bail!("插件 network domain 数量超过 {MAX_NETWORK_DOMAINS_PER_PLUGIN} Host 上限");
     }
 
     let mut provider_ids = HashSet::new();
@@ -246,8 +279,11 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         if !provider_ids.insert(provider.id.as_str()) {
             bail!("provider id 重复: {}", provider.id);
         }
-        if provider.display_name.trim().is_empty() {
-            bail!("provider {} 的 display_name 不能为空", provider.id);
+        if provider.display_name.trim().is_empty()
+            || provider.display_name.len() > MAX_PROVIDER_DISPLAY_NAME_BYTES
+            || provider.display_name.contains('\0')
+        {
+            bail!("provider {} 的 display_name 为空或超过 Host 文本上限", provider.id);
         }
         if provider.capabilities.is_empty() {
             bail!("provider {} 未声明任何 capability", provider.id);
@@ -316,6 +352,7 @@ fn valid_identifier(value: &str) -> bool {
 fn valid_network_domain(value: &str) -> bool {
     let value = value.trim();
     if value.is_empty()
+        || value.len() > MAX_NETWORK_DOMAIN_BYTES
         || value.contains("://")
         || value.contains('/')
         || value.contains('\\')
@@ -331,6 +368,7 @@ fn valid_network_domain(value: &str) -> bool {
         && !host.ends_with('.')
         && host.split('.').all(|label| {
             !label.is_empty()
+                && label.len() <= MAX_NETWORK_DOMAIN_LABEL_BYTES
                 && !label.starts_with('-')
                 && !label.ends_with('-')
                 && label
@@ -689,6 +727,24 @@ auth_methods = ["qr_code"]
         package_dir
     }
 
+    fn manifest() -> PluginManifest {
+        PluginManifest {
+            id: "plugin.test".into(),
+            name: "Test Provider".into(),
+            version: "0.1.0".into(),
+            abi_version: PLUGIN_ABI_VERSION,
+            description: "test".into(),
+            homepage: Some("https://example.com".into()),
+            providers: vec![ProviderDescriptor {
+                id: "test".into(),
+                display_name: "Test".into(),
+                capabilities: vec![PluginCapability::Search],
+                auth_methods: Vec::new(),
+            }],
+            network_domains: vec!["api.example.com".into()],
+        }
+    }
+
     fn account(account_id: &str, priority: i32, is_default: bool) -> PluginAccount {
         PluginAccount {
             plugin_id: "plugin.test".into(),
@@ -729,6 +785,35 @@ auth_methods = ["qr_code"]
         assert!(catalog.failures()[0].error.contains("相对路径"));
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn manifest_has_bounded_metadata_and_contribution_counts() {
+        let mut oversized_name = manifest();
+        oversized_name.name = "x".repeat(MAX_MANIFEST_NAME_BYTES + 1);
+        assert!(validate_manifest(&oversized_name).is_err());
+
+        let mut too_many_providers = manifest();
+        too_many_providers.providers = (0..=MAX_PROVIDERS_PER_PLUGIN)
+            .map(|index| ProviderDescriptor {
+                id: format!("provider{index}"),
+                display_name: format!("Provider {index}"),
+                capabilities: vec![PluginCapability::Search],
+                auth_methods: Vec::new(),
+            })
+            .collect();
+        assert!(validate_manifest(&too_many_providers).is_err());
+
+        let mut too_many_domains = manifest();
+        too_many_domains.network_domains = (0..=MAX_NETWORK_DOMAINS_PER_PLUGIN)
+            .map(|index| format!("api{index}.example.com"))
+            .collect();
+        assert!(validate_manifest(&too_many_domains).is_err());
+
+        assert!(!valid_network_domain(&format!(
+            "{}.example.com",
+            "a".repeat(MAX_NETWORK_DOMAIN_LABEL_BYTES + 1)
+        )));
     }
 
     #[test]
