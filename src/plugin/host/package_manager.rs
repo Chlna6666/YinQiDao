@@ -271,7 +271,22 @@ impl PluginPackageManager {
         let plugin = catalog
             .plugin(plugin_id)
             .ok_or_else(|| anyhow!("未安装插件: {plugin_id}"))?;
+        let contributions = if enabled {
+            Some(
+                ui_catalog::load_plugin_contributions(plugin)
+                    .context("插件 UI contributions 校验失败")?,
+            )
+        } else {
+            None
+        };
 
+        // Keep the established lock order used by startup synchronization: UI registry first,
+        // then the package enabled-state mutex. Holding both makes the registry + persisted state
+        // transition observable as one Host transaction to all in-process readers.
+        let registry = ui_registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+        let mut registry = registry
+            .write()
+            .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
         let mut disabled = self
             .disabled_plugins
             .lock()
@@ -279,21 +294,29 @@ impl PluginPackageManager {
         let Some(next_disabled) = next_disabled_plugins(&disabled, plugin_id, enabled) else {
             return Ok(false);
         };
-        save_disabled_plugins(&self.state_path, &next_disabled)?;
+
+        // UI contribution replacement is validated before mutation, and PluginUiRegistry is Clone.
+        // Keep a snapshot so a state-file write failure can restore the exact previous registry.
+        // The monotonic UI generation may still advance on a rolled-back attempt, which only causes
+        // conservative cache invalidation and never publishes broader authority.
+        let registry_snapshot = registry.clone();
+        if enabled {
+            let contributions = contributions
+                .ok_or_else(|| anyhow!("启用插件缺少已验证 UI contributions: {plugin_id}"))?;
+            registry.replace_plugin(plugin_id, contributions)?;
+        } else {
+            registry.remove_plugin(plugin_id);
+        }
+
+        if let Err(error) = save_disabled_plugins(&self.state_path, &next_disabled) {
+            *registry = registry_snapshot;
+            return Err(error);
+        }
         *disabled = next_disabled;
         drop(disabled);
+        drop(registry);
 
-        if enabled {
-            let registry = ui_registry::global()
-                .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
-            ui_catalog::register_plugin(
-                &mut registry
-                    .write()
-                    .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?,
-                plugin,
-            )?;
-        } else {
-            let _ = ui_registry::unregister_plugin(plugin_id)?;
+        if !enabled {
             if let Some(components) = component_registry::global() {
                 let _ = components.invalidate(plugin_id);
             }
