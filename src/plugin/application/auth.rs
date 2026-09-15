@@ -1,33 +1,76 @@
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Result, anyhow, bail};
 
 use super::{
     abi::{
-        AccountState, AuthPollResult, KeyValue, PluginAccount, PluginCapability, ProviderAccount,
+        AccountState, AuthChallenge, AuthChallengeKind, AuthMethod, AuthPollResult, KeyValue,
+        PluginAccount, PluginCapability, ProviderAccount,
     },
     client,
     frontend::PluginServiceFrontend,
     host::{
-        catalog,
+        catalog, package_manager,
         runtime::{self as host_runtime, PluginCallKey},
         sessions,
     },
+    runtime_ports,
 };
 
 const MAX_AUTH_CHALLENGE_ID_BYTES: usize = 1_024;
 const MAX_AUTH_SUBMIT_FIELDS: usize = 64;
 const MAX_AUTH_FIELD_ID_BYTES: usize = 256;
+const MAX_AUTH_FIELD_LABEL_BYTES: usize = 4 * 1_024;
 const MAX_AUTH_FIELD_VALUE_BYTES: usize = 64 * 1_024;
 const MAX_AUTH_SUBMIT_PAYLOAD_BYTES: usize = 128 * 1_024;
 const MAX_PLUGIN_ACCOUNT_TEXT_BYTES: usize = 8 * 1_024;
+const MAX_ACTIVE_AUTH_FLOWS: usize = 32;
+
+static AUTH_FLOWS: OnceLock<Mutex<HashMap<u64, ActiveAuthFlow>>> = OnceLock::new();
+static NEXT_AUTH_FLOW_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+pub struct PluginAuthFlowSnapshot {
+    pub flow_id: u64,
+    pub plugin_id: String,
+    pub provider_id: String,
+    pub method: AuthMethod,
+    pub challenge: AuthChallenge,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveAuthFlow {
+    plugin_id: String,
+    provider_id: String,
+    method: AuthMethod,
+    challenge: AuthChallenge,
+    package_generation: u64,
+}
+
+impl ActiveAuthFlow {
+    fn snapshot(&self, flow_id: u64) -> PluginAuthFlowSnapshot {
+        PluginAuthFlowSnapshot {
+            flow_id,
+            plugin_id: self.plugin_id.clone(),
+            provider_id: self.provider_id.clone(),
+            method: self.method,
+            challenge: self.challenge.clone(),
+        }
+    }
+}
 
 impl PluginServiceFrontend {
-    /// Submit one Host-owned authentication form without persisting raw user input in application
-    /// state. `AuthChallenge.fields` uses `KeyValue` as `field-id -> display label`; submitted
-    /// values use the same stable field ids and exist only for this guest call. Long-lived cookies,
-    /// refresh tokens or device secrets must still be persisted by the guest through Host
-    /// `secret-set`, never through ordinary application config.
+    /// Submit one authentication form directly through the runtime-neutral Provider port.
+    ///
+    /// Ordinary Host UI should prefer `auth_flow_submit`, which binds values to a tracked challenge
+    /// and closes cancel/update races. This lower-level method remains useful to non-UI controller
+    /// code that already owns equivalent challenge lifetime guarantees.
     pub async fn auth_submit(
         &self,
         plugin_id: &str,
@@ -37,36 +80,264 @@ impl PluginServiceFrontend {
     ) -> Result<AuthPollResult> {
         validate_challenge_id(challenge_id)?;
         validate_submission(values)?;
-
-        let runtime = host_runtime::global()
-            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
-        let provider = runtime
-            .catalog()
-            .provider(plugin_id, provider_id)
-            .ok_or_else(|| anyhow!("未安装插件 Provider: {plugin_id}/{provider_id}"))?;
-        if !provider
-            .capabilities
-            .contains(&PluginCapability::Authentication)
-        {
-            bail!("插件 Provider 未声明 authentication capability");
+        ensure_plugin_enabled(plugin_id)?;
+        let package_generation = runtime_ports::package_mutation_generation();
+        let result = execute_auth_submit(plugin_id, provider_id, challenge_id, values).await?;
+        if runtime_ports::package_mutation_generation() != package_generation {
+            bail!("插件在认证表单提交期间已更新，旧认证结果已丢弃");
         }
-
-        let clients = client::global().ok_or_else(|| anyhow!("插件 Provider client 尚未初始化"))?;
-        let client = clients
-            .client()?
-            .ok_or_else(|| anyhow!("插件 Provider client 尚未就绪"))?;
-        let result = runtime
-            .execute_guest_call(
-                PluginCallKey::provider(plugin_id, provider_id),
-                client.auth_submit(plugin_id, provider_id, challenge_id, values),
-            )
-            .await?;
-
         if let AuthPollResult::Authenticated(account) = &result {
             accept_authenticated_account(plugin_id, provider_id, account.clone())?;
         }
         Ok(result)
     }
+
+    /// Begin one Host-owned authentication flow and retain only challenge metadata. Submitted form
+    /// values are never stored in this registry. The flow is tied to the package mutation generation
+    /// so update/disable/uninstall makes every old challenge fail closed.
+    pub async fn auth_flow_begin(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+        method: AuthMethod,
+    ) -> Result<PluginAuthFlowSnapshot> {
+        ensure_plugin_enabled(plugin_id)?;
+        let package_generation = runtime_ports::package_mutation_generation();
+        let challenge = self.auth_begin(plugin_id, provider_id, method).await?;
+        validate_tracked_challenge(method, &challenge)?;
+
+        if runtime_ports::package_mutation_generation() != package_generation {
+            bail!("插件在认证 challenge 创建期间已更新，旧 challenge 已丢弃");
+        }
+
+        let mut flows = lock_auth_flows()?;
+        if flows.len() >= MAX_ACTIVE_AUTH_FLOWS {
+            bail!("Host 活跃插件认证 flow 已达到 {} 个上限", MAX_ACTIVE_AUTH_FLOWS);
+        }
+        let flow_id = allocate_flow_id(&flows);
+        let flow = ActiveAuthFlow {
+            plugin_id: plugin_id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            method,
+            challenge,
+            package_generation,
+        };
+        let snapshot = flow.snapshot(flow_id);
+        flows.insert(flow_id, flow);
+        Ok(snapshot)
+    }
+
+    /// Clone one Host-owned challenge snapshot for GPUI/controller rendering. No submitted secret
+    /// value is ever retained, so this snapshot is safe for normal UI state.
+    pub fn auth_flow_snapshot(&self, flow_id: u64) -> Result<Option<PluginAuthFlowSnapshot>> {
+        let _ = self;
+        let mut flows = lock_auth_flows()?;
+        let Some(flow) = flows.get(&flow_id).cloned() else {
+            return Ok(None);
+        };
+        if flow.package_generation != runtime_ports::package_mutation_generation() {
+            flows.remove(&flow_id);
+            return Ok(None);
+        }
+        Ok(Some(flow.snapshot(flow_id)))
+    }
+
+    /// Poll QR/browser/device-code authentication without allowing a canceled or stale in-flight
+    /// result to resurrect an account. Terminal results consume the flow before account publication.
+    pub async fn auth_flow_poll(&self, flow_id: u64) -> Result<AuthPollResult> {
+        let _ = self;
+        let flow = current_flow(flow_id)?;
+        let result = execute_auth_poll(
+            &flow.plugin_id,
+            &flow.provider_id,
+            &flow.challenge.challenge_id,
+        )
+        .await?;
+        commit_flow_result(flow_id, &flow, result)
+    }
+
+    /// Submit a Host-rendered form. The field set must exactly match the original challenge; extra,
+    /// missing or duplicate field ids are rejected before guest code executes.
+    pub async fn auth_flow_submit(
+        &self,
+        flow_id: u64,
+        values: &[KeyValue],
+    ) -> Result<AuthPollResult> {
+        let _ = self;
+        let flow = current_flow(flow_id)?;
+        if flow.challenge.kind != AuthChallengeKind::Form {
+            bail!("当前认证 flow 不是表单 challenge，拒绝提交字段");
+        }
+        validate_submission(values)?;
+        validate_submission_against_challenge(&flow.challenge, values)?;
+        let result = execute_auth_submit(
+            &flow.plugin_id,
+            &flow.provider_id,
+            &flow.challenge.challenge_id,
+            values,
+        )
+        .await?;
+        commit_flow_result(flow_id, &flow, result)
+    }
+
+    /// Cancel locally first, then best-effort notify the guest. Once this method starts, any
+    /// concurrent poll/submit result loses its flow ticket and cannot publish Authenticated state.
+    pub async fn auth_flow_cancel(&self, flow_id: u64) -> Result<bool> {
+        let flow = {
+            let mut flows = lock_auth_flows()?;
+            flows
+                .remove(&flow_id)
+                .ok_or_else(|| anyhow!("插件认证 flow 已不存在或已结束: {flow_id}"))?
+        };
+        if flow.package_generation != runtime_ports::package_mutation_generation() {
+            bail!("插件认证 flow 已因插件更新失效");
+        }
+        self.auth_cancel(
+            &flow.plugin_id,
+            &flow.provider_id,
+            &flow.challenge.challenge_id,
+        )
+        .await
+    }
+}
+
+fn auth_flows() -> &'static Mutex<HashMap<u64, ActiveAuthFlow>> {
+    AUTH_FLOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_auth_flows() -> Result<std::sync::MutexGuard<'static, HashMap<u64, ActiveAuthFlow>>> {
+    auth_flows()
+        .lock()
+        .map_err(|error| anyhow!("插件认证 flow registry 锁已损坏: {error}"))
+}
+
+fn allocate_flow_id(flows: &HashMap<u64, ActiveAuthFlow>) -> u64 {
+    loop {
+        let id = NEXT_AUTH_FLOW_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 && !flows.contains_key(&id) {
+            return id;
+        }
+    }
+}
+
+fn current_flow(flow_id: u64) -> Result<ActiveAuthFlow> {
+    let mut flows = lock_auth_flows()?;
+    let flow = flows
+        .get(&flow_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("插件认证 flow 已不存在或已结束: {flow_id}"))?;
+    if flow.package_generation != runtime_ports::package_mutation_generation() {
+        flows.remove(&flow_id);
+        bail!("插件认证 flow 已因插件更新失效");
+    }
+    ensure_plugin_enabled(&flow.plugin_id)?;
+    Ok(flow)
+}
+
+fn commit_flow_result(
+    flow_id: u64,
+    expected: &ActiveAuthFlow,
+    result: AuthPollResult,
+) -> Result<AuthPollResult> {
+    let terminal = !matches!(result, AuthPollResult::Pending);
+    let mut flows = lock_auth_flows()?;
+    let Some(current) = flows.get(&flow_id) else {
+        bail!("认证结果已丢弃：flow 已取消或被替换");
+    };
+    let still_current = current.package_generation == expected.package_generation
+        && current.package_generation == runtime_ports::package_mutation_generation()
+        && current.plugin_id == expected.plugin_id
+        && current.provider_id == expected.provider_id
+        && current.challenge.challenge_id == expected.challenge.challenge_id;
+    if !still_current {
+        flows.remove(&flow_id);
+        bail!("认证结果已丢弃：插件或 challenge 代际已变化");
+    }
+
+    if terminal {
+        flows.remove(&flow_id);
+    }
+    drop(flows);
+
+    if terminal {
+        if let AuthPollResult::Authenticated(account) = &result {
+            accept_authenticated_account(
+                &expected.plugin_id,
+                &expected.provider_id,
+                account.clone(),
+            )?;
+        }
+    }
+    Ok(result)
+}
+
+async fn execute_auth_poll(
+    plugin_id: &str,
+    provider_id: &str,
+    challenge_id: &str,
+) -> Result<AuthPollResult> {
+    validate_challenge_id(challenge_id)?;
+    ensure_plugin_enabled(plugin_id)?;
+    let runtime = require_auth_runtime(plugin_id, provider_id)?;
+    let client = require_provider_client()?;
+    runtime
+        .execute_guest_call(
+            PluginCallKey::provider(plugin_id, provider_id),
+            client.auth_poll(plugin_id, provider_id, challenge_id),
+        )
+        .await
+}
+
+async fn execute_auth_submit(
+    plugin_id: &str,
+    provider_id: &str,
+    challenge_id: &str,
+    values: &[KeyValue],
+) -> Result<AuthPollResult> {
+    validate_challenge_id(challenge_id)?;
+    validate_submission(values)?;
+    ensure_plugin_enabled(plugin_id)?;
+    let runtime = require_auth_runtime(plugin_id, provider_id)?;
+    let client = require_provider_client()?;
+    runtime
+        .execute_guest_call(
+            PluginCallKey::provider(plugin_id, provider_id),
+            client.auth_submit(plugin_id, provider_id, challenge_id, values),
+        )
+        .await
+}
+
+fn require_auth_runtime(
+    plugin_id: &str,
+    provider_id: &str,
+) -> Result<std::sync::Arc<host_runtime::PluginHostServices>> {
+    let runtime = host_runtime::global().ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
+    let provider = runtime
+        .catalog()
+        .provider(plugin_id, provider_id)
+        .ok_or_else(|| anyhow!("未安装插件 Provider: {plugin_id}/{provider_id}"))?;
+    if !provider
+        .capabilities
+        .contains(&PluginCapability::Authentication)
+    {
+        bail!("插件 Provider 未声明 authentication capability");
+    }
+    Ok(runtime)
+}
+
+fn require_provider_client() -> Result<std::sync::Arc<dyn client::PluginProviderClient>> {
+    let clients = client::global().ok_or_else(|| anyhow!("插件 Provider client 尚未初始化"))?;
+    clients
+        .client()?
+        .ok_or_else(|| anyhow!("插件 Provider client 尚未就绪"))
+}
+
+fn ensure_plugin_enabled(plugin_id: &str) -> Result<()> {
+    let manager = package_manager::global().ok_or_else(|| anyhow!("插件包管理器尚未初始化"))?;
+    if !manager.is_enabled(plugin_id) {
+        bail!("插件已禁用，拒绝继续认证: {plugin_id}");
+    }
+    Ok(())
 }
 
 fn validate_challenge_id(challenge_id: &str) -> Result<()> {
@@ -75,6 +346,89 @@ fn validate_challenge_id(challenge_id: &str) -> Result<()> {
         || challenge_id.contains('\0')
     {
         bail!("插件 auth challenge id 非法");
+    }
+    Ok(())
+}
+
+fn validate_tracked_challenge(method: AuthMethod, challenge: &AuthChallenge) -> Result<()> {
+    validate_challenge_id(&challenge.challenge_id)?;
+    let expected_kind = match method {
+        AuthMethod::QrCode => AuthChallengeKind::QrCode,
+        AuthMethod::BrowserOAuth => AuthChallengeKind::Browser,
+        AuthMethod::DeviceCode => AuthChallengeKind::DeviceCode,
+        AuthMethod::CookieImport | AuthMethod::CustomForm => AuthChallengeKind::Form,
+    };
+    if challenge.kind != expected_kind {
+        bail!(
+            "插件认证 challenge kind 与请求方式不匹配: method={method:?}, kind={:?}",
+            challenge.kind
+        );
+    }
+
+    match challenge.kind {
+        AuthChallengeKind::QrCode => {
+            if challenge.qr_payload.as_deref().is_none_or(str::is_empty) {
+                bail!("QR 认证 challenge 缺少 qr_payload");
+            }
+            if !challenge.fields.is_empty() {
+                bail!("QR 认证 challenge 不应包含 form fields");
+            }
+        }
+        AuthChallengeKind::Browser => {
+            validate_https_uri(challenge.verification_uri.as_deref(), "Browser OAuth")?;
+            if !challenge.fields.is_empty() {
+                bail!("Browser OAuth challenge 不应包含 form fields");
+            }
+        }
+        AuthChallengeKind::DeviceCode => {
+            validate_https_uri(challenge.verification_uri.as_deref(), "Device Code")?;
+            if challenge.user_code.as_deref().is_none_or(str::is_empty) {
+                bail!("Device Code challenge 缺少 user_code");
+            }
+            if !challenge.fields.is_empty() {
+                bail!("Device Code challenge 不应包含 form fields");
+            }
+        }
+        AuthChallengeKind::Form => validate_form_fields(&challenge.fields)?,
+    }
+    Ok(())
+}
+
+fn validate_https_uri(uri: Option<&str>, context: &str) -> Result<()> {
+    let Some(uri) = uri.filter(|uri| !uri.is_empty()) else {
+        bail!("{context} challenge 缺少 verification_uri");
+    };
+    if uri.contains('\0')
+        || !uri
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
+        bail!("{context} verification_uri 必须使用 HTTPS");
+    }
+    Ok(())
+}
+
+fn validate_form_fields(fields: &[KeyValue]) -> Result<()> {
+    if fields.is_empty() || fields.len() > MAX_AUTH_SUBMIT_FIELDS {
+        bail!("插件 form challenge fields 数量非法");
+    }
+    let mut ids = HashSet::with_capacity(fields.len());
+    for field in fields {
+        if field.key.trim().is_empty()
+            || field.key.len() > MAX_AUTH_FIELD_ID_BYTES
+            || field.key.contains('\0')
+        {
+            bail!("插件 form challenge field id 非法");
+        }
+        if !ids.insert(field.key.as_str()) {
+            bail!("插件 form challenge field id 重复: {}", field.key);
+        }
+        if field.value.trim().is_empty()
+            || field.value.len() > MAX_AUTH_FIELD_LABEL_BYTES
+            || field.value.contains('\0')
+        {
+            bail!("插件 form challenge field label 非法或超过大小限制");
+        }
     }
     Ok(())
 }
@@ -106,6 +460,27 @@ fn validate_submission(values: &[KeyValue]) -> Result<()> {
         if payload_bytes > MAX_AUTH_SUBMIT_PAYLOAD_BYTES {
             bail!("插件 auth submit payload 超过大小限制");
         }
+    }
+    Ok(())
+}
+
+fn validate_submission_against_challenge(
+    challenge: &AuthChallenge,
+    values: &[KeyValue],
+) -> Result<()> {
+    if values.len() != challenge.fields.len() {
+        bail!("插件 auth submit field 数量与 challenge 不一致");
+    }
+    let expected = challenge
+        .fields
+        .iter()
+        .map(|field| field.key.as_str())
+        .collect::<HashSet<_>>();
+    if values
+        .iter()
+        .any(|field| !expected.contains(field.key.as_str()))
+    {
+        bail!("插件 auth submit 包含 challenge 未声明的 field id");
     }
     Ok(())
 }
@@ -202,6 +577,18 @@ mod tests {
         }
     }
 
+    fn form_challenge() -> AuthChallenge {
+        AuthChallenge {
+            challenge_id: "challenge".into(),
+            kind: AuthChallengeKind::Form,
+            verification_uri: None,
+            user_code: None,
+            qr_payload: None,
+            fields: vec![field("cookie", "Cookie"), field("csrf", "CSRF Token")],
+            expires_at_ms: None,
+        }
+    }
+
     #[test]
     fn auth_submit_accepts_unique_bounded_fields() {
         validate_submission(&[field("cookie", "MUSIC_U=secret"), field("csrf", "token")])
@@ -223,5 +610,36 @@ mod tests {
         )])
         .expect_err("oversized value must fail");
         assert!(error.to_string().contains("大小限制"));
+    }
+
+    #[test]
+    fn form_submission_must_match_original_field_set() {
+        let challenge = form_challenge();
+        validate_submission_against_challenge(
+            &challenge,
+            &[field("cookie", "a"), field("csrf", "b")],
+        )
+        .expect("exact field set");
+        assert!(
+            validate_submission_against_challenge(
+                &challenge,
+                &[field("cookie", "a"), field("other", "b")],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auth_method_must_match_challenge_kind() {
+        let challenge = form_challenge();
+        validate_tracked_challenge(AuthMethod::CookieImport, &challenge).expect("cookie form");
+        assert!(validate_tracked_challenge(AuthMethod::QrCode, &challenge).is_err());
+    }
+
+    #[test]
+    fn external_browser_challenges_require_https() {
+        assert!(validate_https_uri(Some("https://example.com/login"), "test").is_ok());
+        assert!(validate_https_uri(Some("http://example.com/login"), "test").is_err());
+        assert!(validate_https_uri(Some("javascript:alert(1)"), "test").is_err());
     }
 }
