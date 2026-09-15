@@ -80,7 +80,9 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     let plugin_host = host::catalog::initialize(base_dir);
     let package_manager = host::package_manager::initialize(base_dir);
 
-    let secret_store = std::sync::Arc::new(host::secrets::MemorySecretStore::default());
+    let secret_store = host::secrets::initialize(std::sync::Arc::new(
+        host::secrets::MemorySecretStore::default(),
+    ));
     let secret_backend = host::secrets::PluginSecretStore::backend_name(secret_store.as_ref());
     let secret_protection = host::secrets::PluginSecretStore::protection(secret_store.as_ref());
     let sessions = host::sessions::initialize(&plugin_host, secret_protection);

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::RwLock,
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -49,6 +49,19 @@ pub trait PluginSecretStore: Send + Sync {
 
     /// Persistence/protection level used by session restoration policy.
     fn protection(&self) -> SecretStoreProtection;
+}
+
+static PLUGIN_SECRET_STORE: OnceLock<Arc<dyn PluginSecretStore>> = OnceLock::new();
+
+/// Publish the process-wide Host Secret backend used by runtime imports and account lifecycle code.
+/// The guest never receives this handle. Keeping one shared Arc prevents logout/session cleanup from
+/// accidentally targeting a different backend instance than `PluginHostServices`.
+pub fn initialize(store: Arc<dyn PluginSecretStore>) -> Arc<dyn PluginSecretStore> {
+    PLUGIN_SECRET_STORE.get_or_init(|| store).clone()
+}
+
+pub fn global() -> Option<Arc<dyn PluginSecretStore>> {
+    PLUGIN_SECRET_STORE.get().cloned()
 }
 
 /// In-memory backend for tests and early Host wiring.

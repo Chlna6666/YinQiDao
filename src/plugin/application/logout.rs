@@ -2,7 +2,12 @@ use anyhow::{Result, anyhow, bail};
 
 use super::{
     frontend::{PluginLogoutResult, PluginServiceFrontend},
-    host::{catalog, runtime as host_runtime, sessions::PluginAccountKey},
+    host::{
+        catalog,
+        secrets,
+        security::SecretSlot,
+        sessions::PluginAccountKey,
+    },
 };
 
 const MAX_PLUGIN_LOGOUT_ACCOUNTS: usize = 512;
@@ -14,17 +19,19 @@ pub struct PluginAccountLogoutOutcome {
     pub local_state_changed: bool,
     pub remote_acknowledged: bool,
     pub remote_error: Option<String>,
-    /// Failure before the normal single-account logout result could be produced. Processing of
-    /// sibling accounts continues so one poisoned/invalid provider cannot keep other local sessions
-    /// authenticated.
+    /// Failure before the normal single-account logout result could be produced. Secret cleanup is
+    /// still attempted so an application-side failure cannot leave usable credentials behind.
     pub operation_error: Option<String>,
+    /// Account-scoped Host Secret entries removed after the guest logout attempt.
+    pub secrets_revoked: usize,
+    pub secret_cleanup_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginLogoutAllResult {
     pub accounts: Vec<PluginAccountLogoutOutcome>,
-    /// Number of Host-owned Secret entries removed from the plugin namespace after all account
-    /// logout attempts. Whole-plugin logout deliberately revokes provider-scope secrets too.
+    /// Residual plugin secrets removed after per-account cleanup. This includes provider-scope and
+    /// orphaned entries that intentionally cannot be attributed to one account.
     pub secrets_revoked: usize,
     pub secret_cleanup_error: Option<String>,
 }
@@ -46,18 +53,71 @@ impl PluginLogoutAllResult {
             })
             .count()
     }
+
+    pub fn secret_cleanup_failures(&self) -> usize {
+        usize::from(self.secret_cleanup_error.is_some())
+            + self
+                .accounts
+                .iter()
+                .filter(|outcome| outcome.secret_cleanup_error.is_some())
+                .count()
+    }
 }
 
 impl PluginServiceFrontend {
+    /// Secure single-account logout entry for application/UI callers.
+    ///
+    /// The existing frontend logout primitive remains responsible for the authoritative local
+    /// SessionCoordinator transition and best-effort guest logout. This wrapper always follows it
+    /// with exact Host account-namespace Secret deletion. Cleanup happens after the guest call so a
+    /// buggy guest cannot recreate a cookie/token during its own logout callback and leave it behind.
+    pub async fn logout_account(&self, key: &PluginAccountKey) -> Result<PluginAccountLogoutOutcome> {
+        validate_account_key(key)?;
+
+        let (local_state_changed, remote_acknowledged, remote_error, operation_error) =
+            match self.logout(key).await {
+                Ok(PluginLogoutResult {
+                    local_state_changed,
+                    remote_acknowledged,
+                    remote_error,
+                }) => (
+                    local_state_changed,
+                    remote_acknowledged,
+                    remote_error,
+                    None,
+                ),
+                Err(error) => (false, false, None, Some(format!("{error:#}"))),
+            };
+
+        let (secrets_revoked, secret_cleanup_error) = match secrets::global() {
+            Some(store) => match store.delete_account(
+                &key.plugin_id,
+                &key.provider_id,
+                &key.account_id,
+            ) {
+                Ok(removed) => (removed, None),
+                Err(error) => (0, Some(format!("{error:#}"))),
+            },
+            None => (0, Some("插件 Secret backend 尚未初始化".into())),
+        };
+
+        Ok(PluginAccountLogoutOutcome {
+            key: key.clone(),
+            local_state_changed,
+            remote_acknowledged,
+            remote_error,
+            operation_error,
+            secrets_revoked,
+            secret_cleanup_error,
+        })
+    }
+
     /// Log out every account owned by one exact plugin and then revoke the plugin's complete Host
     /// Secret namespace.
     ///
-    /// This is an application/control-path operation only. Each account reuses the normal
-    /// single-account `logout` primitive, whose local SessionCoordinator transition is authoritative
-    /// and occurs before best-effort guest cleanup. A remote failure is recorded per account and does
-    /// not stop sibling accounts from being logged out locally. Finally the Host removes all plugin
-    /// secrets even when there are no remaining account rows, which also cleans orphan/provider-scope
-    /// credentials without exposing Secret keys to guest code.
+    /// A failure for one account never stops sibling accounts. Per-account cleanup first removes
+    /// exact account namespaces; the final plugin-wide wipe removes provider-scope/orphan secrets and
+    /// also runs when the Host currently has zero account rows for the plugin.
     pub async fn logout_plugin_all(&self, plugin_id: &str) -> Result<PluginLogoutAllResult> {
         validate_plugin_id(plugin_id)?;
         let keys = plugin_account_keys(plugin_id)?;
@@ -75,35 +135,27 @@ impl PluginServiceFrontend {
         };
 
         for key in keys {
-            match self.logout(&key).await {
-                Ok(PluginLogoutResult {
-                    local_state_changed,
-                    remote_acknowledged,
-                    remote_error,
-                }) => result.accounts.push(PluginAccountLogoutOutcome {
-                    key,
-                    local_state_changed,
-                    remote_acknowledged,
-                    remote_error,
-                    operation_error: None,
-                }),
+            match self.logout_account(&key).await {
+                Ok(outcome) => result.accounts.push(outcome),
                 Err(error) => result.accounts.push(PluginAccountLogoutOutcome {
                     key,
                     local_state_changed: false,
                     remote_acknowledged: false,
                     remote_error: None,
                     operation_error: Some(format!("{error:#}")),
+                    secrets_revoked: 0,
+                    secret_cleanup_error: None,
                 }),
             }
         }
 
-        match host_runtime::global() {
-            Some(runtime) => match runtime.revoke_all_plugin_secrets(plugin_id) {
+        match secrets::global() {
+            Some(store) => match store.delete_plugin(plugin_id) {
                 Ok(removed) => result.secrets_revoked = removed,
                 Err(error) => result.secret_cleanup_error = Some(format!("{error:#}")),
             },
             None => {
-                result.secret_cleanup_error = Some("插件 Host runtime 尚未初始化".into());
+                result.secret_cleanup_error = Some("插件 Secret backend 尚未初始化".into());
             }
         }
 
@@ -138,5 +190,16 @@ fn validate_plugin_id(plugin_id: &str) -> Result<()> {
     {
         bail!("插件 id 非法");
     }
+    Ok(())
+}
+
+fn validate_account_key(key: &PluginAccountKey) -> Result<()> {
+    // Reuse the Host Secret namespace validator without exposing or persisting a real probe key.
+    let _ = SecretSlot::account(
+        key.plugin_id.clone(),
+        key.provider_id.clone(),
+        key.account_id.clone(),
+        "logout_probe",
+    )?;
     Ok(())
 }
