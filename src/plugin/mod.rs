@@ -19,6 +19,8 @@
 //!   recommendation fusion remains an application/Library responsibility rather than guest policy.
 //! - `search` extends the façade with bounded authenticated Search fan-out and Host-side result
 //!   validation/de-duplication while preserving request-scoped route preference order.
+//! - `cloud_library` adds bounded per-account CloudLibrary/liked-track pagination and explicit-route
+//!   like mutations so merged Library UI never broadcasts a write to every authenticated account.
 //! - `playlists` extends the façade with bounded authenticated playlist fan-out and explicit-route
 //!   track/mutation operations while keeping provider identity validation in Host application code.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
@@ -50,6 +52,8 @@ pub(crate) mod auth;
 pub(crate) mod assets;
 #[path = "runtime/client.rs"]
 pub(crate) mod client;
+#[path = "application/cloud_library.rs"]
+pub(crate) mod cloud_library;
 #[path = "application/commands.rs"]
 pub(crate) mod commands;
 #[path = "application/extensions.rs"]
