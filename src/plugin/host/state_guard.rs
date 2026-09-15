@@ -9,9 +9,13 @@ const PLUGIN_STATE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_STATE_FILE: &str = "plugin-state.json";
 const PLUGIN_ACCOUNT_STORE_FILE: &str = "plugin-accounts.json";
 const PLUGIN_PERMISSION_STORE_FILE: &str = "plugin-permissions.json";
+const PLUGIN_ROOT_DIR: &str = "plugins";
+const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
 const MAX_PLUGIN_STATE_BYTES: u64 = 1024 * 1024;
 const MAX_PLUGIN_ACCOUNT_STORE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PLUGIN_PERMISSION_STORE_BYTES: u64 = 1024 * 1024;
+const MAX_PLUGIN_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_PLUGIN_ROOT_ENTRIES: usize = 1_024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PluginStateFile {
@@ -26,12 +30,13 @@ pub struct PluginStateRecovery {
     pub disabled_plugins: usize,
 }
 
-/// Validate security-sensitive persisted indexes before their loaders allocate or parse contents.
+/// Validate security-sensitive persisted indexes and package descriptors before their loaders
+/// allocate or parse contents.
 ///
 /// Account and permission loaders already fail closed on parse/schema errors, but historically read
-/// the complete file first. A corrupted multi-gigabyte file could therefore force an unbounded
-/// allocation during application startup. This preflight rejects oversized files before any read,
-/// and refuses symlink/non-regular paths instead of following them into arbitrary filesystem data.
+/// the complete file first. Plugin catalog discovery likewise collected every root entry and read an
+/// entire `plugin.toml` before applying semantic validation. This preflight rejects oversized inputs
+/// before any such read/allocation and refuses symlink/non-regular security metadata paths.
 pub fn validate_preload_state_files(base_dir: &Path) -> Result<()> {
     validate_bounded_regular_file(
         base_dir,
@@ -45,6 +50,7 @@ pub fn validate_preload_state_files(base_dir: &Path) -> Result<()> {
         MAX_PLUGIN_PERMISSION_STORE_BYTES,
         "插件权限索引",
     )?;
+    validate_plugin_package_descriptors(base_dir)?;
     Ok(())
 }
 
@@ -59,7 +65,8 @@ fn validate_bounded_regular_file(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            return Err(error).with_context(|| format!("读取{label} metadata 失败: {}", path.display()));
+            return Err(error)
+                .with_context(|| format!("读取{label} metadata 失败: {}", path.display()));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -70,6 +77,69 @@ fn validate_bounded_regular_file(
             "{label}超过 {max_bytes} bytes Host 启动上限: {}",
             path.display()
         );
+    }
+    Ok(())
+}
+
+fn validate_plugin_package_descriptors(base_dir: &Path) -> Result<()> {
+    let plugin_root = base_dir.join(PLUGIN_ROOT_DIR);
+    let root_metadata = match fs::symlink_metadata(&plugin_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("读取插件目录 metadata 失败: {}", plugin_root.display())
+            });
+        }
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!(
+            "插件目录必须是普通目录且不能是符号链接: {}",
+            plugin_root.display()
+        );
+    }
+
+    let entries = fs::read_dir(&plugin_root)
+        .with_context(|| format!("读取插件目录失败: {}", plugin_root.display()))?;
+    let mut root_entries = 0usize;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!("读取插件目录条目失败: {}", plugin_root.display())
+        })?;
+        root_entries = root_entries.saturating_add(1);
+        if root_entries > MAX_PLUGIN_ROOT_ENTRIES {
+            bail!("插件目录条目数量超过 {MAX_PLUGIN_ROOT_ENTRIES} Host 启动上限");
+        }
+
+        let file_type = entry.file_type().with_context(|| {
+            format!("读取插件目录条目类型失败: {}", entry.path().display())
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let descriptor_path = entry.path().join(PLUGIN_PACKAGE_FILE);
+        let descriptor_metadata = match fs::symlink_metadata(&descriptor_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("读取插件清单 metadata 失败: {}", descriptor_path.display())
+                });
+            }
+        };
+        if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
+            bail!(
+                "插件清单必须是普通文件且不能是符号链接: {}",
+                descriptor_path.display()
+            );
+        }
+        if descriptor_metadata.len() > MAX_PLUGIN_MANIFEST_BYTES {
+            bail!(
+                "插件清单超过 {MAX_PLUGIN_MANIFEST_BYTES} bytes Host 启动上限: {}",
+                descriptor_path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -93,8 +163,9 @@ pub fn repair_fail_closed_state(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取插件启停状态 metadata 失败: {}", state_path.display()));
+            return Err(error).with_context(|| {
+                format!("读取插件启停状态 metadata 失败: {}", state_path.display())
+            });
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -157,7 +228,10 @@ pub fn repair_fail_closed_state(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs::File,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 
@@ -241,12 +315,27 @@ auth_methods = ["qr_code"]
     }
 
     #[test]
+    fn preload_rejects_oversized_plugin_manifest_before_catalog_read() {
+        let root = temp_dir("oversized-manifest");
+        let package = root.join(PLUGIN_ROOT_DIR).join("plugin.test");
+        fs::create_dir_all(&package).expect("package dir");
+        let file = File::create(package.join(PLUGIN_PACKAGE_FILE)).expect("manifest file");
+        file.set_len(MAX_PLUGIN_MANIFEST_BYTES + 1)
+            .expect("extend manifest file");
+
+        let error = validate_preload_state_files(&root).expect_err("oversized manifest must fail");
+        assert!(error.to_string().contains("插件清单超过"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn preload_accepts_missing_or_bounded_regular_indexes() {
         let root = temp_dir("bounded-indexes");
         fs::create_dir_all(&root).expect("root");
         validate_preload_state_files(&root).expect("missing files");
         fs::write(root.join(PLUGIN_ACCOUNT_STORE_FILE), b"{}").expect("accounts");
         fs::write(root.join(PLUGIN_PERMISSION_STORE_FILE), b"{}").expect("permissions");
+        write_plugin(&root.join(PLUGIN_ROOT_DIR));
         validate_preload_state_files(&root).expect("bounded files");
         fs::remove_dir_all(root).expect("cleanup");
     }
