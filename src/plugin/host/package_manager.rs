@@ -182,8 +182,10 @@ impl PluginPackageManager {
                 bail!("插件导入目录必须且只能包含一个有效插件包");
             }
             let staged_plugin = &staged_catalog.plugins()[0];
-            ui_catalog::load_plugin_contributions(staged_plugin)
+            let staged_ui = ui_catalog::load_plugin_contributions(staged_plugin)
                 .context("插件 UI contributions 校验失败")?;
+            let registry = ui_registry::global()
+                .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
 
             let plugin_id = staged_plugin.manifest.id.clone();
             let version = staged_plugin.manifest.version.clone();
@@ -212,24 +214,55 @@ impl PluginPackageManager {
                 });
             }
 
-            let installed_catalog = PluginCatalog::discover(self.plugin_root.clone());
-            let installed = installed_catalog
-                .plugin(&plugin_id)
-                .ok_or_else(|| anyhow!("插件提交后重新发现失败: {plugin_id}"))?;
-            let enabled = self.is_enabled(&plugin_id);
-            let ui_registered = if enabled {
-                let registry = ui_registry::global()
-                    .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
-                ui_catalog::register_plugin(
-                    &mut registry
-                        .write()
-                        .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?,
-                    installed,
-                )?;
-                true
-            } else {
-                let _ = ui_registry::unregister_plugin(&plugin_id);
-                false
+            let post_commit = (|| -> Result<(PluginCatalog, bool, bool)> {
+                let installed_catalog = PluginCatalog::discover(self.plugin_root.clone());
+                if installed_catalog.plugin(&plugin_id).is_none() {
+                    bail!("插件提交后重新发现失败: {plugin_id}");
+                }
+                let enabled = self.is_enabled(&plugin_id);
+                let mut registry = registry
+                    .write()
+                    .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
+                let ui_registered = if enabled {
+                    registry.replace_plugin(&plugin_id, staged_ui)?;
+                    true
+                } else {
+                    registry.remove_plugin(&plugin_id);
+                    false
+                };
+                Ok((installed_catalog, enabled, ui_registered))
+            })();
+
+            let (installed_catalog, enabled, ui_registered) = match post_commit {
+                Ok(committed) => committed,
+                Err(error) => {
+                    let rollback = (|| -> Result<()> {
+                        if destination.exists() {
+                            fs::remove_dir_all(&destination).with_context(|| {
+                                format!("删除未完成提交的插件目录失败: {}", destination.display())
+                            })?;
+                        }
+                        if updated_existing {
+                            if !backup.exists() {
+                                bail!("插件更新回滚缺少旧版本备份: {}", backup.display());
+                            }
+                            fs::rename(&backup, &destination).with_context(|| {
+                                format!(
+                                    "恢复旧插件版本失败: {} -> {}",
+                                    backup.display(),
+                                    destination.display()
+                                )
+                            })?;
+                        }
+                        Ok(())
+                    })();
+                    if let Err(rollback_error) = rollback {
+                        return Err(anyhow!(
+                            "插件提交后初始化失败: {error:#}; 文件系统回滚同时失败: {rollback_error:#}"
+                        ));
+                    }
+                    return Err(error);
+                }
             };
 
             if let Some(components) = component_registry::global() {
