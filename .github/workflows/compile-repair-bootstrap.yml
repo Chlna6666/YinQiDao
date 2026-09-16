@@ -1,0 +1,238 @@
+name: Compile Repair Bootstrap
+
+on:
+  push:
+    paths:
+      - .github/workflows/compile-repair-bootstrap.yml
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+
+      - name: Apply compile fixes against current stable GPUI
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: str, old: str, new: str, count: int = 1):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              actual = text.count(old)
+              if actual < count:
+                  raise SystemExit(f"{path}: expected at least {count} occurrence(s), found {actual}: {old!r}")
+              p.write_text(text.replace(old, new, count), encoding="utf-8", newline="\n")
+
+          replace(
+              "src/ui/components/input.rs",
+              "color: if placeholder_active {\n                theme::TEXT_TERTIARY\n            } else {",
+              "color: if placeholder_active {\n                theme::TEXT_TERTIARY.into()\n            } else {",
+          )
+
+          replace(
+              "src/ui/plugin/context_menu.rs",
+              "name: name.to_owned(),",
+              "name: Some(name.to_owned()),",
+          )
+          replace(
+              "src/ui/plugin/context_menu.rs",
+              "let menu = div()\n        .absolute()",
+              "let menu = div()\n        .id(\"plugin-context-menu\")\n        .absolute()",
+          )
+
+          replace(
+              "src/ui/plugin/command_palette.rs",
+              "div()\n                    .flex_1()\n                    .min_h(px(0.0))\n                    .overflow_y_scroll()",
+              "div()\n                    .id(\"plugin-command-palette-scroll\")\n                    .flex_1()\n                    .min_h(px(0.0))\n                    .overflow_y_scroll()",
+          )
+
+          replace(
+              "src/ui/plugin/extensions.rs",
+              "theme::accent_red_muted()\n                } else {\n                    theme::BG_CANVAS\n                })",
+              "theme::accent_red_muted()\n                } else {\n                    theme::BG_CANVAS.into()\n                })",
+          )
+          replace(
+              "src/ui/plugin/extensions.rs",
+              "theme::accent_red_muted()\n                    } else {\n                        theme::BG_CARD\n                    })",
+              "theme::accent_red_muted()\n                    } else {\n                        theme::BG_CARD.into()\n                    })",
+          )
+          replace(
+              "src/ui/plugin/extensions.rs",
+              "\n    div()\n        .size_full()\n        .overflow_y_scroll()",
+              "\n    div()\n        .id(\"plugin-extensions-scroll\")\n        .size_full()\n        .overflow_y_scroll()",
+          )
+
+          replace(
+              "src/ui/plugin/navigation.rs",
+              "\n    div()\n        .size_full()\n        .overflow_y_scroll()",
+              "\n    div()\n        .id(\"plugin-navigation-scroll\")\n        .size_full()\n        .overflow_y_scroll()",
+          )
+
+          replace(
+              "src/ui/plugin/settings.rs",
+              "\n    div()\n        .size_full()\n        .overflow_y_scroll()",
+              "\n    div()\n        .id(\"plugin-settings-scroll\")\n        .size_full()\n        .overflow_y_scroll()",
+          )
+          replace(
+              "src/ui/plugin/settings.rs",
+              "hsla(140.0, 0.45, 0.36, 1.0)\n                                } else {\n                                    theme::TEXT_TERTIARY\n                                })",
+              "hsla(140.0, 0.45, 0.36, 1.0)\n                                } else {\n                                    theme::TEXT_TERTIARY.into()\n                                })",
+          )
+          replace(
+              "src/ui/plugin/settings.rs",
+              "theme::accent_red_muted()\n        } else {\n            theme::BG_CANVAS\n        })",
+              "theme::accent_red_muted()\n        } else {\n            theme::BG_CANVAS.into()\n        })",
+          )
+
+          replace(
+              "src/ui/plugin/service_auth.rs",
+              "\n    div()\n        .size_full()\n        .overflow_y_scroll()",
+              "\n    div()\n        .id(\"plugin-service-auth-scroll\")\n        .size_full()\n        .overflow_y_scroll()",
+          )
+
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "use gpui::{Context, IntoElement, div, hsla, prelude::*, px};",
+              "use gpui::{Context, IntoElement, SharedString, div, hsla, prelude::*, px};",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "\n    div()\n        .size_full()\n        .overflow_y_scroll()",
+              "\n    div()\n        .id(\"plugin-service-accounts-scroll\")\n        .size_full()\n        .overflow_y_scroll()",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "hsla(140.0, 0.45, 0.36, 1.0)\n        } else {\n            theme::TEXT_TERTIARY\n        })",
+              "hsla(140.0, 0.45, 0.36, 1.0)\n        } else {\n            theme::TEXT_TERTIARY.into()\n        })",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "hsla(8.0, 0.72, 0.52, 0.12),\n            theme::ACCENT_RED,",
+              "hsla(8.0, 0.72, 0.52, 0.12),\n            theme::ACCENT_RED.into(),",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "hsla(0.0, 0.0, 0.0, 0.05),\n            theme::TEXT_TERTIARY,",
+              "hsla(0.0, 0.0, 0.0, 0.05),\n            theme::TEXT_TERTIARY.into(),",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "fn action_button<F>(label: &'static str, disabled: bool, on_press: F) -> gpui::AnyElement\nwhere\n    F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,\n{\n    let button = div()",
+              "fn action_button<I, F>(id: I, label: &'static str, disabled: bool, on_press: F) -> gpui::AnyElement\nwhere\n    I: Into<gpui::ElementId>,\n    F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,\n{\n    let button = div()\n        .id(id)",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              ".child(action_button(\n                            \"退出全部\",\n                            interaction_busy,\n                            cx.listener(move |_, _, _, cx| {\n                                logout_plugin_action(",
+              ".child(action_button(\n                            SharedString::from(format!(\"plugin-service-logout-{plugin_id}\")),\n                            \"退出全部\",\n                            interaction_busy,\n                            cx.listener(move |_, _, _, cx| {\n                                logout_plugin_action(",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              ".child(action_button(\n                                action_label,\n                                interaction_busy,\n                                cx.listener(move |_, _, _, cx| {\n                                    logout_account_action(",
+              ".child(action_button(\n                                SharedString::from(format!(\n                                    \"plugin-account-logout-{plugin_id}-{provider_id}-{account_id}\"\n                                )),\n                                action_label,\n                                interaction_busy,\n                                cx.listener(move |_, _, _, cx| {\n                                    logout_account_action(",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              ".child(action_button(\n                            \"退出全部\",\n                            interaction_busy,\n                            cx.listener(move |_, _, _, cx| {\n                                logout_provider_action(",
+              ".child(action_button(\n                            SharedString::from(format!(\n                                \"plugin-provider-logout-{plugin_id}-{provider_id}\"\n                            )),\n                            \"退出全部\",\n                            interaction_busy,\n                            cx.listener(move |_, _, _, cx| {\n                                logout_provider_action(",
+          )
+          replace(
+              "src/ui/plugin/service_accounts.rs",
+              "let button = div()\n        .px_3()",
+              "let button = div()\n        .id(\"plugin-service-accounts-refresh\")\n        .px_3()",
+          )
+
+          replace(
+              "src/ui/route.rs",
+              "navigate(pathname.into());",
+              "navigate(pathname.to_owned().into());",
+          )
+
+          replace(
+              "src/plugin/application/assets.rs",
+              "let mut file = File::open(&canonical_asset)",
+              "let file = File::open(&canonical_asset)",
+          )
+          replace(
+              "src/plugin/application/streaming.rs",
+              "value,\n            route,\n            plan,",
+              "value,\n            route: _,\n            plan,",
+          )
+          replace(
+              "src/ui/components/slider.rs",
+              "fn slider_visual_with_group(\n    id: ElementId,",
+              "fn slider_visual_with_group(\n    _id: ElementId,",
+          )
+
+          replace(
+              "src/plugin/component/wasmtime.rs",
+              "use anyhow::{Context, Result, anyhow};",
+              "use anyhow::{Result, anyhow};",
+          )
+          replace(
+              "src/plugin/component/wasmtime.rs",
+              "}\n\nimpl wit_host::Host for PluginStoreData {",
+              "}\n\nimpl wit_types::Host for PluginStoreData {}\n\nimpl wit_host::Host for PluginStoreData {",
+          )
+          replace(
+              "src/plugin/component/wasmtime.rs",
+              "let engine = Engine::new(&config).context(\"创建 Wasmtime 插件 Engine 失败\")?;",
+              "let engine = Engine::new(&config)\n            .map_err(|error| anyhow!(\"创建 Wasmtime 插件 Engine 失败: {error}\"))?;",
+          )
+          replace(
+              "src/plugin/component/wasmtime.rs",
+              "bindings::MusicPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)\n            .context(\"注册音栖岛插件 Host imports 失败\")?;\n        wasmtime_wasi::p2::add_to_linker_async(&mut linker)\n            .context(\"注册最小 WASI P2 imports 失败\")?;",
+              "bindings::MusicPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)\n            .map_err(|error| anyhow!(\"注册音栖岛插件 Host imports 失败: {error}\"))?;\n        wasmtime_wasi::p2::add_to_linker_async(&mut linker)\n            .map_err(|error| anyhow!(\"注册最小 WASI P2 imports 失败: {error}\"))?;",
+          )
+          replace(
+              "src/plugin/component/wasmtime.rs",
+              "store\n            .set_fuel(self.policy.fuel_per_call)\n            .context(\"设置插件 Store fuel 失败\")?;",
+              "store\n            .set_fuel(self.policy.fuel_per_call)\n            .map_err(|error| anyhow!(\"设置插件 Store fuel 失败: {error}\"))?;",
+          )
+          PY
+
+      - name: Format with Rust 1.95
+        run: cargo +1.95.0 fmt --all
+
+      - name: Verify formatting
+        run: cargo +1.95.0 fmt --all -- --check
+
+      - name: Check root workspace
+        id: check
+        continue-on-error: true
+        run: cargo +1.95.0 check --locked
+
+      - name: Upload repaired source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-repair-source
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            src/ui/components/input.rs
+            src/ui/components/slider.rs
+            src/ui/plugin/command_palette.rs
+            src/ui/plugin/context_menu.rs
+            src/ui/plugin/extensions.rs
+            src/ui/plugin/navigation.rs
+            src/ui/plugin/settings.rs
+            src/ui/plugin/service_accounts.rs
+            src/ui/plugin/service_auth.rs
+            src/ui/route.rs
+            src/plugin/application/assets.rs
+            src/plugin/application/streaming.rs
+            src/plugin/component/wasmtime.rs
+
+      - name: Propagate check failure
+        if: steps.check.outcome == 'failure'
+        shell: bash
+        run: exit 1
