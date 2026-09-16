@@ -130,6 +130,24 @@ impl PluginStreamCache {
             &route.provider_id,
         ))?;
 
+        // Reserve the worst-case temp bytes before touching disk. The identity sidecar is included
+        // so two maximum-size concurrent materializations cannot both consume the same cache headroom.
+        // The blocking writer retains a clone of this reservation, which keeps cancellation safe even
+        // after the async materialize future has been dropped.
+        let reservation_root = self.root.clone();
+        let reservation_bytes = self
+            .max_stream_bytes
+            .saturating_add(MAX_CACHE_IDENTITY_BYTES as u64);
+        let disk_reservation = tokio::task::spawn_blocking(move || {
+            stream_cache_gc::reserve_download_capacity(
+                &reservation_root,
+                reservation_bytes,
+                stream_cache_gc::PluginStreamCacheGcPolicy::default(),
+            )
+        })
+        .await
+        .context("等待插件 stream cache 磁盘容量预留失败")??;
+
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
         let temp_dir = self.root.join(format!(
             ".{locator}.tmp-{}-{nonce}",
@@ -146,7 +164,9 @@ impl PluginStreamCache {
         let writer_audio_name = audio_name.clone();
         let writer_max_stream_bytes = self.max_stream_bytes;
         let writer_completed_flag = writer_completed.clone();
+        let writer_disk_reservation = disk_reservation.clone();
         let writer = tokio::task::spawn_blocking(move || {
+            let _disk_reservation = writer_disk_reservation;
             write_temp_entry(
                 &writer_temp_dir,
                 &writer_identity,
@@ -230,12 +250,16 @@ impl PluginStreamCache {
         .await
         .context("等待插件 stream cache 提交任务失败")??;
 
-        // Pin before capacity GC so the file just handed to the decoder cannot be removed between
-        // materialization and open(). Older unpinned buckets remain eligible for eviction.
+        // Pin before releasing the temp-download reservation so no GC can remove the new bucket
+        // between atomic commit and handoff to the decoder.
         let materialized = self.pin_entry(committed)?;
+        drop(disk_reservation);
+
+        // Preserve headroom already promised to any other concurrent materialization. A plain GC
+        // against the full 8 GiB budget here could otherwise consume bytes reserved by its peer.
         let gc_root = self.root.clone();
         let gc_stats = tokio::task::spawn_blocking(move || {
-            stream_cache_gc::prune(
+            stream_cache_gc::prune_preserving_reservations(
                 &gc_root,
                 stream_cache_gc::PluginStreamCacheGcPolicy::default(),
             )
@@ -413,7 +437,10 @@ async fn download_stream(
         }
 
         if response.status != 206 {
-            bail!("插件 stream range 请求返回非 206 状态: {}", response.status);
+            bail!(
+                "插件 stream range 请求返回非 206 状态: {}",
+                response.status
+            );
         }
 
         let content_range = parse_content_range(&response)?;
@@ -607,7 +634,8 @@ fn push_text(output: &mut Vec<u8>, value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() || value.len() > 8 * 1024 || value.contains('\0') {
         bail!("插件 stream cache {field} 非法");
     }
-    let length = u32::try_from(value.len()).map_err(|_| anyhow!("插件 stream cache 文本过长"))?;
+    let length =
+        u32::try_from(value.len()).map_err(|_| anyhow!("插件 stream cache 文本过长"))?;
     output.extend_from_slice(&length.to_le_bytes());
     output.extend_from_slice(value.as_bytes());
     Ok(())
@@ -715,7 +743,9 @@ fn write_temp_entry(
         if written == 0 {
             bail!("插件 stream cache 不接受空音频");
         }
-        audio.sync_all().context("同步插件 stream cache 音频失败")?;
+        audio
+            .sync_all()
+            .context("同步插件 stream cache 音频失败")?;
         drop(audio);
 
         let identity_path = temp_dir.join("identity.bin");
@@ -756,7 +786,10 @@ fn cached_entry(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("读取插件 stream cache bucket metadata 失败: {}", bucket.display())
+                format!(
+                    "读取插件 stream cache bucket metadata 失败: {}",
+                    bucket.display()
+                )
             });
         }
     };
