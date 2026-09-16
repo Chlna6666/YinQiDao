@@ -27,12 +27,15 @@ use super::{
 const MAX_REMOTE_TRACK_ARTISTS: usize = 128;
 const MAX_REMOTE_TRACK_TEXT_BYTES: usize = 32 * 1024;
 const MAX_REMOTE_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
+const MAX_REMOTE_TRACKS_PER_PROCESS: TrackId = 65_536;
 const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
 const PACKAGE_REVISION_DOMAIN: &[u8] = b"YINQIDAO-PLUGIN-PACKAGE-REVISION-V1\0";
 
 // Local Library ids are SQLite INTEGER PRIMARY KEY AUTOINCREMENT values and therefore occupy the
 // positive namespace. Remote materializations are process-local only and use negative ids so they
 // can enter the existing player queue without being persisted or confused with a Library row.
+// Until the blocking engine registry has an explicit unregister path, cap the negative namespace
+// per process so a malicious/buggy UI cannot grow detached Track metadata without bound.
 static NEXT_REMOTE_TRACK_ID: AtomicI64 = AtomicI64::new(-1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -579,15 +582,25 @@ fn hash_text(hasher: &mut Md5, value: &str) {
     hasher.update(value.as_bytes());
 }
 
+fn next_remote_track_cursor(current: TrackId) -> Result<TrackId> {
+    if current >= 0 || current < -MAX_REMOTE_TRACKS_PER_PROCESS {
+        bail!(
+            "远程临时 TrackId 已达到单进程上限 {}，请重启应用后继续",
+            MAX_REMOTE_TRACKS_PER_PROCESS
+        );
+    }
+    current
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("远程临时 TrackId 命名空间已耗尽"))
+}
+
 fn allocate_remote_track_id() -> Result<TrackId> {
     let mut current = NEXT_REMOTE_TRACK_ID.load(Ordering::Relaxed);
     loop {
-        if current >= 0 || current == i64::MIN {
-            bail!("远程临时 TrackId 命名空间已耗尽");
-        }
+        let next = next_remote_track_cursor(current)?;
         match NEXT_REMOTE_TRACK_ID.compare_exchange_weak(
             current,
-            current - 1,
+            next,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
@@ -658,6 +671,17 @@ mod tests {
         assert!(first < 0);
         assert!(second < 0);
         assert!(second < first);
+    }
+
+    #[test]
+    fn remote_track_id_cursor_enforces_process_budget() {
+        assert_eq!(next_remote_track_cursor(-1).expect("first next"), -2);
+        assert_eq!(
+            next_remote_track_cursor(-MAX_REMOTE_TRACKS_PER_PROCESS).expect("last allocation"),
+            -MAX_REMOTE_TRACKS_PER_PROCESS - 1
+        );
+        assert!(next_remote_track_cursor(-MAX_REMOTE_TRACKS_PER_PROCESS - 1).is_err());
+        assert!(next_remote_track_cursor(0).is_err());
     }
 
     #[test]
