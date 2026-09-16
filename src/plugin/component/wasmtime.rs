@@ -5,8 +5,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use wasmtime::component::{HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::component::{HasSelf, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use super::policy::PluginEnginePolicy;
@@ -69,9 +69,7 @@ impl wit_host::Host for PluginStoreData {
         let host_request = PluginHttpRequest {
             method: request.method,
             url: request.url,
-            headers: request
-                .headers
-                .into_iter()
+            headers: request.headers.into_iter()
                 .map(|header| KeyValue {
                     key: header.key,
                     value: header.value,
