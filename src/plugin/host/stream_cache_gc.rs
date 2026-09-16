@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
@@ -133,6 +133,12 @@ pub fn pin_materialized_path(
         bail!("插件 stream cache materialized path 不属于 Host cache root");
     }
 
+    // Hold the same mutex used by GC from the first filesystem validation through pin publication.
+    // Without this critical section GC could snapshot an unpinned bucket, then delete it after this
+    // function validated the path but before the pin reached the registry.
+    let mut pins = pinned_buckets()
+        .lock()
+        .map_err(|error| anyhow!("插件 stream cache pin registry 锁已损坏: {error}"))?;
     let metadata = fs::symlink_metadata(bucket).with_context(|| {
         format!(
             "读取插件 stream cache bucket metadata 失败: {}",
@@ -153,9 +159,6 @@ pub fn pin_materialized_path(
     }
 
     let bucket = bucket.to_path_buf();
-    let mut pins = pinned_buckets()
-        .lock()
-        .map_err(|error| anyhow!("插件 stream cache pin registry 锁已损坏: {error}"))?;
     *pins.entry(bucket.clone()).or_insert(0) += 1;
     drop(pins);
     Ok(Arc::new(PluginStreamCacheLease { bucket }))
@@ -251,9 +254,14 @@ pub fn prune_preserving_reservations(
 pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStreamCacheGcStats> {
     let policy = policy.normalized();
     ensure_plain_cache_root(root)?;
-    let pinned = pinned_snapshot()?;
+    // Keep the live pin registry locked for the whole scan/deletion transaction. Pin publication
+    // uses this same mutex, eliminating the stale-snapshot TOCTOU that could otherwise delete a
+    // bucket immediately after a decoder-facing materialization acquired its lease.
+    let pins = pinned_buckets()
+        .lock()
+        .map_err(|error| anyhow!("插件 stream cache pin registry 锁已损坏: {error}"))?;
     let mut stats = PluginStreamCacheGcStats {
-        pinned_buckets: pinned.len(),
+        pinned_buckets: pins.values().filter(|count| **count > 0).count(),
         ..PluginStreamCacheGcStats::default()
     };
     let mut buckets = Vec::new();
@@ -285,7 +293,7 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
         }
 
         if is_temp_dir(&path) {
-            if !pinned.contains(&path)
+            if !pin_is_active(&pins, &path)
                 && path_age(&path).is_some_and(|age| age > policy.stale_temp_ttl)
             {
                 remove_direct_entry(&path, true)?;
@@ -300,14 +308,14 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
         }
 
         let Some(bucket) = inspect_bucket(&path)? else {
-            if !pinned.contains(&path) {
+            if !pin_is_active(&pins, &path) {
                 remove_direct_entry(&path, true)?;
                 stats.removed_invalid_entries += 1;
             }
             continue;
         };
         stats.cache_bytes_before = stats.cache_bytes_before.saturating_add(bucket.bytes);
-        if !pinned.contains(&path)
+        if !pin_is_active(&pins, &path)
             && bucket
                 .modified
                 .elapsed()
@@ -334,7 +342,7 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
             if cache_bytes <= policy.target_cache_bytes {
                 break;
             }
-            if pinned.contains(&bucket.path) {
+            if pin_is_active(&pins, &bucket.path) {
                 continue;
             }
             remove_direct_entry(&bucket.path, true)?;
@@ -443,14 +451,8 @@ fn inspect_bucket(path: &Path) -> Result<Option<CacheBucket>> {
     }))
 }
 
-fn pinned_snapshot() -> Result<HashSet<PathBuf>> {
-    let pins = pinned_buckets()
-        .lock()
-        .map_err(|error| anyhow!("插件 stream cache pin registry 锁已损坏: {error}"))?;
-    Ok(pins
-        .iter()
-        .filter_map(|(path, count)| (*count > 0).then_some(path.clone()))
-        .collect())
+fn pin_is_active(pins: &HashMap<PathBuf, usize>, path: &Path) -> bool {
+    pins.get(path).is_some_and(|count| *count > 0)
 }
 
 fn is_locator_bucket(path: &Path) -> bool {
