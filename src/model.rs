@@ -1,4 +1,6 @@
 use std::{
+    any::Any,
+    fmt,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{Arc, OnceLock},
@@ -8,13 +10,37 @@ use serde::{Deserialize, Serialize};
 
 pub type TrackId = i64;
 
+/// Opaque lifetime guard attached to a Track without teaching the player about plugin/cache types.
+///
+/// The contained value is never inspected by the audio path. Its only responsibility is to stay
+/// alive across Track clones (engine registry, snapshots and preload requests) and be dropped when
+/// the final Track handle disappears. Do not attach values whose Drop implementation is intended to
+/// run from a realtime callback; Track ownership changes happen on control/decoder/UI paths.
+#[derive(Clone)]
+struct TrackPlaybackBacking {
+    _inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl fmt::Debug for TrackPlaybackBacking {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrackPlaybackBacking")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Cheap-to-clone handle to immutable-by-default track metadata.
 ///
 /// Playback snapshots, preload requests, engine registration, enrichment tasks and UI projections
 /// frequently retain the same logical track concurrently. Keeping the payload behind `Arc` makes
 /// those clones O(1); rare metadata edits use `DerefMut`/`Arc::make_mut` for copy-on-write updates.
+/// An optional opaque backing guard follows the handle across clones without leaking plugin/cache
+/// implementation types into the audio model.
 #[derive(Clone, Debug)]
-pub struct Track(Arc<TrackData>);
+pub struct Track {
+    data: Arc<TrackData>,
+    playback_backing: Option<TrackPlaybackBacking>,
+}
 
 #[derive(Clone, Debug)]
 pub struct TrackData {
@@ -34,12 +60,34 @@ pub struct TrackData {
 
 impl Track {
     pub fn new(data: TrackData) -> Self {
-        Self(Arc::new(data))
+        Self {
+            data: Arc::new(data),
+            playback_backing: None,
+        }
+    }
+
+    /// Attach an opaque non-realtime resource lifetime to this track. The player never downcasts or
+    /// invokes the value; clones merely retain its Arc. Plugin streaming uses this to pin a Host
+    /// cache lease for as long as any decoder/preloader/snapshot Track handle can still reference the
+    /// materialized file.
+    pub(crate) fn with_playback_backing<T>(mut self, backing: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        self.playback_backing = Some(TrackPlaybackBacking {
+            _inner: Arc::new(backing),
+        });
+        self
     }
 
     #[inline]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+
+    #[cfg(test)]
+    fn has_playback_backing(&self) -> bool {
+        self.playback_backing.is_some()
     }
 }
 
@@ -47,13 +95,13 @@ impl Deref for Track {
     type Target = TrackData;
 
     fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
+        self.data.as_ref()
     }
 }
 
 impl DerefMut for Track {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.0)
+        Arc::make_mut(&mut self.data)
     }
 }
 
@@ -156,7 +204,7 @@ pub struct SpatialSettings {
     pub crossfeed: f32,
     /// Early-room reflection size/amount.
     pub room_size: f32,
-    /// Static externalization/envelopment amount independent of trajectory motion.
+    /// Static externalization/envelopment amount independent from trajectory motion.
     pub immersive_3d: f32,
     /// Internal virtual speaker bed synthesized from mono/stereo programme only.
     pub virtual_bed: VirtualBedMode,
@@ -328,6 +376,8 @@ impl Default for PlayerSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     fn track() -> Track {
@@ -362,6 +412,29 @@ mod tests {
         assert_eq!(original.duration_ms, 180_000);
         assert_eq!(edited.title, "Edited");
         assert_eq!(edited.duration_ms, 181_000);
+    }
+
+    #[test]
+    fn playback_backing_lives_until_last_track_clone_drops() {
+        #[derive(Debug)]
+        struct DropProbe(Arc<AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let backed = track().with_playback_backing(DropProbe(drops.clone()));
+        let cloned = backed.clone();
+
+        assert!(backed.has_playback_backing());
+        assert!(cloned.has_playback_backing());
+        drop(backed);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        drop(cloned);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 
     #[test]
