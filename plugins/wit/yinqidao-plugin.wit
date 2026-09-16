@@ -191,6 +191,65 @@ interface types {
         editable: bool,
     }
 
+    enum media-collection-kind {
+        playlist,
+        album,
+        artist,
+        video,
+    }
+
+    record media-collection-ref {
+        provider-id: string,
+        kind: media-collection-kind,
+        source-id: string,
+    }
+
+    /// Generic saved/recommended remote collection. Provider-specific protocol details never cross
+    /// this boundary; playlists, albums, artists and videos share one typed Host-facing model.
+    record media-collection {
+        source: media-collection-ref,
+        title: string,
+        subtitle: option<string>,
+        artwork-url: option<string>,
+        item-count: option<u32>,
+        editable: bool,
+        saved: option<bool>,
+    }
+
+    enum collection-recommendation-surface {
+        home,
+        daily,
+        discovery,
+        similar,
+    }
+
+    record collection-recommendation-request {
+        surface: collection-recommendation-surface,
+        kind: media-collection-kind,
+        seed: option<media-collection-ref>,
+        limit: u16,
+        exclude: list<media-collection-ref>,
+    }
+
+    record collection-recommendation-item {
+        collection: media-collection,
+        score: option<f32>,
+        reason: option<string>,
+    }
+
+    record user-profile {
+        provider-id: string,
+        account-id: string,
+        display-name: string,
+        avatar-url: option<string>,
+        bio: option<string>,
+        level: option<u32>,
+        follower-count: option<u32>,
+        following-count: option<u32>,
+        playlist-count: option<u32>,
+        listen-count: option<u64>,
+    }
+
     enum playback-signal-kind {
         started,
         completed,
@@ -262,8 +321,13 @@ interface provider {
         auth-challenge,
         auth-method,
         auth-poll,
+        collection-recommendation-item,
+        collection-recommendation-request,
         key-value,
         lyric-document,
+        media-collection,
+        media-collection-kind,
+        media-collection-ref,
         playback-signal,
         playlist,
         plugin-manifest,
@@ -276,6 +340,7 @@ interface provider {
         stream-descriptor,
         stream-request,
         track-query,
+        user-profile,
     };
 
     manifest: func() -> plugin-manifest;
@@ -300,6 +365,12 @@ interface provider {
     playlist-create: func(provider-id: string, account-id: string, name: string) -> result<playlist, string>;
     playlist-add: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
     playlist-remove: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
+
+    /// Generic remote-library collection access. This deliberately avoids provider-specific names.
+    media-collections: func(provider-id: string, account-id: string, kind: media-collection-kind, offset: u32, limit: u16) -> result<list<media-collection>, string>;
+    set-media-saved: func(provider-id: string, account-id: string, collection: media-collection-ref, saved: bool) -> result<bool, string>;
+    collection-recommendations: func(provider-id: string, account-id: string, request: collection-recommendation-request) -> result<list<collection-recommendation-item>, string>;
+    user-profile: func(provider-id: string, account-id: string) -> result<user-profile, string>;
 
     cloud-library: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
     liked-tracks: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
