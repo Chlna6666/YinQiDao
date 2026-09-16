@@ -14,7 +14,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::model::{
-    EqSettings, PlaybackState, PlayerSnapshot, SpatialSettings, Track, TrackData, TrackId,
+    EqSettings, PlaybackState, PlayerSnapshot, RepeatMode, SpatialSettings, Track, TrackData, TrackId,
 };
 
 use super::engine::{
@@ -766,6 +766,48 @@ fn append_queue_override(
     *queue_override = Some(Arc::new(queue));
 }
 
+fn transient_track_is_referenced(current: &PlayerSnapshot, track_id: TrackId) -> bool {
+    if !matches!(
+        current.state,
+        PlaybackState::Loading
+            | PlaybackState::Playing
+            | PlaybackState::Paused
+            | PlaybackState::Buffering
+    ) {
+        return false;
+    }
+
+    let current_id = current.current_track.as_ref().map(|track| track.id);
+    if current_id == Some(track_id) {
+        return true;
+    }
+    if !current.queue.contains(&track_id) {
+        return false;
+    }
+    if current.shuffle || current.repeat == RepeatMode::All {
+        return true;
+    }
+    if current.repeat == RepeatMode::One {
+        return false;
+    }
+
+    // In the normal linear Repeat::Off path, only the current item and entries after it are eligible
+    // for automatic future playback. Past queue entries get the grace period and are then released,
+    // preventing a long remote playlist from pinning every already-played cache bucket forever.
+    let Some(current_id) = current_id else {
+        return true;
+    };
+    let Some(current_index) = current.queue.iter().position(|candidate| *candidate == current_id)
+    else {
+        return true;
+    };
+    current
+        .queue
+        .iter()
+        .position(|candidate| *candidate == track_id)
+        .is_some_and(|candidate_index| candidate_index > current_index)
+}
+
 fn reconcile_transient_tracks(
     current: &mut PlayerSnapshot,
     current_track_override: &mut Option<Track>,
@@ -773,20 +815,11 @@ fn reconcile_transient_tracks(
     now: Instant,
 ) -> usize {
     let current_id = current.current_track.as_ref().map(|track| track.id);
-    let transport_active = matches!(
-        current.state,
-        PlaybackState::Loading
-            | PlaybackState::Playing
-            | PlaybackState::Paused
-            | PlaybackState::Buffering
-    );
     let mut released_current: Option<Track> = None;
     let mut released_ids = Vec::new();
 
     transient_tracks.retain(|track_id, state| {
-        let referenced = transport_active
-            && (current_id == Some(*track_id) || current.queue.contains(track_id));
-        if referenced {
+        if transient_track_is_referenced(current, *track_id) {
             state.observed_in_transport = true;
             state.unreferenced_since = None;
             return true;
@@ -875,9 +908,11 @@ fn register_tracks_for_bridge(
     for track in tracks {
         if track.id < 0 {
             if let Some(state) = transient_tracks.get_mut(&track.id) {
-                state.track = track.clone();
+                // Metadata refreshes must not replace the Host-owned cache/provenance backing. Copy
+                // only TrackData through DerefMut, preserving the existing playback_backing field.
+                *state.track = (*track).clone();
                 if current_id == Some(track.id) {
-                    *current_track_override = Some(track.clone());
+                    *current_track_override = Some(state.track.clone());
                 }
             } else if current_id == Some(track.id) {
                 *current_track_override = Some(detached_playback_track(&track));
@@ -1321,6 +1356,51 @@ mod tests {
         );
         assert!(transient_tracks.contains_key(&track.id));
         assert_eq!(current.current_track.as_ref().map(|track| track.id), Some(-2));
+    }
+
+    #[test]
+    fn past_linear_queue_entries_become_releasable_while_future_entries_stay_pinned() {
+        let previous = transient_test_track("previous", -10);
+        let current_track = transient_test_track("current", -11);
+        let next = transient_test_track("next", -12);
+        let expired = Instant::now() - TRANSIENT_TRACK_RELEASE_GRACE;
+        let mut transient_tracks = HashMap::from([
+            (
+                previous.id,
+                TransientTrackState {
+                    track: previous.clone(),
+                    observed_in_transport: true,
+                    unreferenced_since: Some(expired),
+                },
+            ),
+            (
+                current_track.id,
+                TransientTrackState::playing(current_track.clone()),
+            ),
+            (
+                next.id,
+                TransientTrackState::playing(next.clone()),
+            ),
+        ]);
+        let mut snapshot = PlayerSnapshot {
+            state: PlaybackState::Playing,
+            current_track: Some(detached_playback_track(&current_track)),
+            queue: Arc::new(vec![previous.id, current_track.id, next.id]),
+            repeat: RepeatMode::Off,
+            shuffle: false,
+            ..PlayerSnapshot::default()
+        };
+        let mut current_track_override = None;
+        let released = reconcile_transient_tracks(
+            &mut snapshot,
+            &mut current_track_override,
+            &mut transient_tracks,
+            Instant::now(),
+        );
+        assert_eq!(released, 1);
+        assert!(!transient_tracks.contains_key(&previous.id));
+        assert!(transient_tracks.contains_key(&current_track.id));
+        assert!(transient_tracks.contains_key(&next.id));
     }
 
     #[test]
