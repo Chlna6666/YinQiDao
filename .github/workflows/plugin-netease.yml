@@ -64,11 +64,17 @@ jobs:
       - name: Run native helper tests
         run: cargo test --manifest-path plugins/netease/Cargo.toml --locked
 
+      - name: Clippy handwritten native code
+        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --locked --all-targets -- -D warnings
+
       - name: Check WASI Component guest
         run: cargo check --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked
 
-      - name: Run Clippy for WASI Component guest
-        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked -- -D warnings
+      # wit-bindgen's generated canonical ABI necessarily contains unsafe/export_name/link_section.
+      # Keep handwritten decoder/API code strict in the native Clippy step above; only the WASI
+      # generated ABI invocation receives this compiler-lint exception.
+      - name: Clippy WASI Component guest
+        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked -- -D warnings -A unsafe-code
 
       - name: Build release Component
         run: cargo build --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --release --locked
