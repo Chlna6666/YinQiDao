@@ -14,9 +14,14 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_STALE_TEMP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 static PINNED_BUCKETS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+static RESERVED_BYTES: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 
 fn pinned_buckets() -> &'static Mutex<HashMap<PathBuf, usize>> {
     PINNED_BUCKETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn reserved_bytes() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    RESERVED_BYTES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,7 +45,6 @@ impl Default for PluginStreamCacheGcPolicy {
 
 impl PluginStreamCacheGcPolicy {
     fn normalized(mut self) -> Self {
-        self.max_cache_bytes = self.max_cache_bytes.max(1);
         self.target_cache_bytes = self.target_cache_bytes.min(self.max_cache_bytes);
         self
     }
@@ -90,7 +94,38 @@ impl Drop for PluginStreamCacheLease {
     }
 }
 
-pub fn pin_materialized_path(root: &Path, materialized_path: &Path) -> Result<Arc<PluginStreamCacheLease>> {
+/// In-process reservation for the worst-case bytes one active materialization may still create.
+///
+/// The reservation is intentionally held by both the async materializer and its blocking writer.
+/// If the async future is cancelled, the writer therefore keeps the reservation until it has
+/// observed the closed channel and removed its temp directory. No reservation bookkeeping runs on
+/// the realtime audio callback.
+#[derive(Debug)]
+pub struct PluginStreamCacheReservation {
+    root: PathBuf,
+    bytes: u64,
+}
+
+impl Drop for PluginStreamCacheReservation {
+    fn drop(&mut self) {
+        let Ok(mut reserved) = reserved_bytes().lock() else {
+            return;
+        };
+        let Some(current) = reserved.get_mut(&self.root) else {
+            return;
+        };
+        if *current <= self.bytes {
+            reserved.remove(&self.root);
+        } else {
+            *current -= self.bytes;
+        }
+    }
+}
+
+pub fn pin_materialized_path(
+    root: &Path,
+    materialized_path: &Path,
+) -> Result<Arc<PluginStreamCacheLease>> {
     let bucket = materialized_path
         .parent()
         .ok_or_else(|| anyhow!("插件 stream cache materialized path 缺少 bucket"))?;
@@ -99,7 +134,10 @@ pub fn pin_materialized_path(root: &Path, materialized_path: &Path) -> Result<Ar
     }
 
     let metadata = fs::symlink_metadata(bucket).with_context(|| {
-        format!("读取插件 stream cache bucket metadata 失败: {}", bucket.display())
+        format!(
+            "读取插件 stream cache bucket metadata 失败: {}",
+            bucket.display()
+        )
     })?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         bail!("插件 stream cache bucket 不是普通目录");
@@ -123,6 +161,93 @@ pub fn pin_materialized_path(root: &Path, materialized_path: &Path) -> Result<Ar
     Ok(Arc::new(PluginStreamCacheLease { bucket }))
 }
 
+/// Reserve worst-case disk headroom for one active stream download.
+///
+/// Reservation and the pre-download GC run while holding the same root-scoped accounting lock, so
+/// concurrent materializations cannot both observe the same free capacity. Finalized cache bytes
+/// plus every active reservation are kept at or below `max_cache_bytes`. If pinned playback buckets
+/// prevent enough eviction, the new download is rejected before a temp audio file is created.
+pub fn reserve_download_capacity(
+    root: &Path,
+    bytes: u64,
+    policy: PluginStreamCacheGcPolicy,
+) -> Result<Arc<PluginStreamCacheReservation>> {
+    if bytes == 0 {
+        bail!("插件 stream cache 磁盘预留必须大于 0 bytes");
+    }
+    let policy = policy.normalized();
+    if bytes > policy.max_cache_bytes {
+        bail!(
+            "插件 stream cache 单次预留 {} bytes 超过总预算 {} bytes",
+            bytes,
+            policy.max_cache_bytes
+        );
+    }
+
+    let root = root.to_path_buf();
+    let mut reserved = reserved_bytes()
+        .lock()
+        .map_err(|error| anyhow!("插件 stream cache reservation registry 锁已损坏: {error}"))?;
+    let current_reserved = reserved.get(&root).copied().unwrap_or(0);
+    let total_reserved = current_reserved
+        .checked_add(bytes)
+        .ok_or_else(|| anyhow!("插件 stream cache reservation 长度溢出"))?;
+    if total_reserved > policy.max_cache_bytes {
+        bail!(
+            "插件 stream cache 活跃下载预留超过总预算: reserved={total_reserved}, max={}",
+            policy.max_cache_bytes
+        );
+    }
+
+    let finalized_limit = policy.max_cache_bytes - total_reserved;
+    let stats = prune(
+        &root,
+        PluginStreamCacheGcPolicy {
+            max_cache_bytes: finalized_limit,
+            target_cache_bytes: policy.target_cache_bytes.min(finalized_limit),
+            cache_ttl: policy.cache_ttl,
+            stale_temp_ttl: policy.stale_temp_ttl,
+        },
+    )?;
+    if stats.cache_bytes_after > finalized_limit {
+        bail!(
+            "插件 stream cache 无法为下载预留磁盘空间: finalized={}, limit={}, pinned={}",
+            stats.cache_bytes_after,
+            finalized_limit,
+            stats.pinned_buckets
+        );
+    }
+
+    reserved.insert(root.clone(), total_reserved);
+    Ok(Arc::new(PluginStreamCacheReservation { root, bytes }))
+}
+
+/// Run normal GC without consuming capacity already promised to active temp downloads.
+///
+/// Callers should release their own reservation after their temp directory has been atomically
+/// committed, then use this helper for post-commit cleanup. Reservations belonging to other active
+/// downloads continue to reduce the finalized-cache budget during the scan.
+pub fn prune_preserving_reservations(
+    root: &Path,
+    policy: PluginStreamCacheGcPolicy,
+) -> Result<PluginStreamCacheGcStats> {
+    let policy = policy.normalized();
+    let reserved = reserved_bytes()
+        .lock()
+        .map_err(|error| anyhow!("插件 stream cache reservation registry 锁已损坏: {error}"))?;
+    let active_reserved = reserved.get(root).copied().unwrap_or(0);
+    let finalized_limit = policy.max_cache_bytes.saturating_sub(active_reserved);
+    prune(
+        root,
+        PluginStreamCacheGcPolicy {
+            max_cache_bytes: finalized_limit,
+            target_cache_bytes: policy.target_cache_bytes.min(finalized_limit),
+            cache_ttl: policy.cache_ttl,
+            stale_temp_ttl: policy.stale_temp_ttl,
+        },
+    )
+}
+
 pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStreamCacheGcStats> {
     let policy = policy.normalized();
     ensure_plain_cache_root(root)?;
@@ -138,9 +263,12 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
     {
         let entry = entry.context("读取插件 stream cache 目录项失败")?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("读取插件 stream cache 目录项类型失败: {}", path.display()))?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "读取插件 stream cache 目录项类型失败: {}",
+                path.display()
+            )
+        })?;
 
         if file_type.is_symlink() {
             remove_direct_entry(&path, false)?;
@@ -157,7 +285,9 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
         }
 
         if is_temp_dir(&path) {
-            if !pinned.contains(&path) && path_age(&path).is_some_and(|age| age > policy.stale_temp_ttl) {
+            if !pinned.contains(&path)
+                && path_age(&path).is_some_and(|age| age > policy.stale_temp_ttl)
+            {
                 remove_direct_entry(&path, true)?;
                 stats.removed_stale_temp_dirs += 1;
             }
@@ -245,7 +375,10 @@ fn ensure_plain_cache_root(root: &Path) -> Result<()> {
         }
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("读取插件 stream cache root metadata 失败: {}", root.display())
+                format!(
+                    "读取插件 stream cache root metadata 失败: {}",
+                    root.display()
+                )
             });
         }
     }
@@ -255,7 +388,12 @@ fn ensure_plain_cache_root(root: &Path) -> Result<()> {
 fn inspect_bucket(path: &Path) -> Result<Option<CacheBucket>> {
     let mut bytes = 0u64;
     let mut modified = fs::symlink_metadata(path)
-        .with_context(|| format!("读取插件 stream cache bucket metadata 失败: {}", path.display()))?
+        .with_context(|| {
+            format!(
+                "读取插件 stream cache bucket metadata 失败: {}",
+                path.display()
+            )
+        })?
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut regular_files = 0usize;
@@ -268,13 +406,19 @@ fn inspect_bucket(path: &Path) -> Result<Option<CacheBucket>> {
         let child = child.context("读取插件 stream cache bucket 目录项失败")?;
         let child_path = child.path();
         let file_type = child.file_type().with_context(|| {
-            format!("读取插件 stream cache bucket 项类型失败: {}", child_path.display())
+            format!(
+                "读取插件 stream cache bucket 项类型失败: {}",
+                child_path.display()
+            )
         })?;
         if file_type.is_symlink() || !file_type.is_file() {
             return Ok(None);
         }
         let metadata = child.metadata().with_context(|| {
-            format!("读取插件 stream cache 文件 metadata 失败: {}", child_path.display())
+            format!(
+                "读取插件 stream cache 文件 metadata 失败: {}",
+                child_path.display()
+            )
         })?;
         bytes = bytes.saturating_add(metadata.len());
         modified = modified.max(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
@@ -372,9 +516,15 @@ mod tests {
 
     #[test]
     fn locator_names_are_strict_lower_hex() {
-        assert!(is_locator_bucket(Path::new("0123456789abcdef0123456789abcdef")));
-        assert!(!is_locator_bucket(Path::new("0123456789ABCDEF0123456789ABCDEF")));
-        assert!(!is_locator_bucket(Path::new("../0123456789abcdef0123456789abcdef")));
+        assert!(is_locator_bucket(Path::new(
+            "0123456789abcdef0123456789abcdef"
+        )));
+        assert!(!is_locator_bucket(Path::new(
+            "0123456789ABCDEF0123456789ABCDEF"
+        )));
+        assert!(!is_locator_bucket(Path::new(
+            "../0123456789abcdef0123456789abcdef"
+        )));
         assert!(!is_locator_bucket(Path::new("short")));
     }
 
@@ -385,7 +535,8 @@ mod tests {
         let pinned_bucket = create_bucket(&root, "11111111111111111111111111111111", 4);
         let _other_a = create_bucket(&root, "22222222222222222222222222222222", 4);
         let _other_b = create_bucket(&root, "33333333333333333333333333333333", 4);
-        let lease = pin_materialized_path(&root, &pinned_bucket.join("audio.flac")).expect("lease");
+        let lease =
+            pin_materialized_path(&root, &pinned_bucket.join("audio.flac")).expect("lease");
 
         let stats = prune(
             &root,
@@ -403,6 +554,48 @@ mod tests {
         assert!(stats.cache_bytes_after <= 5);
 
         drop(lease);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn download_reservations_cannot_overcommit_cache_budget() {
+        let root = temp_root("reserve");
+        fs::create_dir_all(&root).expect("root");
+        let policy = PluginStreamCacheGcPolicy {
+            max_cache_bytes: 10,
+            target_cache_bytes: 10,
+            cache_ttl: Duration::from_secs(60 * 60),
+            stale_temp_ttl: Duration::from_secs(60 * 60),
+        };
+
+        let first = reserve_download_capacity(&root, 6, policy).expect("first reservation");
+        assert!(reserve_download_capacity(&root, 5, policy).is_err());
+        drop(first);
+        let second = reserve_download_capacity(&root, 10, policy).expect("full reservation");
+        drop(second);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pinned_cache_can_block_a_new_download_reservation() {
+        let root = temp_root("reserve-pinned");
+        fs::create_dir_all(&root).expect("root");
+        let bucket = create_bucket(&root, "44444444444444444444444444444444", 8);
+        let lease = pin_materialized_path(&root, &bucket.join("audio.flac")).expect("lease");
+        let policy = PluginStreamCacheGcPolicy {
+            max_cache_bytes: 12,
+            target_cache_bytes: 12,
+            cache_ttl: Duration::from_secs(60 * 60),
+            stale_temp_ttl: Duration::from_secs(60 * 60),
+        };
+
+        assert!(reserve_download_capacity(&root, 4, policy).is_err());
+        drop(lease);
+        let reservation = reserve_download_capacity(&root, 4, policy).expect("reservation");
+        assert!(!bucket.exists());
+        drop(reservation);
+
         let _ = fs::remove_dir_all(&root);
     }
 
