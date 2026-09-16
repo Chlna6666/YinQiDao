@@ -314,9 +314,12 @@ fn is_followable_redirect(status: u16) -> bool {
 }
 
 fn parse_method(value: &str, limits: &PluginHttpLimits) -> Result<Method> {
+    if value.len() > limits.max_method_bytes || value.contains('\0') {
+        bail!("插件 HTTP method 超过大小限制或包含 NUL");
+    }
     let value = value.trim();
-    if value.is_empty() || value.len() > limits.max_method_bytes || value.contains('\0') {
-        bail!("插件 HTTP method 为空、超过大小限制或包含 NUL");
+    if value.is_empty() {
+        bail!("插件 HTTP method 不能为空");
     }
     let method = Method::from_bytes(value.as_bytes()).context("插件 HTTP method 非法")?;
     if method == Method::CONNECT || method == Method::TRACE {
@@ -611,6 +614,7 @@ mod tests {
         assert!(parse_method("GET", &limits).is_ok());
         assert!(parse_request_url("https://api.example.com/v1", &limits).is_ok());
         assert!(parse_method(&"X".repeat(limits.max_method_bytes + 1), &limits).is_err());
+        assert!(parse_method(&format!("{}GET", " ".repeat(limits.max_method_bytes)), &limits).is_err());
         assert!(parse_request_url(&format!("https://example.com/{}", "x".repeat(limits.max_url_bytes)), &limits).is_err());
         assert!(parse_request_url("https://example.com/bad\0url", &limits).is_err());
     }
