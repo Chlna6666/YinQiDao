@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     f32::consts::FRAC_PI_2,
     sync::{
         Arc, Mutex, RwLock,
@@ -12,7 +13,9 @@ use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::model::{EqSettings, PlaybackState, PlayerSnapshot, SpatialSettings, Track};
+use crate::model::{
+    EqSettings, PlaybackState, PlayerSnapshot, SpatialSettings, Track, TrackData, TrackId,
+};
 
 use super::engine::{
     AudioEngine as BlockingAudioEngine, OutputDeviceInfo, PlayerCommand, PlayerEvent,
@@ -22,6 +25,11 @@ const REQUEST_QUEUE_CAPACITY: usize = 128;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
 const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(120);
 const TRANSPORT_FADE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+const TRANSIENT_TRACK_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// The blocking player currently caps crossfade/fade transitions at 12 seconds. Keep the Host-owned
+// playback backing for a few extra seconds after transport release so a detached preloader/crossfade
+// decoder cannot race cache GC. This is control-plane state; the realtime callback never touches it.
+const TRANSIENT_TRACK_RELEASE_GRACE: Duration = Duration::from_secs(15);
 const NO_STATE_OVERRIDE: u8 = u8::MAX;
 const NO_POSITION_OVERRIDE: u64 = u64::MAX;
 const SEEK_ACK_TOLERANCE_MS: u64 = 50;
@@ -48,7 +56,26 @@ pub struct AudioEngine {
 enum EngineRequest {
     Command(PlayerCommand),
     RegisterTracks(Vec<Track>),
+    /// Register one process-local Track while retaining its opaque playback backing only in the
+    /// bridge control plane, then start it through the normal blocking player transport.
+    PlayTransientTrack(Track),
     Shutdown,
+}
+
+struct TransientTrackState {
+    track: Track,
+    observed_in_transport: bool,
+    unreferenced_since: Option<Instant>,
+}
+
+impl TransientTrackState {
+    fn playing(track: Track) -> Self {
+        Self {
+            track,
+            observed_in_transport: true,
+            unreferenced_since: None,
+        }
+    }
 }
 
 struct SnapshotCache {
@@ -273,6 +300,23 @@ fn tracks_equal(left: Option<&Track>, right: Option<&Track>) -> bool {
     }
 }
 
+fn detached_playback_track(track: &Track) -> Track {
+    Track::new(TrackData {
+        id: track.id,
+        path: track.path.clone(),
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        album: track.album.clone(),
+        year: track.year,
+        genre: track.genre.clone(),
+        duration_ms: track.duration_ms,
+        codec: track.codec.clone(),
+        sample_rate: track.sample_rate,
+        channels: track.channels,
+        artwork_key: track.artwork_key.clone(),
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FadeCompletion {
     Pause,
@@ -460,6 +504,33 @@ impl AudioEngine {
             .try_send(EngineRequest::RegisterTracks(tracks));
     }
 
+    /// Start one process-local remote/materialized track without making the blocking engine registry
+    /// own its cache/provenance backing forever. Remote playback ids are allocated from the negative
+    /// namespace; positive Library ids must continue through the normal registration path.
+    pub(crate) fn try_play_transient_track(&self, track: Track) -> bool {
+        if track.id >= 0 {
+            return false;
+        }
+        let previous_position_override = self.snapshot.clear_optimistic_position_ms();
+        match self
+            .request_tx
+            .try_send(EngineRequest::PlayTransientTrack(track))
+        {
+            Ok(()) => {
+                self.snapshot
+                    .set_optimistic_state(PlaybackState::Loading);
+                true
+            }
+            Err(_) => {
+                self.snapshot.restore_optimistic_position_ms(
+                    NO_POSITION_OVERRIDE,
+                    previous_position_override,
+                );
+                false
+            }
+        }
+    }
+
     pub fn try_send(&self, command: PlayerCommand) -> bool {
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
@@ -544,23 +615,29 @@ fn run_bridge(
     initial_volume: f32,
 ) {
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
+    let mut last_transient_sweep = Instant::now();
     let mut transport_fade = TransportFade::new(initial_volume);
     // Online enrichment updates the registry without touching decoder transport. The blocking
     // engine's structural snapshot can therefore still carry the Track value captured when the
     // song started. Keep only the enriched current Track as an O(1) bridge-side overlay until the
     // transport switches to a different id; never mirror the full track registry here.
     let mut current_track_override: Option<Track> = None;
+    let mut queue_override: Option<Arc<Vec<TrackId>>> = None;
+    let mut transient_tracks = HashMap::<TrackId, TransientTrackState>::new();
 
     while running.load(Ordering::Acquire) {
         let mut refresh_snapshot = false;
         match request_rx.recv_timeout(Duration::from_millis(4)) {
             Ok(request) => {
-                if let Some(track) = registered_current_track(&engine, &request) {
-                    current_track_override = Some(track);
-                    refresh_snapshot = true;
-                }
                 refresh_snapshot |= request_refreshes_snapshot(&request);
-                if !apply_request(&engine, request, &mut transport_fade) {
+                if !apply_request(
+                    &engine,
+                    request,
+                    &mut transport_fade,
+                    &mut current_track_override,
+                    &mut queue_override,
+                    &mut transient_tracks,
+                ) {
                     break;
                 }
             }
@@ -572,12 +649,15 @@ fn run_bridge(
             let Ok(request) = request_rx.try_recv() else {
                 break;
             };
-            if let Some(track) = registered_current_track(&engine, &request) {
-                current_track_override = Some(track);
-                refresh_snapshot = true;
-            }
             refresh_snapshot |= request_refreshes_snapshot(&request);
-            if !apply_request(&engine, request, &mut transport_fade) {
+            if !apply_request(
+                &engine,
+                request,
+                &mut transport_fade,
+                &mut current_track_override,
+                &mut queue_override,
+                &mut transient_tracks,
+            ) {
                 running.store(false, Ordering::Release);
                 break;
             }
@@ -603,21 +683,151 @@ fn run_bridge(
         }
 
         if refresh_snapshot {
-            let mut current = engine.snapshot();
-            apply_current_track_override(&mut current, &mut current_track_override);
+            let (mut current, released) = bridge_snapshot(
+                &engine,
+                &mut current_track_override,
+                &mut queue_override,
+                &mut transient_tracks,
+                Instant::now(),
+            );
             current.volume = transport_fade.master_volume;
+            // SnapshotCache keeps two structural slots. When transient backing is released, overwrite
+            // both slots so the inactive fallback cannot keep an obsolete cache lease alive.
+            if released > 0 {
+                snapshot.store(current.clone());
+            }
             snapshot.store(current);
             let _ = ui_event_tx.send(AudioUiEvent::SnapshotChanged);
+        } else if !transient_tracks.is_empty()
+            && last_transient_sweep.elapsed() >= TRANSIENT_TRACK_SWEEP_INTERVAL
+        {
+            let (mut current, released) = bridge_snapshot(
+                &engine,
+                &mut current_track_override,
+                &mut queue_override,
+                &mut transient_tracks,
+                Instant::now(),
+            );
+            if released > 0 {
+                current.volume = transport_fade.master_volume;
+                snapshot.store(current.clone());
+                snapshot.store(current);
+                let _ = ui_event_tx.send(AudioUiEvent::SnapshotChanged);
+            }
+            last_transient_sweep = Instant::now();
         }
     }
 }
 
-fn registered_current_track(engine: &BlockingAudioEngine, request: &EngineRequest) -> Option<Track> {
-    let EngineRequest::RegisterTracks(tracks) = request else {
-        return None;
+fn bridge_snapshot(
+    engine: &BlockingAudioEngine,
+    current_track_override: &mut Option<Track>,
+    queue_override: &mut Option<Arc<Vec<TrackId>>>,
+    transient_tracks: &mut HashMap<TrackId, TransientTrackState>,
+    now: Instant,
+) -> (PlayerSnapshot, usize) {
+    let mut current = engine.snapshot();
+    apply_queue_override(&mut current, queue_override);
+    apply_current_track_override(&mut current, current_track_override);
+    let released = reconcile_transient_tracks(
+        &mut current,
+        current_track_override,
+        transient_tracks,
+        now,
+    );
+    (current, released)
+}
+
+fn apply_queue_override(
+    current: &mut PlayerSnapshot,
+    queue_override: &mut Option<Arc<Vec<TrackId>>>,
+) {
+    let Some(expected) = queue_override.as_ref() else {
+        return;
     };
-    let current_id = engine.snapshot().current_track.as_ref()?.id;
-    tracks.iter().find(|track| track.id == current_id).cloned()
+    if current.queue.as_ref() == expected.as_ref() {
+        *queue_override = None;
+    } else {
+        current.queue = expected.clone();
+    }
+}
+
+fn append_queue_override(
+    engine: &BlockingAudioEngine,
+    queue_override: &mut Option<Arc<Vec<TrackId>>>,
+    track_id: TrackId,
+) {
+    let source = queue_override
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| engine.snapshot().queue);
+    if source.contains(&track_id) {
+        *queue_override = Some(source);
+        return;
+    }
+    let mut queue = source.as_ref().clone();
+    queue.push(track_id);
+    *queue_override = Some(Arc::new(queue));
+}
+
+fn reconcile_transient_tracks(
+    current: &mut PlayerSnapshot,
+    current_track_override: &mut Option<Track>,
+    transient_tracks: &mut HashMap<TrackId, TransientTrackState>,
+    now: Instant,
+) -> usize {
+    let current_id = current.current_track.as_ref().map(|track| track.id);
+    let transport_active = matches!(
+        current.state,
+        PlaybackState::Loading
+            | PlaybackState::Playing
+            | PlaybackState::Paused
+            | PlaybackState::Buffering
+    );
+    let mut released_current: Option<Track> = None;
+    let mut released_ids = Vec::new();
+
+    transient_tracks.retain(|track_id, state| {
+        let referenced = transport_active
+            && (current_id == Some(*track_id) || current.queue.contains(track_id));
+        if referenced {
+            state.observed_in_transport = true;
+            state.unreferenced_since = None;
+            return true;
+        }
+        if !state.observed_in_transport {
+            return true;
+        }
+
+        let since = state.unreferenced_since.get_or_insert(now);
+        if now.saturating_duration_since(*since) < TRANSIENT_TRACK_RELEASE_GRACE {
+            return true;
+        }
+
+        if current_id == Some(*track_id) {
+            released_current = Some(detached_playback_track(&state.track));
+        }
+        released_ids.push(*track_id);
+        false
+    });
+
+    if let Some(replacement) = released_current {
+        current.current_track = Some(replacement);
+    }
+    if current_track_override
+        .as_ref()
+        .is_some_and(|track| released_ids.contains(&track.id))
+    {
+        *current_track_override = None;
+    }
+
+    if let Some(track_id) = current.current_track.as_ref().map(|track| track.id)
+        && let Some(state) = transient_tracks.get(&track_id)
+    {
+        current.current_track = Some(state.track.clone());
+    }
+
+    released_ids.len()
 }
 
 fn apply_current_track_override(
@@ -653,14 +863,49 @@ fn request_refreshes_snapshot(request: &EngineRequest) -> bool {
         )
         | EngineRequest::RegisterTracks(_)
         | EngineRequest::Shutdown => false,
-        EngineRequest::Command(_) => true,
+        EngineRequest::Command(_) | EngineRequest::PlayTransientTrack(_) => true,
     }
+}
+
+fn register_tracks_for_bridge(
+    engine: &BlockingAudioEngine,
+    tracks: Vec<Track>,
+    current_track_override: &mut Option<Track>,
+    transient_tracks: &mut HashMap<TrackId, TransientTrackState>,
+) {
+    let current_id = engine.snapshot().current_track.as_ref().map(|track| track.id);
+    let mut engine_tracks = Vec::with_capacity(tracks.len());
+
+    for track in tracks {
+        if track.id < 0 {
+            if let Some(state) = transient_tracks.get_mut(&track.id) {
+                state.track = track.clone();
+                if current_id == Some(track.id) {
+                    *current_track_override = Some(track.clone());
+                }
+            } else if current_id == Some(track.id) {
+                *current_track_override = Some(detached_playback_track(&track));
+            }
+            // A process-local/remote Track may carry a Host cache lease. Never let the blocking
+            // registry become an unbounded owner of that backing after playback has ended.
+            engine_tracks.push(detached_playback_track(&track));
+        } else {
+            if current_id == Some(track.id) {
+                *current_track_override = Some(track.clone());
+            }
+            engine_tracks.push(track);
+        }
+    }
+    engine.register_tracks(engine_tracks);
 }
 
 fn apply_request(
     engine: &BlockingAudioEngine,
     request: EngineRequest,
     transport_fade: &mut TransportFade,
+    current_track_override: &mut Option<Track>,
+    queue_override: &mut Option<Arc<Vec<TrackId>>>,
+    transient_tracks: &mut HashMap<TrackId, TransientTrackState>,
 ) -> bool {
     match request {
         EngineRequest::Command(command) => {
@@ -697,7 +942,9 @@ fn apply_request(
                 }
                 PlayerCommand::PlayTrack(track_id) => {
                     transport_fade.force_gain(0.0, engine);
-                    let _ = engine.try_send(PlayerCommand::PlayTrack(track_id));
+                    if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
+                        append_queue_override(engine, queue_override, track_id);
+                    }
                     transport_fade.fade_to(1.0, None);
                 }
                 PlayerCommand::Next => {
@@ -716,13 +963,20 @@ fn apply_request(
                     play,
                 } => {
                     transport_fade.force_gain(0.0, engine);
-                    let _ = engine.try_send(PlayerCommand::RestoreTrack {
+                    if engine.try_send(PlayerCommand::RestoreTrack {
                         track_id,
                         position,
                         play,
-                    });
+                    }) {
+                        append_queue_override(engine, queue_override, track_id);
+                    }
                     if play {
                         transport_fade.fade_to(1.0, None);
+                    }
+                }
+                PlayerCommand::SetQueue(queue) => {
+                    if engine.try_send(PlayerCommand::SetQueue(queue.clone())) {
+                        *queue_override = Some(queue);
                     }
                 }
                 other => {
@@ -732,7 +986,37 @@ fn apply_request(
             true
         }
         EngineRequest::RegisterTracks(tracks) => {
-            engine.register_tracks(tracks);
+            register_tracks_for_bridge(
+                engine,
+                tracks,
+                current_track_override,
+                transient_tracks,
+            );
+            true
+        }
+        EngineRequest::PlayTransientTrack(track) => {
+            if track.id >= 0 {
+                return true;
+            }
+            let track_id = track.id;
+            let detached = detached_playback_track(&track);
+            engine.register_tracks(std::iter::once(detached));
+            transient_tracks.insert(track_id, TransientTrackState::playing(track.clone()));
+            *current_track_override = Some(track);
+
+            transport_fade.force_gain(0.0, engine);
+            if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
+                append_queue_override(engine, queue_override, track_id);
+                transport_fade.fade_to(1.0, None);
+            } else {
+                transient_tracks.remove(&track_id);
+                if current_track_override
+                    .as_ref()
+                    .is_some_and(|track| track.id == track_id)
+                {
+                    *current_track_override = None;
+                }
+            }
             true
         }
         EngineRequest::Shutdown => false,
@@ -764,6 +1048,7 @@ fn decode_state(value: u8) -> PlaybackState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize as TestAtomicUsize;
 
     fn test_track(title: &str) -> Track {
         Track::new(crate::model::TrackData {
@@ -780,6 +1065,12 @@ mod tests {
             channels: 2,
             artwork_key: Some("art".into()),
         })
+    }
+
+    fn transient_test_track(title: &str, id: TrackId) -> Track {
+        let mut track = test_track(title);
+        track.id = id;
+        track
     }
 
     #[test]
@@ -944,6 +1235,114 @@ mod tests {
         cache.store(source);
         let loaded = cache.snapshot();
         assert!(Arc::ptr_eq(&loaded.queue, &queue));
+    }
+
+    #[test]
+    fn queue_override_survives_stale_engine_snapshot_until_acknowledged() {
+        let expected = Arc::new(vec![1, 2, -1]);
+        let mut queue_override = Some(expected.clone());
+        let mut stale = PlayerSnapshot {
+            queue: Arc::new(vec![1, 2]),
+            ..PlayerSnapshot::default()
+        };
+        apply_queue_override(&mut stale, &mut queue_override);
+        assert_eq!(stale.queue.as_ref(), expected.as_ref());
+        assert!(queue_override.is_some());
+
+        let mut acknowledged = PlayerSnapshot {
+            queue: expected,
+            ..PlayerSnapshot::default()
+        };
+        apply_queue_override(&mut acknowledged, &mut queue_override);
+        assert!(queue_override.is_none());
+    }
+
+    #[test]
+    fn stopped_transient_track_releases_after_crossfade_grace() {
+        let track = transient_test_track("remote", -1);
+        let mut transient_tracks = HashMap::from([(
+            track.id,
+            TransientTrackState {
+                track: track.clone(),
+                observed_in_transport: true,
+                unreferenced_since: None,
+            },
+        )]);
+        let mut current = PlayerSnapshot {
+            state: PlaybackState::Stopped,
+            current_track: Some(detached_playback_track(&track)),
+            queue: Arc::new(vec![track.id]),
+            ..PlayerSnapshot::default()
+        };
+        let mut current_track_override = Some(track.clone());
+        let first = Instant::now();
+        assert_eq!(
+            reconcile_transient_tracks(
+                &mut current,
+                &mut current_track_override,
+                &mut transient_tracks,
+                first,
+            ),
+            0
+        );
+        assert!(transient_tracks.contains_key(&track.id));
+
+        let released = reconcile_transient_tracks(
+            &mut current,
+            &mut current_track_override,
+            &mut transient_tracks,
+            first + TRANSIENT_TRACK_RELEASE_GRACE,
+        );
+        assert_eq!(released, 1);
+        assert!(transient_tracks.is_empty());
+        assert!(current_track_override.is_none());
+        assert_eq!(current.current_track.as_ref().map(|track| track.id), Some(-1));
+    }
+
+    #[test]
+    fn paused_transient_queue_entry_keeps_playback_backing_alive() {
+        let track = transient_test_track("remote", -2);
+        let mut transient_tracks = HashMap::from([(
+            track.id,
+            TransientTrackState::playing(track.clone()),
+        )]);
+        let mut current = PlayerSnapshot {
+            state: PlaybackState::Paused,
+            current_track: Some(detached_playback_track(&track)),
+            queue: Arc::new(vec![track.id]),
+            ..PlayerSnapshot::default()
+        };
+        let mut current_track_override = None;
+        let now = Instant::now();
+        assert_eq!(
+            reconcile_transient_tracks(
+                &mut current,
+                &mut current_track_override,
+                &mut transient_tracks,
+                now + TRANSIENT_TRACK_RELEASE_GRACE + Duration::from_secs(1),
+            ),
+            0
+        );
+        assert!(transient_tracks.contains_key(&track.id));
+        assert_eq!(current.current_track.as_ref().map(|track| track.id), Some(-2));
+    }
+
+    #[test]
+    fn detached_track_does_not_retain_playback_backing() {
+        struct DropProbe(Arc<TestAtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let drops = Arc::new(TestAtomicUsize::new(0));
+        let backed = transient_test_track("remote", -3)
+            .with_playback_backing(DropProbe(drops.clone()));
+        let detached = detached_playback_track(&backed);
+        drop(backed);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert_eq!(detached.id, -3);
     }
 
     #[test]
