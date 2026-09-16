@@ -2,7 +2,11 @@
 mod api;
 pub mod decoder;
 
+// wit-bindgen's canonical ABI glue necessarily emits `unsafe`, `export_name` and `link_section`.
+// Keep the lint exception scoped to generated bindings/export glue; handwritten plugin/NCM code
+// remains covered by this crate's `unsafe_code = "warn"` policy.
 #[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code)]
 pub mod bindings {
     wit_bindgen::generate!({
         world: "music-plugin",
@@ -208,4 +212,5 @@ impl ui::Guest for NeteasePlugin {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code)]
 bindings::export!(NeteasePlugin with_types_in bindings);
