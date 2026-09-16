@@ -4,6 +4,8 @@ pub mod decoder;
 #[cfg(target_arch = "wasm32")]
 mod api;
 #[cfg(target_arch = "wasm32")]
+mod collections;
+#[cfg(target_arch = "wasm32")]
 mod features;
 #[cfg(target_arch = "wasm32")]
 mod protocol;
@@ -32,6 +34,12 @@ fn add_extended_capabilities(capabilities: &mut Vec<types::Capability>) {
         .any(|capability| matches!(capability, types::Capability::Recommendations))
     {
         capabilities.push(types::Capability::Recommendations);
+    }
+    if !capabilities
+        .iter()
+        .any(|capability| matches!(capability, types::Capability::UserProfile))
+    {
+        capabilities.push(types::Capability::UserProfile);
     }
     if !capabilities
         .iter()
@@ -167,6 +175,40 @@ impl provider::Guest for NeteasePlugin {
         tracks: Vec<types::SourceTrackRef>,
     ) -> Result<bool, String> {
         api::playlist_mutate(&provider_id, &account_id, &playlist_id, &tracks, false)
+    }
+
+    fn media_collections(
+        provider_id: String,
+        account_id: String,
+        kind: types::MediaCollectionKind,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<types::MediaCollection>, String> {
+        collections::media_collections(&provider_id, &account_id, kind, offset, limit)
+    }
+
+    fn set_media_saved(
+        provider_id: String,
+        account_id: String,
+        collection: types::MediaCollectionRef,
+        saved: bool,
+    ) -> Result<bool, String> {
+        collections::set_media_saved(&provider_id, &account_id, &collection, saved)
+    }
+
+    fn collection_recommendations(
+        provider_id: String,
+        account_id: String,
+        request: types::CollectionRecommendationRequest,
+    ) -> Result<Vec<types::CollectionRecommendationItem>, String> {
+        collections::collection_recommendations(&provider_id, &account_id, &request)
+    }
+
+    fn user_profile(
+        provider_id: String,
+        account_id: String,
+    ) -> Result<types::UserProfile, String> {
+        collections::user_profile(&provider_id, &account_id)
     }
 
     fn cloud_library(
