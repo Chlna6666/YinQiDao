@@ -21,6 +21,8 @@
 //!   validation/de-duplication while preserving request-scoped route preference order.
 //! - `streaming` converts validated descriptors into Host-owned local playback sources while keeping
 //!   signed URLs, request headers and cache leases behind the application boundary.
+//! - `playback` reports bounded, user-authorized playback telemetry to the exact account route that
+//!   produced a stream; playback events are never broadcast across merged providers/accounts.
 //! - `cloud_library` adds bounded per-account CloudLibrary/liked-track pagination and explicit-route
 //!   like mutations so merged Library UI never broadcasts a write to every authenticated account.
 //! - `playlists` extends the façade with bounded authenticated playlist fan-out and explicit-route
@@ -66,6 +68,8 @@ pub(crate) mod frontend;
 pub(crate) mod logout;
 #[path = "application/management.rs"]
 pub(crate) mod management;
+#[path = "application/playback.rs"]
+pub(crate) mod playback;
 #[path = "application/playlists.rs"]
 pub(crate) mod playlists;
 #[path = "application/recognition.rs"]
