@@ -516,11 +516,7 @@ impl AudioEngine {
             .request_tx
             .try_send(EngineRequest::PlayTransientTrack(track))
         {
-            Ok(()) => {
-                self.snapshot
-                    .set_optimistic_state(PlaybackState::Loading);
-                true
-            }
+            Ok(()) => true,
             Err(_) => {
                 self.snapshot.restore_optimistic_position_ms(
                     NO_POSITION_OVERRIDE,
