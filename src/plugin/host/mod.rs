@@ -8,3 +8,4 @@ pub(crate) mod secrets;
 pub(crate) mod sessions;
 pub(crate) mod state_guard;
 pub(crate) mod stream_cache;
+pub(crate) mod stream_cache_gc;

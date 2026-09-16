@@ -102,6 +102,10 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     }
     let package_manager = host::package_manager::initialize(base_dir);
     let stream_cache = host::stream_cache::initialize(base_dir);
+    let initial_stream_cache_gc = host::stream_cache_gc::prune(
+        stream_cache.root(),
+        host::stream_cache_gc::PluginStreamCacheGcPolicy::default(),
+    )?;
 
     let secret_store = host::secrets::initialize(std::sync::Arc::new(
         host::secrets::MemorySecretStore::default(),
@@ -190,8 +194,15 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     tracing::info!(
         plugin_root = %package_manager.plugin_root().display(),
         stream_cache_root = %stream_cache.root().display(),
+        stream_cache_bytes_before = initial_stream_cache_gc.cache_bytes_before,
+        stream_cache_bytes_after = initial_stream_cache_gc.cache_bytes_after,
+        stream_cache_removed_expired = initial_stream_cache_gc.removed_expired_buckets,
+        stream_cache_removed_capacity = initial_stream_cache_gc.removed_capacity_buckets,
+        stream_cache_removed_temp = initial_stream_cache_gc.removed_stale_temp_dirs,
+        stream_cache_removed_invalid = initial_stream_cache_gc.removed_invalid_entries,
+        stream_cache_over_budget_bytes = initial_stream_cache_gc.over_budget_bytes,
         installed_plugins = package_manager.list_installed().map(|plugins| plugins.len()).unwrap_or_default(),
-        "插件包管理器与 Stream cache 已初始化"
+        "插件包管理器与有界 Stream cache 已初始化"
     );
     if let Some(runtime) = runtime.as_ref() {
         tracing::info!(
