@@ -282,7 +282,7 @@ interface provider {
 
     accounts: func(provider-id: string) -> result<list<account>, string>;
     auth-begin: func(provider-id: string, method: auth-method) -> result<auth-challenge, string>;
-    auth-poll: func(provider-id: string, challenge-id: string) -> result<auth-poll, string>;
+    poll-auth: func(provider-id: string, challenge-id: string) -> result<auth-poll, string>;
     /// Submit one Host-rendered form. Values are one-shot sensitive inputs; persistent credentials
     /// must be stored by the guest through the Host `secret-set` import.
     auth-submit: func(provider-id: string, challenge-id: string, values: list<key-value>) -> result<auth-poll, string>;
