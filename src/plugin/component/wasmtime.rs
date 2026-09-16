@@ -69,7 +69,9 @@ impl wit_host::Host for PluginStoreData {
         let host_request = PluginHttpRequest {
             method: request.method,
             url: request.url,
-            headers: request.headers.into_iter()
+            headers: request
+                .headers
+                .into_iter()
                 .map(|header| KeyValue {
                     key: header.key,
                     value: header.value,
