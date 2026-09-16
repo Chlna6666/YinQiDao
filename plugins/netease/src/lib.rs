@@ -22,12 +22,18 @@ use bindings::yinqidao::music_plugin::types;
 struct NeteasePlugin;
 
 #[cfg(target_arch = "wasm32")]
-fn add_recommendations_capability(capabilities: &mut Vec<types::Capability>) {
+fn add_extended_capabilities(capabilities: &mut Vec<types::Capability>) {
     if !capabilities
         .iter()
         .any(|capability| matches!(capability, types::Capability::Recommendations))
     {
         capabilities.push(types::Capability::Recommendations);
+    }
+    if !capabilities
+        .iter()
+        .any(|capability| matches!(capability, types::Capability::PlaybackEvents))
+    {
+        capabilities.push(types::Capability::PlaybackEvents);
     }
 }
 
@@ -37,7 +43,7 @@ impl provider::Guest for NeteasePlugin {
         let mut manifest = api::manifest();
         for descriptor in &mut manifest.providers {
             if descriptor.id == "netease" {
-                add_recommendations_capability(&mut descriptor.capabilities);
+                add_extended_capabilities(&mut descriptor.capabilities);
             }
         }
         manifest
@@ -46,7 +52,7 @@ impl provider::Guest for NeteasePlugin {
     fn accounts(provider_id: String) -> Result<Vec<types::Account>, String> {
         let mut accounts = api::accounts(&provider_id)?;
         for account in &mut accounts {
-            add_recommendations_capability(&mut account.capabilities);
+            add_extended_capabilities(&mut account.capabilities);
         }
         Ok(accounts)
     }
@@ -203,11 +209,11 @@ impl provider::Guest for NeteasePlugin {
     }
 
     fn report_playback(
-        _provider_id: String,
-        _account_id: String,
-        _signal: types::PlaybackSignal,
+        provider_id: String,
+        account_id: String,
+        signal: types::PlaybackSignal,
     ) -> Result<bool, String> {
-        Err(api::unsupported("playback_events"))
+        features::report_playback(&provider_id, &account_id, &signal)
     }
 }
 
