@@ -9,9 +9,10 @@ use crate::lyrics::LyricsDocument;
 
 use super::{
     abi::{
-        AccountState, AuthChallenge, AuthMethod, AuthPollResult, LyricLine as PluginLyricLine,
-        PluginAccount, PluginCapability, PluginLyricDocument, PluginRoute, ProviderAccount,
-        RemoteTrack, RoutingPolicy, ServiceKind, SourceTrackRef, TrackQuery,
+        AccountState, ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, KeyValue,
+        LyricLine as PluginLyricLine, PluginAccount, PluginCapability, PluginLyricDocument,
+        PluginRoute, ProviderAccount, RemoteTrack, RoutingPolicy, ServiceKind, SourceTrackRef,
+        TrackQuery,
     },
     client::{PluginClientRegistry, PluginProviderClient},
     host::{
@@ -39,6 +40,8 @@ const MAX_PLUGIN_TRACK_TEXT_BYTES: usize = 32 * 1024;
 const MAX_PLUGIN_SOURCE_PROVIDER_BYTES: usize = 128;
 const MAX_PLUGIN_SOURCE_ID_BYTES: usize = 4 * 1024;
 const MAX_PLUGIN_COVER_URL_BYTES: usize = 16 * 1024;
+const MAX_PLUGIN_DESCRIPTOR_HEADER_COUNT: usize = 96;
+const MAX_PLUGIN_DESCRIPTOR_HEADER_BYTES: usize = 64 * 1024;
 const MAX_PLUGIN_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 static PLUGIN_FRONTEND: OnceLock<Arc<PluginServiceFrontend>> = OnceLock::new();
@@ -410,10 +413,10 @@ impl PluginServiceFrontend {
                 }
             };
 
-            if descriptor.url.trim().is_empty() {
+            if let Err(error) = validate_artwork_descriptor(&descriptor) {
                 failures.push(PluginCallFailure {
                     route: route.clone(),
-                    error: "插件 artwork descriptor URL 为空".into(),
+                    error: format!("Artwork descriptor 非法: {error:#}"),
                 });
                 continue;
             }
@@ -509,6 +512,7 @@ impl PluginServiceFrontend {
         track: &SourceTrackRef,
         operation: &str,
     ) -> Result<()> {
+        validate_source_track_ref(track)?;
         if track.provider_id != metadata_route.provider_id {
             bail!(
                 "{operation} source provider 与 metadata route 不一致: source={}, route={}",
@@ -772,19 +776,24 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
     Ok(())
 }
 
+fn validate_source_track_ref(track: &SourceTrackRef) -> Result<()> {
+    if track.provider_id.trim().is_empty()
+        || track.provider_id.len() > MAX_PLUGIN_SOURCE_PROVIDER_BYTES
+        || track.provider_id.contains('\0')
+    {
+        bail!("source track provider id 非法");
+    }
+    if track.source_id.trim().is_empty()
+        || track.source_id.len() > MAX_PLUGIN_SOURCE_ID_BYTES
+        || track.source_id.contains('\0')
+    {
+        bail!("source track source id 非法");
+    }
+    Ok(())
+}
+
 fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()> {
-    if track.source.provider_id.trim().is_empty()
-        || track.source.provider_id.len() > MAX_PLUGIN_SOURCE_PROVIDER_BYTES
-        || track.source.provider_id.contains('\0')
-    {
-        bail!("Metadata track source provider id 非法");
-    }
-    if track.source.source_id.trim().is_empty()
-        || track.source.source_id.len() > MAX_PLUGIN_SOURCE_ID_BYTES
-        || track.source.source_id.contains('\0')
-    {
-        bail!("Metadata track source id 非法");
-    }
+    validate_source_track_ref(&track.source)?;
     if track.source.provider_id != route.provider_id {
         bail!(
             "Metadata track provider 不匹配: expected={}, actual={}",
@@ -834,6 +843,41 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
     }
     if bytes > MAX_PLUGIN_TRACK_TEXT_BYTES {
         bail!("Metadata track 文本超过 {} bytes Host 上限", MAX_PLUGIN_TRACK_TEXT_BYTES);
+    }
+    Ok(())
+}
+
+fn validate_artwork_descriptor(descriptor: &ArtworkDescriptor) -> Result<()> {
+    if descriptor.url.trim().is_empty()
+        || descriptor.url.len() > MAX_PLUGIN_COVER_URL_BYTES
+        || descriptor.url.contains('\0')
+        || descriptor.url.contains('\r')
+        || descriptor.url.contains('\n')
+    {
+        bail!("Artwork descriptor URL 为空、超过大小限制或包含控制字符");
+    }
+    if descriptor.headers.len() > MAX_PLUGIN_DESCRIPTOR_HEADER_COUNT {
+        bail!("Artwork descriptor header 数量超过限制");
+    }
+
+    let mut header_bytes = 0usize;
+    for header in &descriptor.headers {
+        if header.key.trim().is_empty()
+            || header.key.contains('\0')
+            || header.key.contains('\r')
+            || header.key.contains('\n')
+            || header.value.contains('\0')
+            || header.value.contains('\r')
+            || header.value.contains('\n')
+        {
+            bail!("Artwork descriptor header 非法或包含控制字符");
+        }
+        header_bytes = header_bytes
+            .saturating_add(header.key.len())
+            .saturating_add(header.value.len());
+        if header_bytes > MAX_PLUGIN_DESCRIPTOR_HEADER_BYTES {
+            bail!("Artwork descriptor header 总大小超过限制");
+        }
     }
     Ok(())
 }
@@ -1111,6 +1155,35 @@ mod tests {
             ..TrackQuery::default()
         };
         assert!(validate_track_query(&query).is_err());
+    }
+
+    #[test]
+    fn source_track_ref_and_artwork_descriptor_are_bounded() {
+        let source = SourceTrackRef {
+            provider_id: "test".into(),
+            source_id: "song".into(),
+        };
+        assert!(validate_source_track_ref(&source).is_ok());
+
+        let oversized_source = SourceTrackRef {
+            provider_id: "test".into(),
+            source_id: "x".repeat(MAX_PLUGIN_SOURCE_ID_BYTES + 1),
+        };
+        assert!(validate_source_track_ref(&oversized_source).is_err());
+
+        let descriptor = ArtworkDescriptor {
+            url: "https://cdn.example.com/cover.jpg".into(),
+            headers: vec![KeyValue {
+                key: "authorization".into(),
+                value: "Bearer token".into(),
+            }],
+            expires_at_ms: None,
+        };
+        assert!(validate_artwork_descriptor(&descriptor).is_ok());
+
+        let mut invalid = descriptor;
+        invalid.headers[0].value = "bad\r\nheader".into();
+        assert!(validate_artwork_descriptor(&invalid).is_err());
     }
 
     #[test]
