@@ -5,7 +5,10 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::model::{Track, TrackData, TrackId};
+use crate::{
+    audio::AudioEngine,
+    model::{Track, TrackData, TrackId},
+};
 
 use super::{
     abi::{PluginRoute, RemoteTrack, SourceTrackRef, StreamRequest},
@@ -160,6 +163,32 @@ impl PluginPreparedTrack {
     }
 }
 
+/// Exact provenance for one remote track accepted by the player transport.
+///
+/// The route is request-scoped and includes the authenticated account id that actually resolved the
+/// stream. Callers can retain this value for future PlaybackEvents without guessing a default account
+/// or reconstructing provider identity from the local cache path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginStartedPlayback {
+    track_id: TrackId,
+    route: PluginRoute,
+    source: SourceTrackRef,
+}
+
+impl PluginStartedPlayback {
+    pub fn track_id(&self) -> TrackId {
+        self.track_id
+    }
+
+    pub fn route(&self) -> &PluginRoute {
+        &self.route
+    }
+
+    pub fn source(&self) -> &SourceTrackRef {
+        &self.source
+    }
+}
+
 impl PluginServiceFrontend {
     /// Resolve one authenticated stream descriptor and materialize it behind the Host networking
     /// boundary before returning anything playback-facing.
@@ -286,6 +315,69 @@ impl PluginServiceFrontend {
                     client_ready,
                 })
             }
+        }
+    }
+
+    /// Resolve, securely materialize and atomically hand one remote track to the existing player.
+    ///
+    /// This is the first application API that closes the complete remote playback chain. The player
+    /// receives only a Host-owned local seekable path through a negative process-local Track id; the
+    /// signed URL and headers never enter audio code. `PluginStartedPlayback` preserves the exact
+    /// plugin/provider/account/source provenance selected by routing for later PlaybackEvents.
+    pub async fn play_remote_track_for_route(
+        &self,
+        engine: &AudioEngine,
+        metadata_route: &PluginRoute,
+        remote: &RemoteTrack,
+        quality: Option<&str>,
+    ) -> Result<PluginSingleResult<PluginStartedPlayback>> {
+        let prepared = self
+            .prepare_remote_track_for_route(metadata_route, remote, quality)
+            .await?;
+        let PluginSingleResult {
+            value,
+            route: _,
+            plan,
+            mut failures,
+            client_ready,
+        } = prepared;
+
+        let Some(prepared) = value else {
+            return Ok(PluginSingleResult {
+                value: None,
+                route: None,
+                plan,
+                failures,
+                client_ready,
+            });
+        };
+
+        let started = PluginStartedPlayback {
+            track_id: prepared.track.id,
+            route: prepared.route.clone(),
+            source: prepared.source.clone(),
+        };
+        let started_route = started.route.clone();
+        if engine.try_play_transient_track(prepared.into_track()) {
+            Ok(PluginSingleResult {
+                value: Some(started),
+                route: Some(started_route),
+                plan,
+                failures,
+                client_ready,
+            })
+        } else {
+            failures.push(PluginCallFailure {
+                route: started_route,
+                error: "远程 Track 已物化，但播放器控制队列拒绝 transient playback 请求".into(),
+            });
+            Ok(PluginSingleResult {
+                value: None,
+                route: None,
+                plan,
+                failures,
+                client_ready,
+            })
         }
     }
 }
