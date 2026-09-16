@@ -9,7 +9,7 @@ on:
       - ".github/workflows/wasmtime-host-bootstrap.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   resolve:
@@ -86,18 +86,47 @@ jobs:
               Ok(())
           }
           EOF
-          cargo check --manifest-path /tmp/wasmtime-smoke/Cargo.toml --locked || \
-            cargo check --manifest-path /tmp/wasmtime-smoke/Cargo.toml
+          cargo check --manifest-path /tmp/wasmtime-smoke/Cargo.toml
 
-      - name: Capture resolved lockfile
+      - name: Publish resolved lockfile as detached Git blob
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p bootstrap
-          cp Cargo.lock bootstrap/Cargo.lock
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.request import Request, urlopen
 
-      - name: Upload resolved lockfile
+          raw = Path("Cargo.lock").read_bytes()
+          body = json.dumps({
+              "content": base64.b64encode(raw).decode("ascii"),
+              "encoding": "base64",
+          }).encode("utf-8")
+          api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          request = Request(
+              f"{api}/repos/{repo}/git/blobs",
+              data=body,
+              method="POST",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              },
+          )
+          with urlopen(request) as response:
+              payload = json.load(response)
+          sha = payload["sha"]
+          print(f"ROOT_LOCK_BLOB_SHA={sha}")
+          Path("root-lock-blob-sha.txt").write_text(sha + "\n", encoding="utf-8")
+
+      - name: Upload detached blob receipt
         uses: actions/upload-artifact@v4
         with:
-          name: yinqidao-wasmtime-root-lock
-          path: bootstrap/Cargo.lock
+          name: yinqidao-wasmtime-root-lock-blob
+          path: root-lock-blob-sha.txt
           if-no-files-found: error
           retention-days: 7
