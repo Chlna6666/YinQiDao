@@ -13,7 +13,11 @@ use crate::{
 use super::{
     abi::{PluginRoute, RemoteTrack, SourceTrackRef, StreamRequest},
     frontend::{PluginCallFailure, PluginServiceFrontend, PluginSingleResult},
-    host::{runtime, stream_cache, stream_cache::PluginMaterializedStream},
+    host::{
+        runtime::{self, PluginCallKey},
+        stream_cache,
+        stream_cache::PluginMaterializedStream,
+    },
 };
 
 const MAX_REMOTE_TRACK_ARTISTS: usize = 128;
@@ -220,6 +224,26 @@ impl PluginServiceFrontend {
         })?;
 
         let runtime = runtime::global().ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
+        // A local stream-cache hit must not bypass current Host package authority. Revalidate the
+        // exact provider route before the cache layer can return an already-materialized file, so a
+        // disabled/uninstalled plugin or removed provider fails closed without touching the player.
+        if let Err(error) = runtime.route_health(&PluginCallKey::provider(
+            &route.plugin_id,
+            &route.provider_id,
+        )) {
+            failures.push(PluginCallFailure {
+                route: route.clone(),
+                error: format!("Stream Host route 重检失败: {error:#}"),
+            });
+            return Ok(PluginSingleResult {
+                value: None,
+                route: None,
+                plan,
+                failures,
+                client_ready,
+            });
+        }
+
         let cache = stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
         match cache
             .materialize(runtime.as_ref(), &route, request, &descriptor)
