@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    abi::{PluginRoute, RemoteTrack, SourceTrackRef, StreamRequest},
+    abi::{PluginRoute, RemoteTrack, SourceTrackRef, StreamRequest, TrackQuery},
     frontend::{PluginCallFailure, PluginServiceFrontend, PluginSingleResult},
     host::{
         runtime::{self, PluginCallKey},
@@ -211,14 +211,15 @@ impl PluginPreparedTrack {
 
 /// Exact provenance for one remote track accepted by the player transport.
 ///
-/// The route is request-scoped and includes the authenticated account id that actually resolved the
-/// stream. Callers can retain this value for future PlaybackEvents without guessing a default account
-/// or reconstructing provider identity from the local cache path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Route, source and semantic TrackQuery are frozen from the same validated RemoteTrack at the
+/// moment playback is accepted. Later PlaybackEvents therefore cannot accidentally pair an account
+/// provenance envelope with metadata reconstructed from a different UI/library snapshot.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PluginStartedPlayback {
     track_id: TrackId,
     route: PluginRoute,
     source: SourceTrackRef,
+    query: TrackQuery,
 }
 
 impl PluginStartedPlayback {
@@ -232,6 +233,10 @@ impl PluginStartedPlayback {
 
     pub fn source(&self) -> &SourceTrackRef {
         &self.source
+    }
+
+    pub fn query(&self) -> &TrackQuery {
+        &self.query
     }
 }
 
@@ -451,8 +456,8 @@ impl PluginServiceFrontend {
     ///
     /// This is the first application API that closes the complete remote playback chain. The player
     /// receives only a Host-owned local seekable path through a negative process-local Track id; the
-    /// signed URL and headers never enter audio code. `PluginStartedPlayback` preserves the exact
-    /// plugin/provider/account/source provenance selected by routing for later PlaybackEvents.
+    /// signed URL and headers never enter audio code. `PluginStartedPlayback` freezes the exact
+    /// plugin/provider/account/source/query provenance selected by routing for later PlaybackEvents.
     pub async fn play_remote_track_for_route(
         &self,
         engine: &AudioEngine,
@@ -485,6 +490,7 @@ impl PluginServiceFrontend {
             track_id: prepared.track.id,
             route: prepared.route.clone(),
             source: prepared.source.clone(),
+            query: track_query_from_remote(remote),
         };
         let started_route = started.route.clone();
         if engine.try_play_transient_track(prepared.into_track()) {
@@ -508,6 +514,18 @@ impl PluginServiceFrontend {
                 client_ready,
             })
         }
+    }
+}
+
+fn track_query_from_remote(remote: &RemoteTrack) -> TrackQuery {
+    TrackQuery {
+        title: remote.title.clone(),
+        artists: remote.artists.clone(),
+        album: remote.album.clone(),
+        duration_ms: remote.duration_ms,
+        isrc: remote.isrc.clone(),
+        musicbrainz_recording_id: None,
+        fingerprint_id: None,
     }
 }
 
@@ -682,6 +700,32 @@ mod tests {
         );
         assert!(next_remote_track_cursor(-MAX_REMOTE_TRACKS_PER_PROCESS - 1).is_err());
         assert!(next_remote_track_cursor(0).is_err());
+    }
+
+    #[test]
+    fn remote_track_query_is_frozen_from_validated_remote_metadata() {
+        let remote = RemoteTrack {
+            source: SourceTrackRef {
+                provider_id: "provider".into(),
+                source_id: "track-1".into(),
+            },
+            title: "Song".into(),
+            artists: vec!["Artist A".into(), "Artist B".into()],
+            album: "Album".into(),
+            duration_ms: Some(180_000),
+            isrc: Some("ISRC123".into()),
+            cover_url: None,
+            playable: true,
+            explicit: false,
+        };
+        let query = track_query_from_remote(&remote);
+        assert_eq!(query.title, remote.title);
+        assert_eq!(query.artists, remote.artists);
+        assert_eq!(query.album, remote.album);
+        assert_eq!(query.duration_ms, remote.duration_ms);
+        assert_eq!(query.isrc, remote.isrc);
+        assert!(query.musicbrainz_recording_id.is_none());
+        assert!(query.fingerprint_id.is_none());
     }
 
     #[test]

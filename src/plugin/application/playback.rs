@@ -22,9 +22,9 @@ const MAX_SOURCE_ID_BYTES: usize = 4 * 1024;
 const MAX_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 impl PluginServiceFrontend {
-    /// Report one playback signal using the exact plugin/provider/account provenance that actually
-    /// started a remote track. The Host supplies the source reference and timestamp; callers provide
-    /// only semantic track metadata plus current transport progress.
+    /// Report one playback signal using the exact plugin/provider/account/source/query provenance that
+    /// actually started a remote track. The Host supplies the frozen semantic track identity and
+    /// timestamp; callers provide only signal kind plus current transport progress.
     ///
     /// This path is never invoked from the realtime audio callback. UI/application control code must
     /// schedule it on the ordinary async runtime after observing a transport transition.
@@ -32,14 +32,13 @@ impl PluginServiceFrontend {
         &self,
         started: &PluginStartedPlayback,
         kind: PlaybackSignalKind,
-        track: &TrackQuery,
         position_ms: u64,
         duration_ms: u64,
     ) -> Result<bool> {
         let runtime = runtime::global().ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
         let signal = PlaybackSignal {
             kind,
-            track: track.clone(),
+            track: started.query().clone(),
             source: Some(started.source().clone()),
             position_ms,
             duration_ms,
