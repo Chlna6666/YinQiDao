@@ -141,7 +141,7 @@ fn open_playlist_context(
         page_id: None,
         track: None,
         playlist: Some(PluginPlaylistCommandContext {
-            name: name.to_owned(),
+            name: Some(name.to_owned()),
             provider_id: Some(provider_id.to_owned()),
             source_id: Some(source_id.to_owned()),
         }),
@@ -296,6 +296,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement> {
 
     let view_dismiss = view.clone();
     let menu = div()
+        .id("plugin-context-menu")
         .absolute()
         .left(position.x)
         .top(position.y)

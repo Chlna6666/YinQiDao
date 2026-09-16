@@ -19,5 +19,5 @@ pub fn navigate_to(cx: &mut App, route: AppRoute) {
 /// 使用 gpui-router 跳转到 Host 已验证的动态 pathname。
 pub fn navigate_path(cx: &mut App, pathname: &str) {
     let mut navigate = gpui_router::use_navigate(cx);
-    navigate(pathname.into());
+    navigate(pathname.to_owned().into());
 }

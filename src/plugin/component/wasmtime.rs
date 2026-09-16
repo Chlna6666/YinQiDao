@@ -4,9 +4,9 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use anyhow::{Result, anyhow};
 use wasmtime::component::{HasSelf, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use super::policy::PluginEnginePolicy;
@@ -56,6 +56,8 @@ impl WasiView for PluginStoreData {
         }
     }
 }
+
+impl wit_types::Host for PluginStoreData {}
 
 impl wit_host::Host for PluginStoreData {
     async fn http_request(
@@ -150,11 +152,7 @@ impl wit_host::Host for PluginStoreData {
         Ok(self.host.services().now_ms())
     }
 
-    async fn log(
-        &mut self,
-        level: wit_host::LogLevel,
-        message: String,
-    ) -> wasmtime::Result<()> {
+    async fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
         let message = bounded_log_message(&message);
         let plugin_id = self.host.plugin_id();
         match level {
@@ -213,7 +211,8 @@ impl PluginWasmtimeRuntime {
         config.consume_fuel(true);
         config.epoch_interruption(true);
 
-        let engine = Engine::new(&config).context("创建 Wasmtime 插件 Engine 失败")?;
+        let engine = Engine::new(&config)
+            .map_err(|error| anyhow!("创建 Wasmtime 插件 Engine 失败: {error}"))?;
         Ok(Self {
             engine,
             services,
@@ -224,9 +223,9 @@ impl PluginWasmtimeRuntime {
     fn linker(&self) -> Result<Linker<PluginStoreData>> {
         let mut linker = Linker::new(&self.engine);
         bindings::MusicPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-            .context("注册音栖岛插件 Host imports 失败")?;
+            .map_err(|error| anyhow!("注册音栖岛插件 Host imports 失败: {error}"))?;
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .context("注册最小 WASI P2 imports 失败")?;
+            .map_err(|error| anyhow!("注册最小 WASI P2 imports 失败: {error}"))?;
         Ok(linker)
     }
 
@@ -259,7 +258,7 @@ impl PluginWasmtimeRuntime {
         store.limiter(|state| &mut state.limits);
         store
             .set_fuel(self.policy.fuel_per_call)
-            .context("设置插件 Store fuel 失败")?;
+            .map_err(|error| anyhow!("设置插件 Store fuel 失败: {error}"))?;
         store.set_epoch_deadline(self.policy.epoch_deadline_ticks());
         Ok(store)
     }
@@ -274,9 +273,11 @@ impl PluginWasmtimeRuntime {
 fn start_epoch_driver(engine: Engine, interval: Duration) -> Result<()> {
     thread::Builder::new()
         .name("yinqidao-plugin-epoch".into())
-        .spawn(move || loop {
-            thread::sleep(interval);
-            engine.increment_epoch();
+        .spawn(move || {
+            loop {
+                thread::sleep(interval);
+                engine.increment_epoch();
+            }
         })
         .map(|_| ())
         .map_err(|error| anyhow!("启动 Wasmtime epoch driver 失败: {error}"))

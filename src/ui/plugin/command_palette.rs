@@ -88,7 +88,12 @@ impl PluginCommandPalette {
                     let status = result.toast.unwrap_or_else(|| {
                         result.open_page.as_ref().map_or_else(
                             || "插件 Command 执行完成".to_string(),
-                            |page| format!("插件 Command 执行完成；请求打开 {}/{}", page.plugin_id, page.page_id),
+                            |page| {
+                                format!(
+                                    "插件 Command 执行完成；请求打开 {}/{}",
+                                    page.plugin_id, page.page_id
+                                )
+                            },
                         )
                     });
                     (status, result.open_page)
@@ -140,7 +145,10 @@ impl Render for PluginCommandPalette {
                 let is_invoking = invoking.as_deref() == Some(command.qualified_id.as_str());
                 command_list = command_list.child(
                     div()
-                        .id(SharedString::from(format!("palette-command-{}", command.qualified_id)))
+                        .id(SharedString::from(format!(
+                            "palette-command-{}",
+                            command.qualified_id
+                        )))
                         .p_3()
                         .rounded_xl()
                         .bg(theme::BG_CARD)
@@ -168,7 +176,10 @@ impl Render for PluginCommandPalette {
                                         .text_xs()
                                         .text_color(theme::TEXT_TERTIARY)
                                         .truncate()
-                                        .child(format!("{} · {}", command.plugin_id, command.qualified_id)),
+                                        .child(format!(
+                                            "{} · {}",
+                                            command.plugin_id, command.qualified_id
+                                        )),
                                 ),
                         )
                         .child(
@@ -230,6 +241,7 @@ impl Render for PluginCommandPalette {
             )
             .child(
                 div()
+                    .id("plugin-command-palette-scroll")
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
@@ -259,7 +271,9 @@ impl Render for PluginCommandPalette {
     }
 }
 
-fn navigation_target(open_page: &PluginCommandOpenPage) -> Option<plugin_navigation::PluginNavigationRoute> {
+fn navigation_target(
+    open_page: &PluginCommandOpenPage,
+) -> Option<plugin_navigation::PluginNavigationRoute> {
     plugin_navigation::sidebar_routes()
         .unwrap_or_default()
         .into_iter()
