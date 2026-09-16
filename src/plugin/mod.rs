@@ -19,6 +19,8 @@
 //!   recommendation fusion remains an application/Library responsibility rather than guest policy.
 //! - `search` extends the façade with bounded authenticated Search fan-out and Host-side result
 //!   validation/de-duplication while preserving request-scoped route preference order.
+//! - `streaming` converts validated descriptors into Host-owned local playback sources while keeping
+//!   signed URLs, request headers and cache leases behind the application boundary.
 //! - `cloud_library` adds bounded per-account CloudLibrary/liked-track pagination and explicit-route
 //!   like mutations so merged Library UI never broadcasts a write to every authenticated account.
 //! - `playlists` extends the façade with bounded authenticated playlist fan-out and explicit-route
@@ -72,6 +74,8 @@ pub(crate) mod recognition;
 pub(crate) mod recommendations;
 #[path = "application/search.rs"]
 pub(crate) mod search;
+#[path = "application/streaming.rs"]
+pub(crate) mod streaming;
 #[path = "runtime/ports.rs"]
 pub(crate) mod runtime_ports;
 
