@@ -36,7 +36,7 @@ impl provider::Guest for NeteasePlugin {
         api::auth_begin(&provider_id, method)
     }
 
-    fn auth_poll(provider_id: String, challenge_id: String) -> Result<types::AuthPoll, String> {
+    fn poll_auth(provider_id: String, challenge_id: String) -> Result<types::AuthPoll, String> {
         api::auth_poll(&provider_id, &challenge_id)
     }
 
