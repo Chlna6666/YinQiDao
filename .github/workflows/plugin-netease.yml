@@ -32,31 +32,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-wasip2
-          components: rustfmt,clippy
-
-      - name: Generate guest lockfile
-        run: cargo generate-lockfile --manifest-path plugins/netease/Cargo.toml
-
-      - name: Format guest source with Rust 1.95
-        run: cargo fmt --manifest-path plugins/netease/Cargo.toml
-
-      - name: Capture bootstrap files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p bootstrap/src
-          cp plugins/netease/Cargo.lock bootstrap/Cargo.lock
-          cp plugins/netease/src/api.rs bootstrap/src/api.rs
-          cp plugins/netease/src/lib.rs bootstrap/src/lib.rs
-          cp plugins/netease/src/decoder.rs bootstrap/src/decoder.rs
-
-      - name: Upload bootstrap files
-        uses: actions/upload-artifact@v4
-        with:
-          name: yinqidao-netease-bootstrap
-          path: bootstrap/
-          if-no-files-found: error
-          retention-days: 7
+          components: clippy
 
       - name: Check native helper code
         run: cargo check --manifest-path plugins/netease/Cargo.toml --locked
