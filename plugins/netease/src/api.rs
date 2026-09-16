@@ -724,7 +724,7 @@ fn request_json_with_cookie(
         });
     }
 
-    let request = host::HttpRequest {
+    let request = host::HttpRequestData {
         provider_id: PROVIDER_ID.into(),
         account_id: account_id.map(str::to_owned),
         method: method.into(),
