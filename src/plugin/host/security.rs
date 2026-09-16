@@ -54,7 +54,11 @@ pub fn authorize_http_target(
         .filter(|host| !host.is_empty())
         .ok_or_else(|| anyhow::anyhow!("插件网络请求缺少 host"))?;
 
-    if host.parse::<IpAddr>().is_ok() {
+    // `url::Url::host_str()` serializes IPv6 literals with square brackets. Parsing that string
+    // directly as `IpAddr` therefore catches IPv4 but not IPv6. Manifest validation already accepts
+    // DNS labels only, but reject both literal forms here as an independent SSRF boundary so future
+    // manifest/grant format changes cannot accidentally make `[::1]` or another IPv6 literal routable.
+    if host_is_ip_literal(&host) {
         bail!("插件网络请求禁止直接访问 IP literal");
     }
     if obvious_local_hostname(&host) {
@@ -90,6 +94,15 @@ pub fn authorize_redirect(
     redirect_target: &Url,
 ) -> Result<AuthorizedHttpTarget> {
     authorize_http_target(manifest, grant, redirect_target)
+}
+
+fn host_is_ip_literal(host: &str) -> bool {
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .is_some_and(|host| host.parse::<IpAddr>().is_ok())
 }
 
 fn domain_pattern_matches(pattern: &str, host: &str) -> bool {
@@ -322,6 +335,14 @@ mod tests {
     }
 
     #[test]
+    fn ip_literal_parser_covers_ipv4_and_bracketed_ipv6() {
+        assert!(host_is_ip_literal("127.0.0.1"));
+        assert!(host_is_ip_literal("[::1]"));
+        assert!(host_is_ip_literal("[2606:4700:4700::1111]"));
+        assert!(!host_is_ip_literal("api.example.com"));
+    }
+
+    #[test]
     fn http_target_rejects_insecure_local_and_ip_destinations() {
         let manifest = manifest(&["localhost", "127.0.0.1", "api.example.com"]);
         let grant = grant(&["localhost", "127.0.0.1", "api.example.com"]);
@@ -347,6 +368,16 @@ mod tests {
                 &manifest,
                 &grant,
                 &Url::parse("https://127.0.0.1/").expect("url")
+            )
+            .is_err()
+        );
+        let ipv6_manifest = manifest(&["api.example.com"]);
+        let ipv6_grant = grant(&["api.example.com"]);
+        assert!(
+            authorize_http_target(
+                &ipv6_manifest,
+                &ipv6_grant,
+                &Url::parse("https://[::1]/").expect("url")
             )
             .is_err()
         );
