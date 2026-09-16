@@ -929,6 +929,7 @@ fn capability_list(capabilities: &[PluginCapability]) -> String {
             PluginCapability::Artwork => "封面",
             PluginCapability::Streaming => "串流",
             PluginCapability::Playlists => "歌单",
+            PluginCapability::MediaCollections => "媒体收藏",
             PluginCapability::CloudLibrary => "云曲库",
             PluginCapability::Recommendations => "推荐",
             PluginCapability::Recognition => "识别",

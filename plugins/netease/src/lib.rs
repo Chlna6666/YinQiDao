@@ -31,6 +31,12 @@ struct NeteasePlugin;
 fn add_extended_capabilities(capabilities: &mut Vec<types::Capability>) {
     if !capabilities
         .iter()
+        .any(|capability| matches!(capability, types::Capability::MediaCollections))
+    {
+        capabilities.push(types::Capability::MediaCollections);
+    }
+    if !capabilities
+        .iter()
         .any(|capability| matches!(capability, types::Capability::Recommendations))
     {
         capabilities.push(types::Capability::Recommendations);

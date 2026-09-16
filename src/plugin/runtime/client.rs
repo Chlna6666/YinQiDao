@@ -7,10 +7,12 @@ use std::{
 use anyhow::{Result, anyhow};
 
 use super::abi::{
-    ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, KeyValue, PlaybackSignal,
-    PlaylistDescriptor, PluginLyricDocument, PluginManifest, ProviderAccount, RecognitionRequest,
-    RecognitionResult, RecommendationItem, RecommendationRequest, RemoteTrack, SourceTrackRef,
-    StreamDescriptor, StreamRequest, TrackQuery,
+    ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, CollectionRecommendationItem,
+    CollectionRecommendationRequest, KeyValue, MediaCollection, MediaCollectionKind,
+    MediaCollectionRef, PlaybackSignal, PlaylistDescriptor, PluginLyricDocument, PluginManifest,
+    ProviderAccount, RecognitionRequest, RecognitionResult, RecommendationItem,
+    RecommendationRequest, RemoteTrack, SourceTrackRef, StreamDescriptor, StreamRequest, TrackQuery,
+    UserProfile,
 };
 
 /// Future returned by the runtime-neutral provider client boundary.
@@ -153,6 +155,40 @@ pub trait PluginProviderClient: Send + Sync {
         playlist_id: &'a str,
         tracks: &'a [SourceTrackRef],
     ) -> PluginClientFuture<'a, bool>;
+
+    fn media_collections<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        kind: MediaCollectionKind,
+        offset: u32,
+        limit: u16,
+    ) -> PluginClientFuture<'a, Vec<MediaCollection>>;
+
+    fn set_media_saved<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        collection: &'a MediaCollectionRef,
+        saved: bool,
+    ) -> PluginClientFuture<'a, bool>;
+
+    fn collection_recommendations<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        request: &'a CollectionRecommendationRequest,
+    ) -> PluginClientFuture<'a, Vec<CollectionRecommendationItem>>;
+
+    fn user_profile<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+    ) -> PluginClientFuture<'a, UserProfile>;
 
     fn cloud_library<'a>(
         &'a self,

@@ -27,6 +27,8 @@
 //!   like mutations so merged Library UI never broadcasts a write to every authenticated account.
 //! - `playlists` extends the façade with bounded authenticated playlist fan-out and explicit-route
 //!   track/mutation operations while keeping provider identity validation in Host application code.
+//! - `media_collections` owns generic saved/recommended playlist/album/artist/video access, exact-route
+//!   mutations and user-profile validation without exposing provider-specific protocol details.
 //! - `management` is the narrow application/UI management façade; UI must not import Host or
 //!   Component internals directly.
 //! - `extensions` exposes validated command/home/theme DTOs without leaking UI registry internals or
@@ -68,6 +70,8 @@ pub(crate) mod frontend;
 pub(crate) mod logout;
 #[path = "application/management.rs"]
 pub(crate) mod management;
+#[path = "application/media_collections.rs"]
+pub(crate) mod media_collections;
 #[path = "application/playback.rs"]
 pub(crate) mod playback;
 #[path = "application/playlists.rs"]

@@ -9,6 +9,7 @@ interface types {
         artwork,
         streaming,
         playlists,
+        media-collections,
         cloud-library,
         recommendations,
         recognition,

@@ -17,6 +17,7 @@ pub enum PluginCapability {
     Artwork,
     Streaming,
     Playlists,
+    MediaCollections,
     CloudLibrary,
     Recommendations,
     Recognition,
@@ -369,6 +370,90 @@ pub struct PlaylistDescriptor {
     pub editable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCollectionKind {
+    Playlist,
+    Album,
+    Artist,
+    Video,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct MediaCollectionRef {
+    pub provider_id: String,
+    pub kind: MediaCollectionKind,
+    pub source_id: String,
+}
+
+/// Generic saved/recommended remote collection. Provider protocol details stay behind the Component
+/// boundary while application code can treat playlists, albums, artists and videos uniformly.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MediaCollection {
+    pub source: MediaCollectionRef,
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub artwork_url: Option<String>,
+    #[serde(default)]
+    pub item_count: Option<u32>,
+    #[serde(default)]
+    pub editable: bool,
+    #[serde(default)]
+    pub saved: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionRecommendationSurface {
+    Home,
+    Daily,
+    Discovery,
+    Similar,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CollectionRecommendationRequest {
+    pub surface: CollectionRecommendationSurface,
+    pub kind: MediaCollectionKind,
+    #[serde(default)]
+    pub seed: Option<MediaCollectionRef>,
+    pub limit: u16,
+    #[serde(default)]
+    pub exclude: Vec<MediaCollectionRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CollectionRecommendationItem {
+    pub collection: MediaCollection,
+    #[serde(default)]
+    pub score: Option<f32>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UserProfile {
+    pub provider_id: String,
+    pub account_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub level: Option<u32>,
+    #[serde(default)]
+    pub follower_count: Option<u32>,
+    #[serde(default)]
+    pub following_count: Option<u32>,
+    #[serde(default)]
+    pub playlist_count: Option<u32>,
+    #[serde(default)]
+    pub listen_count: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackSignalKind {
@@ -399,6 +484,7 @@ pub enum ServiceKind {
     Artwork,
     Streaming,
     Playlists,
+    MediaCollections,
     CloudLibrary,
     Recommendations,
     Recognition,
@@ -416,6 +502,7 @@ impl ServiceKind {
             Self::Artwork => PluginCapability::Artwork,
             Self::Streaming => PluginCapability::Streaming,
             Self::Playlists => PluginCapability::Playlists,
+            Self::MediaCollections => PluginCapability::MediaCollections,
             Self::CloudLibrary => PluginCapability::CloudLibrary,
             Self::Recommendations => PluginCapability::Recommendations,
             Self::Recognition => PluginCapability::Recognition,
@@ -430,7 +517,11 @@ impl ServiceKind {
     pub const fn fan_out(self) -> bool {
         matches!(
             self,
-            Self::Search | Self::Playlists | Self::CloudLibrary | Self::Recommendations
+            Self::Search
+                | Self::Playlists
+                | Self::MediaCollections
+                | Self::CloudLibrary
+                | Self::Recommendations
         )
     }
 }
