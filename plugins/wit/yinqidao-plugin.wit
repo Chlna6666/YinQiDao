@@ -221,7 +221,7 @@ interface host {
         error,
     }
 
-    record http-request {
+    record http-request-data {
         provider-id: string,
         account-id: option<string>,
         method: string,
@@ -243,7 +243,7 @@ interface host {
 
     /// Host-mediated network access. `provider-id` is explicit so one component can safely expose
     /// multiple music services while the Host applies per-provider policy, tracing and budgets.
-    http-request: func(request: http-request) -> result<http-response, string>;
+    http-request: func(request: http-request-data) -> result<http-response, string>;
 
     /// The Host injects plugin identity from the instantiated component. Guests choose only a
     /// provider scope or a provider+account scope; they can never address another plugin namespace.
