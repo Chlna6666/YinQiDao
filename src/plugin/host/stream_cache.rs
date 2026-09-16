@@ -13,10 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use md5::{Digest, Md5};
 use tokio::sync::{Semaphore, mpsc};
 
-use crate::{
-    plugin_security::PluginPermissionGrant,
-    plugins::{KeyValue, PluginManifest, PluginRoute, StreamDescriptor, StreamRequest},
-};
+use crate::plugins::{KeyValue, PluginRoute, StreamDescriptor, StreamRequest};
 
 use super::{
     http::{
@@ -33,6 +30,7 @@ const DEFAULT_RANGE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_MAX_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
+const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_CACHE_IDENTITY_BYTES: usize = 32 * 1024;
 const WRITER_QUEUE_DEPTH: usize = 4;
 
@@ -124,33 +122,13 @@ impl PluginStreamCache {
             return self.pin_entry(hit);
         }
 
-        // `route_health` is used here as a fail-closed enabled/provider validation gate. The stream
-        // transfer itself has a separate Host download semaphore and never occupies a guest export
-        // permit for minutes while decoder workers are waiting on network I/O.
+        // Validate the route before allocating a temp writer. `download_stream` repeats this gate,
+        // live catalog lookup and permission lookup before every Range request so disabling a plugin,
+        // removing a provider/domain or revoking network grants stops subsequent chunks fail-closed.
         runtime.route_health(&PluginCallKey::provider(
             &route.plugin_id,
             &route.provider_id,
         ))?;
-        let catalog = runtime.catalog_snapshot()?;
-        let plugin = catalog
-            .plugin(&route.plugin_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("未安装插件: {}", route.plugin_id))?;
-        if plugin.provider(&route.provider_id).is_none() {
-            bail!(
-                "插件 {} 未声明 provider {}",
-                route.plugin_id,
-                route.provider_id
-            );
-        }
-        let permission_state = permissions::global()
-            .ok_or_else(|| anyhow!("插件权限状态尚未初始化"))?;
-        let grant = permission_state
-            .read()
-            .map_err(|error| anyhow!("插件权限状态锁已损坏: {error}"))?
-            .grant_for(&route.plugin_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("插件 {} 尚未获得网络权限", route.plugin_id))?;
 
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
         let temp_dir = self.root.join(format!(
@@ -173,18 +151,26 @@ impl PluginStreamCache {
             )
         });
 
-        let download_result = download_stream(
-            &self.http,
-            runtime,
-            &plugin.manifest,
-            &grant,
-            route,
-            descriptor,
-            self.range_chunk_bytes,
-            self.max_stream_bytes,
-            &writer_tx,
+        let download_result = match tokio::time::timeout(
+            DEFAULT_DOWNLOAD_TIMEOUT,
+            download_stream(
+                &self.http,
+                runtime,
+                route,
+                descriptor,
+                self.range_chunk_bytes,
+                self.max_stream_bytes,
+                &writer_tx,
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "插件 stream 下载超过总时限 {} ms",
+                DEFAULT_DOWNLOAD_TIMEOUT.as_millis()
+            )),
+        };
         drop(writer_tx);
 
         let writer_result = writer
@@ -293,8 +279,6 @@ impl PluginStreamCache {
 async fn download_stream(
     http: &PluginHttpExecutor,
     runtime: &PluginHostServices,
-    manifest: &PluginManifest,
-    grant: &PluginPermissionGrant,
     route: &PluginRoute,
     descriptor: &StreamDescriptor,
     range_chunk_bytes: u64,
@@ -323,6 +307,34 @@ async fn download_stream(
             bail!("插件 stream 超过 Host 最大文件大小限制");
         }
 
+        // Re-check live Host authority before every network chunk. The active request itself cannot
+        // be retroactively cancelled by a grant update, but the very next Range must observe plugin
+        // disable, package/provider changes and permission revocation instead of using a stale grant.
+        runtime.route_health(&PluginCallKey::provider(
+            &route.plugin_id,
+            &route.provider_id,
+        ))?;
+        let catalog = runtime.catalog_snapshot()?;
+        let plugin = catalog
+            .plugin(&route.plugin_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未安装插件: {}", route.plugin_id))?;
+        if plugin.provider(&route.provider_id).is_none() {
+            bail!(
+                "插件 {} 未声明 provider {}",
+                route.plugin_id,
+                route.provider_id
+            );
+        }
+        let permission_state = permissions::global()
+            .ok_or_else(|| anyhow!("插件权限状态尚未初始化"))?;
+        let grant = permission_state
+            .read()
+            .map_err(|error| anyhow!("插件权限状态锁已损坏: {error}"))?
+            .grant_for(&route.plugin_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("插件 {} 尚未获得网络权限", route.plugin_id))?;
+
         let requested_end = offset
             .saturating_add(range_chunk_bytes.saturating_sub(1))
             .min(max_stream_bytes - 1);
@@ -338,8 +350,8 @@ async fn download_stream(
         );
         let response = http
             .execute_stream(
-                manifest,
-                grant,
+                &plugin.manifest,
+                &grant,
                 PluginHttpRequest {
                     method: "GET".into(),
                     url: descriptor.url.clone(),
@@ -1036,6 +1048,14 @@ mod tests {
     #[test]
     fn download_concurrency_is_bounded() {
         let cache = PluginStreamCache::new(PathBuf::from("cache"));
-        assert_eq!(cache.download_gate.available_permits(), DEFAULT_MAX_CONCURRENT_DOWNLOADS);
+        assert_eq!(
+            cache.download_gate.available_permits(),
+            DEFAULT_MAX_CONCURRENT_DOWNLOADS
+        );
+    }
+
+    #[test]
+    fn download_timeout_is_finite() {
+        assert!(!DEFAULT_DOWNLOAD_TIMEOUT.is_zero());
     }
 }
