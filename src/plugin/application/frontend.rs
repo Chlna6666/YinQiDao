@@ -10,9 +10,9 @@ use crate::lyrics::LyricsDocument;
 use super::{
     abi::{
         AccountState, ArtworkDescriptor, AuthChallenge, AuthMethod, AuthPollResult, KeyValue,
-        LyricLine as PluginLyricLine, PluginAccount, PluginCapability, PluginLyricDocument,
-        PluginRoute, ProviderAccount, RemoteTrack, RoutingPolicy, ServiceKind, SourceTrackRef,
-        TrackQuery,
+        LyricLine as PluginLyricLine, PluginAccount, PluginAccountPreference, PluginCapability,
+        PluginLyricDocument, PluginRoute, ProviderAccount, RemoteTrack, RoutingPolicy, ServiceKind,
+        SourceTrackRef, StreamDescriptor, StreamRequest, TrackQuery,
     },
     client::{PluginClientRegistry, PluginProviderClient},
     host::{
@@ -42,6 +42,11 @@ const MAX_PLUGIN_SOURCE_ID_BYTES: usize = 4 * 1024;
 const MAX_PLUGIN_COVER_URL_BYTES: usize = 16 * 1024;
 const MAX_PLUGIN_DESCRIPTOR_HEADER_COUNT: usize = 96;
 const MAX_PLUGIN_DESCRIPTOR_HEADER_BYTES: usize = 64 * 1024;
+const MAX_PLUGIN_STREAM_QUALITY_BYTES: usize = 256;
+const MAX_PLUGIN_STREAM_CODEC_BYTES: usize = 128;
+const MAX_PLUGIN_STREAM_BITRATE: u32 = 512_000_000;
+const MAX_PLUGIN_STREAM_SAMPLE_RATE: u32 = 50_000_000;
+const MAX_PLUGIN_STREAM_CHANNELS: u16 = 64;
 const MAX_PLUGIN_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 static PLUGIN_FRONTEND: OnceLock<Arc<PluginServiceFrontend>> = OnceLock::new();
@@ -326,7 +331,7 @@ impl PluginServiceFrontend {
         track: &SourceTrackRef,
     ) -> Result<PluginSingleResult<PluginLyricDocument>> {
         self.validate_source_route(metadata_route, track, "歌词")?;
-        let mut plan = self.same_provider_plan(ServiceKind::Lyrics, metadata_route)?;
+        let plan = self.same_provider_plan(ServiceKind::Lyrics, metadata_route)?;
         let Some(client) = self.clients.client()? else {
             return Ok(PluginSingleResult::unavailable(plan));
         };
@@ -381,7 +386,7 @@ impl PluginServiceFrontend {
         track: &SourceTrackRef,
     ) -> Result<PluginSingleResult<Vec<u8>>> {
         self.validate_source_route(metadata_route, track, "封面")?;
-        let mut plan = self.same_provider_plan(ServiceKind::Artwork, metadata_route)?;
+        let plan = self.same_provider_plan(ServiceKind::Artwork, metadata_route)?;
         let Some(client) = self.clients.client()? else {
             return Ok(PluginSingleResult::unavailable(plan));
         };
@@ -487,13 +492,84 @@ impl PluginServiceFrontend {
         })
     }
 
+    /// Resolve a remote playback descriptor on the ordinary async control path. The descriptor is
+    /// only metadata; Host playback/download code remains responsible for network I/O, buffering,
+    /// decoding, seeking and realtime delivery, so the audio callback never invokes plugin code.
+    pub async fn stream_for_route(
+        &self,
+        metadata_route: &PluginRoute,
+        request: &StreamRequest,
+    ) -> Result<PluginSingleResult<StreamDescriptor>> {
+        self.validate_source_route(metadata_route, &request.track, "播放")?;
+        validate_stream_request(request)?;
+        let plan = self.same_provider_plan(ServiceKind::Streaming, metadata_route)?;
+        let Some(client) = self.clients.client()? else {
+            return Ok(PluginSingleResult::unavailable(plan));
+        };
+
+        let mut failures = Vec::new();
+        for route in &plan.eligible_routes {
+            let key = PluginCallKey::provider(&route.plugin_id, &route.provider_id);
+            let call = client.stream(
+                &route.plugin_id,
+                &route.provider_id,
+                &route.account_id,
+                request,
+            );
+            match self.runtime.execute_guest_call(key, call).await {
+                Ok(descriptor) => {
+                    if let Err(error) = validate_stream_descriptor(&descriptor) {
+                        failures.push(PluginCallFailure {
+                            route: route.clone(),
+                            error: format!("Stream descriptor 非法: {error:#}"),
+                        });
+                        continue;
+                    }
+                    if descriptor
+                        .expires_at_ms
+                        .is_some_and(|expires_at_ms| expires_at_ms <= self.runtime.now_ms())
+                    {
+                        failures.push(PluginCallFailure {
+                            route: route.clone(),
+                            error: "插件 stream descriptor 已过期".into(),
+                        });
+                        continue;
+                    }
+                    return Ok(PluginSingleResult {
+                        value: Some(descriptor),
+                        route: Some(route.clone()),
+                        plan,
+                        failures,
+                        client_ready: true,
+                    });
+                }
+                Err(error) => failures.push(PluginCallFailure {
+                    route: route.clone(),
+                    error: format!("{error:#}"),
+                }),
+            }
+        }
+
+        Ok(PluginSingleResult {
+            value: None,
+            route: None,
+            plan,
+            failures,
+            client_ready: true,
+        })
+    }
+
     fn same_provider_plan(
         &self,
         service: ServiceKind,
         metadata_route: &PluginRoute,
     ) -> Result<GatedRoutePlan> {
         let policy = RoutingPolicy {
-            preferred_provider: Some(metadata_route.provider_id.clone()),
+            preferred_account: Some(PluginAccountPreference {
+                plugin_id: metadata_route.plugin_id.clone(),
+                provider_id: metadata_route.provider_id.clone(),
+                account_id: metadata_route.account_id.clone(),
+            }),
             ..RoutingPolicy::default()
         };
         let mut plan = self.plan(service, &policy)?;
@@ -501,7 +577,6 @@ impl PluginServiceFrontend {
             route.plugin_id == metadata_route.plugin_id
                 && route.provider_id == metadata_route.provider_id
         });
-        prioritize_account_route(&mut plan.eligible_routes, &metadata_route.account_id);
         plan.plan.plugin_routes = plan.eligible_routes.first().cloned().into_iter().collect();
         Ok(plan)
     }
@@ -617,13 +692,6 @@ impl PluginServiceFrontend {
             },
         )
     }
-}
-
-fn prioritize_account_route(routes: &mut [PluginRoute], account_id: &str) {
-    let Some(index) = routes.iter().position(|route| route.account_id == account_id) else {
-        return;
-    };
-    routes[..=index].rotate_right(1);
 }
 
 fn validate_challenge_id(challenge_id: &str) -> Result<()> {
@@ -847,21 +915,21 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
     Ok(())
 }
 
-fn validate_artwork_descriptor(descriptor: &ArtworkDescriptor) -> Result<()> {
-    if descriptor.url.trim().is_empty()
-        || descriptor.url.len() > MAX_PLUGIN_COVER_URL_BYTES
-        || descriptor.url.contains('\0')
-        || descriptor.url.contains('\r')
-        || descriptor.url.contains('\n')
+fn validate_descriptor_request(url: &str, headers: &[KeyValue], context: &str) -> Result<()> {
+    if url.trim().is_empty()
+        || url.len() > MAX_PLUGIN_COVER_URL_BYTES
+        || url.contains('\0')
+        || url.contains('\r')
+        || url.contains('\n')
     {
-        bail!("Artwork descriptor URL 为空、超过大小限制或包含控制字符");
+        bail!("{context} URL 为空、超过大小限制或包含控制字符");
     }
-    if descriptor.headers.len() > MAX_PLUGIN_DESCRIPTOR_HEADER_COUNT {
-        bail!("Artwork descriptor header 数量超过限制");
+    if headers.len() > MAX_PLUGIN_DESCRIPTOR_HEADER_COUNT {
+        bail!("{context} header 数量超过限制");
     }
 
     let mut header_bytes = 0usize;
-    for header in &descriptor.headers {
+    for header in headers {
         if header.key.trim().is_empty()
             || header.key.contains('\0')
             || header.key.contains('\r')
@@ -870,14 +938,63 @@ fn validate_artwork_descriptor(descriptor: &ArtworkDescriptor) -> Result<()> {
             || header.value.contains('\r')
             || header.value.contains('\n')
         {
-            bail!("Artwork descriptor header 非法或包含控制字符");
+            bail!("{context} header 非法或包含控制字符");
         }
         header_bytes = header_bytes
             .saturating_add(header.key.len())
             .saturating_add(header.value.len());
         if header_bytes > MAX_PLUGIN_DESCRIPTOR_HEADER_BYTES {
-            bail!("Artwork descriptor header 总大小超过限制");
+            bail!("{context} header 总大小超过限制");
         }
+    }
+    Ok(())
+}
+
+fn validate_artwork_descriptor(descriptor: &ArtworkDescriptor) -> Result<()> {
+    validate_descriptor_request(&descriptor.url, &descriptor.headers, "Artwork descriptor")
+}
+
+fn validate_stream_request(request: &StreamRequest) -> Result<()> {
+    if let Some(quality) = request.quality.as_deref()
+        && (quality.trim().is_empty()
+            || quality.len() > MAX_PLUGIN_STREAM_QUALITY_BYTES
+            || quality.contains('\0')
+            || quality.contains('\r')
+            || quality.contains('\n'))
+    {
+        bail!("Stream quality 为空、超过大小限制或包含控制字符");
+    }
+    Ok(())
+}
+
+fn validate_stream_descriptor(descriptor: &StreamDescriptor) -> Result<()> {
+    validate_descriptor_request(&descriptor.url, &descriptor.headers, "Stream descriptor")?;
+    if let Some(codec) = descriptor.codec.as_deref()
+        && (codec.trim().is_empty()
+            || codec.len() > MAX_PLUGIN_STREAM_CODEC_BYTES
+            || codec.contains('\0')
+            || codec.contains('\r')
+            || codec.contains('\n'))
+    {
+        bail!("Stream codec 为空、超过大小限制或包含控制字符");
+    }
+    if descriptor
+        .bitrate
+        .is_some_and(|value| value == 0 || value > MAX_PLUGIN_STREAM_BITRATE)
+    {
+        bail!("Stream bitrate hint 超出允许范围");
+    }
+    if descriptor
+        .sample_rate
+        .is_some_and(|value| value == 0 || value > MAX_PLUGIN_STREAM_SAMPLE_RATE)
+    {
+        bail!("Stream sample_rate hint 超出允许范围");
+    }
+    if descriptor
+        .channels
+        .is_some_and(|value| value == 0 || value > MAX_PLUGIN_STREAM_CHANNELS)
+    {
+        bail!("Stream channels hint 超出允许范围");
     }
     Ok(())
 }
@@ -1101,20 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn same_provider_followup_prioritizes_metadata_account_without_dropping_fallbacks() {
-        let mut routes = vec![
-            route("default", 100, true),
-            route("metadata", 10, false),
-            route("backup", 5, false),
-        ];
-        prioritize_account_route(&mut routes, "metadata");
-        assert_eq!(
-            routes.iter().map(|route| route.account_id.as_str()).collect::<Vec<_>>(),
-            vec!["metadata", "default", "backup"]
-        );
-    }
-
-    #[test]
     fn generic_auth_challenge_rejects_nul_payload() {
         let challenge = AuthChallenge {
             challenge_id: "challenge".into(),
@@ -1184,6 +1287,33 @@ mod tests {
         let mut invalid = descriptor;
         invalid.headers[0].value = "bad\r\nheader".into();
         assert!(validate_artwork_descriptor(&invalid).is_err());
+    }
+
+    #[test]
+    fn stream_request_and_descriptor_are_bounded() {
+        let request = StreamRequest {
+            track: SourceTrackRef {
+                provider_id: "test".into(),
+                source_id: "song".into(),
+            },
+            quality: Some("lossless".into()),
+        };
+        assert!(validate_stream_request(&request).is_ok());
+
+        let descriptor = StreamDescriptor {
+            url: "https://cdn.example.com/audio.flac".into(),
+            headers: Vec::new(),
+            codec: Some("flac".into()),
+            bitrate: Some(4_608_000),
+            sample_rate: Some(192_000),
+            channels: Some(2),
+            expires_at_ms: None,
+        };
+        assert!(validate_stream_descriptor(&descriptor).is_ok());
+
+        let mut invalid = descriptor;
+        invalid.channels = Some(MAX_PLUGIN_STREAM_CHANNELS + 1);
+        assert!(validate_stream_descriptor(&invalid).is_err());
     }
 
     #[test]
