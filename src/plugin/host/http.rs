@@ -22,6 +22,8 @@ use crate::{
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_MAX_METHOD_BYTES: usize = 32;
+const DEFAULT_MAX_URL_BYTES: usize = 16 * 1024;
 const DEFAULT_MAX_REQUEST_BODY: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_HEADER_COUNT: usize = 96;
@@ -45,6 +47,8 @@ pub struct PluginHttpLimits {
     pub connect_timeout: Duration,
     /// Total deadline for the complete call, including DNS, redirects and response streaming.
     pub request_timeout: Duration,
+    pub max_method_bytes: usize,
+    pub max_url_bytes: usize,
     pub max_request_body: usize,
     pub max_response_body: usize,
     pub max_header_count: usize,
@@ -62,6 +66,8 @@ impl Default for PluginHttpLimits {
         Self {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_method_bytes: DEFAULT_MAX_METHOD_BYTES,
+            max_url_bytes: DEFAULT_MAX_URL_BYTES,
             max_request_body: DEFAULT_MAX_REQUEST_BODY,
             max_response_body: DEFAULT_MAX_RESPONSE_BODY,
             max_header_count: DEFAULT_MAX_HEADER_COUNT,
@@ -133,6 +139,8 @@ impl PluginHttpExecutor {
         if limits.pinned_client_ttl.is_zero() {
             limits.pinned_client_ttl = Duration::from_millis(1);
         }
+        limits.max_method_bytes = limits.max_method_bytes.max(1);
+        limits.max_url_bytes = limits.max_url_bytes.max(1);
         limits.max_pinned_clients = limits.max_pinned_clients.max(1);
         Self {
             limits,
@@ -178,8 +186,8 @@ impl PluginHttpExecutor {
             );
         }
 
-        let mut method = parse_method(&request.method)?;
-        let mut url = Url::parse(&request.url).context("插件 HTTP URL 非法")?;
+        let mut method = parse_method(&request.method, &self.limits)?;
+        let mut url = parse_request_url(&request.url, &self.limits)?;
         let mut headers = build_request_headers(&request.headers, &self.limits)?;
         let mut body = request.body;
 
@@ -214,10 +222,16 @@ impl PluginHttpExecutor {
                 .ok_or_else(|| anyhow!("插件 HTTP redirect 缺少 Location"))?
                 .to_str()
                 .context("插件 HTTP redirect Location 不是有效文本")?;
+            if location.len() > self.limits.max_url_bytes || location.contains('\0') {
+                bail!("插件 HTTP redirect Location 超过大小限制或包含 NUL");
+            }
             let next_url = authorized
                 .url
                 .join(location)
                 .context("插件 HTTP redirect Location 非法")?;
+            if next_url.as_str().len() > self.limits.max_url_bytes {
+                bail!("插件 HTTP redirect URL 超过大小限制");
+            }
             // Authorize before mutating headers/method so a rejected redirect cannot affect the next
             // caller-visible state or cause another DNS lookup.
             authorize_redirect(manifest, grant, &next_url)?;
@@ -299,12 +313,23 @@ fn is_followable_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-fn parse_method(value: &str) -> Result<Method> {
-    let method = Method::from_bytes(value.trim().as_bytes()).context("插件 HTTP method 非法")?;
+fn parse_method(value: &str, limits: &PluginHttpLimits) -> Result<Method> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > limits.max_method_bytes || value.contains('\0') {
+        bail!("插件 HTTP method 为空、超过大小限制或包含 NUL");
+    }
+    let method = Method::from_bytes(value.as_bytes()).context("插件 HTTP method 非法")?;
     if method == Method::CONNECT || method == Method::TRACE {
         bail!("插件 HTTP 禁止 CONNECT/TRACE");
     }
     Ok(method)
+}
+
+fn parse_request_url(value: &str, limits: &PluginHttpLimits) -> Result<Url> {
+    if value.trim().is_empty() || value.len() > limits.max_url_bytes || value.contains('\0') {
+        bail!("插件 HTTP URL 为空、超过大小限制或包含 NUL");
+    }
+    Url::parse(value).context("插件 HTTP URL 非法")
 }
 
 fn build_request_headers(values: &[KeyValue], limits: &PluginHttpLimits) -> Result<HeaderMap> {
@@ -578,6 +603,16 @@ mod tests {
             assert!(!ip_is_public(address.parse().expect("ip")), "{address}");
         }
         assert!(ip_is_public("2606:4700:4700::1111".parse().expect("ip")));
+    }
+
+    #[test]
+    fn request_method_and_url_have_host_limits() {
+        let limits = PluginHttpLimits::default();
+        assert!(parse_method("GET", &limits).is_ok());
+        assert!(parse_request_url("https://api.example.com/v1", &limits).is_ok());
+        assert!(parse_method(&"X".repeat(limits.max_method_bytes + 1), &limits).is_err());
+        assert!(parse_request_url(&format!("https://example.com/{}", "x".repeat(limits.max_url_bytes)), &limits).is_err());
+        assert!(parse_request_url("https://example.com/bad\0url", &limits).is_err());
     }
 
     #[test]
