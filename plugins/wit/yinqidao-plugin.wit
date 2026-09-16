@@ -293,7 +293,7 @@ interface provider {
     resolve-track: func(provider-id: string, account-id: option<string>, query: track-query) -> result<option<remote-track>, string>;
     lyrics: func(provider-id: string, account-id: option<string>, track: source-track-ref) -> result<option<lyric-document>, string>;
     artwork: func(provider-id: string, account-id: option<string>, track: source-track-ref) -> result<option<artwork-descriptor>, string>;
-    stream: func(provider-id: string, account-id: string, request: stream-request) -> result<stream-descriptor, string>;
+    %stream: func(provider-id: string, account-id: string, request: stream-request) -> result<stream-descriptor, string>;
 
     playlists: func(provider-id: string, account-id: string) -> result<list<playlist>, string>;
     playlist-tracks: func(provider-id: string, account-id: string, playlist-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
