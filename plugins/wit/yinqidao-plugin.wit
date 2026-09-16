@@ -167,7 +167,7 @@ interface types {
 
     record recommendation-item {
         track: remote-track,
-        score: option<float32>,
+        score: option<f32>,
         reason: option<string>,
     }
 
@@ -179,7 +179,7 @@ interface types {
 
     record recognition-result {
         track: remote-track,
-        confidence: option<float32>,
+        confidence: option<f32>,
     }
 
     record playlist {
