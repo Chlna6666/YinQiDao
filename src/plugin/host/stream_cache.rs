@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -136,11 +136,16 @@ impl PluginStreamCache {
             std::process::id()
         ));
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(WRITER_QUEUE_DEPTH);
+        // A closed channel alone does not mean the transfer completed: dropping/cancelling the
+        // materialize future also drops the sender. The blocking writer therefore requires this
+        // explicit completion fence before it is allowed to leave a temp entry behind.
+        let writer_completed = Arc::new(AtomicBool::new(false));
 
         let writer_temp_dir = temp_dir.clone();
         let writer_identity = identity.clone();
         let writer_audio_name = audio_name.clone();
         let writer_max_stream_bytes = self.max_stream_bytes;
+        let writer_completed_flag = writer_completed.clone();
         let writer = tokio::task::spawn_blocking(move || {
             write_temp_entry(
                 &writer_temp_dir,
@@ -148,6 +153,7 @@ impl PluginStreamCache {
                 &writer_audio_name,
                 writer_max_stream_bytes,
                 writer_rx,
+                writer_completed_flag,
             )
         });
 
@@ -171,6 +177,12 @@ impl PluginStreamCache {
                 DEFAULT_DOWNLOAD_TIMEOUT.as_millis()
             )),
         };
+        if download_result.is_ok() {
+            // Release pairs with the blocking writer's Acquire after it drains every queued chunk.
+            // On cancellation this store is never reached, so the detached writer fails closed and
+            // removes its own temp directory even though its JoinHandle was dropped with the future.
+            writer_completed.store(true, Ordering::Release);
+        }
         drop(writer_tx);
 
         let writer_result = writer
@@ -658,6 +670,7 @@ fn write_temp_entry(
     audio_name: &str,
     max_stream_bytes: u64,
     mut receiver: mpsc::Receiver<Vec<u8>>,
+    completed: Arc<AtomicBool>,
 ) -> Result<u64> {
     let result = (|| {
         let root = temp_dir
@@ -695,6 +708,9 @@ fn write_temp_entry(
             audio
                 .write_all(&chunk)
                 .context("写入插件 stream cache 音频失败")?;
+        }
+        if !completed.load(Ordering::Acquire) {
+            bail!("插件 stream cache writer 未收到完整下载提交标记");
         }
         if written == 0 {
             bail!("插件 stream cache 不接受空音频");
@@ -1057,5 +1073,31 @@ mod tests {
     #[test]
     fn download_timeout_is_finite() {
         assert!(!DEFAULT_DOWNLOAD_TIMEOUT.is_zero());
+    }
+
+    #[test]
+    fn writer_rejects_channel_close_without_completion_fence() {
+        let root = std::env::temp_dir().join(format!(
+            "yinqidao-stream-writer-cancel-{}-{}",
+            std::process::id(),
+            TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temp_dir = root.join(".entry.tmp-test");
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(vec![1, 2, 3]).expect("queue test chunk");
+        drop(tx);
+        let completed = Arc::new(AtomicBool::new(false));
+
+        let result = write_temp_entry(
+            &temp_dir,
+            b"identity",
+            "audio.media",
+            1024,
+            rx,
+            completed,
+        );
+        assert!(result.is_err());
+        assert!(!temp_dir.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }
