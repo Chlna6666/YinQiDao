@@ -1,0 +1,103 @@
+name: Wasmtime Host Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/wasmtime-host-bootstrap.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve Wasmtime 48.0.1
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Inject Host runtime dependencies in runner worktree
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("Cargo.toml")
+          text = path.read_text(encoding="utf-8")
+          needle = 'thiserror = "2"\n'
+          insert = '''thiserror = "2"\nwasmtime = { version = "=48.0.1", default-features = false, features = ["async", "cache", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }\nwasmtime-wasi = { version = "=48.0.1", default-features = false, features = ["p2"] }\n'''
+          if needle not in text:
+              raise SystemExit("Cargo.toml dependency anchor not found")
+          path.write_text(text.replace(needle, insert, 1), encoding="utf-8")
+
+      - name: Resolve real root lockfile
+        run: |
+          cargo fetch
+          cargo fetch --locked
+
+      - name: Rust 1.95 Wasmtime API smoke check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wasmtime-smoke/src
+          cat > /tmp/wasmtime-smoke/Cargo.toml <<'EOF'
+          [package]
+          name = "wasmtime-smoke"
+          version = "0.0.0"
+          edition = "2024"
+          rust-version = "1.95"
+
+          [dependencies]
+          wasmtime = { version = "=48.0.1", default-features = false, features = ["async", "cache", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
+          wasmtime-wasi = { version = "=48.0.1", default-features = false, features = ["p2"] }
+          EOF
+          cat > /tmp/wasmtime-smoke/src/main.rs <<'EOF'
+          use wasmtime::{Config, Engine};
+          use wasmtime::component::{Linker, ResourceTable};
+          use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+          struct State {
+              wasi: WasiCtx,
+              table: ResourceTable,
+          }
+
+          impl WasiView for State {
+              fn ctx(&mut self) -> WasiCtxView<'_> {
+                  WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+              }
+          }
+
+          fn main() -> wasmtime::Result<()> {
+              let mut config = Config::new();
+              config.async_support(true);
+              config.consume_fuel(true);
+              config.epoch_interruption(true);
+              let engine = Engine::new(&config)?;
+              let mut linker = Linker::<State>::new(&engine);
+              wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+              let _state = State {
+                  wasi: WasiCtx::builder().build(),
+                  table: ResourceTable::new(),
+              };
+              Ok(())
+          }
+          EOF
+          cargo check --manifest-path /tmp/wasmtime-smoke/Cargo.toml --locked || \
+            cargo check --manifest-path /tmp/wasmtime-smoke/Cargo.toml
+
+      - name: Capture resolved lockfile
+        run: |
+          mkdir -p bootstrap
+          cp Cargo.lock bootstrap/Cargo.lock
+
+      - name: Upload resolved lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: yinqidao-wasmtime-root-lock
+          path: bootstrap/Cargo.lock
+          if-no-files-found: error
+          retention-days: 7
