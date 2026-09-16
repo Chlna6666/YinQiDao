@@ -11,30 +11,49 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use md5::{Digest, Md5};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
-use crate::plugins::{KeyValue, PluginRoute, StreamDescriptor, StreamRequest};
+use crate::{
+    plugin_security::PluginPermissionGrant,
+    plugins::{KeyValue, PluginManifest, PluginRoute, StreamDescriptor, StreamRequest},
+};
 
 use super::{
-    http::{PluginHttpRequest, PluginHttpResponse},
-    runtime::PluginHostServices,
+    http::{
+        PluginHttpExecutor, PluginHttpRequest, PluginHttpStreamBodyLimits,
+        PluginHttpStreamResponse,
+    },
+    permissions,
+    runtime::{PluginCallKey, PluginHostServices},
+    stream_cache_gc::{self, PluginStreamCacheLease},
 };
 
 const STREAM_CACHE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_RANGE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_MAX_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
 const MAX_CACHE_IDENTITY_BYTES: usize = 32 * 1024;
 const WRITER_QUEUE_DEPTH: usize = 4;
 
 static PLUGIN_STREAM_CACHE: OnceLock<Arc<PluginStreamCache>> = OnceLock::new();
 static TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PluginMaterializedStream {
     pub path: PathBuf,
     pub bytes: u64,
     pub cache_hit: bool,
+    /// Keep the finalized bucket pinned for as long as the caller owns this materialization.
+    /// The lease is intentionally opaque outside the Host cache implementation.
+    _lease: Arc<PluginStreamCacheLease>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedStreamEntry {
+    path: PathBuf,
+    bytes: u64,
+    cache_hit: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +62,8 @@ pub struct PluginStreamCache {
     range_chunk_bytes: u64,
     max_stream_bytes: u64,
     cache_ttl: Duration,
+    http: PluginHttpExecutor,
+    download_gate: Arc<Semaphore>,
 }
 
 impl PluginStreamCache {
@@ -52,6 +73,8 @@ impl PluginStreamCache {
             range_chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES,
             max_stream_bytes: DEFAULT_MAX_STREAM_BYTES,
             cache_ttl: DEFAULT_CACHE_TTL,
+            http: PluginHttpExecutor::default(),
+            download_gate: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
@@ -61,11 +84,11 @@ impl PluginStreamCache {
 
     /// Materialize one already validated StreamDescriptor into a Host-owned, seekable local file.
     ///
-    /// Network reads stay on the async control path. File writes are performed by one blocking
-    /// worker fed through a bounded channel, so neither Tokio workers nor the realtime audio
-    /// callback perform filesystem I/O. Every range request is delegated to `PluginHostServices`
-    /// and therefore reuses the same permission, DNS, redirect and rate-limit boundaries as normal
-    /// plugin HTTP imports.
+    /// Network reads stay on the async control path. Response chunks are pushed through a bounded
+    /// channel into one blocking writer, so the complete track is never collected into a Vec and
+    /// neither Tokio workers nor the realtime audio callback perform filesystem I/O. The dedicated
+    /// Host HTTP streaming path shares permission, DNS pinning, redirect, proxy and header policy
+    /// with ordinary plugin HTTP without expanding the ordinary 8 MiB response budget.
     pub async fn materialize(
         &self,
         runtime: &PluginHostServices,
@@ -78,25 +101,56 @@ impl PluginStreamCache {
         let audio_name = format!("audio.{}", codec_extension(descriptor.codec.as_deref()));
         let bucket = self.root.join(&locator);
 
-        let lookup_bucket = bucket.clone();
-        let lookup_identity = identity.clone();
-        let lookup_audio_name = audio_name.clone();
-        let max_stream_bytes = self.max_stream_bytes;
-        let cache_ttl = self.cache_ttl;
-        if let Some(hit) = tokio::task::spawn_blocking(move || {
-            cached_entry(
-                &lookup_bucket,
-                &lookup_identity,
-                &lookup_audio_name,
-                max_stream_bytes,
-                cache_ttl,
-            )
-        })
-        .await
-        .context("等待插件 stream cache 查询任务失败")??
+        if let Some(hit) = self
+            .lookup_cached(&bucket, &identity, &audio_name)
+            .await?
         {
-            return Ok(hit);
+            return self.pin_entry(hit);
         }
+
+        // Bound disk/network pressure independently from provider guest-call concurrency. Waiting
+        // callers re-check the cache after acquiring the permit so a just-finished peer avoids a
+        // duplicate transfer.
+        let _download_permit = self
+            .download_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("插件 stream download gate 已关闭"))?;
+        if let Some(hit) = self
+            .lookup_cached(&bucket, &identity, &audio_name)
+            .await?
+        {
+            return self.pin_entry(hit);
+        }
+
+        // `route_health` is used here as a fail-closed enabled/provider validation gate. The stream
+        // transfer itself has a separate Host download semaphore and never occupies a guest export
+        // permit for minutes while decoder workers are waiting on network I/O.
+        runtime.route_health(&PluginCallKey::provider(
+            &route.plugin_id,
+            &route.provider_id,
+        ))?;
+        let catalog = runtime.catalog_snapshot()?;
+        let plugin = catalog
+            .plugin(&route.plugin_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未安装插件: {}", route.plugin_id))?;
+        if plugin.provider(&route.provider_id).is_none() {
+            bail!(
+                "插件 {} 未声明 provider {}",
+                route.plugin_id,
+                route.provider_id
+            );
+        }
+        let permission_state = permissions::global()
+            .ok_or_else(|| anyhow!("插件权限状态尚未初始化"))?;
+        let grant = permission_state
+            .read()
+            .map_err(|error| anyhow!("插件权限状态锁已损坏: {error}"))?
+            .grant_for(&route.plugin_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("插件 {} 尚未获得网络权限", route.plugin_id))?;
 
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
         let temp_dir = self.root.join(format!(
@@ -120,7 +174,10 @@ impl PluginStreamCache {
         });
 
         let download_result = download_stream(
+            &self.http,
             runtime,
+            &plugin.manifest,
+            &grant,
             route,
             descriptor,
             self.range_chunk_bytes,
@@ -162,7 +219,7 @@ impl PluginStreamCache {
         let commit_audio_name = audio_name.clone();
         let commit_max_stream_bytes = self.max_stream_bytes;
         let commit_cache_ttl = self.cache_ttl;
-        tokio::task::spawn_blocking(move || {
+        let committed = tokio::task::spawn_blocking(move || {
             commit_temp_entry(
                 &commit_temp_dir,
                 &commit_bucket,
@@ -173,12 +230,71 @@ impl PluginStreamCache {
             )
         })
         .await
-        .context("等待插件 stream cache 提交任务失败")?
+        .context("等待插件 stream cache 提交任务失败")??;
+
+        // Pin before capacity GC so the file just handed to the decoder cannot be removed between
+        // materialization and open(). Older unpinned buckets remain eligible for eviction.
+        let materialized = self.pin_entry(committed)?;
+        let gc_root = self.root.clone();
+        let gc_stats = tokio::task::spawn_blocking(move || {
+            stream_cache_gc::prune(
+                &gc_root,
+                stream_cache_gc::PluginStreamCacheGcPolicy::default(),
+            )
+        })
+        .await
+        .context("等待插件 stream cache GC 任务失败")??;
+        if gc_stats.over_budget_bytes > 0 {
+            tracing::warn!(
+                over_budget_bytes = gc_stats.over_budget_bytes,
+                pinned_buckets = gc_stats.pinned_buckets,
+                "插件 stream cache 因活跃 lease 暂时超过容量预算"
+            );
+        }
+        Ok(materialized)
+    }
+
+    async fn lookup_cached(
+        &self,
+        bucket: &Path,
+        identity: &[u8],
+        audio_name: &str,
+    ) -> Result<Option<CachedStreamEntry>> {
+        let lookup_bucket = bucket.to_path_buf();
+        let lookup_identity = identity.to_vec();
+        let lookup_audio_name = audio_name.to_owned();
+        let max_stream_bytes = self.max_stream_bytes;
+        let cache_ttl = self.cache_ttl;
+        tokio::task::spawn_blocking(move || {
+            cached_entry(
+                &lookup_bucket,
+                &lookup_identity,
+                &lookup_audio_name,
+                max_stream_bytes,
+                cache_ttl,
+            )
+        })
+        .await
+        .context("等待插件 stream cache 查询任务失败")?
+    }
+
+    fn pin_entry(&self, entry: CachedStreamEntry) -> Result<PluginMaterializedStream> {
+        let lease = stream_cache_gc::pin_materialized_path(&self.root, &entry.path)?;
+        Ok(PluginMaterializedStream {
+            path: entry.path,
+            bytes: entry.bytes,
+            cache_hit: entry.cache_hit,
+            _lease: lease,
+        })
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_stream(
+    http: &PluginHttpExecutor,
     runtime: &PluginHostServices,
+    manifest: &PluginManifest,
+    grant: &PluginPermissionGrant,
     route: &PluginRoute,
     descriptor: &StreamDescriptor,
     range_chunk_bytes: u64,
@@ -210,33 +326,51 @@ async fn download_stream(
         let requested_end = offset
             .saturating_add(range_chunk_bytes.saturating_sub(1))
             .min(max_stream_bytes - 1);
+        let requested_bytes = requested_end
+            .checked_sub(offset)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| anyhow!("插件 stream range 长度溢出"))?;
         let headers = build_range_headers(
             &descriptor.headers,
             offset,
             requested_end,
             if_range.as_deref(),
         );
-        let response = runtime
-            .http_request(
-                &route.plugin_id,
-                &route.provider_id,
-                Some(&route.account_id),
+        let response = http
+            .execute_stream(
+                manifest,
+                grant,
                 PluginHttpRequest {
                     method: "GET".into(),
                     url: descriptor.url.clone(),
                     headers,
                     body: Vec::new(),
                 },
+                PluginHttpStreamBodyLimits {
+                    max_full_body: max_stream_bytes,
+                    max_partial_body: requested_bytes,
+                    allow_full_response: offset == 0,
+                },
+                writer,
             )
             .await
-            .context("插件 stream Host HTTP range 请求失败")?;
+            .context("插件 stream Host HTTP 请求失败")?;
+
+        if response.status == 429 {
+            let retry_after = response_header(&response, "retry-after")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let _ = runtime.record_rate_limit(
+                &PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                retry_after,
+            );
+        }
 
         if offset == 0 && response.status == 200 {
-            if response.body.is_empty() {
+            if response.body_bytes == 0 {
                 bail!("插件 stream HTTP body 为空");
             }
-            let body_len = response.body.len() as u64;
-            if body_len > max_stream_bytes {
+            if response.body_bytes > max_stream_bytes {
                 bail!("插件 stream 超过 Host 最大文件大小限制");
             }
             if let Some(content_length) = response_header(&response, "content-length") {
@@ -244,17 +378,14 @@ async fn download_stream(
                     .trim()
                     .parse::<u64>()
                     .context("插件 stream Content-Length 非法")?;
-                if declared != body_len {
+                if declared != response.body_bytes {
                     bail!(
-                        "插件 stream Content-Length 与实际响应不一致: declared={declared}, actual={body_len}"
+                        "插件 stream Content-Length 与实际响应不一致: declared={declared}, actual={}",
+                        response.body_bytes
                     );
                 }
             }
-            writer
-                .send(response.body)
-                .await
-                .map_err(|_| anyhow!("插件 stream cache 写线程已退出"))?;
-            return Ok(body_len);
+            return Ok(response.body_bytes);
         }
 
         if response.status != 206 {
@@ -298,17 +429,12 @@ async fn download_stream(
             .checked_sub(content_range.start)
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| anyhow!("插件 stream Content-Range 长度溢出"))?;
-        if response.body.len() as u64 != expected_body_len {
+        if response.body_bytes != expected_body_len {
             bail!(
                 "插件 stream range body 长度不匹配: expected={expected_body_len}, actual={}",
-                response.body.len()
+                response.body_bytes
             );
         }
-
-        writer
-            .send(response.body)
-            .await
-            .map_err(|_| anyhow!("插件 stream cache 写线程已退出"))?;
 
         offset = content_range
             .end
@@ -362,7 +488,7 @@ struct ParsedContentRange {
     total: u64,
 }
 
-fn parse_content_range(response: &PluginHttpResponse) -> Result<ParsedContentRange> {
+fn parse_content_range(response: &PluginHttpStreamResponse) -> Result<ParsedContentRange> {
     let value = response_header(response, "content-range")
         .ok_or_else(|| anyhow!("插件 stream 206 响应缺少 Content-Range"))?
         .trim();
@@ -399,7 +525,7 @@ fn parse_content_range(response: &PluginHttpResponse) -> Result<ParsedContentRan
     Ok(ParsedContentRange { start, end, total })
 }
 
-fn response_header<'a>(response: &'a PluginHttpResponse, name: &str) -> Option<&'a str> {
+fn response_header<'a>(response: &'a PluginHttpStreamResponse, name: &str) -> Option<&'a str> {
     response
         .headers
         .iter()
@@ -407,7 +533,7 @@ fn response_header<'a>(response: &'a PluginHttpResponse, name: &str) -> Option<&
         .map(|header| header.value.as_str())
 }
 
-fn select_if_range_validator(response: &PluginHttpResponse) -> Option<String> {
+fn select_if_range_validator(response: &PluginHttpStreamResponse) -> Option<String> {
     if let Some(etag) = response_header(response, "etag") {
         let etag = etag.trim();
         if !etag.is_empty() && !etag.starts_with("W/") {
@@ -596,16 +722,22 @@ fn cached_entry(
     audio_name: &str,
     max_stream_bytes: u64,
     cache_ttl: Duration,
-) -> Result<Option<PluginMaterializedStream>> {
-    if !bucket.exists() {
-        return Ok(None);
-    }
-    if !bucket.is_dir() {
-        bail!("插件 stream cache locator 被非目录对象占用");
+) -> Result<Option<CachedStreamEntry>> {
+    let bucket_metadata = match fs::symlink_metadata(bucket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("读取插件 stream cache bucket metadata 失败: {}", bucket.display())
+            });
+        }
+    };
+    if bucket_metadata.file_type().is_symlink() || !bucket_metadata.file_type().is_dir() {
+        bail!("插件 stream cache locator 被非普通目录对象占用");
     }
 
     let identity_path = bucket.join("identity.bin");
-    let identity_metadata = match fs::metadata(&identity_path) {
+    let identity_metadata = match fs::symlink_metadata(&identity_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::remove_dir_all(bucket).with_context(|| {
@@ -622,8 +754,11 @@ fn cached_entry(
             });
         }
     };
-    if identity_metadata.len() > MAX_CACHE_IDENTITY_BYTES as u64 {
-        bail!("插件 stream cache identity 文件超过大小限制");
+    if identity_metadata.file_type().is_symlink()
+        || !identity_metadata.file_type().is_file()
+        || identity_metadata.len() > MAX_CACHE_IDENTITY_BYTES as u64
+    {
+        bail!("插件 stream cache identity 文件非法");
     }
     let stored_identity = fs::read(&identity_path).with_context(|| {
         format!(
@@ -636,7 +771,7 @@ fn cached_entry(
     }
 
     let audio_path = bucket.join(audio_name);
-    let audio_metadata = match fs::metadata(&audio_path) {
+    let audio_metadata = match fs::symlink_metadata(&audio_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::remove_dir_all(bucket).with_context(|| {
@@ -653,7 +788,8 @@ fn cached_entry(
             });
         }
     };
-    if !audio_metadata.is_file()
+    if audio_metadata.file_type().is_symlink()
+        || !audio_metadata.file_type().is_file()
         || audio_metadata.len() == 0
         || audio_metadata.len() > max_stream_bytes
     {
@@ -675,7 +811,7 @@ fn cached_entry(
         return Ok(None);
     }
 
-    Ok(Some(PluginMaterializedStream {
+    Ok(Some(CachedStreamEntry {
         path: audio_path,
         bytes: audio_metadata.len(),
         cache_hit: true,
@@ -689,7 +825,7 @@ fn commit_temp_entry(
     audio_name: &str,
     max_stream_bytes: u64,
     cache_ttl: Duration,
-) -> Result<PluginMaterializedStream> {
+) -> Result<CachedStreamEntry> {
     if let Some(hit) = cached_entry(
         bucket,
         expected_identity,
@@ -703,7 +839,7 @@ fn commit_temp_entry(
 
     match fs::rename(temp_dir, bucket) {
         Ok(()) => {}
-        Err(rename_error) if bucket.exists() => {
+        Err(rename_error) if fs::symlink_metadata(bucket).is_ok() => {
             if let Some(hit) = cached_entry(
                 bucket,
                 expected_identity,
@@ -724,13 +860,16 @@ fn commit_temp_entry(
     }
 
     let audio_path = bucket.join(audio_name);
-    let metadata = fs::metadata(&audio_path).with_context(|| {
+    let metadata = fs::symlink_metadata(&audio_path).with_context(|| {
         format!(
             "读取已提交插件 stream cache metadata 失败: {}",
             audio_path.display()
         )
     })?;
-    Ok(PluginMaterializedStream {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!("已提交插件 stream cache 音频不是普通文件");
+    }
+    Ok(CachedStreamEntry {
         path: audio_path,
         bytes: metadata.len(),
         cache_hit: false,
@@ -782,13 +921,13 @@ mod tests {
 
     #[test]
     fn content_range_parser_rejects_unknown_or_invalid_total() {
-        let response = |value: &str| PluginHttpResponse {
+        let response = |value: &str| PluginHttpStreamResponse {
             status: 206,
             headers: vec![KeyValue {
                 key: "Content-Range".into(),
                 value: value.into(),
             }],
-            body: Vec::new(),
+            body_bytes: 0,
         };
         assert_eq!(
             parse_content_range(&response("bytes 0-99/100")).expect("range"),
@@ -874,7 +1013,7 @@ mod tests {
 
     #[test]
     fn weak_etag_is_not_used_for_if_range() {
-        let weak = PluginHttpResponse {
+        let weak = PluginHttpStreamResponse {
             status: 206,
             headers: vec![
                 KeyValue {
@@ -886,11 +1025,17 @@ mod tests {
                     value: "Wed, 16 Sep 2026 00:00:00 GMT".into(),
                 },
             ],
-            body: Vec::new(),
+            body_bytes: 0,
         };
         assert_eq!(
             select_if_range_validator(&weak).as_deref(),
             Some("Wed, 16 Sep 2026 00:00:00 GMT")
         );
+    }
+
+    #[test]
+    fn download_concurrency_is_bounded() {
+        let cache = PluginStreamCache::new(PathBuf::from("cache"));
+        assert_eq!(cache.download_gate.available_permits(), DEFAULT_MAX_CONCURRENT_DOWNLOADS);
     }
 }

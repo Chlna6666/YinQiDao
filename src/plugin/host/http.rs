@@ -14,6 +14,7 @@ use reqwest::{
     },
     redirect::Policy,
 };
+use tokio::sync::mpsc;
 
 use crate::{
     plugin_security::{PluginPermissionGrant, authorize_http_target, authorize_redirect},
@@ -22,6 +23,7 @@ use crate::{
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_MAX_METHOD_BYTES: usize = 32;
 const DEFAULT_MAX_URL_BYTES: usize = 16 * 1024;
 const DEFAULT_MAX_REQUEST_BODY: usize = 2 * 1024 * 1024;
@@ -45,8 +47,11 @@ pub enum PluginHttpProxyPolicy {
 #[derive(Clone, Debug)]
 pub struct PluginHttpLimits {
     pub connect_timeout: Duration,
-    /// Total deadline for the complete call, including DNS, redirects and response streaming.
+    /// Total deadline for one ordinary API/asset call, including DNS, redirects and body collect.
     pub request_timeout: Duration,
+    /// Independent deadline for Host-owned large streaming transfers. This never changes the
+    /// ordinary response body limit and is used only by `execute_stream`.
+    pub stream_request_timeout: Duration,
     pub max_method_bytes: usize,
     pub max_url_bytes: usize,
     pub max_request_body: usize,
@@ -66,6 +71,7 @@ impl Default for PluginHttpLimits {
         Self {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            stream_request_timeout: DEFAULT_STREAM_REQUEST_TIMEOUT,
             max_method_bytes: DEFAULT_MAX_METHOD_BYTES,
             max_url_bytes: DEFAULT_MAX_URL_BYTES,
             max_request_body: DEFAULT_MAX_REQUEST_BODY,
@@ -93,6 +99,23 @@ pub struct PluginHttpResponse {
     pub status: u16,
     pub headers: Vec<KeyValue>,
     pub body: Vec<u8>,
+}
+
+/// Body limits for the Host-owned streaming path. A 206 response is always constrained by
+/// `max_partial_body`; a 200 response is constrained independently and can be forbidden after the
+/// first Range request so a server cannot make a seek/resume request restart a whole large file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PluginHttpStreamBodyLimits {
+    pub max_full_body: u64,
+    pub max_partial_body: u64,
+    pub allow_full_response: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PluginHttpStreamResponse {
+    pub status: u16,
+    pub headers: Vec<KeyValue>,
+    pub body_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -136,6 +159,12 @@ impl Default for PluginHttpExecutor {
 
 impl PluginHttpExecutor {
     pub fn new(mut limits: PluginHttpLimits) -> Self {
+        if limits.request_timeout.is_zero() {
+            limits.request_timeout = Duration::from_millis(1);
+        }
+        if limits.stream_request_timeout.is_zero() {
+            limits.stream_request_timeout = Duration::from_millis(1);
+        }
         if limits.pinned_client_ttl.is_zero() {
             limits.pinned_client_ttl = Duration::from_millis(1);
         }
@@ -148,7 +177,7 @@ impl PluginHttpExecutor {
         }
     }
 
-    /// Execute one Host-mediated plugin request under a total deadline.
+    /// Execute one Host-mediated plugin request under the ordinary small-response deadline.
     ///
     /// DNS is resolved by the Host, private/special addresses are removed, and the surviving
     /// addresses are pinned into a reqwest Client. Automatic redirects are disabled so every
@@ -173,12 +202,52 @@ impl PluginHttpExecutor {
         })?
     }
 
+    /// Execute one Host-owned large transfer without collecting the body into a single Vec.
+    ///
+    /// This path deliberately shares the exact request validation, permission checks, DNS pinning,
+    /// redirect handling, proxy policy and credential-stripping implementation with `execute`.
+    /// Only the body handling and deadline differ. Chunks are pushed through a bounded channel to a
+    /// non-realtime writer; the guest never receives a socket, URL fetch primitive or cache path.
+    pub async fn execute_stream(
+        &self,
+        manifest: &PluginManifest,
+        grant: &PluginPermissionGrant,
+        request: PluginHttpRequest,
+        body_limits: PluginHttpStreamBodyLimits,
+        writer: &mpsc::Sender<Vec<u8>>,
+    ) -> Result<PluginHttpStreamResponse> {
+        if body_limits.max_full_body == 0 || body_limits.max_partial_body == 0 {
+            bail!("插件 HTTP stream body limit 必须大于 0");
+        }
+        tokio::time::timeout(self.limits.stream_request_timeout, async {
+            let response = self.send_authorized(manifest, grant, request).await?;
+            stream_response(response, &self.limits, body_limits, writer).await
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "插件 HTTP stream 调用超过总时限 {} ms",
+                self.limits.stream_request_timeout.as_millis()
+            )
+        })?
+    }
+
     async fn execute_inner(
         &self,
         manifest: &PluginManifest,
         grant: &PluginPermissionGrant,
         request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse> {
+        let response = self.send_authorized(manifest, grant, request).await?;
+        collect_response(response, &self.limits).await
+    }
+
+    async fn send_authorized(
+        &self,
+        manifest: &PluginManifest,
+        grant: &PluginPermissionGrant,
+        request: PluginHttpRequest,
+    ) -> Result<Response> {
         if request.body.len() > self.limits.max_request_body {
             bail!(
                 "插件 HTTP request body 超过 {} bytes",
@@ -210,7 +279,7 @@ impl PluginHttpExecutor {
 
             let status = response.status().as_u16();
             if !is_followable_redirect(status) {
-                return collect_response(response, &self.limits).await;
+                return Ok(response);
             }
             if redirect_count == self.limits.max_redirects {
                 bail!("插件 HTTP redirect 超过 {} 次", self.limits.max_redirects);
@@ -428,7 +497,8 @@ fn build_pinned_client(
     let mut builder = Client::builder()
         .redirect(Policy::none())
         .connect_timeout(limits.connect_timeout)
-        .timeout(limits.request_timeout)
+        // Total deadlines are enforced by the Host wrappers. Keeping them out of the shared Client
+        // lets ordinary API calls remain at 20s while the stream path uses its independent budget.
         .resolve_to_addrs(host, addresses);
     match limits.proxy_policy {
         PluginHttpProxyPolicy::Direct => {
@@ -476,6 +546,58 @@ async fn collect_response(
         status,
         headers,
         body,
+    })
+}
+
+async fn stream_response(
+    mut response: Response,
+    limits: &PluginHttpLimits,
+    body_limits: PluginHttpStreamBodyLimits,
+    writer: &mpsc::Sender<Vec<u8>>,
+) -> Result<PluginHttpStreamResponse> {
+    let headers = collect_response_headers(response.headers(), limits)?;
+    let status = response.status().as_u16();
+    let max_body = match status {
+        206 => body_limits.max_partial_body,
+        200 if body_limits.allow_full_response => body_limits.max_full_body,
+        _ => {
+            return Ok(PluginHttpStreamResponse {
+                status,
+                headers,
+                body_bytes: 0,
+            });
+        }
+    };
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_body)
+    {
+        bail!("插件 HTTP stream Content-Length 超过本次传输限制");
+    }
+
+    let mut body_bytes = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("读取插件 HTTP stream response 失败")?
+    {
+        body_bytes = body_bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| anyhow!("插件 HTTP stream body 长度溢出"))?;
+        if body_bytes > max_body {
+            bail!("插件 HTTP stream response body 超过本次传输限制");
+        }
+        writer
+            .send(chunk.to_vec())
+            .await
+            .map_err(|_| anyhow!("插件 HTTP stream writer 已退出"))?;
+    }
+
+    Ok(PluginHttpStreamResponse {
+        status,
+        headers,
+        body_bytes,
     })
 }
 
@@ -617,6 +739,14 @@ mod tests {
         assert!(parse_method(&format!("{}GET", " ".repeat(limits.max_method_bytes)), &limits).is_err());
         assert!(parse_request_url(&format!("https://example.com/{}", "x".repeat(limits.max_url_bytes)), &limits).is_err());
         assert!(parse_request_url("https://example.com/bad\0url", &limits).is_err());
+    }
+
+    #[test]
+    fn stream_deadline_does_not_expand_ordinary_http_budget() {
+        let limits = PluginHttpLimits::default();
+        assert_eq!(limits.request_timeout, Duration::from_secs(20));
+        assert!(limits.stream_request_timeout > limits.request_timeout);
+        assert_eq!(limits.max_response_body, 8 * 1024 * 1024);
     }
 
     #[test]
