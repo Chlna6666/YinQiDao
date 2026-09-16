@@ -1,0 +1,82 @@
+name: NetEase Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "plugins/netease/**"
+      - "plugins/wit/yinqidao-plugin.wit"
+      - ".github/workflows/plugin-netease.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "plugins/netease/**"
+      - "plugins/wit/yinqidao-plugin.wit"
+      - ".github/workflows/plugin-netease.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build NetEase Component
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-wasip2
+          components: rustfmt,clippy
+
+      - name: Generate guest lockfile
+        run: cargo generate-lockfile --manifest-path plugins/netease/Cargo.toml
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path plugins/netease/Cargo.toml -- --check
+
+      - name: Check native helper code
+        run: cargo check --manifest-path plugins/netease/Cargo.toml --locked
+
+      - name: Run native helper tests
+        run: cargo test --manifest-path plugins/netease/Cargo.toml --locked
+
+      - name: Check WASI Component guest
+        run: cargo check --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked
+
+      - name: Run Clippy for WASI Component guest
+        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked -- -D warnings
+
+      - name: Build release Component
+        run: cargo build --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --release --locked
+
+      - name: Assemble plugin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/io.yinqidao.netease
+          cp plugins/netease/plugin.toml dist/io.yinqidao.netease/plugin.toml
+          cp plugins/netease/target/wasm32-wasip2/release/yinqidao_netease_plugin.wasm \
+            dist/io.yinqidao.netease/provider.wasm
+          cp plugins/netease/Cargo.lock dist/Cargo.lock
+          test -s dist/io.yinqidao.netease/provider.wasm
+          python - <<'PY'
+          from pathlib import Path
+          wasm = Path("dist/io.yinqidao.netease/provider.wasm").read_bytes()
+          if not wasm.startswith(b"\0asm"):
+              raise SystemExit("provider.wasm does not have WebAssembly magic")
+          print(f"provider.wasm: {len(wasm)} bytes")
+          PY
+
+      - name: Upload installable plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: yinqidao-netease-plugin
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
