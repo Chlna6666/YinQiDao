@@ -1,9 +1,12 @@
 use std::{
+    fs,
     path::Path,
     sync::atomic::{AtomicI64, Ordering},
+    time::UNIX_EPOCH,
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use md5::{Digest, Md5};
 
 use crate::{
     audio::AudioEngine,
@@ -18,16 +21,52 @@ use super::{
         stream_cache,
         stream_cache::PluginMaterializedStream,
     },
+    runtime_ports,
 };
 
 const MAX_REMOTE_TRACK_ARTISTS: usize = 128;
 const MAX_REMOTE_TRACK_TEXT_BYTES: usize = 32 * 1024;
 const MAX_REMOTE_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
+const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
+const PACKAGE_REVISION_DOMAIN: &[u8] = b"YINQIDAO-PLUGIN-PACKAGE-REVISION-V1\0";
 
 // Local Library ids are SQLite INTEGER PRIMARY KEY AUTOINCREMENT values and therefore occupy the
 // positive namespace. Remote materializations are process-local only and use negative ids so they
 // can enter the existing player queue without being persisted or confused with a Library row.
 static NEXT_REMOTE_TRACK_ID: AtomicI64 = AtomicI64::new(-1);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageFileStamp {
+    len: u64,
+    modified_ns: u128,
+}
+
+/// Stable-enough Host cache invalidation stamp for one installed package.
+///
+/// This is deliberately not a trust/authenticity digest. Package admission and runtime authorization
+/// remain the Host's responsibility. The stamp only prevents a persisted audio cache entry produced
+/// by an older package revision from being reused after a normal package-manager replacement or app
+/// restart. It mirrors the component registry's len/mtime generation idea while staying in the Host
+/// application boundary and without exposing Wasmtime types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PluginPackageRevision {
+    manifest_version: String,
+    manifest: PackageFileStamp,
+    component: PackageFileStamp,
+}
+
+impl PluginPackageRevision {
+    fn cache_scope(&self) -> String {
+        let mut hasher = Md5::new();
+        hasher.update(PACKAGE_REVISION_DOMAIN);
+        hash_text(&mut hasher, &self.manifest_version);
+        hasher.update(self.manifest.len.to_le_bytes());
+        hasher.update(self.manifest.modified_ns.to_le_bytes());
+        hasher.update(self.component.len.to_le_bytes());
+        hasher.update(self.component.modified_ns.to_le_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+}
 
 /// Application-facing local playback source produced from a plugin stream descriptor.
 ///
@@ -201,6 +240,10 @@ impl PluginServiceFrontend {
         metadata_route: &PluginRoute,
         request: &StreamRequest,
     ) -> Result<PluginSingleResult<PluginPlaybackSource>> {
+        // The process-local mutation generation closes the in-flight hot-update race around the guest
+        // descriptor call. The persistent package revision below separately scopes disk-cache reuse
+        // across process restarts.
+        let package_generation = runtime_ports::package_mutation_generation();
         let resolved = self.stream_for_route(metadata_route, request).await?;
         let PluginSingleResult {
             value,
@@ -223,17 +266,10 @@ impl PluginServiceFrontend {
             anyhow!("插件 stream descriptor 缺少对应 route，拒绝 materialize")
         })?;
 
-        let runtime = runtime::global().ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
-        // A local stream-cache hit must not bypass current Host package authority. Revalidate the
-        // exact provider route before the cache layer can return an already-materialized file, so a
-        // disabled/uninstalled plugin or removed provider fails closed without touching the player.
-        if let Err(error) = runtime.route_health(&PluginCallKey::provider(
-            &route.plugin_id,
-            &route.provider_id,
-        )) {
+        if runtime_ports::package_mutation_generation() != package_generation {
             failures.push(PluginCallFailure {
                 route: route.clone(),
-                error: format!("Stream Host route 重检失败: {error:#}"),
+                error: "插件在 Stream descriptor 解析期间已更新，旧结果已丢弃".into(),
             });
             return Ok(PluginSingleResult {
                 value: None,
@@ -244,27 +280,93 @@ impl PluginServiceFrontend {
             });
         }
 
-        let cache = stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
-        match cache
-            .materialize(runtime.as_ref(), &route, request, &descriptor)
-            .await
-        {
-            Ok(materialized) => Ok(PluginSingleResult {
-                value: Some(PluginPlaybackSource {
+        let runtime = runtime::global().ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?;
+        let package_revision = match current_package_revision(runtime.as_ref(), &route) {
+            Ok(revision) => revision,
+            Err(error) => {
+                failures.push(PluginCallFailure {
                     route: route.clone(),
-                    source: request.track.clone(),
-                    quality: request.quality.clone(),
-                    codec: descriptor.codec,
-                    bitrate: descriptor.bitrate,
-                    sample_rate: descriptor.sample_rate,
-                    channels: descriptor.channels,
-                    materialized,
-                }),
-                route: Some(route),
+                    error: format!("Stream Host package revision 重检失败: {error:#}"),
+                });
+                return Ok(PluginSingleResult {
+                    value: None,
+                    route: None,
+                    plan,
+                    failures,
+                    client_ready,
+                });
+            }
+        };
+        if runtime_ports::package_mutation_generation() != package_generation {
+            failures.push(PluginCallFailure {
+                route: route.clone(),
+                error: "插件在 Stream cache scope 建立期间已更新，旧结果已丢弃".into(),
+            });
+            return Ok(PluginSingleResult {
+                value: None,
+                route: None,
                 plan,
                 failures,
                 client_ready,
-            }),
+            });
+        }
+
+        // Do not mutate the guest-visible request or the exact account route. Only a private clone is
+        // decorated so `stream_cache::cache_identity` sees a new variant after package replacement.
+        let cache_request = cache_scoped_request(request, &package_revision);
+        let cache = stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
+        match cache
+            .materialize(runtime.as_ref(), &route, &cache_request, &descriptor)
+            .await
+        {
+            Ok(materialized) => {
+                let revision_check = if runtime_ports::package_mutation_generation()
+                    != package_generation
+                {
+                    Err(anyhow!("插件在 Stream materialize 期间已更新"))
+                } else {
+                    current_package_revision(runtime.as_ref(), &route).and_then(|current| {
+                        if current == package_revision {
+                            Ok(())
+                        } else {
+                            bail!("插件 package revision 在 Stream materialize 期间发生变化")
+                        }
+                    })
+                };
+                if let Err(error) = revision_check {
+                    // Dropping materialized releases its cache lease. The completed old-revision
+                    // bucket may remain until normal GC, but the new package scope can never hit it.
+                    drop(materialized);
+                    failures.push(PluginCallFailure {
+                        route: route.clone(),
+                        error: format!("Stream package revision 提交校验失败: {error:#}"),
+                    });
+                    return Ok(PluginSingleResult {
+                        value: None,
+                        route: None,
+                        plan,
+                        failures,
+                        client_ready,
+                    });
+                }
+
+                Ok(PluginSingleResult {
+                    value: Some(PluginPlaybackSource {
+                        route: route.clone(),
+                        source: request.track.clone(),
+                        quality: request.quality.clone(),
+                        codec: descriptor.codec,
+                        bitrate: descriptor.bitrate,
+                        sample_rate: descriptor.sample_rate,
+                        channels: descriptor.channels,
+                        materialized,
+                    }),
+                    route: Some(route),
+                    plan,
+                    failures,
+                    client_ready,
+                })
+            }
             Err(error) => {
                 failures.push(PluginCallFailure {
                     route: route.clone(),
@@ -406,6 +508,77 @@ impl PluginServiceFrontend {
     }
 }
 
+fn current_package_revision(
+    runtime: &runtime::PluginHostServices,
+    route: &PluginRoute,
+) -> Result<PluginPackageRevision> {
+    // This is also the authority gate for cache hits: validate_call_key() checks current package
+    // enablement and provider presence before we look at any persisted materialization.
+    runtime.route_health(&PluginCallKey::provider(
+        &route.plugin_id,
+        &route.provider_id,
+    ))?;
+    let catalog = runtime.catalog_snapshot()?;
+    let plugin = catalog
+        .plugin(&route.plugin_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("未安装插件: {}", route.plugin_id))?;
+    if plugin.provider(&route.provider_id).is_none() {
+        bail!(
+            "插件 {} 未声明 provider {}",
+            route.plugin_id,
+            route.provider_id
+        );
+    }
+
+    Ok(PluginPackageRevision {
+        manifest_version: plugin.manifest.version.clone(),
+        manifest: regular_file_stamp(&plugin.package_dir.join(PLUGIN_PACKAGE_FILE), "plugin.toml")?,
+        component: regular_file_stamp(&plugin.component_path, "Component")?,
+    })
+}
+
+fn regular_file_stamp(path: &Path, label: &str) -> Result<PackageFileStamp> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("读取插件 {label} revision metadata 失败: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!("插件 {label} revision 输入不是普通文件: {}", path.display());
+    }
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("读取插件 {label} mtime 失败: {}", path.display()))?;
+    let modified_ns = modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| anyhow!("插件 {label} mtime 早于 UNIX_EPOCH: {}", path.display()))?
+        .as_nanos();
+    Ok(PackageFileStamp {
+        len: metadata.len(),
+        modified_ns,
+    })
+}
+
+fn cache_scoped_request(
+    request: &StreamRequest,
+    revision: &PluginPackageRevision,
+) -> StreamRequest {
+    let base_quality = request.quality.as_deref().unwrap_or("");
+    let quality_kind = u8::from(request.quality.is_some());
+    let private_quality_scope = format!(
+        "YQD-HOST-CACHE-V1|{quality_kind}|{}|{base_quality}|{}",
+        base_quality.len(),
+        revision.cache_scope()
+    );
+    StreamRequest {
+        track: request.track.clone(),
+        quality: Some(private_quality_scope),
+    }
+}
+
+fn hash_text(hasher: &mut Md5, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
 fn allocate_remote_track_id() -> Result<TrackId> {
     let mut current = NEXT_REMOTE_TRACK_ID.load(Ordering::Relaxed);
     loop {
@@ -464,6 +637,20 @@ fn validate_remote_text(value: &str, field: &str, allow_empty: bool) -> Result<(
 mod tests {
     use super::*;
 
+    fn revision(version: &str, manifest_len: u64, component_len: u64) -> PluginPackageRevision {
+        PluginPackageRevision {
+            manifest_version: version.into(),
+            manifest: PackageFileStamp {
+                len: manifest_len,
+                modified_ns: 10,
+            },
+            component: PackageFileStamp {
+                len: component_len,
+                modified_ns: 20,
+            },
+        }
+    }
+
     #[test]
     fn remote_track_ids_use_unique_negative_namespace() {
         let first = allocate_remote_track_id().expect("first");
@@ -471,6 +658,49 @@ mod tests {
         assert!(first < 0);
         assert!(second < 0);
         assert!(second < first);
+    }
+
+    #[test]
+    fn package_revision_changes_private_cache_scope() {
+        let first = revision("1.0.0", 100, 1_000);
+        let second = revision("1.0.0", 100, 1_001);
+        assert_ne!(first.cache_scope(), second.cache_scope());
+
+        let request = StreamRequest {
+            track: SourceTrackRef {
+                provider_id: "provider".into(),
+                source_id: "track-1".into(),
+            },
+            quality: Some("lossless".into()),
+        };
+        let scoped = cache_scoped_request(&request, &first);
+        assert_eq!(scoped.track, request.track);
+        assert_ne!(scoped.quality, request.quality);
+        assert!(scoped.quality.as_deref().is_some_and(|value| value.contains("lossless")));
+    }
+
+    #[test]
+    fn package_revision_scope_distinguishes_none_and_empty_quality() {
+        let revision = revision("1.0.0", 100, 1_000);
+        let base_track = SourceTrackRef {
+            provider_id: "provider".into(),
+            source_id: "track-1".into(),
+        };
+        let none = cache_scoped_request(
+            &StreamRequest {
+                track: base_track.clone(),
+                quality: None,
+            },
+            &revision,
+        );
+        let empty = cache_scoped_request(
+            &StreamRequest {
+                track: base_track,
+                quality: Some(String::new()),
+            },
+            &revision,
+        );
+        assert_ne!(none.quality, empty.quality);
     }
 
     #[test]
