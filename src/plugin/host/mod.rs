@@ -7,3 +7,4 @@ pub(crate) mod security;
 pub(crate) mod secrets;
 pub(crate) mod sessions;
 pub(crate) mod state_guard;
+pub(crate) mod stream_cache;

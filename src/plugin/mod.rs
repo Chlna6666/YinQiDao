@@ -3,8 +3,8 @@
 //! Dependency boundary:
 //! - `abi` contains runtime-neutral plugin/domain types and must not depend on Host, OnlineServices,
 //!   GPUI, audio, or Wasmtime.
-//! - `host` owns permissions, secrets, HTTP/network policy, sessions, package management and call
-//!   budgets. Guest code is never authoritative for these decisions.
+//! - `host` owns permissions, secrets, HTTP/network policy, stream materialization/cache, sessions,
+//!   package management and call budgets. Guest code is never authoritative for these decisions.
 //! - `component` owns Component loading/compiled cache, Host-owned GC and, later, the private
 //!   Wasmtime adapter. Generated Wasmtime binding types must not escape this module.
 //! - `accounts` exposes non-Secret Provider/account/session/permission snapshots for application UI.
@@ -101,6 +101,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
         );
     }
     let package_manager = host::package_manager::initialize(base_dir);
+    let stream_cache = host::stream_cache::initialize(base_dir);
 
     let secret_store = host::secrets::initialize(std::sync::Arc::new(
         host::secrets::MemorySecretStore::default(),
@@ -188,8 +189,9 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     );
     tracing::info!(
         plugin_root = %package_manager.plugin_root().display(),
+        stream_cache_root = %stream_cache.root().display(),
         installed_plugins = package_manager.list_installed().map(|plugins| plugins.len()).unwrap_or_default(),
-        "插件包管理器已初始化"
+        "插件包管理器与 Stream cache 已初始化"
     );
     if let Some(runtime) = runtime.as_ref() {
         tracing::info!(
