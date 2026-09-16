@@ -1,0 +1,46 @@
+name: NetEase Crypto Lock Bootstrap
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/netease-crypto-lock.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-wasip2
+      - name: Inject planned crypto dependencies
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("plugins/netease/Cargo.toml")
+          text = path.read_text()
+          marker = 'wit-bindgen = "0.62.0"\n'
+          deps = '''wit-bindgen = "0.62.0"\naes = "0.8"\nbase64 = "0.22"\ncbc = { version = "0.1", features = ["alloc"] }\necb = { version = "0.1", features = ["alloc"] }\nmd-5 = "0.10"\nrand = "0.8"\nrsa = "0.9"\n'''
+          if marker not in text:
+              raise SystemExit("dependency insertion marker missing")
+          path.write_text(text.replace(marker, deps, 1))
+          PY
+      - name: Generate Rust 1.95 lockfile
+        run: cargo generate-lockfile --manifest-path plugins/netease/Cargo.toml
+      - name: Check dependency graph on native and WASI
+        run: |
+          cargo check --manifest-path plugins/netease/Cargo.toml --locked
+          cargo check --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netease-crypto-lock
+          path: plugins/netease/Cargo.lock
+          if-no-files-found: error
+          retention-days: 3
