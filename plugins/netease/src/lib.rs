@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 mod api;
+#[cfg(target_arch = "wasm32")]
+mod features;
 pub mod decoder;
 
 #[cfg(target_arch = "wasm32")]
@@ -20,13 +22,33 @@ use bindings::yinqidao::music_plugin::types;
 struct NeteasePlugin;
 
 #[cfg(target_arch = "wasm32")]
+fn add_recommendations_capability(capabilities: &mut Vec<types::Capability>) {
+    if !capabilities
+        .iter()
+        .any(|capability| matches!(capability, types::Capability::Recommendations))
+    {
+        capabilities.push(types::Capability::Recommendations);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 impl provider::Guest for NeteasePlugin {
     fn manifest() -> types::PluginManifest {
-        api::manifest()
+        let mut manifest = api::manifest();
+        for descriptor in &mut manifest.providers {
+            if descriptor.id == "netease" {
+                add_recommendations_capability(&mut descriptor.capabilities);
+            }
+        }
+        manifest
     }
 
     fn accounts(provider_id: String) -> Result<Vec<types::Account>, String> {
-        api::accounts(&provider_id)
+        let mut accounts = api::accounts(&provider_id)?;
+        for account in &mut accounts {
+            add_recommendations_capability(&mut account.capabilities);
+        }
+        Ok(accounts)
     }
 
     fn auth_begin(
@@ -165,11 +187,11 @@ impl provider::Guest for NeteasePlugin {
     }
 
     fn recommendations(
-        _provider_id: String,
-        _account_id: String,
-        _request: types::RecommendationRequest,
+        provider_id: String,
+        account_id: String,
+        request: types::RecommendationRequest,
     ) -> Result<Vec<types::RecommendationItem>, String> {
-        Err(api::unsupported("recommendations"))
+        features::recommendations(&provider_id, &account_id, &request)
     }
 
     fn recognize(
