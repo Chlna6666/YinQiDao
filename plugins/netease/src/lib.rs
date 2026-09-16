@@ -1,8 +1,12 @@
+mod crypto;
+pub mod decoder;
+
 #[cfg(target_arch = "wasm32")]
 mod api;
 #[cfg(target_arch = "wasm32")]
 mod features;
-pub mod decoder;
+#[cfg(target_arch = "wasm32")]
+mod protocol;
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings {
@@ -189,7 +193,7 @@ impl provider::Guest for NeteasePlugin {
         track: types::SourceTrackRef,
         liked: bool,
     ) -> Result<bool, String> {
-        api::set_liked(&provider_id, &account_id, &track, liked)
+        features::set_liked(&provider_id, &account_id, &track, liked)
     }
 
     fn recommendations(

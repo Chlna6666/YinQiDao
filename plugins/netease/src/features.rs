@@ -1,19 +1,13 @@
 use std::collections::HashSet;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
-    api,
-    bindings::yinqidao::music_plugin::{host, types},
+    api, protocol,
+    bindings::yinqidao::music_plugin::types,
 };
 
 const PROVIDER_ID: &str = "netease";
-const COOKIE_KEY: &str = "cookie-v1";
-const API_BASE: &str = "https://music.163.com";
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36";
-const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
-const MAX_COOKIE_BYTES: usize = 16 * 1024;
 const MAX_RECOMMENDATION_LIMIT: u16 = 100;
 
 pub fn recommendations(
@@ -68,6 +62,30 @@ pub fn recommendations(
         .collect())
 }
 
+pub fn set_liked(
+    provider_id: &str,
+    account_id: &str,
+    track: &types::SourceTrackRef,
+    liked: bool,
+) -> Result<bool, String> {
+    ensure_provider(provider_id)?;
+    validate_account_id(account_id)?;
+    if track.provider_id != PROVIDER_ID {
+        return Err("红心同步 source provider 与网易云 route 不匹配".into());
+    }
+    let song_id = numeric_source_id(&track.source_id)?;
+    let json = protocol::weapi(
+        account_id,
+        "/api/song/like",
+        json!({
+            "trackId": song_id.to_string(),
+            "userid": account_id,
+            "like": liked,
+        }),
+    )?;
+    Ok(api_code_success(&json))
+}
+
 pub fn report_playback(
     provider_id: &str,
     account_id: &str,
@@ -79,7 +97,7 @@ pub fn report_playback(
     match signal.kind.clone() {
         types::PlaybackSignalKind::Liked | types::PlaybackSignalKind::Unliked => {
             let source = require_signal_source(signal)?;
-            api::set_liked(
+            set_liked(
                 provider_id,
                 account_id,
                 source,
@@ -124,12 +142,15 @@ fn fm_trash(
 ) -> Result<bool, String> {
     let song_id = numeric_source_id(&source.source_id)?;
     let seconds = (position_ms / 1_000).clamp(1, 86_400);
-    let body = form_encode(&[
-        ("songId", song_id.to_string()),
-        ("alg", "RT".into()),
-        ("time", seconds.to_string()),
-    ]);
-    let json = request_json(account_id, "POST", "/api/radio/trash/add", Some(body))?;
+    let json = protocol::weapi(
+        account_id,
+        "/api/radio/trash/add",
+        json!({
+            "songId": song_id.to_string(),
+            "alg": "RT",
+            "time": seconds,
+        }),
+    )?;
     Ok(api_code_success(&json))
 }
 
@@ -157,17 +178,19 @@ fn scrobble(
     }]);
     let logs = serde_json::to_string(&logs)
         .map_err(|error| format!("序列化网易云听歌打卡失败: {error}"))?;
-    let body = form_encode(&[("logs", logs)]);
-    let json = request_json(account_id, "POST", "/api/feedback/weblog", Some(body))?;
+    let json = protocol::weapi(
+        account_id,
+        "/api/feedback/weblog",
+        json!({ "logs": logs }),
+    )?;
     Ok(api_code_success(&json))
 }
 
 fn daily_recommendations(account_id: &str) -> Result<Vec<types::RemoteTrack>, String> {
-    let json = request_json(
+    let json = protocol::weapi(
         account_id,
-        "POST",
         "/api/v3/discovery/recommend/songs",
-        None,
+        json!({}),
     )?;
     parse_track_array(json.pointer("/data/dailySongs"))
 }
@@ -176,22 +199,20 @@ fn personalized_new_music(
     account_id: &str,
     limit: u16,
 ) -> Result<Vec<types::RemoteTrack>, String> {
-    let body = form_encode(&[
-        ("type", "recommend".into()),
-        ("limit", limit.to_string()),
-        ("areaId", "0".into()),
-    ]);
-    let json = request_json(
+    let json = protocol::weapi(
         account_id,
-        "POST",
         "/api/personalized/newsong",
-        Some(body),
+        json!({
+            "type": "recommend",
+            "limit": limit,
+            "areaId": 0,
+        }),
     )?;
     parse_track_array(json.get("result"))
 }
 
 fn personal_fm(account_id: &str) -> Result<Vec<types::RemoteTrack>, String> {
-    let json = request_json(account_id, "POST", "/api/v1/radio/get", None)?;
+    let json = protocol::weapi(account_id, "/api/v1/radio/get", json!({}))?;
     parse_track_array(json.get("data"))
 }
 
@@ -204,7 +225,7 @@ fn similar_tracks(
         .ok_or_else(|| "无法在网易云解析相似歌曲 seed".to_string())?;
     let song_id = numeric_source_id(&resolved.source.source_id)?;
     let path = format!("/api/discovery/simiSong?songid={song_id}");
-    let json = request_json(account_id, "GET", &path, None)?;
+    let json = protocol::get(account_id, &path)?;
     parse_track_array(json.get("songs"))
 }
 
@@ -262,110 +283,6 @@ fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
     })
 }
 
-fn request_json(
-    account_id: &str,
-    method: &str,
-    path: &str,
-    body: Option<Vec<u8>>,
-) -> Result<Value, String> {
-    validate_account_id(account_id)?;
-    if !path.starts_with('/') || path.contains('\r') || path.contains('\n') {
-        return Err("内部网易云 API path 非法".into());
-    }
-    if !matches!(method, "GET" | "POST") {
-        return Err("内部网易云 API method 非法".into());
-    }
-
-    let mut cookie = account_cookie(account_id)?;
-    if !cookie
-        .split(';')
-        .any(|part| part.trim().starts_with("os="))
-    {
-        cookie.push_str("; os=pc");
-    }
-
-    let mut headers = vec![
-        types::KeyValue {
-            key: "User-Agent".into(),
-            value: USER_AGENT.into(),
-        },
-        types::KeyValue {
-            key: "Accept".into(),
-            value: "application/json, text/plain, */*".into(),
-        },
-        types::KeyValue {
-            key: "Referer".into(),
-            value: "https://music.163.com/".into(),
-        },
-        types::KeyValue {
-            key: "Origin".into(),
-            value: "https://music.163.com".into(),
-        },
-        types::KeyValue {
-            key: "Cookie".into(),
-            value: cookie,
-        },
-    ];
-    if method == "POST" {
-        headers.push(types::KeyValue {
-            key: "Content-Type".into(),
-            value: "application/x-www-form-urlencoded; charset=UTF-8".into(),
-        });
-    }
-
-    let request = host::HttpRequestData {
-        provider_id: PROVIDER_ID.into(),
-        account_id: Some(account_id.into()),
-        method: method.into(),
-        url: format!("{API_BASE}{path}"),
-        headers,
-        body: body.unwrap_or_default(),
-    };
-    let response = host::http_request(&request)
-        .map_err(|error| format!("网易云 Host HTTP 调用失败: {error}"))?;
-    if response.body.len() > MAX_HTTP_BODY_BYTES {
-        return Err(format!(
-            "网易云 HTTP 响应超过插件上限 {MAX_HTTP_BODY_BYTES} bytes"
-        ));
-    }
-    if !(200..300).contains(&response.status) {
-        return Err(format!("网易云 HTTP 状态异常: {}", response.status));
-    }
-
-    let value: Value = serde_json::from_slice(&response.body)
-        .map_err(|error| format!("网易云返回 JSON 解析失败: {error}"))?;
-    if let Some(code) = value.get("code").and_then(Value::as_i64)
-        && !(200..300).contains(&code)
-    {
-        let message = value
-            .get("message")
-            .or_else(|| value.get("msg"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Err(format!("网易云 API 错误 code={code}: {message}"));
-    }
-    Ok(value)
-}
-
-fn account_cookie(account_id: &str) -> Result<String, String> {
-    let scope = host::SecretScope {
-        provider_id: PROVIDER_ID.into(),
-        account_id: Some(account_id.into()),
-    };
-    let bytes = host::secret_get(&scope, COOKIE_KEY)
-        .map_err(|error| format!("Host Secret 读取失败: {error}"))?
-        .ok_or_else(|| "网易云账号 Cookie 不存在，请重新登录".to_string())?;
-    if bytes.len() > MAX_COOKIE_BYTES {
-        return Err("网易云 Cookie 超过大小限制".into());
-    }
-    let cookie = String::from_utf8(bytes)
-        .map_err(|_| "网易云 Cookie 不是合法 UTF-8".to_string())?;
-    if cookie.contains('\r') || cookie.contains('\n') || cookie.contains('\0') {
-        return Err("网易云 Cookie 包含非法控制字符".into());
-    }
-    Ok(cookie)
-}
-
 fn ensure_provider(provider_id: &str) -> Result<(), String> {
     if provider_id == PROVIDER_ID {
         Ok(())
@@ -399,35 +316,7 @@ fn numeric_source_id(source_id: &str) -> Result<u64, String> {
 fn api_code_success(json: &Value) -> bool {
     json.get("code")
         .and_then(Value::as_i64)
-        .is_some_and(|code| (200..300).contains(&code))
-}
-
-fn form_encode(fields: &[(&str, String)]) -> Vec<u8> {
-    let mut body = String::new();
-    for (index, (key, value)) in fields.iter().enumerate() {
-        if index > 0 {
-            body.push('&');
-        }
-        body.push_str(&percent_encode(key));
-        body.push('=');
-        body.push_str(&percent_encode(value));
-    }
-    body.into_bytes()
-}
-
-fn percent_encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(char::from(HEX[(byte >> 4) as usize]));
-            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
-        }
-    }
-    encoded
+        .is_none_or(|code| (200..300).contains(&code))
 }
 
 fn value_string(value: &Value, path: &[&str]) -> Option<String> {
