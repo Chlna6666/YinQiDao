@@ -192,6 +192,19 @@ pub fn reserve_download_capacity(
         .lock()
         .map_err(|error| anyhow!("插件 stream cache reservation registry 锁已损坏: {error}"))?;
     let current_reserved = reserved.get(&root).copied().unwrap_or(0);
+
+    // A reservation exists for every in-process writer before it can create its temp directory and
+    // remains alive until cancellation cleanup finishes. Therefore, when this root has zero active
+    // reservations, every `.tmp-*` entry is necessarily orphaned (including crash leftovers from a
+    // previous process). Remove them synchronously before calculating new headroom instead of waiting
+    // up to the normal 24 h stale-temp TTL and allowing unaccounted bytes to break the hard budget.
+    if current_reserved == 0 {
+        let removed = cleanup_orphan_temp_entries(&root)?;
+        if removed > 0 {
+            tracing::info!(removed, "已清理崩溃/异常退出遗留的插件 stream 临时目录");
+        }
+    }
+
     let total_reserved = current_reserved
         .checked_add(bytes)
         .ok_or_else(|| anyhow!("插件 stream cache reservation 长度溢出"))?;
@@ -393,6 +406,38 @@ fn ensure_plain_cache_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove Host-owned temp namespace entries only when the caller has already proven there are no
+/// active in-process reservations for this root. Symlinks are unlinked rather than followed, and
+/// unrelated directories are never touched.
+fn cleanup_orphan_temp_entries(root: &Path) -> Result<usize> {
+    ensure_plain_cache_root(root)?;
+    let mut removed = 0usize;
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("读取插件 stream cache root 失败: {}", root.display()))?
+    {
+        let entry = entry.context("读取插件 stream cache 临时目录项失败")?;
+        let path = entry.path();
+        if !is_temp_dir(&path) {
+            continue;
+        }
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "读取插件 stream cache 临时项类型失败: {}",
+                path.display()
+            )
+        })?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            remove_direct_entry(&path, true)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            remove_direct_entry(&path, false)?;
+        } else {
+            bail!("插件 stream cache 临时命名空间存在不支持的文件系统对象: {}", path.display());
+        }
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 fn inspect_bucket(path: &Path) -> Result<Option<CacheBucket>> {
     let mut bytes = 0u64;
     let mut modified = fs::symlink_metadata(path)
@@ -576,6 +621,48 @@ mod tests {
         let second = reserve_download_capacity(&root, 10, policy).expect("full reservation");
         drop(second);
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_reservation_removes_orphan_temp_entries() {
+        let root = temp_root("orphan-temp");
+        fs::create_dir_all(&root).expect("root");
+        let orphan = root.join(".0123456789abcdef0123456789abcdef.tmp-dead-process");
+        fs::create_dir_all(&orphan).expect("orphan temp");
+        fs::write(orphan.join("audio.media"), vec![0u8; 32]).expect("partial audio");
+        let policy = PluginStreamCacheGcPolicy {
+            max_cache_bytes: 128,
+            target_cache_bytes: 128,
+            cache_ttl: Duration::from_secs(60 * 60),
+            stale_temp_ttl: Duration::from_secs(60 * 60),
+        };
+
+        let reservation = reserve_download_capacity(&root, 16, policy).expect("reservation");
+        assert!(!orphan.exists());
+        drop(reservation);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn active_reservation_preserves_peer_temp_entry() {
+        let root = temp_root("active-temp");
+        fs::create_dir_all(&root).expect("root");
+        let policy = PluginStreamCacheGcPolicy {
+            max_cache_bytes: 128,
+            target_cache_bytes: 128,
+            cache_ttl: Duration::from_secs(60 * 60),
+            stale_temp_ttl: Duration::from_secs(60 * 60),
+        };
+        let first = reserve_download_capacity(&root, 16, policy).expect("first reservation");
+        let active = root.join(".0123456789abcdef0123456789abcdef.tmp-active");
+        fs::create_dir_all(&active).expect("active temp");
+        fs::write(active.join("audio.media"), vec![0u8; 8]).expect("active partial audio");
+
+        let second = reserve_download_capacity(&root, 16, policy).expect("second reservation");
+        assert!(active.is_dir());
+        drop(second);
+        drop(first);
         let _ = fs::remove_dir_all(&root);
     }
 
