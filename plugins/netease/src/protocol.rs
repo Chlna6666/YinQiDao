@@ -1,4 +1,4 @@
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use crate::{
     bindings::yinqidao::music_plugin::{host, types},
@@ -20,42 +20,93 @@ pub fn get(account_id: &str, path: &str) -> Result<Value, String> {
     validate_relative_path(path)?;
     let cookie = account_cookie(account_id)?;
     send(
-        account_id,
+        Some(account_id),
         "GET",
         &format!("{WEB_BASE}{path}"),
         &cookie,
         WEB_USER_AGENT,
         Vec::new(),
+        &[],
     )
 }
 
-pub fn weapi(account_id: &str, path: &str, mut data: Value) -> Result<Value, String> {
-    validate_api_path(path)?;
+pub fn weapi(account_id: &str, path: &str, data: Value) -> Result<Value, String> {
     let cookie = account_cookie(account_id)?;
-    let csrf = cookie_value(&cookie, "__csrf").unwrap_or_default();
+    weapi_with(Some(account_id), account_id, &cookie, path, data)
+}
+
+pub fn weapi_anonymous(path: &str, data: Value) -> Result<Value, String> {
+    weapi_with(None, "anonymous", "", path, data)
+}
+
+fn weapi_with(
+    account_id: Option<&str>,
+    identity: &str,
+    cookie: &str,
+    path: &str,
+    mut data: Value,
+) -> Result<Value, String> {
+    validate_api_path(path)?;
+    let csrf = cookie_value(cookie, "__csrf").unwrap_or_default();
     let object = data
         .as_object_mut()
         .ok_or_else(|| "WeAPI payload 必须是 JSON object".to_string())?;
     object.insert("csrf_token".into(), Value::String(csrf.into()));
 
-    let entropy = host::now_ms() ^ stable_entropy(account_id.as_bytes()) ^ stable_entropy(path.as_bytes());
+    let entropy = host::now_ms()
+        ^ stable_entropy(identity.as_bytes())
+        ^ stable_entropy(path.as_bytes());
     let encrypted = crypto::weapi(&data, entropy)?;
     let endpoint = format!("{WEB_BASE}/weapi/{}", path.trim_start_matches("/api/"));
     send(
         account_id,
         "POST",
         &endpoint,
-        &cookie,
+        cookie,
         WEB_USER_AGENT,
         encrypted.body,
+        &[],
     )
 }
 
-pub fn eapi(account_id: &str, path: &str, mut data: Value) -> Result<Value, String> {
-    validate_api_path(path)?;
+pub fn eapi(account_id: &str, path: &str, data: Value) -> Result<Value, String> {
     let cookie = account_cookie(account_id)?;
+    eapi_with(Some(account_id), account_id, &cookie, path, data, &[])
+}
+
+pub fn eapi_anonymous(path: &str, data: Value) -> Result<Value, String> {
+    eapi_with(None, "anonymous", "", path, data, &[])
+}
+
+/// Anonymous EAPI request used by login flows whose business status codes are intentionally outside
+/// the ordinary 2xx API range (for example QR login 800/801/802/803). HTTP transport failures are
+/// still rejected; only explicitly listed JSON `code` values bypass normal response-code validation.
+pub fn eapi_anonymous_status(
+    path: &str,
+    data: Value,
+    accepted_codes: &[i64],
+) -> Result<Value, String> {
+    eapi_with(
+        None,
+        "anonymous",
+        "",
+        path,
+        data,
+        accepted_codes,
+    )
+}
+
+fn eapi_with(
+    account_id: Option<&str>,
+    identity: &str,
+    cookie: &str,
+    path: &str,
+    mut data: Value,
+    accepted_codes: &[i64],
+) -> Result<Value, String> {
+    validate_api_path(path)?;
     let now_ms = host::now_ms();
-    let header = eapi_header(account_id, &cookie, now_ms);
+    let header = eapi_header(identity, cookie, now_ms);
     let header_cookie = eapi_cookie(&header);
 
     let object = data
@@ -73,24 +124,31 @@ pub fn eapi(account_id: &str, path: &str, mut data: Value) -> Result<Value, Stri
         &header_cookie,
         EAPI_USER_AGENT,
         encrypted.body,
+        accepted_codes,
     )
 }
 
-fn eapi_header(account_id: &str, cookie: &str, now_ms: u64) -> Map<String, Value> {
+fn eapi_header(identity: &str, cookie: &str, now_ms: u64) -> Map<String, Value> {
     let csrf = cookie_value(cookie, "__csrf").unwrap_or_default();
     let music_u = cookie_value(cookie, "MUSIC_U");
     let music_a = cookie_value(cookie, "MUSIC_A");
-    let device_id = crypto::md5_hex(format!("yinqidao-netease-device:{account_id}").as_bytes());
-    let request_suffix = stable_entropy(format!("{account_id}:{now_ms}").as_bytes()) % 10_000;
+    let device_id = crypto::md5_hex(format!("yinqidao-netease-device:{identity}").as_bytes());
+    let request_suffix = stable_entropy(format!("{identity}:{now_ms}").as_bytes()) % 10_000;
 
     let mut header = Map::new();
-    header.insert("osver".into(), Value::String("Microsoft-Windows-10-Professional-build-19045-64bit".into()));
+    header.insert(
+        "osver".into(),
+        Value::String("Microsoft-Windows-10-Professional-build-19045-64bit".into()),
+    );
     header.insert("deviceId".into(), Value::String(device_id));
     header.insert("os".into(), Value::String("pc".into()));
     header.insert("appver".into(), Value::String("3.1.17.204416".into()));
     header.insert("versioncode".into(), Value::String("140".into()));
     header.insert("mobilename".into(), Value::String(String::new()));
-    header.insert("buildver".into(), Value::String((now_ms / 1_000).to_string()));
+    header.insert(
+        "buildver".into(),
+        Value::String((now_ms / 1_000).to_string()),
+    );
     header.insert("resolution".into(), Value::String("1920x1080".into()));
     header.insert("__csrf".into(), Value::String(csrf.into()));
     header.insert("channel".into(), Value::String("netease".into()));
@@ -126,14 +184,17 @@ fn eapi_cookie(header: &Map<String, Value>) -> String {
 }
 
 fn send(
-    account_id: &str,
+    account_id: Option<&str>,
     method: &str,
     url: &str,
     cookie: &str,
     user_agent: &str,
     body: Vec<u8>,
+    accepted_codes: &[i64],
 ) -> Result<Value, String> {
-    validate_account_id(account_id)?;
+    if let Some(account_id) = account_id {
+        validate_account_id(account_id)?;
+    }
     if !matches!(method, "GET" | "POST") {
         return Err("网易云协议层拒绝未知 HTTP method".into());
     }
@@ -174,7 +235,7 @@ fn send(
 
     let response = host::http_request(&host::HttpRequestData {
         provider_id: PROVIDER_ID.into(),
-        account_id: Some(account_id.into()),
+        account_id: account_id.map(str::to_owned),
         method: method.into(),
         url: url.into(),
         headers,
@@ -193,7 +254,7 @@ fn send(
 
     let value: Value = serde_json::from_slice(&response.body)
         .map_err(|error| format!("网易云返回 JSON 解析失败: {error}"))?;
-    validate_response_code(&value)?;
+    validate_response_code(&value, accepted_codes)?;
     Ok(value)
 }
 
@@ -209,7 +270,8 @@ fn account_cookie(account_id: &str) -> Result<String, String> {
     if bytes.len() > MAX_COOKIE_BYTES {
         return Err("网易云 Cookie 超过大小限制".into());
     }
-    let cookie = String::from_utf8(bytes).map_err(|_| "网易云 Cookie 不是合法 UTF-8".to_string())?;
+    let cookie =
+        String::from_utf8(bytes).map_err(|_| "网易云 Cookie 不是合法 UTF-8".to_string())?;
     if cookie.contains('\r') || cookie.contains('\n') || cookie.contains('\0') {
         return Err("网易云 Cookie 包含非法控制字符".into());
     }
@@ -273,9 +335,10 @@ fn validate_account_id(account_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_response_code(value: &Value) -> Result<(), String> {
+fn validate_response_code(value: &Value, accepted_codes: &[i64]) -> Result<(), String> {
     if let Some(code) = value.get("code").and_then(Value::as_i64)
         && !(200..300).contains(&code)
+        && !accepted_codes.contains(&code)
     {
         let message = value
             .get("message")
@@ -334,9 +397,26 @@ mod tests {
 
     #[test]
     fn eapi_header_keeps_login_token_in_protocol_boundary() {
-        let header = eapi_header("123", "MUSIC_U=token; __csrf=csrf-value", 1_700_000_000_123);
-        assert_eq!(header.get("MUSIC_U").and_then(Value::as_str), Some("token"));
-        assert_eq!(header.get("__csrf").and_then(Value::as_str), Some("csrf-value"));
+        let header = eapi_header(
+            "123",
+            "MUSIC_U=token; __csrf=csrf-value",
+            1_700_000_000_123,
+        );
+        assert_eq!(
+            header.get("MUSIC_U").and_then(Value::as_str),
+            Some("token")
+        );
+        assert_eq!(
+            header.get("__csrf").and_then(Value::as_str),
+            Some("csrf-value")
+        );
         assert_eq!(header.get("os").and_then(Value::as_str), Some("pc"));
+    }
+
+    #[test]
+    fn login_status_codes_are_opt_in() {
+        let response = serde_json::json!({ "code": 803 });
+        assert!(validate_response_code(&response, &[]).is_err());
+        assert!(validate_response_code(&response, &[800, 801, 802, 803]).is_ok());
     }
 }

@@ -4,9 +4,13 @@ pub mod decoder;
 #[cfg(target_arch = "wasm32")]
 mod api;
 #[cfg(target_arch = "wasm32")]
+mod auth;
+#[cfg(target_arch = "wasm32")]
 mod collections;
 #[cfg(target_arch = "wasm32")]
 mod features;
+#[cfg(target_arch = "wasm32")]
+mod music;
 #[cfg(target_arch = "wasm32")]
 mod protocol;
 
@@ -56,12 +60,23 @@ fn add_extended_capabilities(capabilities: &mut Vec<types::Capability>) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn add_extended_auth_methods(methods: &mut Vec<types::AuthMethod>) {
+    if !methods
+        .iter()
+        .any(|method| matches!(method, types::AuthMethod::QrCode))
+    {
+        methods.push(types::AuthMethod::QrCode);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 impl provider::Guest for NeteasePlugin {
     fn manifest() -> types::PluginManifest {
         let mut manifest = api::manifest();
         for descriptor in &mut manifest.providers {
             if descriptor.id == "netease" {
                 add_extended_capabilities(&mut descriptor.capabilities);
+                add_extended_auth_methods(&mut descriptor.auth_methods);
             }
         }
         manifest
@@ -79,11 +94,11 @@ impl provider::Guest for NeteasePlugin {
         provider_id: String,
         method: types::AuthMethod,
     ) -> Result<types::AuthChallenge, String> {
-        api::auth_begin(&provider_id, method)
+        auth::auth_begin(&provider_id, method)
     }
 
     fn poll_auth(provider_id: String, challenge_id: String) -> Result<types::AuthPoll, String> {
-        api::auth_poll(&provider_id, &challenge_id)
+        auth::auth_poll(&provider_id, &challenge_id)
     }
 
     fn auth_submit(
@@ -95,7 +110,7 @@ impl provider::Guest for NeteasePlugin {
     }
 
     fn auth_cancel(provider_id: String, challenge_id: String) -> Result<bool, String> {
-        api::auth_cancel(&provider_id, &challenge_id)
+        auth::auth_cancel(&provider_id, &challenge_id)
     }
 
     fn logout(provider_id: String, account_id: String) -> Result<bool, String> {
@@ -108,7 +123,7 @@ impl provider::Guest for NeteasePlugin {
         query: String,
         limit: u16,
     ) -> Result<Vec<types::RemoteTrack>, String> {
-        api::search(&provider_id, account_id.as_deref(), &query, limit)
+        music::search(&provider_id, account_id.as_deref(), &query, limit)
     }
 
     fn resolve_track(
@@ -116,7 +131,7 @@ impl provider::Guest for NeteasePlugin {
         account_id: Option<String>,
         query: types::TrackQuery,
     ) -> Result<Option<types::RemoteTrack>, String> {
-        api::resolve_track(&provider_id, account_id.as_deref(), &query)
+        music::resolve_track(&provider_id, account_id.as_deref(), &query)
     }
 
     fn lyrics(
@@ -124,7 +139,7 @@ impl provider::Guest for NeteasePlugin {
         account_id: Option<String>,
         track: types::SourceTrackRef,
     ) -> Result<Option<types::LyricDocument>, String> {
-        api::lyrics(&provider_id, account_id.as_deref(), &track)
+        music::lyrics(&provider_id, account_id.as_deref(), &track)
     }
 
     fn artwork(
@@ -132,7 +147,7 @@ impl provider::Guest for NeteasePlugin {
         account_id: Option<String>,
         track: types::SourceTrackRef,
     ) -> Result<Option<types::ArtworkDescriptor>, String> {
-        api::artwork(&provider_id, account_id.as_deref(), &track)
+        music::artwork(&provider_id, account_id.as_deref(), &track)
     }
 
     fn stream(
@@ -140,7 +155,7 @@ impl provider::Guest for NeteasePlugin {
         account_id: String,
         request: types::StreamRequest,
     ) -> Result<types::StreamDescriptor, String> {
-        api::stream(&provider_id, &account_id, &request)
+        music::stream(&provider_id, &account_id, &request)
     }
 
     fn playlists(provider_id: String, account_id: String) -> Result<Vec<types::Playlist>, String> {
