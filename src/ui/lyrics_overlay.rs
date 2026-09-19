@@ -193,8 +193,8 @@ impl gpui::Render for DesktopLyricsView {
             // leaves first; only after it has visibly separated does the incoming sentence become
             // readable. The travel distance scales with the configured lyric size.
             let travel = (config.font_size * 0.72).clamp(18.0, 46.0);
-            let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.48);
-            let incoming_progress = desktop_transition_phase(progress, 0.24, 1.0);
+            let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.42);
+            let incoming_progress = desktop_transition_phase(progress, 0.34, 1.0);
 
             let incoming = div()
                 .w_full()
