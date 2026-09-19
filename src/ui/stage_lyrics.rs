@@ -25,8 +25,9 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
 const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(420);
-const LYRIC_ROW_STAGGER: f32 = 0.035;
-const LYRIC_ROW_STAGGER_MAX: f32 = 0.14;
+const LYRIC_ROW_STAGGER_MS: f32 = 36.0;
+const LYRIC_ROW_MOTION_MS: f32 = 250.0;
+const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 4;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 4;
@@ -111,6 +112,12 @@ struct LyricScrollAnimation {
 }
 
 impl LyricScrollAnimation {
+    fn raw_progress_at(self, now: Instant) -> f32 {
+        let duration = LYRIC_HANDOFF_DURATION.as_secs_f32().max(f32::EPSILON);
+        (now.saturating_duration_since(self.started_at).as_secs_f32() / duration)
+            .clamp(0.0, 1.0)
+    }
+
     fn progress_at(self, now: Instant) -> f32 {
         lyric_handoff_progress(self.started_at, now)
     }
@@ -629,7 +636,7 @@ impl Render for StageLyricsView {
             && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        let scroll_progress = scroll_animation.map(|scroll| scroll.progress_at(frame_now));
+        let scroll_progress = scroll_animation.map(|scroll| scroll.raw_progress_at(frame_now));
         let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
         let focus_progress = self.focus_handoff_progress(frame_now);
         let focus_animating = focus_progress.is_some_and(|progress| progress < 1.0);
@@ -1267,20 +1274,27 @@ fn format_lyric_time(ms: u64) -> String {
 fn lyric_row_scroll_progress(
     index: usize,
     active: usize,
-    progress: f32,
+    raw_progress: f32,
     from_y: f32,
 ) -> f32 {
-    // When lyrics advance (positive compensation -> rows visually travel upward), the focus area
-    // leads and rows below it follow with a very small stagger. Reverse the cascade when seeking
-    // backwards. The cap keeps distant virtualized rows from visibly lagging behind.
+    // Use real elapsed milliseconds, not an already-eased global progress. Each trailing row owns
+    // an actual start time, which makes the upward cascade visible at both 60 Hz and high refresh.
     let trailing_distance = if from_y >= 0.0 {
         index.saturating_sub(active)
     } else {
         active.saturating_sub(index)
-    };
-    let delay =
-        (trailing_distance as f32 * LYRIC_ROW_STAGGER).min(LYRIC_ROW_STAGGER_MAX);
-    lyric_phase_progress(progress, delay, 1.0)
+    }
+    .min(LYRIC_ROW_MAX_STAGGER_ROWS);
+
+    let elapsed_ms =
+        raw_progress.clamp(0.0, 1.0) * LYRIC_HANDOFF_DURATION.as_secs_f32() * 1000.0;
+    let delay_ms = trailing_distance as f32 * LYRIC_ROW_STAGGER_MS;
+    let local =
+        ((elapsed_ms - delay_ms) / LYRIC_ROW_MOTION_MS).clamp(0.0, 1.0);
+
+    // Quintic smootherstep per row: rows remain still until their own start time, accelerate upward,
+    // then settle independently instead of snapping onto the row ahead.
+    local * local * local * (local * (local * 6.0 - 15.0) + 10.0)
 }
 
 fn lyric_depth_transition_bound(
@@ -1333,8 +1347,16 @@ mod tests {
     }
 
     #[test]
-    fn row_scroll_stagger_makes_lower_rows_follow_the_focus() {
-        let p = 0.35;
+    fn row_scroll_stagger_uses_distinct_start_times() {
+        // ~21 ms into a 420 ms handoff: active row has started, row +1 is still parked.
+        let early = 0.05;
+        let active = lyric_row_scroll_progress(10, 10, early, 80.0);
+        let next = lyric_row_scroll_progress(11, 10, early, 80.0);
+        assert!(active > 0.0);
+        assert_eq!(next, 0.0);
+
+        // Later, every lower row is at a distinct phase.
+        let p = 0.45;
         let active = lyric_row_scroll_progress(10, 10, p, 80.0);
         let next = lyric_row_scroll_progress(11, 10, p, 80.0);
         let third = lyric_row_scroll_progress(13, 10, p, 80.0);
