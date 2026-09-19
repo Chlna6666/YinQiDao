@@ -32,6 +32,7 @@ mod lyrics;
 pub mod media_controls;
 mod model;
 mod online;
+mod playback_cache;
 mod plugin;
 
 // Transitional aliases remain only for Host internals that have not yet moved to sibling paths.

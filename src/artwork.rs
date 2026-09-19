@@ -99,66 +99,77 @@ impl ArtworkCache {
         Ok(Self { directory })
     }
 
+    /// Load an already-processed artwork entry by its explicit cache key.
+    ///
+    /// Remote/plugin playback uses the cover URL as this key. Unlike `load(Track)`, this method
+    /// never probes a local media path when the cache misses, so startup can restore plugin artwork
+    /// without treating a materialized stream path as embedded artwork.
+    pub fn load_key(&self, key: &str) -> Result<Option<Artwork>> {
+        let hash = artwork_cache_hash(key);
+        let cache_path = self.directory.join(format!("{:016x}.png", hash));
+        let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
+        let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
+
+        if !cache_path.exists() {
+            return Ok(None);
+        }
+
+        let png = fs::read(&cache_path)
+            .with_context(|| format!("读取封面缓存失败: {}", cache_path.display()))?;
+        let Ok(img) = image::load_from_memory(&png) else {
+            let _ = fs::remove_file(&cache_path);
+            let _ = fs::remove_file(&blur_cache_path);
+            let _ = fs::remove_file(&palette_cache_path);
+            return Ok(None);
+        };
+
+        let blurred_png = if blur_cache_path.exists() {
+            fs::read(&blur_cache_path)
+                .ok()
+                .filter(|bytes| image::load_from_memory(bytes).is_ok())
+        } else {
+            None
+        };
+        let palette = if palette_cache_path.exists() {
+            fs::read_to_string(&palette_cache_path)
+                .ok()
+                .and_then(|value| ArtworkPalette::parse_serialized(&value))
+        } else {
+            None
+        };
+
+        if let (Some(blurred_png), Some(palette)) = (blurred_png, palette) {
+            return Ok(Some(Artwork {
+                png,
+                blurred_png,
+                palette,
+            }));
+        }
+
+        let blurred_png = generate_blurred_artwork(&img).unwrap_or_else(|_| png.clone());
+        let palette = extract_palette(&img);
+        let _ = fs::write(&blur_cache_path, &blurred_png);
+        let _ = fs::write(&palette_cache_path, palette.to_serialized_string());
+        Ok(Some(Artwork {
+            png,
+            blurred_png,
+            palette,
+        }))
+    }
+
     pub fn load(&self, track: &Track) -> Result<Option<Artwork>> {
         let key = track
             .artwork_key
             .clone()
             .unwrap_or_else(|| track.path.to_string_lossy().into_owned());
+        if let Some(artwork) = self.load_key(&key)? {
+            return Ok(Some(artwork));
+        }
+
         let hash = artwork_cache_hash(&key);
         let cache_path = self.directory.join(format!("{:016x}.png", hash));
         let blur_cache_path = self.directory.join(format!("{:016x}_ambient_v2.png", hash));
         let palette_cache_path = self.directory.join(format!("{:016x}_palette.txt", hash));
-
-        if cache_path.exists() {
-            let png = fs::read(&cache_path)
-                .with_context(|| format!("读取封面缓存失败: {}", cache_path.display()))?;
-
-            // Never return stale/corrupted bytes merely because the cache files exist. Previous
-            // M4A metadata parsing could accept arbitrary non-empty Picture payloads, so old cache
-            // entries need a real decode check before they can be trusted.
-            if let Ok(img) = image::load_from_memory(&png) {
-                let blurred_png = if blur_cache_path.exists() {
-                    fs::read(&blur_cache_path)
-                        .ok()
-                        .filter(|bytes| image::load_from_memory(bytes).is_ok())
-                } else {
-                    None
-                };
-
-                let palette = if palette_cache_path.exists() {
-                    fs::read_to_string(&palette_cache_path)
-                        .ok()
-                        .and_then(|s| ArtworkPalette::parse_serialized(&s))
-                } else {
-                    None
-                };
-
-                if let (Some(b_png), Some(pal)) = (blurred_png, palette) {
-                    return Ok(Some(Artwork {
-                        png,
-                        blurred_png: b_png,
-                        palette: pal,
-                    }));
-                }
-
-                // 补全缺失或损坏的模糊图与调色板。
-                let blurred = generate_blurred_artwork(&img).unwrap_or_else(|_| png.clone());
-                let pal = extract_palette(&img);
-                let _ = fs::write(&blur_cache_path, &blurred);
-                let _ = fs::write(&palette_cache_path, pal.to_serialized_string());
-                return Ok(Some(Artwork {
-                    png,
-                    blurred_png: blurred,
-                    palette: pal,
-                }));
-            }
-
-            // Invalid cache bytes must not reach GPUI's image path. Remove all siblings and fall
-            // through to a fresh embedded/sidecar extraction.
-            let _ = fs::remove_file(&cache_path);
-            let _ = fs::remove_file(&blur_cache_path);
-            let _ = fs::remove_file(&palette_cache_path);
-        }
 
         let Some(image) = decoded_local_artwork(&track.path) else {
             return Ok(None);

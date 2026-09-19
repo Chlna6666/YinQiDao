@@ -24,6 +24,7 @@ use crate::{
     audio::{AudioEngine, EqPreset, PlayerCommand},
     library::{Library, ScanReport},
     model::{AppPage, LibraryTab, PlaybackState, PlayerSnapshot, RepeatMode, Track, TrackId},
+    playback_cache::PlaybackAssetCache,
     settings::{AppConfig, ConfigStore},
 };
 
@@ -102,6 +103,7 @@ pub struct MusicApp {
     last_system_media_state: Option<PlaybackState>,
     last_system_media_position_sec: u64,
     pub(crate) artwork_cache: Option<ArtworkCache>,
+    playback_cache: Option<PlaybackAssetCache>,
     artwork_loading: HashSet<TrackId>,
     pub(crate) artwork_missing: HashSet<TrackId>,
     pub(crate) enrichment_loading: HashSet<TrackId>,
@@ -529,6 +531,10 @@ impl MusicApp {
             .path()
             .parent()
             .and_then(|parent| ArtworkCache::new(parent.join("artwork-cache")).ok());
+        let playback_cache = config_store
+            .path()
+            .parent()
+            .and_then(|parent| PlaybackAssetCache::new(parent.join("playback-cache")).ok());
         let library = config_store
             .path()
             .parent()
@@ -567,9 +573,54 @@ impl MusicApp {
             }
         }
         let mut initial_online_cache = HashMap::new();
-        if let Some(track) = &initial_track {
-            if track.id < 0 {
-                initial_online_cache.insert(track.id, track.clone());
+        let mut initial_online_playback_meta = HashMap::new();
+        let mut initial_online_remote_tracks = HashMap::new();
+        let mut initial_lyrics = HashMap::new();
+        let mut initial_lyrics_order = VecDeque::new();
+        let mut initial_artworks = HashMap::new();
+        let mut initial_blurred_artworks = HashMap::new();
+        let mut initial_artwork_palettes = HashMap::new();
+
+        if let Some(track) = &initial_track
+            && track.id < 0
+        {
+            initial_online_cache.insert(track.id, track.clone());
+
+            // Restore the last plugin track's semantic provenance and presentation assets before the
+            // first window frame. The cache contains no stream URL or auth secret; it only reconnects
+            // the saved TrackId to provider/source plus already-persisted lyrics/artwork.
+            if let Some(cached) = playback_cache
+                .as_ref()
+                .and_then(|cache| cache.load_last(track.id).ok().flatten())
+            {
+                let cover_url = cached
+                    .cover_url
+                    .clone()
+                    .or_else(|| cached.remote.cover_url.clone());
+                initial_online_playback_meta.insert(
+                    track.id,
+                    (
+                        cached.route.clone(),
+                        cached.source.clone(),
+                        cover_url.clone(),
+                    ),
+                );
+                initial_online_remote_tracks
+                    .insert(track.id, (cached.route.clone(), cached.remote.clone()));
+
+                if let Some(lyrics) = cached.lyrics {
+                    initial_lyrics.insert(track.id, lyrics);
+                    initial_lyrics_order.push_back(track.id);
+                }
+
+                if let Some(url) = cover_url
+                    && let Some(cache) = artwork_cache.as_ref()
+                    && let Ok(Some(artwork)) = cache.load_key(&url)
+                {
+                    initial_artworks.insert(track.id, artwork.png.into());
+                    initial_blurred_artworks.insert(track.id, artwork.blurred_png.into());
+                    initial_artwork_palettes.insert(track.id, artwork.palette);
+                }
             }
         }
 
@@ -641,11 +692,11 @@ impl MusicApp {
             snapshot: initial_snapshot,
             playback_progress: None,
             playback_time: None,
-            artworks: HashMap::new(),
-            blurred_artworks: HashMap::new(),
-            artwork_palettes: HashMap::new(),
-            lyrics: HashMap::new(),
-            lyrics_order: VecDeque::new(),
+            artworks: initial_artworks,
+            blurred_artworks: initial_blurred_artworks,
+            artwork_palettes: initial_artwork_palettes,
+            lyrics: initial_lyrics,
+            lyrics_order: initial_lyrics_order,
             watchers: Vec::new(),
             library_update_rx,
             library_update_tx,
@@ -661,6 +712,7 @@ impl MusicApp {
             last_system_media_state: None,
             last_system_media_position_sec: 0,
             artwork_cache,
+            playback_cache,
             artwork_loading: HashSet::new(),
             artwork_missing: HashSet::new(),
             enrichment_loading: HashSet::new(),
@@ -714,11 +766,11 @@ impl MusicApp {
             online_search_loading: false,
             online_search_route: None,
             recent_plays: Vec::new(),
-            online_playback_meta: HashMap::new(),
+            online_playback_meta: initial_online_playback_meta,
             online_track_buffering: None,
             online_playlist_cache: HashMap::new(),
             online_track_cache: initial_online_cache,
-            online_remote_tracks: HashMap::new(),
+            online_remote_tracks: initial_online_remote_tracks,
             home_page: None,
             library_page: None,
             online_playlist_page: None,
@@ -1998,13 +2050,58 @@ impl MusicApp {
         .detach();
     }
 
-    pub(crate) fn play_prepared_remote_track(&mut self, track: Track, cx: &mut Context<Self>) {
+    fn persist_online_playback_assets(
+        &self,
+        track: &Track,
+        route: &crate::plugin::abi::PluginRoute,
+        source: &crate::plugin::abi::SourceTrackRef,
+        remote: &crate::plugin::abi::RemoteTrack,
+        cover_url: Option<&str>,
+    ) {
+        let Some(cache) = self.playback_cache.clone() else {
+            return;
+        };
+        let track = track.clone();
+        let route = route.clone();
+        let source = source.clone();
+        let remote = remote.clone();
+        let cover_url = cover_url.map(str::to_owned);
+        let _ = crate::runtime::spawn_blocking(move || {
+            if let Err(error) = cache.store_playback(
+                &track,
+                &route,
+                &source,
+                &remote,
+                cover_url.as_deref(),
+            ) {
+                tracing::warn!(error = %error, "持久化在线播放资源元数据失败");
+            }
+        });
+    }
+
+    pub(crate) fn play_prepared_remote_track(
+        &mut self,
+        track: Track,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let track_id = track.id;
-        self.online_track_cache.insert(track_id, track.clone());
-        if let Some(engine) = &self.engine {
-            engine.try_play_transient_track(track.clone());
+        let accepted = self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.try_play_transient_track(track.clone()));
+        if !accepted {
+            self.status = "音频命令队列繁忙，请稍后重试".into();
+            cx.notify();
+            return false;
         }
+
+        self.online_track_cache.insert(track_id, track.clone());
         self.reset_progress_for_track_switch();
+        // Keep persistence/UI identity coherent before the audio bridge posts its structural
+        // SnapshotChanged event. This is metadata-only and performs no decoder/file/network work.
+        self.snapshot.current_track = Some(track.clone());
+        self.snapshot.duration_ms = track.duration_ms;
+        self.snapshot.state = PlaybackState::Loading;
         self.config.current_track = Some(track_id);
         self.record_recent_play(&track);
         self.bump_ui_content_revision();
@@ -2014,6 +2111,7 @@ impl MusicApp {
         }
         self.save_config();
         cx.notify();
+        true
     }
 
     pub(crate) fn play_online_remote_track(
@@ -2054,18 +2152,28 @@ impl MusicApp {
                 let _ = this.update(cx, |app, cx| {
                     app.online_track_buffering = None;
                     let track_id = track.id;
-                    app.online_playback_meta
-                        .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
-                    app.online_track_cache.insert(track_id, track.clone());
-                    app.online_remote_tracks
-                        .insert(track_id, (route.clone(), remote_for_cache.clone()));
-                    app.status = format!("正在播放在线音频：{title} · {artist}");
-                    app.play_prepared_remote_track(track, cx);
+                    let track_for_cache = track.clone();
+                    if app.play_prepared_remote_track(track, cx) {
+                        app.persist_online_playback_assets(
+                            &track_for_cache,
+                            &route,
+                            &source,
+                            &remote_for_cache,
+                            cover_url.as_deref(),
+                        );
+                        app.online_playback_meta.insert(
+                            track_id,
+                            (route.clone(), source.clone(), cover_url.clone()),
+                        );
+                        app.online_remote_tracks
+                            .insert(track_id, (route.clone(), remote_for_cache.clone()));
+                        app.status = format!("正在播放在线音频：{title} · {artist}");
 
-                    if let Some(url) = cover_url {
-                        app.fetch_online_artwork_for_track(track_id, url, cx);
+                        if let Some(url) = cover_url {
+                            app.fetch_online_artwork_for_track(track_id, url, cx);
+                        }
+                        app.fetch_online_lyrics_for_track(track_id, route, source, cx);
                     }
-                    app.fetch_online_lyrics_for_track(track_id, route, source, cx);
                 });
             }
             Err(err) => {
@@ -2091,6 +2199,15 @@ impl MusicApp {
         let artwork_cache = self.artwork_cache.clone();
         let target_url = url.clone();
         let task = Tokio::spawn_result(cx, async move {
+            if let Some(cache) = artwork_cache.clone() {
+                let key = target_url.clone();
+                let cached = tokio::task::spawn_blocking(move || cache.load_key(&key))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))??;
+                if let Some(art) = cached {
+                    return Ok((art.png, art.blurred_png, art.palette));
+                }
+            }
             if let Some(bytes) = crate::ui::image_cache::get_cached(&target_url) {
                 if let Some(cache) = &artwork_cache {
                     if let Ok(art) = cache.store(&target_url, &bytes) {
@@ -2143,22 +2260,47 @@ impl MusicApp {
         if self.lyrics.contains_key(&track_id) {
             return;
         }
+        let playback_cache = self.playback_cache.clone();
+        let source_for_cache = source.clone();
+        let source_for_store = source.clone();
         let task = Tokio::spawn_result(cx, async move {
+            if let Some(cache) = playback_cache.clone() {
+                let cached_source = source_for_cache.clone();
+                let cached =
+                    tokio::task::spawn_blocking(move || cache.load_lyrics(&cached_source))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))??;
+                if let Some(doc) = cached {
+                    return Ok((Some(doc), true));
+                }
+            }
+
             let frontend =
                 crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
             let res = frontend.lyrics_for_route(&route, &source).await?;
             if let Some(doc) = res.value {
                 let player_doc =
                     crate::plugin::frontend::plugin_lyrics_to_player(doc, &route.provider_id)?;
-                return Ok(player_doc);
+                return Ok((Some(player_doc), false));
             }
-            Ok(None)
+            Ok((None, false))
         });
 
         cx.spawn(async move |this, cx| -> Result<()> {
-            if let Ok(Some(doc)) = task.await {
+            if let Ok((Some(doc), from_cache)) = task.await {
+                let doc_for_disk = (!from_cache).then(|| doc.clone());
                 let _ = this.update(cx, |app, cx| {
                     app.cache_lyrics(track_id, doc);
+                    if let (Some(cache), Some(doc)) =
+                        (app.playback_cache.clone(), doc_for_disk.clone())
+                    {
+                        let source = source_for_store.clone();
+                        let _ = crate::runtime::spawn_blocking(move || {
+                            if let Err(error) = cache.store_lyrics(&source, &doc) {
+                                tracing::warn!(error = %error, "持久化在线歌词缓存失败");
+                            }
+                        });
+                    }
                     cx.notify();
                 });
             }
@@ -3392,6 +3534,12 @@ impl MusicApp {
         let Some(track) = self.snapshot.current_track.clone() else {
             return;
         };
+        if track.id < 0
+            && let Some((_, _, Some(url))) = self.online_playback_meta.get(&track.id).cloned()
+        {
+            self.fetch_online_artwork_for_track(track.id, url, cx);
+            return;
+        }
         if self.artworks.contains_key(&track.id)
             || self.artwork_missing.contains(&track.id)
             || !self.artwork_loading.insert(track.id)
