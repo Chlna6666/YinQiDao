@@ -358,6 +358,12 @@ impl Render for StageControlsView {
         // semantic endpoints; the renderer interpolates the dock without a per-frame CPU RAF.
         div()
             .id("stage-bottom-dock")
+            // Own an explicit blocking hitbox above the lyric/background surface. Without this,
+            // GPUI can resolve the retained sibling behind this Entity for mouse input even though
+            // the dock is painted later and visually on top.
+            .occlude()
+            .w_full()
+            .flex_none()
             .opacity(visibility)
             .transition(stage_chrome_fade_transition())
             .flex()
@@ -559,6 +565,7 @@ impl Render for StageTitlebarView {
             .id("stage-titlebar-shell")
             .w_full()
             .h(px(38.0))
+            .occlude()
             .opacity(visibility)
             .transition(stage_chrome_fade_transition())
             .child(

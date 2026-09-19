@@ -4614,34 +4614,10 @@ impl Render for MusicApp {
                         this.handle_stage_mouse_move(event.position, cx);
                     }),
                 )
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
-                        this.wake_stage_controls_immediately(cx);
-                    }),
-                )
-                .on_mouse_down(
-                    gpui::MouseButton::Right,
-                    cx.listener(|this, _, _window, cx| {
-                        this.wake_stage_controls_immediately(cx);
-                    }),
-                )
-                .on_mouse_up(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
-                        if this.drag_target.is_some() {
-                            this.commit_drag(cx);
-                        }
-                    }),
-                )
-                .on_mouse_up_out(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
-                        if this.drag_target.is_some() {
-                            this.commit_drag(cx);
-                        }
-                    }),
-                )
+                // Do not register blanket mouse-down/up handlers on the full-screen Stage.
+                // Interactive descendants own their pointer gestures and stop propagation where
+                // appropriate. A parent hit handler here can win the hit-test path across Entity
+                // boundaries and is especially harmful for the bottom retained controls.
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                     this.wake_stage_controls_immediately(cx);
                     let key = event.keystroke.key.as_str();

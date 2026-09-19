@@ -184,9 +184,13 @@ impl Render for StagePlayerView {
                     .gap_6()
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_1()
                             .min_h(px(0.0))
+                            // Keep the full-height retained lyric/list hitbox clipped to the content
+                            // row. It must never extend into the sibling bottom transport dock.
+                            .overflow_hidden()
                             .gap_12()
                             .items_center()
                             .child(stage_cover(&self.cover))

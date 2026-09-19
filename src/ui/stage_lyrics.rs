@@ -573,10 +573,11 @@ impl Render for StageLyricsView {
             && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        // Restore depth only after the retained list has settled. During the 220 ms compositor
-        // scroll (and manual reading) glyph blur is disabled, so Gaussian offscreen passes never
-        // compete with the list translation that previously caused low-FPS lyric motion.
-        let depth_blur_active = !reading_mode && !scroll_animating;
+        // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
+        // 220 ms scroll made every line become equally sharp during the transition, producing the
+        // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
+        // depth so manual browsing stays crisp.
+        let depth_blur_active = !reading_mode;
         let text_id = "lyric-text";
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
@@ -1035,9 +1036,12 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(120))
+    Transition::new(Duration::from_millis(180))
         .ease(Easing::OutCubic)
-        .properties([TransitionProperty::Opacity])
+        .properties([
+            TransitionProperty::Opacity,
+            TransitionProperty::Blur,
+        ])
 }
 
 #[cfg(test)]
