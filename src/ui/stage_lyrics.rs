@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
+    Animation, AnimationExt as _, AnimationProperty, BorrowAppContext as _,
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, TransformOrigin,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
@@ -22,8 +22,7 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 120.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(320);
-const LYRIC_FOCUS_ANIMATION_DURATION: Duration = Duration::from_millis(320);
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(360);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 4;
@@ -109,15 +108,12 @@ struct LyricScrollAnimation {
 }
 
 impl LyricScrollAnimation {
+    fn progress_at(self, now: Instant) -> f32 {
+        lyric_handoff_progress(self.started_at, now)
+    }
+
     fn offset_at(self, now: Instant) -> f32 {
-        let duration = SCROLL_ANIMATION_DURATION.as_secs_f32();
-        if duration <= f32::EPSILON {
-            return 0.0;
-        }
-        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32() / duration)
-            .clamp(0.0, 1.0);
-        let remaining = 1.0 - progress;
-        self.from_y * remaining * remaining * remaining
+        self.from_y * (1.0 - self.progress_at(now))
     }
 }
 
@@ -150,7 +146,7 @@ pub(super) struct StageLyricsView {
     playback_state: PlaybackState,
     active_index: Option<usize>,
     focus_from_index: Option<usize>,
-    focus_epoch: u64,
+    focus_started_at: Option<Instant>,
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
@@ -180,7 +176,7 @@ impl StageLyricsView {
             playback_state: PlaybackState::Paused,
             active_index: None,
             focus_from_index: None,
-            focus_epoch: 0,
+            focus_started_at: None,
             active_word_index: None,
             hovered_index: None,
             karaoke_epoch: 0,
@@ -239,7 +235,7 @@ impl StageLyricsView {
             self.list_state.reset(source_len);
             self.active_index = None;
             self.focus_from_index = None;
-            self.focus_epoch = self.focus_epoch.wrapping_add(1);
+            self.focus_started_at = None;
             self.active_word_index = None;
             self.hovered_index = None;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -287,7 +283,7 @@ impl StageLyricsView {
             // Stage removal drops retained scene state. Do not keep an old focus source around:
             // otherwise reopening can recreate an already-finished hand-off from a stale line.
             self.focus_from_index = None;
-            self.focus_epoch = self.focus_epoch.wrapping_add(1);
+            self.focus_started_at = None;
             if stage_active {
                 // Re-entering Stage must not reuse an old retained word timeline that may have kept
                 // aging while its scene subtree was absent.
@@ -336,8 +332,8 @@ impl StageLyricsView {
             return false;
         }
         self.focus_from_index = self.active_index;
+        self.focus_started_at = None;
         self.active_index = active;
-        self.focus_epoch = self.focus_epoch.wrapping_add(1);
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
@@ -445,7 +441,7 @@ impl StageLyricsView {
         // Reading mode deliberately flattens the depth field. Drop any in-flight automatic
         // hand-off so returning to playback never replays a stale old->new focus animation.
         self.focus_from_index = None;
-        self.focus_epoch = self.focus_epoch.wrapping_add(1);
+        self.focus_started_at = None;
         self.active_word_index = None;
         self.scroll_target = None;
         self.hovered_index = None;
@@ -453,18 +449,41 @@ impl StageLyricsView {
         cx.notify();
     }
 
+    fn prepare_focus_handoff(&mut self, now: Instant) {
+        if self.is_reading() || self.focus_from_index == self.active_index {
+            self.focus_from_index = None;
+            self.focus_started_at = None;
+            return;
+        }
+        if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
+            self.focus_started_at = Some(now);
+        }
+    }
+
+    fn focus_handoff_progress(&self, now: Instant) -> Option<f32> {
+        let started_at = self.focus_started_at?;
+        Some(lyric_handoff_progress(started_at, now))
+    }
+
     fn expire_deadlines(&mut self, now: Instant) {
         if self.reading_until.is_some_and(|until| until <= now) {
             self.reading_until = None;
             self.focus_from_index = None;
-            self.focus_epoch = self.focus_epoch.wrapping_add(1);
+            self.focus_started_at = None;
             self.active_word_index = self.compute_active_word_index();
             self.scroll_target = self.active_index;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
         if self
+            .focus_started_at
+            .is_some_and(|started_at| started_at + LYRIC_HANDOFF_DURATION <= now)
+        {
+            self.focus_from_index = None;
+            self.focus_started_at = None;
+        }
+        if self
             .scroll_animation
-            .is_some_and(|animation| animation.started_at + SCROLL_ANIMATION_DURATION <= now)
+            .is_some_and(|animation| animation.started_at + LYRIC_HANDOFF_DURATION <= now)
         {
             self.scroll_animation = None;
         }
@@ -483,7 +502,7 @@ impl StageLyricsView {
             window.request_invalidation_at(until, cx);
         }
         if let Some(animation) = self.scroll_animation {
-            let deadline = animation.started_at + SCROLL_ANIMATION_DURATION;
+            let deadline = animation.started_at + LYRIC_HANDOFF_DURATION;
             if deadline > now {
                 window.request_invalidation_at(deadline, cx);
             }
@@ -542,14 +561,17 @@ impl StageLyricsView {
             return;
         }
 
-        self.start_scroll_animation(carry + applied, now);
+        let started_at = self.focus_started_at.unwrap_or(now);
+        self.start_scroll_animation(carry + applied, started_at);
     }
 }
 
 impl Render for StageLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.expire_deadlines(Instant::now());
+        let frame_now = window.animation_time();
+        self.expire_deadlines(frame_now);
         self.refresh_transport();
+        self.prepare_focus_handoff(frame_now);
 
         if self.lines.is_empty() {
             return div()
@@ -593,6 +615,11 @@ impl Render for StageLyricsView {
             && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
+        let focus_progress = self.focus_handoff_progress(frame_now);
+        let focus_animating = focus_progress.is_some_and(|progress| progress < 1.0);
+        if scroll_animating || focus_animating {
+            window.request_animation_frame();
+        }
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // 220 ms scroll made every line become equally sharp during the transition, producing the
         // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
@@ -602,7 +629,6 @@ impl Render for StageLyricsView {
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
-        let focus_epoch = self.focus_epoch;
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
@@ -613,7 +639,7 @@ impl Render for StageLyricsView {
                 index,
                 active,
                 focus_from_index,
-                focus_epoch,
+                focus_progress,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -621,7 +647,7 @@ impl Render for StageLyricsView {
                 depth_blur_active,
                 text_id,
                 hovered_index == Some(index),
-                !scroll_animating,
+                !(scroll_animating || focus_animating),
                 karaoke_epoch,
                 view.clone(),
                 parent.clone(),
@@ -633,22 +659,14 @@ impl Render for StageLyricsView {
         .pr(px(8.0));
 
         let lyrics = if let Some(scroll) = scroll_animation {
-            let animation = Animation::from_spec(
-                AnimationSpec::new(SCROLL_ANIMATION_DURATION).ease(Easing::OutCubic),
-            )
-            .with_property(AnimationProperty::translation(
-                point(px(0.0), px(scroll.from_y)),
-                point(px(0.0), px(0.0)),
-            ));
             lyrics
                 .composite_layer()
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("stage-lyrics-scroll"),
-                        scroll.epoch,
+                .with_sampled_animation(
+                    AnimationProperty::translation(
+                        point(px(0.0), px(scroll.from_y)),
+                        point(px(0.0), px(0.0)),
                     ),
-                    animation,
-                    |element, _| element,
+                    scroll.progress_at(frame_now),
                 )
                 .into_any_element()
         } else {
@@ -679,7 +697,7 @@ fn render_lyric_row(
     index: usize,
     active: usize,
     focus_from_index: Option<usize>,
-    focus_epoch: u64,
+    focus_progress: Option<f32>,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -700,96 +718,66 @@ fn render_lyric_row(
     let karaoke_active = index == active && !reading_mode;
 
     let previous_active = focus_from_index.filter(|previous| *previous != active);
-    let previous_profile = previous_active.map(|previous| {
+    let transition_profile = previous_active.map(|previous| {
         let previous_distance = index.abs_diff(previous);
         let (alpha, blur) =
             lyric_focus_profile(previous_distance, reading_mode, depth_blur_active);
         let scale = lyric_focus_scale(previous_distance, reading_mode);
-        (previous, alpha, blur, scale)
+        (alpha, blur, scale)
     });
     let animate_focus = !reading_mode
         && !hovered
         && lyric_depth_transition_bound(index, active, previous_active, reading_mode)
-        && previous_profile.is_some_and(|(_, alpha, blur, scale)| {
+        && focus_progress.is_some()
+        && transition_profile.is_some_and(|(alpha, blur, scale)| {
             (alpha - target_alpha).abs() > 0.001
                 || (blur - target_blur).abs() > 0.001
                 || (scale - target_scale).abs() > 0.001
         });
 
-    let target_text = lyric_text_layer(
+    let progress = if animate_focus {
+        focus_progress.unwrap_or(1.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let (from_alpha, from_blur, from_scale) =
+        transition_profile.unwrap_or((target_alpha, target_blur, target_scale));
+    let current_blur = if hovered {
+        0.0
+    } else {
+        lerp_f32(from_blur, target_blur, progress)
+    };
+    let motion = if hovered {
+        AnimationProperty::scale_opacity(
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            TransformOrigin::new(0.0, 0.5),
+        )
+    } else {
+        AnimationProperty::scale_opacity(
+            from_scale,
+            target_scale,
+            from_alpha,
+            target_alpha,
+            TransformOrigin::new(0.0, 0.5),
+        )
+    };
+
+    let text = lyric_text_layer(
         line,
         karaoke_active,
         active_word_index,
         position_ms,
         karaoke_running,
         karaoke_epoch,
-        if hovered { 0.0 } else { target_blur },
+        current_blur,
         text_id,
         index,
-    );
-
-    let text = if animate_focus {
-        let (previous, previous_alpha, previous_blur, previous_scale) =
-            previous_profile.expect("focus profile checked above");
-        let motion_key = focus_epoch
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(index as u64);
-
-        // The incoming/outgoing lyric rasters are static. GPUI's scene animation only changes the
-        // final composite transform/opacity, so Gaussian text blur is not recomputed by the CPU on
-        // every frame. This is the same retained-animation path used by modal/scene motion.
-        let incoming = target_text
-            .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("lyric-focus-in"),
-                    motion_key,
-                ),
-                lyric_focus_motion(previous_scale, target_scale, 0.0, target_alpha),
-                |element, _| element,
-            )
-            .into_any_element();
-
-        let previous_karaoke_active = previous == index;
-        let previous_word_index = if previous_karaoke_active {
-            line.words.len().checked_sub(1)
-        } else {
-            None
-        };
-        let outgoing = lyric_text_layer(
-            line,
-            previous_karaoke_active,
-            previous_word_index,
-            position_ms,
-            false,
-            karaoke_epoch,
-            previous_blur,
-            "lyric-text-out",
-            index,
-        )
-        .absolute()
-        .inset_0()
-        .with_animation(
-            ElementId::NamedInteger(
-                SharedString::new_static("lyric-focus-out"),
-                motion_key,
-            ),
-            lyric_focus_motion(previous_scale, target_scale, previous_alpha, 0.0),
-            |element, _| element,
-        )
-        .into_any_element();
-
-        div()
-            .relative()
-            .w_full()
-            .min_w(px(0.0))
-            .child(incoming)
-            .child(outgoing)
-            .into_any_element()
-    } else {
-        target_text
-            .opacity(if hovered { 1.0 } else { target_alpha })
-            .into_any_element()
-    };
+    )
+    .with_sampled_animation(motion, progress)
+    .into_any_element();
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -869,8 +857,8 @@ fn render_lyric_row(
             this.hovered_index = None;
             this.position_ms = timestamp;
             this.focus_from_index = this.active_index;
+            this.focus_started_at = None;
             this.active_index = Some(index);
-            this.focus_epoch = this.focus_epoch.wrapping_add(1);
             this.active_word_index = this.compute_active_word_index();
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
@@ -942,22 +930,16 @@ fn lyric_focus_scale(distance: usize, reading_mode: bool) -> f32 {
     }
 }
 
-fn lyric_focus_motion(
-    from_scale: f32,
-    to_scale: f32,
-    from_opacity: f32,
-    to_opacity: f32,
-) -> Animation {
-    Animation::from_spec(
-        AnimationSpec::new(LYRIC_FOCUS_ANIMATION_DURATION).ease(Easing::OutCubic),
-    )
-    .with_property(AnimationProperty::scale_opacity(
-        from_scale,
-        to_scale,
-        from_opacity,
-        to_opacity,
-        TransformOrigin::new(0.0, 0.5),
-    ))
+fn lyric_handoff_progress(started_at: Instant, now: Instant) -> f32 {
+    let duration = LYRIC_HANDOFF_DURATION.as_secs_f32().max(f32::EPSILON);
+    let raw =
+        (now.saturating_duration_since(started_at).as_secs_f32() / duration).clamp(0.0, 1.0);
+    1.0 - (1.0 - raw).powi(3)
+}
+
+#[inline]
+fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
+    from + (to - from) * progress.clamp(0.0, 1.0)
 }
 
 fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
@@ -1246,9 +1228,21 @@ mod tests {
             started_at: start,
         };
         assert!((animation.offset_at(start) - 120.0).abs() < 0.001);
-        let halfway = animation.offset_at(start + SCROLL_ANIMATION_DURATION / 2);
+        let halfway = animation.offset_at(start + LYRIC_HANDOFF_DURATION / 2);
         assert!(halfway > 0.0 && halfway < 120.0);
-        assert!(animation.offset_at(start + SCROLL_ANIMATION_DURATION).abs() < 0.001);
+        assert!(animation.offset_at(start + LYRIC_HANDOFF_DURATION).abs() < 0.001);
+        assert_eq!(animation.progress_at(start), 0.0);
+        assert_eq!(animation.progress_at(start + LYRIC_HANDOFF_DURATION), 1.0);
+    }
+
+    #[test]
+    fn depth_sigma_uses_the_same_handoff_progress_as_motion() {
+        let start = Instant::now();
+        let progress = lyric_handoff_progress(start, start + LYRIC_HANDOFF_DURATION / 2);
+        let blur = lerp_f32(1.0, 0.0, progress);
+        let alpha = lerp_f32(0.56, 1.0, progress);
+        assert!(blur > 0.0 && blur < 1.0);
+        assert!(alpha > 0.56 && alpha < 1.0);
     }
 
     #[test]
