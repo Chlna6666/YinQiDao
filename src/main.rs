@@ -36,13 +36,21 @@ mod plugin;
 
 // Transitional aliases remain only for Host internals that have not yet moved to sibling paths.
 // Application-facing plugin code and Component lifecycle code no longer depend on crate-root aliases.
+#[allow(unused_imports)]
 pub(crate) use plugin::abi as plugins;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::catalog as plugin_host;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::http as plugin_http;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::permissions as plugin_permissions;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::runtime as plugin_runtime;
-pub(crate) use plugin::host::security as plugin_security;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::secrets as plugin_secrets;
+#[allow(unused_imports)]
+pub(crate) use plugin::host::security as plugin_security;
+#[allow(unused_imports)]
 pub(crate) use plugin::host::sessions as plugin_sessions;
 
 mod preferences;
@@ -85,6 +93,7 @@ fn main() -> Result<()> {
     );
 
     plugin::initialize(&base_dir)?;
+    ui::image_cache::init_disk_cache(base_dir.join("image-cache"));
 
     ensure_gpui_outside_tokio_runtime()?;
 

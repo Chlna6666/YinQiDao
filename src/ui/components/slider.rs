@@ -245,7 +245,7 @@ fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
 }
 
 fn slider_visual_with_group(
-    id: ElementId,
+    _id: ElementId,
     ratio: f32,
     style: SliderStyle,
     hover_group: SharedString,

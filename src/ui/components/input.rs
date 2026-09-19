@@ -79,6 +79,7 @@ pub struct HostTextInput {
     is_selecting: bool,
     secret: bool,
     on_commit: HostTextInputCommitHandler,
+    on_change: Option<HostTextInputCommitHandler>,
 }
 
 impl HostTextInput {
@@ -103,7 +104,25 @@ impl HostTextInput {
             is_selecting: false,
             secret,
             on_commit,
+            on_change: None,
         }
+    }
+
+    pub fn with_on_change(mut self, on_change: HostTextInputCommitHandler) -> Self {
+        self.on_change = Some(on_change);
+        self
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.value = value.into();
+        let end = self.value.len();
+        self.selected_range = end..end;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -339,12 +358,7 @@ impl HostTextInput {
         self.display_to_value_offset(line.closest_index_for_x(position.x - bounds.left()))
     }
 
-    fn replace_value_range(
-        &mut self,
-        range: Range<usize>,
-        new_text: &str,
-        cx: &mut Context<Self>,
-    ) {
+    fn replace_value_range(&mut self, range: Range<usize>, new_text: &str, cx: &mut Context<Self>) {
         let next_len = self
             .value
             .len()
@@ -420,7 +434,7 @@ impl EntityInputHandler for HostTextInput {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16
@@ -429,6 +443,9 @@ impl EntityInputHandler for HostTextInput {
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
         self.replace_value_range(range, new_text, cx);
+        if let Some(on_change) = self.on_change.clone() {
+            on_change(self.value.to_string(), window, cx);
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -436,7 +453,7 @@ impl EntityInputHandler for HostTextInput {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range_utf16: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16
@@ -459,7 +476,8 @@ impl EntityInputHandler for HostTextInput {
             &self.value[range.end..]
         )
         .into();
-        self.marked_range = (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+        self.marked_range =
+            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|selected| {
@@ -473,6 +491,9 @@ impl EntityInputHandler for HostTextInput {
             });
         self.selection_reversed = false;
         cx.notify();
+        if let Some(on_change) = self.on_change.clone() {
+            on_change(self.value.to_string(), window, cx);
+        }
     }
 
     fn bounds_for_range(
@@ -565,7 +586,7 @@ impl Element for TextElement {
             len: display_text.len(),
             font: style.font(),
             color: if placeholder_active {
-                theme::TEXT_TERTIARY
+                theme::TEXT_TERTIARY.into()
             } else {
                 style.color
             },
@@ -682,11 +703,11 @@ impl Render for HostTextInput {
         let focused = self.focus_handle.is_focused(window);
         div()
             .w_full()
-            .min_h(px(40.0))
+            .min_h(px(34.0))
             .flex()
             .items_center()
             .px_3()
-            .py_2()
+            .py_1p5()
             .rounded_lg()
             .overflow_hidden()
             .bg(theme::BG_CARD)
@@ -696,7 +717,7 @@ impl Render for HostTextInput {
             } else {
                 theme::BORDER_CARD
             })
-            .text_sm()
+            .text_xs()
             .text_color(theme::TEXT_PRIMARY)
             .key_context("HostTextInput")
             .track_focus(&self.focus_handle(cx))
