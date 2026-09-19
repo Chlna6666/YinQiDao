@@ -644,7 +644,7 @@ impl Render for StageLyricsView {
         // notifications here: rebuilding every Stage sibling at 60/120 Hz made otherwise-correct
         // row staggering look uneven under blur load.
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
-        // 220 ms scroll made every line become equally sharp during the transition, producing the
+        // automatic scroll used to make every line equally sharp during the transition, producing
         // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
         // depth so manual browsing stays crisp.
         let depth_blur_active = !reading_mode;
@@ -1367,10 +1367,11 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_transition_is_bound_to_old_and_new_focus_neighborhoods() {
+    fn lyric_depth_transition_is_bound_to_near_focus_rows_only() {
         assert!(lyric_depth_transition_bound(12, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(8, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(7, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(10, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(9, 12, Some(11), false));
+        assert!(!lyric_depth_transition_bound(8, 12, Some(11), false));
         assert!(!lyric_depth_transition_bound(0, 12, Some(11), false));
         assert!(!lyric_depth_transition_bound(12, 12, Some(11), true));
     }
