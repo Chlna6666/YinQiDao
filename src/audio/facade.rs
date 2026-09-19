@@ -37,6 +37,7 @@ const SEEK_ACK_TOLERANCE_MS: u64 = 50;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AudioUiEvent {
     SnapshotChanged,
+    TrackEnded,
     Error(String),
 }
 
@@ -664,6 +665,10 @@ fn run_bridge(
         for event in engine.drain_events() {
             match event {
                 PlayerEvent::PositionChanged(_) => {}
+                PlayerEvent::TrackEnded => {
+                    refresh_snapshot = true;
+                    let _ = ui_event_tx.send(AudioUiEvent::TrackEnded);
+                }
                 PlayerEvent::Error(error) => {
                     refresh_snapshot = true;
                     let _ = ui_event_tx.send(AudioUiEvent::Error(error.to_string()));
