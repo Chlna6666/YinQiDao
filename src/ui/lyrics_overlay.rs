@@ -255,6 +255,12 @@ impl gpui::Render for DesktopLyricsView {
             .relative()
             .overflow_hidden()
             .window_control_area(WindowControlArea::Client)
+            .when(!config.locked && cfg!(windows), |root| {
+                // Use GPUI's native Windows drag hit-test path for the widget surface. The backend
+                // arms a drag gesture and only calls start_window_move after the pointer crosses the
+                // platform drag threshold; frontmost Client controls automatically override it.
+                root.window_control_area(WindowControlArea::Drag)
+            })
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if this.hovered != *hovered {
                     this.hovered = *hovered;
@@ -262,10 +268,9 @@ impl gpui::Render for DesktopLyricsView {
                 }
             }));
 
-        if !config.locked {
-            // Buttons/panels stop propagation themselves, so every other pixel is a valid drag
-            // surface. The previous fixed 224 px exclusion made almost half of a narrow widget
-            // permanently non-draggable even while the toolbar was hidden.
+        if !config.locked && !cfg!(windows) {
+            // Linux/macOS currently do not consume WindowControlArea::Drag in the same native path,
+            // so keep explicit dragging there. Buttons/panels stop propagation themselves.
             root = root.on_mouse_down(
                 gpui::MouseButton::Left,
                 move |_: &gpui::MouseDownEvent, window, cx| {
