@@ -39,6 +39,9 @@ const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
 const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(190);
+// Hidden Stage preparation must never compete with the transport's startup window. The audible
+// playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
+const STAGE_BACKGROUND_PREWARM_DELAY: Duration = Duration::from_millis(2_000);
 const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 
 fn online_source_key(
@@ -193,6 +196,7 @@ pub struct MusicApp {
     stage_transition_duration: Duration,
     stage_transition_start_armed: bool,
     stage_prepared: bool,
+    stage_prewarm_after: Option<std::time::Instant>,
     pub(crate) stage_last_user_activity: std::time::Instant,
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
@@ -808,6 +812,9 @@ impl MusicApp {
             stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_transition_start_armed: false,
             stage_prepared: false,
+            stage_prewarm_after: Some(
+                std::time::Instant::now() + STAGE_BACKGROUND_PREWARM_DELAY,
+            ),
             stage_last_user_activity: std::time::Instant::now(),
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
@@ -1120,6 +1127,9 @@ impl MusicApp {
         if self.page != AppPage::Player {
             self.previous_page = self.page;
         }
+        // A visible Stage render supersedes any delayed hidden prewarm.
+        self.stage_prewarm_after = None;
+        self.stage_prepared = true;
         self.begin_stage_transition(true, cx);
         self.stage_last_user_activity = std::time::Instant::now();
         self.stage_last_mouse_pos = None;
@@ -1249,12 +1259,6 @@ impl MusicApp {
         if let Some(palette) = palette {
             self.artwork_palettes.insert(track_id, palette);
         }
-        if !self.stage_open
-            && !self.stage_animating
-            && self.snapshot.current_track.as_ref().map(|track| track.id) == Some(track_id)
-        {
-            self.stage_prepared = false;
-        }
         self.bump_ui_content_revision();
     }
 
@@ -1263,9 +1267,6 @@ impl MusicApp {
         self.lyrics_order.retain(|id| *id != track_id);
         self.lyrics_order.push_back(track_id);
         let current_id = self.snapshot.current_track.as_ref().map(|track| track.id);
-        if !self.stage_open && !self.stage_animating && current_id == Some(track_id) {
-            self.stage_prepared = false;
-        }
         while self.lyrics_order.len() > MAX_LYRICS_MEMORY_ENTRIES {
             let Some(candidate) = self.lyrics_order.pop_front() else {
                 break;
@@ -1468,22 +1469,23 @@ impl MusicApp {
             }
         }
 
-        let state = self
-            .engine
-            .as_ref()
-            .map_or(self.snapshot.state, |engine| engine.progress().0);
-        let next_state = match state {
-            PlaybackState::Playing => PlaybackState::Paused,
-            PlaybackState::Paused | PlaybackState::Stopped => PlaybackState::Playing,
-            other => other,
+        let previous_state = self.snapshot.state;
+        let (next_state, command) = match previous_state {
+            PlaybackState::Playing | PlaybackState::Loading | PlaybackState::Buffering => {
+                (PlaybackState::Paused, PlayerCommand::Pause)
+            }
+            PlaybackState::Paused | PlaybackState::Stopped | PlaybackState::Error => {
+                (PlaybackState::Playing, PlayerCommand::Play)
+            }
         };
-        let command = if state == PlaybackState::Playing {
-            PlayerCommand::Pause
-        } else {
-            PlayerCommand::Play
-        };
+
+        // React on the foreground turn. AudioEngine mirrors the intent through its atomic
+        // optimistic state; the existing audible startup/delay path remains unchanged.
         self.snapshot.state = next_state;
-        if state == PlaybackState::Playing {
+        if matches!(
+            previous_state,
+            PlaybackState::Playing | PlaybackState::Loading | PlaybackState::Buffering
+        ) {
             self.cancel_online_preload_tasks();
         }
         cx.notify();
@@ -1494,6 +1496,7 @@ impl MusicApp {
                 self.schedule_online_playlist_prefetch(cx);
             }
         } else {
+            self.snapshot.state = previous_state;
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
         }
@@ -1774,6 +1777,11 @@ impl MusicApp {
                 .and_then(|index| self.tracks.get(*index))
                 .cloned()
             {
+                // Present selected metadata immediately. Decoder/startup timing is deliberately
+                // untouched; only the UI no longer waits for a structural engine snapshot.
+                self.snapshot.current_track = Some(track.clone());
+                self.snapshot.duration_ms = track.duration_ms;
+                self.snapshot.state = PlaybackState::Loading;
                 self.record_recent_play(&track);
             } else {
                 self.recent_plays.retain(|id| *id != track_id);
@@ -1782,9 +1790,6 @@ impl MusicApp {
             }
             self.bump_ui_content_revision();
             self.status = "正在准备播放".into();
-            if !self.stage_open && !self.stage_animating {
-                self.stage_prepared = false;
-            }
             self.save_config();
         } else {
             self.status = "音频命令队列繁忙，请稍后重试".into();
@@ -2256,8 +2261,9 @@ impl MusicApp {
     }
 
     pub(crate) fn save_config(&mut self) {
+        // Keep UI interactions allocation-light. The 2 s maintenance loop coalesces changes and
+        // performs the snapshot clone/disk handoff later; Drop still flushes a dirty configuration.
         self.config_save_dirty = true;
-        self.flush_config_save_if_due();
     }
 
     fn flush_config_save_if_due(&mut self) {
@@ -2383,9 +2389,6 @@ impl MusicApp {
         self.record_recent_play(&track);
         self.bump_ui_content_revision();
         self.status = "正在准备播放".into();
-        if !self.stage_open && !self.stage_animating {
-            self.stage_prepared = false;
-        }
         self.save_config();
         cx.notify();
         true
@@ -3724,7 +3727,37 @@ impl MusicApp {
         let Some(engine) = self.engine.clone() else {
             return;
         };
+
+        // Transport commands already update the foreground snapshot optimistically. Preserve enough
+        // structural identity to recognize a later bridge ACK and avoid repainting the whole root
+        // tree when the engine merely confirms exactly what the button already showed.
+        let previous_state = self.snapshot.state;
+        let previous_track = self.snapshot.current_track.clone();
+        let previous_queue = self.snapshot.queue.clone();
+        let previous_duration_ms = self.snapshot.duration_ms;
+        let previous_volume = self.snapshot.volume;
+        let previous_repeat = self.snapshot.repeat;
+        let previous_shuffle = self.snapshot.shuffle;
+        let previous_error = self.snapshot.error.clone();
+
         self.snapshot = engine.snapshot();
+        let track_changed = match (
+            previous_track.as_ref(),
+            self.snapshot.current_track.as_ref(),
+        ) {
+            (None, None) => false,
+            (Some(previous), Some(current)) => !previous.ptr_eq(current),
+            _ => true,
+        };
+        let root_visible_change = previous_state != self.snapshot.state
+            || track_changed
+            || !Arc::ptr_eq(&previous_queue, &self.snapshot.queue)
+            || previous_duration_ms != self.snapshot.duration_ms
+            || (previous_volume - self.snapshot.volume).abs() > 0.0005
+            || previous_repeat != self.snapshot.repeat
+            || previous_shuffle != self.snapshot.shuffle
+            || previous_error.as_deref() != self.snapshot.error.as_deref();
+
         if self.drag_target.is_none() {
             self.position_ms = self.snapshot.position_ms;
             self.config.position_ms = self.position_ms;
@@ -3778,15 +3811,14 @@ impl MusicApp {
         let curr_track_id = self.snapshot.current_track.as_ref().map(|track| track.id);
         if curr_track_id != self.last_polled_track_id {
             self.last_polled_track_id = curr_track_id;
-            if !self.stage_open && !self.stage_animating {
-                self.stage_prepared = false;
-            }
             self.request_current_artwork(cx);
             self.request_current_enrichment(cx);
         }
 
         self.update_system_media_async(cx);
-        cx.notify();
+        if root_visible_change {
+            cx.notify();
+        }
     }
 
     pub(crate) fn runtime_maintenance_tick(&mut self, cx: &mut Context<MusicApp>) {
@@ -4390,10 +4422,31 @@ impl Render for MusicApp {
 
         let now = std::time::Instant::now();
 
-        let stage_prewarm = !self.stage_prepared && !self.stage_open && !self.stage_animating;
+        // Route restoration may request the Stage before this frame's surface decision. Resolve it
+        // first so the very same frame constructs the drawer and only then arms its presentation
+        // fence; otherwise the animation clock could start one frame before the Stage exists.
+        let current_route = route::current_route(cx);
+        if current_route == AppRoute::Player && !self.stage_open && self.stage_progress < 0.001 {
+            self.open_stage(cx);
+        }
+
+        let stage_prewarm = !self.stage_prepared
+            && !self.stage_open
+            && !self.stage_animating
+            && self.stage_prewarm_after.is_some_and(|deadline| deadline <= now);
+        if !self.stage_prepared
+            && !self.stage_open
+            && !self.stage_animating
+            && let Some(deadline) = self.stage_prewarm_after
+            && deadline > now
+        {
+            // Exactly one deferred invalidation; the transport interaction frame never builds the
+            // hidden immersive tree.
+            window.request_invalidation_at(deadline, cx);
+        }
         if stage_prewarm {
             self.stage_prepared = true;
-            cx.notify();
+            self.stage_prewarm_after = None;
         }
 
         let is_idle = self.stage_open
@@ -4415,31 +4468,32 @@ impl Render for MusicApp {
             }
         }
 
-        let fluid_background = self.ensure_fluid_background(cx);
-        let fluid_track_id = self
-            .snapshot
-            .current_track
-            .as_ref()
-            .map_or(0, |track| track.id);
-        let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
-        // Do not run a full-screen shader RAF while the whole stage is itself moving. The retained
-        // drawer animation replays the already painted stage; fluid resumes once the drawer settles.
-        let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
-        let fluid_dynamic = self.config.dynamic_blur;
-        fluid_background.update(cx, |view, cx| {
-            view.sync(
-                fluid_track_id,
-                fluid_palette,
-                fluid_dynamic,
-                fluid_active,
-                cx,
-            );
+        let stage_surface_needed =
+            self.stage_progress > 0.001 || self.stage_animating || stage_prewarm;
+        let fluid_background = stage_surface_needed.then(|| {
+            let fluid_background = self.ensure_fluid_background(cx);
+            let fluid_track_id = self
+                .snapshot
+                .current_track
+                .as_ref()
+                .map_or(0, |track| track.id);
+            let fluid_palette = self.artwork_palettes.get(&fluid_track_id).cloned();
+            // Do not run a full-screen shader RAF while the whole stage is itself moving. The
+            // retained drawer animation replays the already painted stage; fluid resumes once the
+            // drawer settles.
+            let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
+            let fluid_dynamic = self.config.dynamic_blur;
+            fluid_background.update(cx, |view, cx| {
+                view.sync(
+                    fluid_track_id,
+                    fluid_palette,
+                    fluid_dynamic,
+                    fluid_active,
+                    cx,
+                );
+            });
+            fluid_background
         });
-
-        let current_route = route::current_route(cx);
-        if current_route == AppRoute::Player && !self.stage_open && self.stage_progress < 0.001 {
-            self.open_stage(cx);
-        }
 
         self.arm_stage_transition_after_present(window, cx);
 
@@ -4471,7 +4525,10 @@ impl Render for MusicApp {
             }
         };
 
-        let stage_drawer = if self.stage_progress > 0.001 || self.stage_animating || stage_prewarm {
+        let stage_drawer = if stage_surface_needed {
+            let fluid_background = fluid_background
+                .clone()
+                .expect("Stage surface requires a prepared fluid background");
             let viewport_height = window.viewport_size().height;
             let zero = point(px(0.0), px(0.0));
             let below_viewport = point(px(0.0), viewport_height);
@@ -4501,6 +4558,12 @@ impl Render for MusicApp {
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        this.wake_stage_controls_immediately(cx);
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
                     cx.listener(|this, _, _window, cx| {
                         this.wake_stage_controls_immediately(cx);
                     }),

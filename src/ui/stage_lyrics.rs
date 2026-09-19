@@ -532,8 +532,6 @@ impl Render for StageLyricsView {
         self.refresh_transport();
 
         if self.lines.is_empty() {
-            let parent_left = self.parent.clone();
-            let parent_right = self.parent.clone();
             return div()
                 .id("stage-lyrics-view")
                 .flex_1()
@@ -545,16 +543,8 @@ impl Render for StageLyricsView {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                    let _ = parent_left.update(cx, |app, cx| {
-                        app.wake_stage_controls_immediately(cx);
-                    });
-                })
-                .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
-                    let _ = parent_right.update(cx, |app, cx| {
-                        app.wake_stage_controls_immediately(cx);
-                    });
-                })
+                // Generic pointer wake is owned by stage-drawer-root. Lyric-row actions below
+                // explicitly wake after stop_propagation, so interactive seeking remains intact.
                 .child(themed_icon(icon!(music), 36.0, hsla(0.0, 0.0, 1.0, 0.25)))
                 .child(
                     div()
@@ -648,14 +638,6 @@ impl Render for StageLyricsView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
-            .on_mouse_down(gpui::MouseButton::Left, {
-                let parent = self.parent.clone();
-                move |_, _, cx| {
-                    let _ = parent.update(cx, |app, cx| {
-                        app.wake_stage_controls_immediately(cx);
-                    });
-                }
-            })
             .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _, cx| {
                 this.begin_reading_mode(cx);
                 let _ = this

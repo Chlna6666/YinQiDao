@@ -331,14 +331,8 @@ impl Render for StageControlsView {
                     });
                 }
             })
-            .on_mouse_move({
-                let parent = parent.clone();
-                move |event: &gpui::MouseMoveEvent, _, cx| {
-                    let _ = parent.update(cx, |app, cx| {
-                        app.handle_stage_mouse_move(event.position, cx);
-                    });
-                }
-            })
+            // stage-drawer-root owns pointer activity for the whole immersive surface. Keeping
+            // another forwarding handler here multiplied Entity::update work for every mouse move.
             .child(self.transport.clone())
             .child(control_button("stage-prev-btn", icon!(skip_back), {
                 let parent = parent.clone();
