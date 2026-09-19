@@ -25,13 +25,13 @@ pub enum DesktopLyricsAlignment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DesktopLyricsConfig {
-    /// Whether the independent desktop lyric window should be visible.
+    /// Whether the desktop lyric widget should be visible.
     pub visible: bool,
-    /// Prevent dragging the lyric window while keeping the toolbar available for unlocking.
+    /// Prevent dragging the desktop widget while keeping its inline toolbar available.
     pub locked: bool,
-    /// Use a GPUI popup window so the lyrics stay above normal application windows.
+    /// Keep the desktop widget above normal application surfaces when requested.
     pub always_on_top: bool,
-    /// Saved global window origin. `None` means center it on the primary display.
+    /// Saved global widget origin. `None` means center it on the primary display.
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub width: f32,
