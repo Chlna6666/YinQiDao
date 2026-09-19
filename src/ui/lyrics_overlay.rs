@@ -212,8 +212,6 @@ impl gpui::Render for DesktopLyricsView {
             let outgoing = div()
                 .absolute()
                 .inset_0()
-                .px(px(24.0))
-                .py(px(12.0))
                 .flex()
                 .child(desktop_lyrics_stack(
                     previous,
