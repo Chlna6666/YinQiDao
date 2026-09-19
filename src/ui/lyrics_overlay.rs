@@ -4,11 +4,10 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing, ElementId,
-    GpuMesh3d, GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader,
-    GpuMesh3dVertex, HorizontalRevealEdge, IntoElement, SharedString, Subscription, Task, Timer,
-    TransformOrigin, WeakEntity, WgslShaderSource, Window, WindowControlArea, canvas, div, hsla,
-    point, prelude::*, px, rgb,
+    AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
+    GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
+    IntoElement, Subscription, Task, Timer, WeakEntity, WgslShaderSource, Window,
+    WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::{
@@ -36,7 +35,7 @@ pub(crate) struct DesktopLyricsView {
     display_key: Option<(TrackId, usize)>,
     last_display: Option<LyricsDisplay>,
     previous_display: Option<LyricsDisplay>,
-    line_epoch: u64,
+    line_transition_started_at: Option<Instant>,
     line_transition_deadline: Option<Instant>,
 }
 
@@ -62,7 +61,7 @@ impl DesktopLyricsView {
             display_key: None,
             last_display: None,
             previous_display: None,
-            line_epoch: 0,
+            line_transition_started_at: None,
             line_transition_deadline: None,
         }
     }
@@ -128,6 +127,7 @@ impl gpui::Render for DesktopLyricsView {
             .is_some_and(|deadline| deadline <= now)
         {
             self.previous_display = None;
+            self.line_transition_started_at = None;
             self.line_transition_deadline = None;
         }
 
@@ -135,20 +135,30 @@ impl gpui::Render for DesktopLyricsView {
         if next_key != self.display_key {
             if self.display_key.is_some() && next_key.is_some() {
                 self.previous_display = self.last_display.clone();
+                self.line_transition_started_at = Some(now);
                 self.line_transition_deadline = Some(now + LYRIC_LINE_TRANSITION_DURATION);
             } else {
                 self.previous_display = None;
+                self.line_transition_started_at = None;
                 self.line_transition_deadline = None;
             }
             self.display_key = next_key;
-            self.line_epoch = self.line_epoch.wrapping_add(1);
         }
         self.last_display = display.clone();
 
-        if let Some(deadline) = self.line_transition_deadline
-            && deadline > now
-        {
-            window.request_invalidation_at(deadline, cx);
+        let line_transition_progress = self
+            .line_transition_started_at
+            .map(|started_at| lyric_line_transition_progress(started_at, now))
+            .filter(|progress| *progress < 1.0);
+        let karaoke_animating = display
+            .as_ref()
+            .is_some_and(|display| desktop_karaoke_is_animating(display, karaoke_running));
+
+        // WS_EX_NOACTIVATE makes this widget inactive from GPUI's point of view. Engine-owned
+        // visual timelines intentionally pause for inactive windows, so this small widget drives
+        // its sampled compositor state with GPUI's inactive-safe presentation frame request.
+        if line_transition_progress.is_some() || karaoke_animating {
+            window.request_animation_frame();
         }
 
         let interacting = self.hovered || self.settings_open;
@@ -162,13 +172,7 @@ impl gpui::Render for DesktopLyricsView {
         .clamp(0.0, 0.85);
 
         let lyrics = if let Some(display) = &display {
-            desktop_lyrics_stack(
-                display,
-                &config,
-                karaoke_running,
-                self.line_epoch,
-                true,
-            )
+            desktop_lyrics_stack(display, &config)
         } else {
             div()
                 .w_full()
@@ -184,62 +188,38 @@ impl gpui::Render for DesktopLyricsView {
         };
 
         let lyrics = if let Some(previous) = self.previous_display.as_ref()
-            && self.line_transition_deadline.is_some_and(|deadline| deadline > now)
+            && let Some(progress) = line_transition_progress
         {
-            let key = self.line_epoch;
             let incoming = div()
                 .w_full()
                 .min_w(px(0.0))
                 .child(lyrics)
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyric-line-in-scale"),
-                        key,
+                .with_sampled_animation(
+                    AnimationProperty::translation_opacity(
+                        point(px(0.0), px(8.0)),
+                        point(px(0.0), px(0.0)),
+                        0.0,
+                        1.0,
                     ),
-                    lyric_line_scale_opacity(0.985, 1.0, 0.0, 1.0),
-                    |element, _| element,
-                )
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyric-line-in-translation"),
-                        key,
-                    ),
-                    lyric_line_translation(7.0, 0.0),
-                    |element, _| element,
+                    progress,
                 )
                 .into_any_element();
 
             let mut previous_complete = previous.clone();
-            // The outgoing line represents the just-finished semantic line, not the last CPU
-            // boundary sample we happened to retain. Force its karaoke mask to the completed state
-            // before fading it away so the final syllable never freezes half-highlighted.
             previous_complete.position_ms = u64::MAX;
             let outgoing = div()
                 .absolute()
                 .inset_0()
                 .flex()
-                .child(desktop_lyrics_stack(
-                    &previous_complete,
-                    &config,
-                    false,
-                    key.wrapping_sub(1),
-                    false,
-                ))
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyric-line-out-scale"),
-                        key,
+                .child(desktop_lyrics_stack(&previous_complete, &config))
+                .with_sampled_animation(
+                    AnimationProperty::translation_opacity(
+                        point(px(0.0), px(0.0)),
+                        point(px(0.0), px(-6.0)),
+                        1.0,
+                        0.0,
                     ),
-                    lyric_line_scale_opacity(1.0, 0.985, 1.0, 0.0),
-                    |element, _| element,
-                )
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyric-line-out-translation"),
-                        key,
-                    ),
-                    lyric_line_translation(0.0, -7.0),
-                    |element, _| element,
+                    progress,
                 )
                 .into_any_element();
 
@@ -370,9 +350,6 @@ impl gpui::Render for DesktopLyricsView {
 fn desktop_lyrics_stack(
     display: &LyricsDisplay,
     config: &crate::settings::DesktopLyricsConfig,
-    karaoke_running: bool,
-    line_epoch: u64,
-    animate_words: bool,
 ) -> gpui::AnyElement {
     let mut lyrics = div()
         .w_full()
@@ -394,8 +371,6 @@ fn desktop_lyrics_stack(
         config.alignment,
         config.font_size,
         config.active_color,
-        karaoke_running && animate_words,
-        line_epoch,
     ));
 
     if config.show_translation
@@ -450,8 +425,6 @@ fn animated_current_line(
     alignment: DesktopLyricsAlignment,
     font_size: f32,
     color: u32,
-    animate: bool,
-    line_epoch: u64,
 ) -> gpui::AnyElement {
     if display.current_words.is_empty()
         || !words_cover_primary_text(&display.current, &display.current_words)
@@ -486,9 +459,7 @@ fn animated_current_line(
             index,
             current_word,
             display.position_ms,
-            animate,
             color,
-            line_epoch,
         ));
     }
 
@@ -513,9 +484,7 @@ fn desktop_karaoke_word(
     index: usize,
     current_word: Option<usize>,
     position_ms: u64,
-    animate: bool,
     color: u32,
-    line_epoch: u64,
 ) -> gpui::AnyElement {
     const DIM_ALPHA: f32 = 0.34;
     let color = color & 0x00ff_ffff;
@@ -566,37 +535,7 @@ fn desktop_karaoke_word(
         .text_color(rgb(color))
         .child(word.text.clone());
 
-    let overlay = if animate
-        && progress < 1.0
-        && let Some(duration_ms) = duration_ms
-    {
-        let end = word.timestamp_ms.saturating_add(duration_ms);
-        let remaining = end.saturating_sub(position_ms);
-        if remaining > 0 {
-            let key = line_epoch
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add(word.timestamp_ms.rotate_left(17))
-                .wrapping_add(index as u64);
-            overlay
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyric-word-sweep"),
-                        key,
-                    ),
-                    Animation::new(Duration::from_millis(remaining)).with_property(
-                        AnimationProperty::horizontal_reveal(
-                            HorizontalRevealEdge::Left,
-                            progress,
-                            1.0,
-                        ),
-                    ),
-                    |element, _| element,
-                )
-                .into_any_element()
-        } else {
-            overlay.into_any_element()
-        }
-    } else if progress < 1.0 {
+    let overlay = if progress < 1.0 {
         overlay
             .with_sampled_animation(
                 AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
@@ -652,32 +591,31 @@ fn words_cover_primary_text(text: &str, words: &[LyricWord]) -> bool {
     remaining.is_empty()
 }
 
-fn lyric_line_scale_opacity(
-    from_scale: f32,
-    to_scale: f32,
-    from_opacity: f32,
-    to_opacity: f32,
-) -> Animation {
-    Animation::from_spec(
-        AnimationSpec::new(LYRIC_LINE_TRANSITION_DURATION).ease(Easing::OutCubic),
-    )
-    .with_property(AnimationProperty::scale_opacity(
-        from_scale,
-        to_scale,
-        from_opacity,
-        to_opacity,
-        TransformOrigin::new(0.5, 0.5),
-    ))
+fn lyric_line_transition_progress(started_at: Instant, now: Instant) -> f32 {
+    let duration = LYRIC_LINE_TRANSITION_DURATION.as_secs_f32().max(f32::EPSILON);
+    let raw = (now.saturating_duration_since(started_at).as_secs_f32() / duration)
+        .clamp(0.0, 1.0);
+    1.0 - (1.0 - raw).powi(3)
 }
 
-fn lyric_line_translation(from_y: f32, to_y: f32) -> Animation {
-    Animation::from_spec(
-        AnimationSpec::new(LYRIC_LINE_TRANSITION_DURATION).ease(Easing::OutCubic),
-    )
-    .with_property(AnimationProperty::translation(
-        point(px(0.0), px(from_y)),
-        point(px(0.0), px(to_y)),
-    ))
+fn desktop_karaoke_is_animating(display: &LyricsDisplay, playing: bool) -> bool {
+    if !playing || display.current_words.is_empty() {
+        return false;
+    }
+    let Some(index) = display
+        .current_words
+        .partition_point(|word| word.timestamp_ms <= display.position_ms)
+        .checked_sub(1)
+    else {
+        return false;
+    };
+    let Some(word) = display.current_words.get(index) else {
+        return false;
+    };
+    let Some(duration_ms) = authored_or_inferred_word_duration(&display.current_words, index) else {
+        return false;
+    };
+    display.position_ms < word.timestamp_ms.saturating_add(duration_ms)
 }
 
 fn aligned_line(
