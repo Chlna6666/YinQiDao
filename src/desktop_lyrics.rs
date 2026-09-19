@@ -74,6 +74,18 @@ impl MusicApp {
         let existing =
             cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
         if let Some(window) = existing {
+            // Keep the tracked instance and collapse any historical duplicate surfaces left by an
+            // older build. Hiding before removal prevents a stale DComp frame from remaining visible.
+            for extra in desktop_lyrics_windows(cx) {
+                if extra == window {
+                    continue;
+                }
+                let _ = extra.update(cx, |_view, window, _cx| {
+                    window.hide_window();
+                    window.remove_window();
+                });
+            }
+
             let always_on_top = self.config.desktop_lyrics.always_on_top;
             if window
                 .update(cx, |_view, window, _cx| {
