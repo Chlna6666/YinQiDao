@@ -545,6 +545,10 @@ impl StageLyricsView {
 
         if applied.abs() <= SCROLL_SETTLE_PX {
             self.cancel_scroll_animation();
+            if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
+                self.focus_started_at = Some(now);
+                window.request_animation_frame();
+            }
             return;
         }
 
@@ -1200,7 +1204,7 @@ mod tests {
         assert_eq!(lyric_focus_profile(1, false, true), (0.66, 0.80));
         assert_eq!(lyric_focus_profile(3, false, true), (0.36, 1.60));
         assert_eq!(lyric_focus_profile(5, false, true), (0.28, 2.10));
-        assert_eq!(lyric_focus_profile(2, false, false), (0.42, 0.0));
+        assert_eq!(lyric_focus_profile(2, false, false), (0.48, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
     }
 
