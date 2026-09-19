@@ -12,6 +12,18 @@ mod plugin_service_accounts;
 #[path = "plugin/service_auth.rs"]
 mod plugin_service_auth;
 
+pub(crate) fn render_service_auth(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
+    plugin_service_auth::render(cx)
+}
+
+pub(crate) fn render_service_auth_modal_content(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
+    plugin_service_auth::render_modal_content(cx)
+}
+
+pub(crate) fn cancel_service_auth_if_active(cx: &mut Context<MusicApp>) {
+    plugin_service_auth::cancel_active_if_any(cx);
+}
+
 // Keep the existing large settings implementation unchanged and embed it as the Preferences tab.
 // Its `super::{components, shell, theme}` imports resolve to the aliases above.
 mod base {
@@ -19,7 +31,7 @@ mod base {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum SettingsWorkspace {
+pub(crate) enum SettingsWorkspace {
     #[default]
     Preferences,
     Services,
@@ -30,7 +42,7 @@ enum SettingsWorkspace {
 
 static SETTINGS_WORKSPACE: OnceLock<Mutex<SettingsWorkspace>> = OnceLock::new();
 
-fn workspace() -> SettingsWorkspace {
+pub(crate) fn workspace() -> SettingsWorkspace {
     SETTINGS_WORKSPACE
         .get_or_init(|| Mutex::new(SettingsWorkspace::Preferences))
         .lock()
@@ -38,7 +50,7 @@ fn workspace() -> SettingsWorkspace {
         .unwrap_or(SettingsWorkspace::Preferences)
 }
 
-fn select_workspace(target: SettingsWorkspace, cx: &mut Context<MusicApp>) {
+pub(crate) fn select_workspace(target: SettingsWorkspace, cx: &mut Context<MusicApp>) {
     if let Ok(mut workspace) = SETTINGS_WORKSPACE
         .get_or_init(|| Mutex::new(SettingsWorkspace::Preferences))
         .lock()
@@ -88,10 +100,10 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Preferences, cx)),
         ))
         .child(workspace_button(
-            "settings-workspace-services",
-            "音乐服务",
-            active_plugin_route.is_none() && selected == SettingsWorkspace::Services,
-            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Services, cx)),
+            "settings-workspace-plugins",
+            "插件中心",
+            active_plugin_route.is_none() && selected == SettingsWorkspace::Plugins,
+            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Plugins, cx)),
         ))
         .child(workspace_button(
             "settings-workspace-authentication",
@@ -100,10 +112,10 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Authentication, cx)),
         ))
         .child(workspace_button(
-            "settings-workspace-plugins",
-            "插件与扩展",
-            active_plugin_route.is_none() && selected == SettingsWorkspace::Plugins,
-            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Plugins, cx)),
+            "settings-workspace-services",
+            "音乐服务",
+            active_plugin_route.is_none() && selected == SettingsWorkspace::Services,
+            cx.listener(|_, _, _, cx| select_workspace(SettingsWorkspace::Services, cx)),
         ))
         .child(workspace_button(
             "settings-workspace-contributions",
@@ -118,7 +130,10 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
             .is_some_and(|current| current.pathname == target.pathname);
         let target_for_click = target.clone();
         nav = nav.child(workspace_button_dynamic(
-            SharedString::from(format!("settings-plugin-route-{}", target.summary.qualified_id)),
+            SharedString::from(format!(
+                "settings-plugin-route-{}",
+                target.summary.qualified_id
+            )),
             target.summary.title.clone(),
             active,
             cx.listener(move |this, _, _, cx| {
@@ -147,7 +162,12 @@ fn workspace_button<F>(
 where
     F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 {
-    workspace_button_dynamic(SharedString::new_static(id), label.to_string(), active, on_press)
+    workspace_button_dynamic(
+        SharedString::new_static(id),
+        label.to_string(),
+        active,
+        on_press,
+    )
 }
 
 fn workspace_button_dynamic<F>(

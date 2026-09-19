@@ -1,8 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{App, AppContext, Entity, Focusable, Window};
 
@@ -49,11 +45,7 @@ impl Drop for PluginInputSurfaceGuard {
     }
 }
 
-pub fn begin_surface(
-    plugin_id: &str,
-    page_id: &str,
-    revision: u64,
-) -> PluginInputSurfaceGuard {
+pub fn begin_surface(plugin_id: &str, page_id: &str, revision: u64) -> PluginInputSurfaceGuard {
     // A page revision is immutable. Once a newer snapshot is rendered, editors belonging to any
     // older revision of that exact plugin/page can no longer publish against the current page cache
     // ticket and must be dropped together with their IME/selection/caret state.
@@ -128,13 +120,11 @@ pub fn activate(
         // A page may publish a newer revision between the guest response and the next GPUI render.
         // Revalidate against the Host page cache at the final Enter boundary so an editor from the
         // previous revision can never submit into a newer page generation during that one-frame gap.
-        let revision_is_current = management::page_snapshot(
-            &commit_key.plugin_id,
-            &commit_key.page_id,
-        )
-        .ok()
-        .flatten()
-        .is_some_and(|snapshot| snapshot.revision == commit_key.revision);
+        let revision_is_current =
+            management::page_snapshot(&commit_key.plugin_id, &commit_key.page_id)
+                .ok()
+                .flatten()
+                .is_some_and(|snapshot| snapshot.revision == commit_key.revision);
 
         ACTIVE_INPUTS.with(|inputs| {
             inputs.borrow_mut().remove(&commit_key);
@@ -145,9 +135,8 @@ pub fn activate(
         window.request_animation_frame();
     });
 
-    let input = cx.new(move |entity_cx| {
-        HostTextInput::new(entity_cx, value, placeholder, secret, commit)
-    });
+    let input =
+        cx.new(move |entity_cx| HostTextInput::new(entity_cx, value, placeholder, secret, commit));
 
     ACTIVE_INPUTS.with(|inputs| {
         let mut inputs = inputs.borrow_mut();

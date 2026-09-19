@@ -45,6 +45,13 @@ fn snapshot_for_generation(generation: u64) -> (ServiceAccountsSnapshot, bool) {
     (state.clone(), should_refresh)
 }
 
+pub(crate) fn invalidate_cache() {
+    let Ok(mut state) = state().lock() else {
+        return;
+    };
+    state.loaded = false;
+}
+
 fn begin_refresh(generation: u64) -> bool {
     let Ok(mut state) = state().lock() else {
         return false;
@@ -113,8 +120,17 @@ fn refresh_services(cx: &mut Context<MusicApp>) {
     });
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
-        this.update(cx, |_this, cx| {
+        this.update(cx, |this, cx| {
             complete_refresh(generation, result);
+            let is_auth = this.check_online_authenticated();
+            this.online_authenticated = is_auth;
+            if !is_auth {
+                this.online_daily_tracks.clear();
+                this.online_playlists.clear();
+                this.online_new_tracks.clear();
+                this.online_route = None;
+            }
+            this.bump_ui_content_revision();
             cx.notify();
         })?;
         Ok(())
@@ -196,6 +212,76 @@ fn logout_account_action(
     .detach();
 }
 
+fn switch_default_account_action(
+    plugin_id: String,
+    provider_id: String,
+    account_id: String,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) {
+    if !begin_action(generation, "正在切换当前生效账号…") {
+        cx.notify();
+        return;
+    }
+    cx.notify();
+    let task = Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
+            frontend.set_default_account(&plugin_id, &provider_id, &account_id)?;
+            Ok::<_, anyhow::Error>("已成功将该账号切换为当前生效账号".to_string())
+        })
+        .await
+        .map_err(|_| anyhow!("切换账号任务异常退出"))?
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if complete_action(generation, result) {
+                refresh_services(cx);
+            } else {
+                cx.notify();
+            }
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn remove_account_action(
+    plugin_id: String,
+    provider_id: String,
+    account_id: String,
+    generation: u64,
+    cx: &mut Context<MusicApp>,
+) {
+    if !begin_action(generation, "正在移除账号并清理凭据…") {
+        cx.notify();
+        return;
+    }
+    cx.notify();
+    let task = Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
+            frontend.remove_account_by_id(&plugin_id, &provider_id, &account_id)?;
+            Ok::<_, anyhow::Error>("账号已彻底移除并清理凭据".to_string())
+        })
+        .await
+        .map_err(|_| anyhow!("移除账号任务异常退出"))?
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let result = task.await;
+        this.update(cx, |_this, cx| {
+            if complete_action(generation, result) {
+                refresh_services(cx);
+            } else {
+                cx.notify();
+            }
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
 fn logout_provider_action(
     plugin_id: String,
     provider_id: String,
@@ -209,7 +295,9 @@ fn logout_provider_action(
     cx.notify();
     let task = Tokio::spawn_result(cx, async move {
         let frontend = frontend::global().ok_or_else(|| anyhow!("插件服务前端尚未初始化"))?;
-        let result = frontend.logout_provider_all(&plugin_id, &provider_id).await?;
+        let result = frontend
+            .logout_provider_all(&plugin_id, &provider_id)
+            .await?;
         Ok::<_, anyhow::Error>(summarize_bulk_logout("Provider", &result))
     });
     cx.spawn(async move |this, cx| -> Result<()> {
@@ -300,10 +388,7 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     if should_refresh {
         refresh_services(cx);
     }
-    let current = state()
-        .lock()
-        .map(|state| state.clone())
-        .unwrap_or(initial);
+    let current = state().lock().map(|state| state.clone()).unwrap_or(initial);
     let interaction_busy = current.loading || current.action_in_flight;
 
     let mut services = div().flex().flex_col().gap_4();
@@ -331,25 +416,17 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
                             "当前没有可显示的音乐服务插件"
                         }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::TEXT_TERTIARY)
-                        .child(if interaction_busy {
-                            "Host 正在后台执行账号/凭据操作，不会在 render 路径执行插件代码。"
-                        } else {
-                            "安装带 Provider 的插件后，可在此查看账号会话、能力和 Host 权限授权状态。"
-                        }),
-                ),
+                .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
+                    if interaction_busy {
+                        "Host 正在后台执行账号/凭据操作，不会在 render 路径执行插件代码。"
+                    } else {
+                        "安装带 Provider 的插件后，可在此查看账号会话、能力和 Host 权限授权状态。"
+                    },
+                )),
         );
     } else {
         for service in current.services.iter().cloned() {
-            services = services.child(service_card(
-                service,
-                interaction_busy,
-                generation,
-                cx,
-            ));
+            services = services.child(service_card(service, interaction_busy, generation, cx));
         }
     }
 
@@ -362,6 +439,7 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     };
 
     div()
+        .id("service-accounts-scroll")
         .size_full()
         .overflow_y_scroll()
         .bg(theme::BG_CANVAS)
@@ -556,11 +634,7 @@ fn service_card(
                             "退出全部",
                             interaction_busy,
                             cx.listener(move |_, _, _, cx| {
-                                logout_plugin_action(
-                                    plugin_id_for_logout.clone(),
-                                    generation,
-                                    cx,
-                                )
+                                logout_plugin_action(plugin_id_for_logout.clone(), generation, cx)
                             }),
                         )),
                 ),
@@ -586,26 +660,32 @@ fn service_card(
                         .text_color(theme::TEXT_TERTIARY)
                         .child(format!("{network_summary} · {playback_summary}")),
                 )
-                .child_if(!service.permissions.requested_network_domains.is_empty(), || {
-                    div()
-                        .text_xs()
-                        .text_color(theme::TEXT_TERTIARY)
-                        .truncate()
-                        .child(format!(
-                            "声明域名：{}",
-                            service.permissions.requested_network_domains.join(", ")
-                        ))
-                })
-                .child_if(!service.permissions.granted_network_domains.is_empty(), || {
-                    div()
-                        .text_xs()
-                        .text_color(theme::TEXT_TERTIARY)
-                        .truncate()
-                        .child(format!(
-                            "已授权：{}",
-                            service.permissions.granted_network_domains.join(", ")
-                        ))
-                }),
+                .child_if(
+                    !service.permissions.requested_network_domains.is_empty(),
+                    || {
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_TERTIARY)
+                            .truncate()
+                            .child(format!(
+                                "声明域名：{}",
+                                service.permissions.requested_network_domains.join(", ")
+                            ))
+                    },
+                )
+                .child_if(
+                    !service.permissions.granted_network_domains.is_empty(),
+                    || {
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_TERTIARY)
+                            .truncate()
+                            .child(format!(
+                                "已授权：{}",
+                                service.permissions.granted_network_domains.join(", ")
+                            ))
+                    },
+                ),
         )
         .child(providers)
         .into_any_element()
@@ -626,13 +706,26 @@ fn provider_card(
     if provider.accounts.is_empty() {
         accounts = accounts.child(
             div()
-                .px_3()
-                .py_2()
+                .p_3()
                 .rounded_lg()
                 .bg(theme::BG_CARD)
-                .text_xs()
-                .text_color(theme::TEXT_TERTIARY)
-                .child("尚无已登记账号；可使用 Provider 级清理撤销残余 Host 凭据。"),
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::TEXT_TERTIARY)
+                        .child("尚无已登记账号；可点击右侧添加账号或使用 Provider 级清理。"),
+                )
+                .child(action_button(
+                    "添加账号",
+                    interaction_busy,
+                    cx.listener(move |app, _, _, cx| {
+                        app.open_modal(crate::ui::components::GlobalModal::ServiceAuth, cx);
+                    }),
+                )),
         );
     } else {
         for account in provider.accounts {
@@ -640,11 +733,25 @@ fn provider_card(
             let account_id = account.account_id.clone();
             let plugin_id_for_account = plugin_id.to_owned();
             let provider_id_for_account = provider_id.clone();
-            let action_label = if account.state == PluginAccountSessionStatus::LoggedOut {
-                "清理凭据"
+            let plugin_id_for_switch = plugin_id.to_owned();
+            let provider_id_for_switch = provider_id.clone();
+            let account_id_for_switch = account_id.clone();
+            let plugin_id_for_remove = plugin_id.to_owned();
+            let provider_id_for_remove = provider_id.clone();
+            let account_id_for_remove = account_id.clone();
+            let is_logged_out = account.state == PluginAccountSessionStatus::LoggedOut;
+            let action_label = if is_logged_out {
+                "移除账号"
             } else {
                 "退出"
             };
+            let avatar_element = crate::ui::image_cache::render_remote_avatar(
+                account.avatar_url.as_deref(),
+                34.0,
+                account.is_default,
+                cx,
+            );
+
             accounts = accounts.child(
                 div()
                     .px_3()
@@ -659,32 +766,44 @@ fn provider_card(
                         div()
                             .min_w(px(0.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(1.0))
+                            .items_center()
+                            .gap_3()
+                            .child(avatar_element)
                             .child(
                                 div()
+                                    .min_w(px(0.0))
                                     .flex()
-                                    .items_center()
-                                    .gap_2()
+                                    .flex_col()
+                                    .gap(px(1.0))
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme::TEXT_PRIMARY)
-                                            .truncate()
-                                            .child(account.display_name),
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(theme::TEXT_PRIMARY)
+                                                    .truncate()
+                                                    .child(account.display_name),
+                                            )
+                                            .child_if(account.is_default, || {
+                                                active_badge("✓ 当前生效")
+                                            }),
                                     )
-                                    .child_if(account.is_default, || small_badge("默认")),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::TEXT_TERTIARY)
-                                    .truncate()
-                                    .child(format!(
-                                        "优先级 {} · 账号能力：{}",
-                                        account.priority, account_capabilities
-                                    )),
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::TEXT_TERTIARY)
+                                            .truncate()
+                                            .child(format!(
+                                                "UID: {} · 优先级 {} · 能力：{}",
+                                                account.account_id,
+                                                account.priority,
+                                                account_capabilities
+                                            )),
+                                    ),
                             ),
                     )
                     .child(
@@ -694,17 +813,42 @@ fn provider_card(
                             .items_center()
                             .gap_2()
                             .child(session_badge(account.state))
+                            .child_if(!account.is_default && !is_logged_out, || {
+                                action_button(
+                                    "设为当前",
+                                    interaction_busy,
+                                    cx.listener(move |_, _, _, cx| {
+                                        switch_default_account_action(
+                                            plugin_id_for_switch.clone(),
+                                            provider_id_for_switch.clone(),
+                                            account_id_for_switch.clone(),
+                                            generation,
+                                            cx,
+                                        )
+                                    }),
+                                )
+                            })
                             .child(action_button(
                                 action_label,
                                 interaction_busy,
                                 cx.listener(move |_, _, _, cx| {
-                                    logout_account_action(
-                                        plugin_id_for_account.clone(),
-                                        provider_id_for_account.clone(),
-                                        account_id.clone(),
-                                        generation,
-                                        cx,
-                                    )
+                                    if is_logged_out {
+                                        remove_account_action(
+                                            plugin_id_for_remove.clone(),
+                                            provider_id_for_remove.clone(),
+                                            account_id_for_remove.clone(),
+                                            generation,
+                                            cx,
+                                        )
+                                    } else {
+                                        logout_account_action(
+                                            plugin_id_for_account.clone(),
+                                            provider_id_for_account.clone(),
+                                            account_id.clone(),
+                                            generation,
+                                            cx,
+                                        )
+                                    }
                                 }),
                             )),
                     ),
@@ -762,6 +906,13 @@ fn provider_card(
                                 .child(format!("{account_count} 个账号")),
                         )
                         .child(action_button(
+                            "添加账号",
+                            interaction_busy,
+                            cx.listener(move |app, _, _, cx| {
+                                app.open_modal(crate::ui::components::GlobalModal::ServiceAuth, cx);
+                            }),
+                        ))
+                        .child(action_button(
                             "退出全部",
                             interaction_busy,
                             cx.listener(move |_, _, _, cx| {
@@ -805,7 +956,7 @@ fn enabled_badge(enabled: bool) -> gpui::AnyElement {
         .text_color(if enabled {
             hsla(140.0, 0.45, 0.36, 1.0)
         } else {
-            theme::TEXT_TERTIARY
+            theme::TEXT_TERTIARY.into()
         })
         .child(if enabled { "已启用" } else { "已禁用" })
         .into_any_element()
@@ -826,12 +977,12 @@ fn session_badge(status: PluginAccountSessionStatus) -> gpui::AnyElement {
         PluginAccountSessionStatus::Expired => (
             "已过期",
             hsla(8.0, 0.72, 0.52, 0.12),
-            theme::ACCENT_RED,
+            theme::ACCENT_RED.into(),
         ),
         PluginAccountSessionStatus::LoggedOut => (
             "已退出",
             hsla(0.0, 0.0, 0.0, 0.05),
-            theme::TEXT_TERTIARY,
+            theme::TEXT_TERTIARY.into(),
         ),
     };
     div()
@@ -858,11 +1009,25 @@ fn small_badge(label: &'static str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+fn active_badge(label: &'static str) -> gpui::AnyElement {
+    div()
+        .px_2()
+        .py(px(1.0))
+        .rounded_full()
+        .bg(hsla(140.0, 0.45, 0.45, 0.14))
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(hsla(140.0, 0.55, 0.32, 1.0))
+        .child(label)
+        .into_any_element()
+}
+
 fn action_button<F>(label: &'static str, disabled: bool, on_press: F) -> gpui::AnyElement
 where
     F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 {
     let button = div()
+        .id(label)
         .flex_none()
         .px_2()
         .py(px(4.0))
@@ -890,6 +1055,7 @@ where
     F: Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 {
     let button = div()
+        .id(label)
         .px_3()
         .py_2()
         .rounded_lg()
@@ -912,7 +1078,10 @@ where
 }
 
 fn status_is_error(status: &str) -> bool {
-    status.contains("失败") || status.contains("异常") || status.contains("未确认") || status.contains("已丢弃")
+    status.contains("失败")
+        || status.contains("异常")
+        || status.contains("未确认")
+        || status.contains("已丢弃")
 }
 
 fn capability_list(capabilities: &[PluginCapability]) -> String {

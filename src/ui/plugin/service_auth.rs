@@ -1,20 +1,27 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    io::Cursor,
     rc::Rc,
     sync::{Arc, Mutex, OnceLock},
 };
 
 use anyhow::{Result, anyhow};
 use gpui::{
-    App, AppContext, ClipboardItem, Context, Entity, Focusable, IntoElement, SharedString,
-    WeakEntity, Window, div, prelude::*, px,
+    App, AppContext, ClipboardItem, Context, EncodedImageBytes, Entity, Focusable, ImageFormat,
+    IntoElement, SharedString, WeakEntity, Window, div, hsla, img, prelude::*, px,
 };
 use gpui_tokio::Tokio;
+use image::{DynamicImage, ImageBuffer, ImageFormat as ImgFormat, Rgba};
+use lucide_gpui::icon;
+use qrcode::{Color, QrCode};
 
 use crate::{
     plugin::{
-        abi::{AuthChallengeKind, AuthMethod, AuthPollResult, KeyValue, PluginCapability},
+        abi::{
+            AuthChallengeKind, AuthMethod, AuthPollResult, KeyValue, PluginCapability,
+            ProviderAccount,
+        },
         accounts::{self, PluginServiceSummary},
         auth::PluginAuthFlowSnapshot,
         frontend, runtime_ports,
@@ -54,6 +61,12 @@ impl Drop for SensitiveValue {
     }
 }
 
+#[derive(Clone, Debug)]
+struct AuthenticatedAccountSnapshot {
+    plugin_id: String,
+    account: ProviderAccount,
+}
+
 struct AuthWorkspaceState {
     generation: u64,
     options_loading: bool,
@@ -63,9 +76,11 @@ struct AuthWorkspaceState {
     flow_busy: bool,
     flow_request_id: u64,
     active_flow: Option<PluginAuthFlowSnapshot>,
+    qr_png_bytes: Option<Arc<[u8]>>,
     form_values: HashMap<String, SensitiveValue>,
     form_submitted: bool,
     status: String,
+    authenticated_account: Option<AuthenticatedAccountSnapshot>,
 }
 
 impl Default for AuthWorkspaceState {
@@ -79,9 +94,11 @@ impl Default for AuthWorkspaceState {
             flow_busy: false,
             flow_request_id: 0,
             active_flow: None,
+            qr_png_bytes: None,
             form_values: HashMap::new(),
             form_submitted: false,
             status: String::new(),
+            authenticated_account: None,
         }
     }
 }
@@ -92,9 +109,11 @@ struct AuthRenderSnapshot {
     options: Arc<Vec<AuthProviderOption>>,
     flow_busy: bool,
     active_flow: Option<PluginAuthFlowSnapshot>,
+    qr_png_bytes: Option<Arc<[u8]>>,
     committed_fields: HashSet<String>,
     form_submitted: bool,
     status: String,
+    authenticated_account: Option<AuthenticatedAccountSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -130,6 +149,8 @@ fn render_snapshot(generation: u64) -> (AuthRenderSnapshot, bool) {
                 state.flow_busy = false;
                 state.form_values.clear();
                 state.form_submitted = false;
+                state.qr_png_bytes = None;
+                state.authenticated_account = None;
                 state.status = "插件包代际已变化，旧认证 challenge 已失效".into();
             }
             let should_refresh = !state.options_loaded && !state.options_loading;
@@ -139,9 +160,11 @@ fn render_snapshot(generation: u64) -> (AuthRenderSnapshot, bool) {
                     options: state.options.clone(),
                     flow_busy: state.flow_busy,
                     active_flow: state.active_flow.clone(),
+                    qr_png_bytes: state.qr_png_bytes.clone(),
                     committed_fields: state.form_values.keys().cloned().collect(),
                     form_submitted: state.form_submitted,
                     status: state.status.clone(),
+                    authenticated_account: state.authenticated_account.clone(),
                 },
                 should_refresh,
             )
@@ -152,9 +175,11 @@ fn render_snapshot(generation: u64) -> (AuthRenderSnapshot, bool) {
                 options: Arc::new(Vec::new()),
                 flow_busy: false,
                 active_flow: None,
+                qr_png_bytes: None,
                 committed_fields: HashSet::new(),
                 form_submitted: false,
                 status: "认证 UI 状态锁已损坏".into(),
+                authenticated_account: None,
             },
             false,
         ),
@@ -237,7 +262,9 @@ fn complete_options_refresh(
                 let plugin_id = service.plugin_id.clone();
                 let service_name = service.name.clone();
                 for provider in service.providers {
-                    if !provider.capabilities.contains(&PluginCapability::Authentication)
+                    if !provider
+                        .capabilities
+                        .contains(&PluginCapability::Authentication)
                         || provider.auth_methods.is_empty()
                     {
                         continue;
@@ -277,10 +304,23 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     }
     let view = cx.entity().downgrade();
 
-    let body = if let Some(flow) = snapshot.active_flow.clone() {
+    let body = if let Some(account) = &snapshot.authenticated_account {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(authenticated_user_card(account, cx))
+            .child(provider_list(
+                snapshot.options.clone(),
+                snapshot.options_loading,
+                cx,
+            ))
+            .into_any_element()
+    } else if let Some(flow) = snapshot.active_flow.clone() {
         challenge_card(
             flow,
             snapshot.flow_busy,
+            snapshot.qr_png_bytes.clone(),
             snapshot.form_submitted,
             &snapshot.committed_fields,
             &view,
@@ -291,6 +331,7 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     };
 
     div()
+        .id("service-auth-scroll")
         .size_full()
         .overflow_y_scroll()
         .bg(theme::BG_CANVAS)
@@ -370,6 +411,246 @@ pub(super) fn render(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
         .into_any_element()
 }
 
+pub(crate) fn render_modal_content(cx: &mut Context<MusicApp>) -> gpui::AnyElement {
+    let generation = runtime_ports::package_mutation_generation();
+    let (snapshot, should_refresh) = render_snapshot(generation);
+    if should_refresh {
+        refresh_options(cx);
+    }
+    let view = cx.entity().downgrade();
+
+    let body = if let Some(account) = &snapshot.authenticated_account {
+        authenticated_user_card(account, cx)
+    } else if let Some(flow) = snapshot.active_flow.clone() {
+        challenge_card(
+            flow,
+            snapshot.flow_busy,
+            snapshot.qr_png_bytes.clone(),
+            snapshot.form_submitted,
+            &snapshot.committed_fields,
+            &view,
+            cx,
+        )
+    } else if snapshot.flow_busy {
+        div()
+            .p_8()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme::TEXT_SECONDARY)
+                    .child("正在创建认证 challenge…"),
+            )
+            .into_any_element()
+    } else {
+        provider_list(snapshot.options.clone(), snapshot.options_loading, cx)
+    };
+
+    let show_status = snapshot.authenticated_account.is_none();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child_if(show_status, || {
+            div()
+                .text_xs()
+                .text_color(
+                    if snapshot.status.contains("失败")
+                        || snapshot.status.contains("失效")
+                        || snapshot.status.contains("拒绝")
+                    {
+                        theme::ACCENT_RED
+                    } else {
+                        theme::TEXT_TERTIARY
+                    },
+                )
+                .child(if snapshot.status.is_empty() {
+                    "请使用对应的认证方式完成登录".to_string()
+                } else {
+                    snapshot.status
+                })
+        })
+        .child(body)
+        .into_any_element()
+}
+
+fn authenticated_user_card(
+    snapshot: &AuthenticatedAccountSnapshot,
+    cx: &mut Context<MusicApp>,
+) -> gpui::AnyElement {
+    let display_name = snapshot.account.display_name.clone();
+    let account_id = snapshot.account.account_id.clone();
+    let avatar_url = snapshot.account.avatar_url.clone();
+    let plugin_id = snapshot.plugin_id.clone();
+    let provider_id = snapshot.account.provider_id.clone();
+    let account_id_for_default = snapshot.account.account_id.clone();
+
+    div()
+        .p_6()
+        .rounded_xl()
+        .bg(theme::BG_CARD)
+        .border_1()
+        .border_color(theme::BORDER_CARD)
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_4()
+        .child(
+            div()
+                .relative()
+                .size(px(80.0))
+                .rounded_full()
+                .bg(theme::BG_CANVAS)
+                .border_2()
+                .border_color(hsla(140.0, 0.55, 0.45, 0.6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .child(crate::ui::image_cache::render_remote_avatar(
+                    avatar_url.as_deref(),
+                    80.0,
+                    false,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .right_0()
+                        .size(px(22.0))
+                        .rounded_full()
+                        .bg(hsla(140.0, 0.70, 0.40, 1.0))
+                        .border_2()
+                        .border_color(theme::BG_CARD)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(theme::themed_icon(
+                            icon!(check),
+                            12.0,
+                            theme::TEXT_WHITE.into(),
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme::TEXT_PRIMARY)
+                        .child(display_name),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::TEXT_TERTIARY)
+                        .child(format!("用户 ID: {account_id}")),
+                ),
+        )
+        .child(
+            div()
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .bg(hsla(140.0, 0.50, 0.45, 0.12))
+                .border_1()
+                .border_color(hsla(140.0, 0.55, 0.45, 0.3))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(hsla(140.0, 0.75, 0.38, 1.0))
+                .child("✓ 认证成功，已登录网易云音乐"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::TEXT_SECONDARY)
+                .text_center()
+                .child("账号已加入 Host 音乐服务路由，可设为当前主账号或作为多账号之一随时切换。"),
+        )
+        .child(
+            div()
+                .pt_2()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    div()
+                        .id("plugin-auth-set-default-btn")
+                        .px_5()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme::ACCENT_RED)
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::TEXT_WHITE)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::ACCENT_RED_HOVER))
+                        .active(|s| s.scale(0.98))
+                        .child("设为当前生效账号")
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |app, _, _, cx| {
+                                if let Some(frontend) = frontend::global() {
+                                    let _ = frontend.set_default_account(
+                                        &plugin_id,
+                                        &provider_id,
+                                        &account_id_for_default,
+                                    );
+                                }
+                                super::plugin_service_accounts::invalidate_cache();
+                                dismiss_auth_success(app, cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("plugin-auth-finish-btn")
+                        .px_5()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme::BORDER_CARD)
+                        .bg(theme::BG_CANVAS)
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::TEXT_PRIMARY)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::bg_hover()))
+                        .active(|s| s.scale(0.98))
+                        .child("完成")
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|app, _, _, cx| {
+                                super::plugin_service_accounts::invalidate_cache();
+                                dismiss_auth_success(app, cx);
+                            }),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+fn dismiss_auth_success(app: &mut MusicApp, cx: &mut Context<MusicApp>) {
+    if let Ok(mut state) = state().lock() {
+        state.authenticated_account = None;
+    }
+    app.close_modal(cx);
+    cx.notify();
+}
+
 fn provider_list(
     options: Arc<Vec<AuthProviderOption>>,
     loading: bool,
@@ -396,12 +677,9 @@ fn provider_list(
                         "当前没有可认证的 Provider"
                     }),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::TEXT_TERTIARY)
-                    .child("Provider 必须已启用，并声明 authentication capability 与至少一种 auth method。"),
-            )
+            .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
+                "Provider 必须已启用，并声明 authentication capability 与至少一种 auth method。",
+            ))
             .into_any_element();
     }
 
@@ -418,8 +696,8 @@ fn provider_list(
                 )),
                 auth_method_label(method),
                 false,
-                cx.listener(move |_, _, _, cx| {
-                    begin_auth(plugin_id.clone(), provider_id.clone(), method, cx);
+                cx.listener(move |this, _, _, cx| {
+                    begin_auth(this, plugin_id.clone(), provider_id.clone(), method, cx);
                 }),
             ));
         }
@@ -453,15 +731,12 @@ fn provider_list(
                                         .text_color(theme::TEXT_PRIMARY)
                                         .child(option.provider_name),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::TEXT_TERTIARY)
-                                        .child(format!(
-                                            "{} · {}/{}",
-                                            option.service_name, option.plugin_id, option.provider_id
-                                        )),
-                                ),
+                                .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
+                                    format!(
+                                        "{} · {}/{}",
+                                        option.service_name, option.plugin_id, option.provider_id
+                                    ),
+                                )),
                         )
                         .child(
                             div()
@@ -477,6 +752,7 @@ fn provider_list(
 }
 
 fn begin_auth(
+    app: &mut MusicApp,
     plugin_id: String,
     provider_id: String,
     method: AuthMethod,
@@ -490,11 +766,13 @@ fn begin_auth(
         if state.flow_busy || state.active_flow.is_some() {
             return;
         }
+        state.authenticated_account = None;
         state.flow_busy = true;
         state.flow_request_id = state.flow_request_id.wrapping_add(1);
         state.status = format!("正在创建 {} challenge…", auth_method_label(method));
         state.flow_request_id
     };
+    app.open_modal(crate::ui::components::GlobalModal::ServiceAuth, cx);
     cx.notify();
 
     let Some(frontend) = frontend::global() else {
@@ -508,7 +786,63 @@ fn begin_auth(
     });
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
-        this.update(cx, |_app, cx| complete_begin(request_id, generation, result, cx))?;
+        this.update(cx, |_app, cx| {
+            complete_begin(request_id, generation, result, cx)
+        })?;
+        Ok(())
+    })
+    .detach();
+}
+
+fn qr_payload_to_png(payload: &str) -> Option<Arc<[u8]>> {
+    let code = QrCode::new(payload.as_bytes()).ok()?;
+    let modules = code.width() as u32;
+    let quiet_zone = 2u32;
+    let scale = 6u32;
+    let size = (modules + quiet_zone * 2) * scale;
+    let mut img = ImageBuffer::from_pixel(size, size, Rgba([255, 255, 255, 255]));
+    let colors = code.to_colors();
+    for y in 0..modules {
+        for x in 0..modules {
+            if colors[(y * modules + x) as usize] == Color::Dark {
+                let start_x = (x + quiet_zone) * scale;
+                let start_y = (y + quiet_zone) * scale;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        img.put_pixel(start_x + dx, start_y + dy, Rgba([20, 20, 22, 255]));
+                    }
+                }
+            }
+        }
+    }
+    let mut buffer = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(img)
+        .write_to(&mut buffer, ImgFormat::Png)
+        .ok()?;
+    Some(Arc::from(buffer.into_inner().into_boxed_slice()))
+}
+
+fn schedule_qr_poll(flow_id: u64, cx: &mut Context<MusicApp>) {
+    let timer_task = Tokio::spawn_result(cx, async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        Ok(())
+    });
+    cx.spawn(async move |this, cx| -> Result<()> {
+        let _ = timer_task.await;
+        this.update(cx, |_app, cx| {
+            let should_poll = {
+                let Ok(state) = state().lock() else {
+                    return;
+                };
+                let is_active_qr = state.active_flow.as_ref().is_some_and(|f| {
+                    f.flow_id == flow_id && f.challenge.kind == AuthChallengeKind::QrCode
+                });
+                is_active_qr && !state.flow_busy
+            };
+            if should_poll {
+                poll_auth(flow_id, cx);
+            }
+        })?;
         Ok(())
     })
     .detach();
@@ -521,6 +855,8 @@ fn complete_begin(
     cx: &mut Context<MusicApp>,
 ) {
     let mut open_url = None;
+    let mut start_qr_poll = false;
+    let mut poll_flow_id = 0;
     let Ok(mut state) = state().lock() else {
         return;
     };
@@ -542,8 +878,20 @@ fn complete_begin(
             if flow.challenge.kind == AuthChallengeKind::Browser {
                 open_url = flow.challenge.verification_uri.clone();
             }
+            // Pre-render QR code image so the UI can display it immediately.
+            state.qr_png_bytes = if flow.challenge.kind == AuthChallengeKind::QrCode {
+                start_qr_poll = true;
+                poll_flow_id = flow.flow_id;
+                flow.challenge
+                    .qr_payload
+                    .as_deref()
+                    .and_then(qr_payload_to_png)
+            } else {
+                None
+            };
             state.status = match flow.challenge.kind {
                 AuthChallengeKind::Form => "认证表单已就绪；逐项输入并按 Enter 确认。".into(),
+                AuthChallengeKind::QrCode => "二维码已就绪，请使用网易云音乐 App 扫码登录。".into(),
                 _ => "认证 challenge 已就绪；完成外部操作后点击“检查状态”。".into(),
             };
             state.active_flow = Some(flow);
@@ -556,12 +904,16 @@ fn complete_begin(
     if let Some(url) = open_url {
         cx.open_url(&url);
     }
+    if start_qr_poll && poll_flow_id != 0 {
+        schedule_qr_poll(poll_flow_id, cx);
+    }
     cx.notify();
 }
 
 fn challenge_card(
     flow: PluginAuthFlowSnapshot,
     busy: bool,
+    qr_png_bytes: Option<Arc<[u8]>>,
     form_submitted: bool,
     committed_fields: &HashSet<String>,
     view: &WeakEntity<MusicApp>,
@@ -574,16 +926,50 @@ fn challenge_card(
         AuthChallengeKind::QrCode => {
             let payload = flow.challenge.qr_payload.clone().unwrap_or_default();
             let payload_for_copy = payload.clone();
-            content = content
-                .child(info_block("二维码 payload", payload))
-                .child(action_button(
-                    SharedString::from(format!("plugin-auth-copy-qr-{flow_id}")),
-                    "复制二维码载荷",
-                    false,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(payload_for_copy.clone()));
-                    },
-                ));
+
+            // Prefer rendering the QR image; fall back to on-the-fly generation or payload text.
+            let qr_image = qr_png_bytes.or_else(|| qr_payload_to_png(&payload));
+            if let Some(png) = qr_image {
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .py_2()
+                        .child(
+                            div()
+                                .p_3()
+                                .bg(gpui::white())
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(theme::BORDER_CARD)
+                                .shadow_sm()
+                                .child(
+                                    img(EncodedImageBytes::new(ImageFormat::Png, png))
+                                        .size(px(200.0))
+                                        .rounded_md(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::TEXT_SECONDARY)
+                                .child("请使用网易云音乐手机 App 扫码登录（支持自动轮询检测）"),
+                        ),
+                );
+            } else {
+                content = content.child(info_block("二维码 payload", payload));
+            }
+
+            content = content.child(action_button(
+                SharedString::from(format!("plugin-auth-copy-qr-{flow_id}")),
+                "复制二维码载荷",
+                false,
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(payload_for_copy.clone()));
+                },
+            ));
         }
         AuthChallengeKind::Browser => {
             let url = flow.challenge.verification_uri.clone().unwrap_or_default();
@@ -641,12 +1027,7 @@ fn challenge_card(
                 );
             } else {
                 for field in flow.challenge.fields.iter().cloned() {
-                    content = content.child(form_field_row(
-                        flow_id,
-                        field,
-                        committed_fields,
-                        view,
-                    ));
+                    content = content.child(form_field_row(flow_id, field, committed_fields, view));
                 }
             }
         }
@@ -715,7 +1096,7 @@ fn challenge_card(
                     SharedString::from(format!("plugin-auth-cancel-{flow_id}")),
                     "取消认证",
                     false,
-                    cx.listener(move |_, _, _, cx| cancel_auth(flow_id, cx)),
+                    cx.listener(move |this, _, _, cx| cancel_auth(this, flow_id, cx)),
                 )),
         )
         .into_any_element()
@@ -856,9 +1237,7 @@ fn activate_form_input(
         window.request_animation_frame();
     });
 
-    let input = cx.new(move |entity_cx| {
-        HostTextInput::new(entity_cx, "", label, true, commit)
-    });
+    let input = cx.new(move |entity_cx| HostTextInput::new(entity_cx, "", label, true, commit));
     AUTH_INPUTS.with(|inputs| {
         inputs.borrow_mut().insert(key, input.clone());
     });
@@ -885,7 +1264,12 @@ fn commit_form_value(
         if flow.flow_id != flow_id || flow.challenge.kind != AuthChallengeKind::Form {
             return;
         }
-        if !flow.challenge.fields.iter().any(|field| field.key == field_id) {
+        if !flow
+            .challenge
+            .fields
+            .iter()
+            .any(|field| field.key == field_id)
+        {
             return;
         }
         state.form_values.insert(field_id, value);
@@ -948,8 +1332,8 @@ fn submit_form(
     });
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
-        this.update(cx, |_app, cx| {
-            complete_flow_result(flow_id, request_id, true, result, cx);
+        this.update(cx, |app, cx| {
+            complete_flow_result(app, flow_id, request_id, true, result, cx);
         })?;
         Ok(())
     })
@@ -983,8 +1367,8 @@ fn poll_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
     let task = Tokio::spawn_result(cx, async move { frontend.auth_flow_poll(flow_id).await });
     cx.spawn(async move |this, cx| -> Result<()> {
         let result = task.await;
-        this.update(cx, |_app, cx| {
-            complete_flow_result(flow_id, request_id, false, result, cx);
+        this.update(cx, |app, cx| {
+            complete_flow_result(app, flow_id, request_id, false, result, cx);
         })?;
         Ok(())
     })
@@ -992,6 +1376,7 @@ fn poll_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
 }
 
 fn complete_flow_result(
+    app: &mut MusicApp,
     flow_id: u64,
     request_id: u64,
     submitted_form: bool,
@@ -1011,22 +1396,42 @@ fn complete_flow_result(
         return;
     }
     state.flow_busy = false;
+    let is_authenticated = matches!(&result, Ok(AuthPollResult::Authenticated(_)));
 
     match result {
         Ok(AuthPollResult::Pending) => {
             state.form_submitted |= submitted_form;
-            state.status = "Provider 仍在等待认证完成；完成外部操作后再次检查状态。".into();
+            state.status = "Provider 正在等待扫码认证（请在手机端确认）…".into();
+            let is_qr = state.active_flow.as_ref().is_some_and(|flow| {
+                flow.flow_id == flow_id && flow.challenge.kind == AuthChallengeKind::QrCode
+            });
+            drop(state);
+            if is_qr {
+                schedule_qr_poll(flow_id, cx);
+            }
+            cx.notify();
+            return;
         }
         Ok(AuthPollResult::Authenticated(account)) => {
-            terminal = true;
+            terminal = false;
+            let plugin_id = state
+                .active_flow
+                .as_ref()
+                .map(|f| f.plugin_id.clone())
+                .unwrap_or_else(|| "io.yinqidao.netease".to_string());
             state.active_flow = None;
+            state.qr_png_bytes = None;
             state.form_values.clear();
             state.form_submitted = false;
-            state.status = format!("账号 {} 已认证并立即加入 Host 路由", account.display_name);
+            state.status = format!("账号 {} 已认证并加入 Host 路由", account.display_name);
+            state.authenticated_account = Some(AuthenticatedAccountSnapshot { plugin_id, account });
+            super::plugin_service_accounts::invalidate_cache();
         }
         Ok(AuthPollResult::Expired) => {
             terminal = true;
             state.active_flow = None;
+            state.authenticated_account = None;
+            state.qr_png_bytes = None;
             state.form_values.clear();
             state.form_submitted = false;
             state.status = "认证 challenge 已过期，请重新开始。".into();
@@ -1034,6 +1439,8 @@ fn complete_flow_result(
         Ok(AuthPollResult::Denied(reason)) => {
             terminal = true;
             state.active_flow = None;
+            state.authenticated_account = None;
+            state.qr_png_bytes = None;
             state.form_values.clear();
             state.form_submitted = false;
             let reason = truncate_text(&reason, 512);
@@ -1046,14 +1453,19 @@ fn complete_flow_result(
             state.status = format!("认证操作失败：{error:#}");
         }
     }
-    drop(state);
+    clear_flow_inputs(flow_id);
+    if is_authenticated {
+        app.online_authenticated = true;
+        app.refresh_online_recommendations(cx);
+        app.bump_ui_content_revision();
+    }
     if terminal {
-        clear_flow_inputs(flow_id);
+        app.close_modal(cx);
     }
     cx.notify();
 }
 
-fn cancel_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
+fn cancel_auth(app: &mut MusicApp, flow_id: u64, cx: &mut Context<MusicApp>) {
     let request_id = {
         let Ok(mut state) = state().lock() else {
             return;
@@ -1066,6 +1478,8 @@ fn cancel_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
             return;
         }
         state.active_flow = None;
+        state.authenticated_account = None;
+        state.qr_png_bytes = None;
         state.form_values.clear();
         state.form_submitted = false;
         state.flow_busy = false;
@@ -1074,10 +1488,15 @@ fn cancel_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
         state.flow_request_id
     };
     clear_flow_inputs(flow_id);
+    app.close_modal(cx);
     cx.notify();
 
     let Some(frontend) = frontend::global() else {
-        finish_cancel(request_id, Err(anyhow!("插件 Provider frontend 尚未初始化")), cx);
+        finish_cancel(
+            request_id,
+            Err(anyhow!("插件 Provider frontend 尚未初始化")),
+            cx,
+        );
         return;
     };
     let task = Tokio::spawn_result(cx, async move { frontend.auth_flow_cancel(flow_id).await });
@@ -1087,6 +1506,42 @@ fn cancel_auth(flow_id: u64, cx: &mut Context<MusicApp>) {
         Ok(())
     })
     .detach();
+}
+
+pub(crate) fn cancel_active_if_any(cx: &mut Context<MusicApp>) {
+    let to_cancel = {
+        let Ok(mut state) = state().lock() else {
+            return;
+        };
+        state.authenticated_account = None;
+        let flow = state.active_flow.take();
+        state.qr_png_bytes = None;
+        state.form_values.clear();
+        state.form_submitted = false;
+        state.flow_busy = false;
+        state.flow_request_id = state.flow_request_id.wrapping_add(1);
+        if flow.is_some() {
+            state.status = "认证已取消".into();
+        }
+        flow.map(|f| (f.flow_id, state.flow_request_id))
+    };
+    if let Some((flow_id, request_id)) = to_cancel {
+        clear_flow_inputs(flow_id);
+        cx.notify();
+
+        if let Some(frontend) = frontend::global() {
+            let task =
+                Tokio::spawn_result(cx, async move { frontend.auth_flow_cancel(flow_id).await });
+            cx.spawn(async move |this, cx| -> Result<()> {
+                let result = task.await;
+                this.update(cx, |_app, cx| finish_cancel(request_id, result, cx))?;
+                Ok(())
+            })
+            .detach();
+        }
+    } else {
+        cx.notify();
+    }
 }
 
 fn finish_cancel(request_id: u64, result: Result<bool>, cx: &mut Context<MusicApp>) {
@@ -1150,16 +1605,16 @@ fn info_block(label: &'static str, value: String) -> gpui::AnyElement {
                 .text_color(theme::TEXT_SECONDARY)
                 .child(label),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme::TEXT_PRIMARY)
-                .child(value),
-        )
+        .child(div().text_sm().text_color(theme::TEXT_PRIMARY).child(value))
         .into_any_element()
 }
 
-fn action_button<F>(id: SharedString, label: &'static str, disabled: bool, on_press: F) -> gpui::AnyElement
+fn action_button<F>(
+    id: SharedString,
+    label: &'static str,
+    disabled: bool,
+    on_press: F,
+) -> gpui::AnyElement
 where
     F: Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
 {

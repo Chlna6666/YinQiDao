@@ -69,7 +69,11 @@ impl PluginPageTheme {
     /// GPUI render/paint never touches plugin files, parses strings or executes guest code.
     pub fn try_from_snapshot(snapshot: &PluginThemeSnapshot) -> Result<Self, String> {
         let host = Self::host();
-        let background = parse_optional("background", snapshot.background.as_deref(), host.background)?;
+        let background = parse_optional(
+            "background",
+            snapshot.background.as_deref(),
+            host.background,
+        )?;
         let surface = parse_optional("surface", snapshot.surface.as_deref(), host.surface)?;
         let surface_elevated = parse_optional(
             "surface_elevated",
@@ -210,7 +214,9 @@ fn bounded_radius(value: Option<u16>, fallback: f32) -> f32 {
 
 fn parse_optional(name: &str, value: Option<&str>, fallback: Rgba) -> Result<Rgba, String> {
     match value {
-        Some(value) => parse_hex_color(value).map_err(|error| format!("Theme token {name}: {error}")),
+        Some(value) => {
+            parse_hex_color(value).map_err(|error| format!("Theme token {name}: {error}"))
+        }
         None => Ok(fallback),
     }
 }

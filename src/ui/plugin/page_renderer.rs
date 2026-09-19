@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AnyElement, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Window,
+    AnyElement, App, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, Window,
     div, img, prelude::*, px,
 };
 
@@ -14,14 +14,22 @@ use super::{plugin_input, plugin_theme};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginUiInteraction {
-    Action { action_id: String },
+    Action {
+        action_id: String,
+    },
     BeginInput {
         field_id: String,
         current_value: String,
         secret: bool,
     },
-    SelectChanged { field_id: String, value: String },
-    ToggleChanged { field_id: String, value: bool },
+    SelectChanged {
+        field_id: String,
+        value: String,
+    },
+    ToggleChanged {
+        field_id: String,
+        value: bool,
+    },
 }
 
 pub type PluginUiInteractionHandler =
@@ -29,10 +37,7 @@ pub type PluginUiInteractionHandler =
 
 /// Render a page without package asset context. Kept for non-plugin callers/tests; image nodes fall
 /// back to their alt placeholder because paint is never allowed to resolve plugin files directly.
-pub fn render_page(
-    model: &UiPageModel,
-    handler: Option<PluginUiInteractionHandler>,
-) -> AnyElement {
+pub fn render_page(model: &UiPageModel, handler: Option<PluginUiInteractionHandler>) -> AnyElement {
     let palette = plugin_theme::PluginPageTheme::host();
     render_node(None, &model.root, handler, &palette).into_any_element()
 }
@@ -179,9 +184,7 @@ fn render_node(
             }
             list.into_any_element()
         }
-        UiNode::Image { asset, alt } => {
-            render_image(plugin_id, asset, alt.as_deref(), palette)
-        }
+        UiNode::Image { asset, alt } => render_image(plugin_id, asset, alt.as_deref(), palette),
         UiNode::Button {
             label,
             action_id,
@@ -326,7 +329,9 @@ fn render_node(
             } else {
                 let index = selected
                     .as_ref()
-                    .and_then(|selected| options.iter().position(|option| option.value == *selected))
+                    .and_then(|selected| {
+                        options.iter().position(|option| option.value == *selected)
+                    })
                     .map_or(0, |index| (index + 1) % options.len());
                 Some(options[index].value.clone())
             };
@@ -487,7 +492,8 @@ fn render_image(
     alt: Option<&str>,
     palette: &plugin_theme::PluginPageTheme,
 ) -> AnyElement {
-    let image = plugin_id.and_then(|plugin_id| assets::cached_image(plugin_id, asset).ok().flatten());
+    let image =
+        plugin_id.and_then(|plugin_id| assets::cached_image(plugin_id, asset).ok().flatten());
     if let Some(image) = image {
         let mut container = div().w_full().flex().flex_col().gap_1p5();
         container = container.child(

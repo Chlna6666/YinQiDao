@@ -32,7 +32,10 @@ fn state() -> &'static Mutex<PluginExtensionsSnapshot> {
 }
 
 fn snapshot() -> PluginExtensionsSnapshot {
-    state().lock().map(|state| state.clone()).unwrap_or_default()
+    state()
+        .lock()
+        .map(|state| state.clone())
+        .unwrap_or_default()
 }
 
 fn refresh(cx: &mut Context<MusicApp>) {
@@ -56,10 +59,9 @@ fn refresh(cx: &mut Context<MusicApp>) {
                 PluginCommandSurface::PageLocal,
             ] {
                 for command in extensions::commands(surface)? {
-                    if !commands
-                        .iter()
-                        .any(|existing: &PluginCommandSummary| existing.qualified_id == command.qualified_id)
-                    {
+                    if !commands.iter().any(|existing: &PluginCommandSummary| {
+                        existing.qualified_id == command.qualified_id
+                    }) {
                         commands.push(command);
                     }
                 }
@@ -69,7 +71,11 @@ fn refresh(cx: &mut Context<MusicApp>) {
                     .cmp(&right.title)
                     .then_with(|| left.qualified_id.cmp(&right.qualified_id))
             });
-            Ok((commands, extensions::home_sections()?, extensions::themes()?))
+            Ok((
+                commands,
+                extensions::home_sections()?,
+                extensions::themes()?,
+            ))
         })
         .await
         .map_err(|_| anyhow!("插件扩展快照任务异常退出"))?
@@ -262,7 +268,10 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                 .join(" · ");
             command_list = command_list.child(
                 div()
-                    .id(SharedString::from(format!("plugin-command-{}", command.qualified_id)))
+                    .id(SharedString::from(format!(
+                        "plugin-command-{}",
+                        command.qualified_id
+                    )))
                     .p_3()
                     .rounded_lg()
                     .bg(theme::BG_CANVAS)
@@ -324,7 +333,10 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
             let qualified = section.qualified_id.clone();
             home = home.child(
                 div()
-                    .id(SharedString::from(format!("plugin-home-{}", section.qualified_id)))
+                    .id(SharedString::from(format!(
+                        "plugin-home-{}",
+                        section.qualified_id
+                    )))
                     .p_3()
                     .rounded_lg()
                     .bg(theme::BG_CANVAS)
@@ -381,64 +393,64 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
         }
     }
 
-    let mut themes = div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .p_3()
-                .rounded_lg()
-                .bg(if active_theme.is_none() {
-                    theme::accent_red_muted()
-                } else {
-                    theme::BG_CANVAS
-                })
-                .border_1()
-                .border_color(theme::BORDER_CARD)
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::TEXT_PRIMARY)
-                                .child("Host Theme"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_TERTIARY)
-                                .child("使用 YinQiDao 默认页面颜色；不会读取插件 Theme asset"),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("plugin-theme-host")
-                        .px_3()
-                        .py_1p5()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .bg(theme::accent_red_muted())
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::ACCENT_RED)
-                        .hover(|style| style.opacity(0.86))
-                        .active(|style| style.scale(0.98))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|_, _, _, cx| restore_host_theme(cx)),
-                        )
-                        .child(if active_theme.is_none() { "当前" } else { "恢复" }),
-                ),
-        );
+    let mut themes = div().flex().flex_col().gap_2().child(
+        div()
+            .p_3()
+            .rounded_lg()
+            .bg(if active_theme.is_none() {
+                theme::accent_red_muted()
+            } else {
+                theme::BG_CANVAS.into()
+            })
+            .border_1()
+            .border_color(theme::BORDER_CARD)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT_PRIMARY)
+                            .child("Host Theme"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_TERTIARY)
+                            .child("使用 YinQiDao 默认页面颜色；不会读取插件 Theme asset"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("plugin-theme-host")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .bg(theme::accent_red_muted())
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::ACCENT_RED)
+                    .hover(|style| style.opacity(0.86))
+                    .active(|style| style.scale(0.98))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, _, _, cx| restore_host_theme(cx)),
+                    )
+                    .child(if active_theme.is_none() {
+                        "当前"
+                    } else {
+                        "恢复"
+                    }),
+            ),
+    );
 
     if current.themes.is_empty() {
         themes = themes.child(empty_state("暂无 Theme contribution"));
@@ -459,7 +471,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
                     .bg(if is_active {
                         theme::accent_red_muted()
                     } else {
-                        theme::BG_CARD
+                        theme::BG_CARD.into()
                     })
                     .border_1()
                     .border_color(theme::BORDER_CARD)
@@ -514,6 +526,7 @@ pub(super) fn render(_app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEl
     }
 
     div()
+        .id("plugin-extensions-scroll")
         .size_full()
         .overflow_y_scroll()
         .bg(theme::BG_CANVAS)

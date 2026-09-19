@@ -341,7 +341,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement> {
             .inset_0()
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                let _ = view_dismiss.update(cx, |app, app_cx| close(app, app_cx));
+                let _ = view_dismiss.update(cx, close);
             })
             .child(menu)
             .into_any_element(),

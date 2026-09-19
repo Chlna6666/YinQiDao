@@ -91,11 +91,7 @@ pub fn current(cx: &gpui::App) -> Result<Option<PluginNavigationRoute>> {
     resolve_path(&route::current_pathname(cx))
 }
 
-pub fn navigate(
-    app: &mut MusicApp,
-    cx: &mut Context<MusicApp>,
-    target: &PluginNavigationRoute,
-) {
+pub fn navigate(app: &mut MusicApp, cx: &mut Context<MusicApp>, target: &PluginNavigationRoute) {
     if app.stage_open {
         app.close_stage(cx);
     }
@@ -107,10 +103,11 @@ pub fn navigate(
 }
 
 fn ensure_page_loaded(target: &PluginNavigationRoute, cx: &mut Context<MusicApp>) {
-    let already_cached = management::page_snapshot(&target.summary.plugin_id, &target.summary.page_id)
-        .ok()
-        .flatten()
-        .is_some();
+    let already_cached =
+        management::page_snapshot(&target.summary.plugin_id, &target.summary.page_id)
+            .ok()
+            .flatten()
+            .is_some();
     if already_cached || !management::ui_client_ready() {
         return;
     }
@@ -149,9 +146,7 @@ fn page_local_commands(plugin_id: &str) -> Option<Arc<[PluginCommandSummary]>> {
         {
             cache.remove(plugin_id);
         }
-        cache
-            .get(plugin_id)
-            .map(|entry| entry.commands.clone())
+        cache.get(plugin_id).map(|entry| entry.commands.clone())
     })
 }
 
@@ -529,12 +524,9 @@ pub fn render_route_shell(
                         "插件 Component UI runtime 尚未就绪"
                     }),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::TEXT_TERTIARY)
-                    .child("页面加载与 WASM 调用只在异步 controller 中发生；GPUI render/paint 不执行 guest。"),
-            )
+            .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
+                "页面加载与 WASM 调用只在异步 controller 中发生；GPUI render/paint 不执行 guest。",
+            ))
             .into_any_element()
     };
 
@@ -567,6 +559,7 @@ pub fn render_route_shell(
     content = content.child(body);
 
     div()
+        .id("plugin-nav-scroll")
         .size_full()
         .overflow_y_scroll()
         .bg(theme::BG_CANVAS)
@@ -602,9 +595,7 @@ fn valid_path_id(value: &str) -> bool {
         && !value.starts_with('.')
         && !value.ends_with('.')
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         })
 }
 
@@ -644,17 +635,11 @@ pub fn sidebar_entry(
             })
         })
         .active(|style| style.scale(0.98))
-        .child(
-            div()
-                .w(px(3.0))
-                .h(px(14.0))
-                .rounded_full()
-                .bg(if active {
-                    theme::ACCENT_RED.into()
-                } else {
-                    gpui::hsla(0.0, 0.0, 0.0, 0.0)
-                }),
-        )
+        .child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(if active {
+            theme::ACCENT_RED.into()
+        } else {
+            gpui::hsla(0.0, 0.0, 0.0, 0.0)
+        }))
         .child(
             div()
                 .text_sm()

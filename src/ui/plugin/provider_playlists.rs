@@ -140,7 +140,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
             if loading {
                 return;
             }
-            let _ = view_sync.update(cx, |app, app_cx| request_sync(app, app_cx));
+            let _ = view_sync.update(cx, request_sync);
         });
 
     if rows.is_empty() {
