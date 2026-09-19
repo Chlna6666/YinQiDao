@@ -1,8 +1,15 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::{
+    abi::{AuthMethod, PluginCapability},
     assets,
     component::gc,
     host::package_manager::PluginPackageManager,
@@ -40,6 +47,38 @@ pub struct PluginImportSummary {
     pub enabled: bool,
     pub ui_registered: bool,
     pub provider_runtime_refresh_pending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginCandidateProvider {
+    pub id: String,
+    pub display_name: String,
+    pub capabilities: Vec<String>,
+    pub auth_methods: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginInstallStatus {
+    NewInstall,
+    Upgrade { current_version: String },
+    SameVersion { current_version: String },
+    Downgrade { current_version: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginImportCandidate {
+    pub source_path: PathBuf,
+    pub package_dir: PathBuf,
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub homepage: Option<String>,
+    pub component_file: String,
+    pub component_bytes: u64,
+    pub providers: Vec<PluginCandidateProvider>,
+    pub network_domains: Vec<String>,
+    pub install_status: PluginInstallStatus,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,6 +175,281 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
         enabled: result.enabled,
         ui_registered: result.ui_registered,
         provider_runtime_refresh_pending: refresh.provider_runtime_refresh_pending,
+    })
+}
+
+pub fn import_file(file_path: &Path) -> Result<PluginImportSummary> {
+    let canonical = fs::canonicalize(file_path)
+        .with_context(|| format!("读取插件文件路径失败: {}", file_path.display()))?;
+    if canonical.is_dir() {
+        return import_directory(&canonical);
+    }
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| anyhow!("无法解析插件文件所在目录: {}", file_path.display()))?;
+
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if extension == "toml" || extension == "wasm" {
+        let manifest_path = if extension == "toml" {
+            canonical.clone()
+        } else {
+            let direct = parent.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
+            if direct.is_file() {
+                direct
+            } else {
+                let mut current = parent;
+                let mut found = None;
+                for _ in 0..4 {
+                    if let Some(p) = current.parent() {
+                        let candidate = p.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
+                        if candidate.is_file() {
+                            found = Some(candidate);
+                            break;
+                        }
+                        current = p;
+                    }
+                }
+                found.unwrap_or(direct)
+            }
+        };
+
+        if !manifest_path.is_file() {
+            bail!(
+                "未在所选插件同级或上级目录中找到 plugin.toml 清单文件。请确保插件包含 plugin.toml 与 .wasm 文件。"
+            );
+        }
+
+        let package_dir = manifest_path
+            .parent()
+            .ok_or_else(|| anyhow!("无法解析插件清单所在目录"))?;
+
+        import_directory(package_dir)
+    } else {
+        bail!("不支持的文件类型 (.{extension})。请选择 .wasm 插件文件或 plugin.toml 清单");
+    }
+}
+
+fn compare_versions(v1: &str, v2: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim_start_matches(['v', 'V'])
+            .split('.')
+            .filter_map(|part| part.split(['-', '+']).next().and_then(|p| p.parse().ok()))
+            .collect()
+    };
+    let p1 = parse(v1);
+    let p2 = parse(v2);
+    if !p1.is_empty() && !p2.is_empty() {
+        p1.cmp(&p2)
+    } else {
+        v1.cmp(v2)
+    }
+}
+
+fn capability_display_name(cap: &PluginCapability) -> &'static str {
+    match cap {
+        PluginCapability::Authentication => "账号认证",
+        PluginCapability::Search => "搜索",
+        PluginCapability::Metadata => "元数据",
+        PluginCapability::Lyrics => "歌词",
+        PluginCapability::Artwork => "封面",
+        PluginCapability::Streaming => "在线播放",
+        PluginCapability::Playlists => "歌单管理",
+        PluginCapability::MediaCollections => "合辑/专辑",
+        PluginCapability::CloudLibrary => "云音乐库",
+        PluginCapability::LikeSync => "红心同步",
+        PluginCapability::Recommendations => "每日推荐",
+        PluginCapability::PlaybackEvents => "播放上报",
+        PluginCapability::UserProfile => "用户画像",
+        PluginCapability::Recognition => "听歌识曲",
+    }
+}
+
+fn auth_method_display_name(method: &AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::QrCode => "二维码扫码",
+        AuthMethod::CustomForm => "手机号/密码登录",
+        AuthMethod::CookieImport => "Cookie 导入",
+        AuthMethod::BrowserOAuth => "网页授权 (OAuth)",
+        AuthMethod::DeviceCode => "设备码授权",
+    }
+}
+
+pub fn inspect_plugin_file(file_path: &Path) -> Result<PluginImportCandidate> {
+    let canonical = fs::canonicalize(file_path)
+        .with_context(|| format!("读取插件文件路径失败: {}", file_path.display()))?;
+
+    let (package_dir, manifest_path, chosen_component_path) = if canonical.is_dir() {
+        let manifest = canonical.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
+        (canonical.clone(), manifest, None)
+    } else {
+        let parent = canonical
+            .parent()
+            .ok_or_else(|| anyhow!("无法解析插件文件所在目录"))?
+            .to_path_buf();
+        let extension = canonical
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        if extension == "toml" {
+            (parent, canonical.clone(), None)
+        } else if extension == "wasm" {
+            let direct = parent.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
+            if direct.is_file() {
+                (parent, direct, Some(canonical.clone()))
+            } else {
+                let mut current = parent.as_path();
+                let mut found = None;
+                for _ in 0..4 {
+                    if let Some(p) = current.parent() {
+                        let candidate = p.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
+                        if candidate.is_file() {
+                            found = Some((p.to_path_buf(), candidate));
+                            break;
+                        }
+                        current = p;
+                    }
+                }
+                let (pkg_dir, manifest) = found.ok_or_else(|| {
+                    anyhow!(
+                        "未在所选 .wasm 文件同级或上级目录中找到 {} 清单文件。请确保插件包含清单文件与 WASM 组件。",
+                        super::host::catalog::PLUGIN_PACKAGE_FILE
+                    )
+                })?;
+                (pkg_dir, manifest, Some(canonical.clone()))
+            }
+        } else {
+            bail!("不支持的文件类型（.{extension}）。请选择 .wasm 插件文件或 plugin.toml 清单");
+        }
+    };
+
+    if !manifest_path.is_file() {
+        bail!(
+            "未找到插件清单 {}（查找路径: {}）",
+            super::host::catalog::PLUGIN_PACKAGE_FILE,
+            manifest_path.display()
+        );
+    }
+
+    let manifest_content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取插件清单失败: {}", manifest_path.display()))?;
+    let package: super::host::catalog::PluginPackageFile = toml::from_str(&manifest_content)
+        .with_context(|| format!("解析插件清单失败: {}", manifest_path.display()))?;
+
+    if package.manifest.name.trim().is_empty() {
+        bail!("插件清单中的 name 不能为空");
+    }
+    if package.manifest.version.trim().is_empty() {
+        bail!("插件清单中的 version 不能为空");
+    }
+
+    if let Some(chosen) = chosen_component_path.as_ref() {
+        let chosen_name = chosen
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let declared_name = Path::new(&package.component)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !chosen_name.is_empty() && !declared_name.is_empty() && chosen_name != declared_name {
+            bail!(
+                "所选 WASM 文件 ({chosen_name}) 与插件清单 {} 中声明的组件文件名 ({declared_name}) 不一致",
+                super::host::catalog::PLUGIN_PACKAGE_FILE
+            );
+        }
+    }
+
+    // Validate component wasm file
+    let component_path = package_dir.join(&package.component);
+    let resolved_component = if component_path.is_file() {
+        component_path
+    } else if let Some(chosen) = chosen_component_path.filter(|p| p.is_file()) {
+        chosen
+    } else {
+        bail!(
+            "找不到清单声明的插件组件: {}（查找路径: {}）",
+            package.component,
+            component_path.display()
+        );
+    };
+
+    let comp_meta = fs::metadata(&resolved_component)
+        .with_context(|| format!("读取插件组件失败: {}", resolved_component.display()))?;
+    if comp_meta.len() < 4 {
+        bail!("插件组件文件过小或已损坏: {}", resolved_component.display());
+    }
+    let mut header = [0u8; 4];
+    let mut f = fs::File::open(&resolved_component)
+        .with_context(|| format!("打开插件组件失败: {}", resolved_component.display()))?;
+    f.read_exact(&mut header)
+        .with_context(|| "读取插件组件魔数失败")?;
+    if &header != b"\0asm" {
+        bail!("所选文件不是有效的 WebAssembly 组件二进制（缺少 WASM 魔数）");
+    }
+
+    let installed = list_installed().unwrap_or_default();
+    let existing = installed
+        .iter()
+        .find(|p| p.plugin_id == package.manifest.id);
+    let install_status = match existing {
+        None => PluginInstallStatus::NewInstall,
+        Some(installed_plugin) => {
+            match compare_versions(&package.manifest.version, &installed_plugin.version) {
+                std::cmp::Ordering::Equal => PluginInstallStatus::SameVersion {
+                    current_version: installed_plugin.version.clone(),
+                },
+                std::cmp::Ordering::Greater => PluginInstallStatus::Upgrade {
+                    current_version: installed_plugin.version.clone(),
+                },
+                std::cmp::Ordering::Less => PluginInstallStatus::Downgrade {
+                    current_version: installed_plugin.version.clone(),
+                },
+            }
+        }
+    };
+
+    let providers = package
+        .manifest
+        .providers
+        .iter()
+        .map(|p| PluginCandidateProvider {
+            id: p.id.clone(),
+            display_name: p.display_name.clone(),
+            capabilities: p
+                .capabilities
+                .iter()
+                .map(capability_display_name)
+                .map(String::from)
+                .collect(),
+            auth_methods: p
+                .auth_methods
+                .iter()
+                .map(auth_method_display_name)
+                .map(String::from)
+                .collect(),
+        })
+        .collect();
+
+    Ok(PluginImportCandidate {
+        source_path: canonical,
+        package_dir,
+        plugin_id: package.manifest.id,
+        name: package.manifest.name,
+        version: package.manifest.version,
+        description: package.manifest.description,
+        homepage: package.manifest.homepage,
+        component_file: package.component,
+        component_bytes: comp_meta.len(),
+        providers,
+        network_domains: package.manifest.network_domains,
+        install_status,
     })
 }
 
@@ -417,25 +731,31 @@ fn find_action(node: &UiNode, action_id: &str) -> Option<bool> {
         | UiNode::Row { children }
         | UiNode::Card { children }
         | UiNode::List { children }
-        | UiNode::Section { children, .. } => {
-            children.iter().find_map(|child| find_action(child, action_id))
-        }
+        | UiNode::Section { children, .. } => children
+            .iter()
+            .find_map(|child| find_action(child, action_id)),
         _ => None,
     }
 }
 
 fn find_field(node: &UiNode, field_id: &str) -> Option<UiFieldKind> {
     match node {
-        UiNode::Input { field_id: current, .. } if current == field_id => Some(UiFieldKind::Input),
-        UiNode::Select { field_id: current, .. } if current == field_id => Some(UiFieldKind::Select),
-        UiNode::Toggle { field_id: current, .. } if current == field_id => Some(UiFieldKind::Toggle),
+        UiNode::Input {
+            field_id: current, ..
+        } if current == field_id => Some(UiFieldKind::Input),
+        UiNode::Select {
+            field_id: current, ..
+        } if current == field_id => Some(UiFieldKind::Select),
+        UiNode::Toggle {
+            field_id: current, ..
+        } if current == field_id => Some(UiFieldKind::Toggle),
         UiNode::Column { children }
         | UiNode::Row { children }
         | UiNode::Card { children }
         | UiNode::List { children }
-        | UiNode::Section { children, .. } => {
-            children.iter().find_map(|child| find_field(child, field_id))
-        }
+        | UiNode::Section { children, .. } => children
+            .iter()
+            .find_map(|child| find_field(child, field_id)),
         _ => None,
     }
 }
@@ -448,11 +768,11 @@ fn collect_fields(node: &UiNode, fields: &mut BTreeMap<String, UiFieldValue>) {
             fields.insert(field_id.clone(), UiFieldValue::Text(value.clone()));
         }
         UiNode::Select {
-            field_id, selected, ..
+            field_id,
+            selected: Some(selected),
+            ..
         } => {
-            if let Some(selected) = selected {
-                fields.insert(field_id.clone(), UiFieldValue::Text(selected.clone()));
-            }
+            fields.insert(field_id.clone(), UiFieldValue::Text(selected.clone()));
         }
         UiNode::Toggle {
             field_id, value, ..
@@ -530,5 +850,100 @@ mod tests {
         assert!(
             validate_page_event_toast(Some("x".repeat(MAX_PAGE_EVENT_TOAST_BYTES + 1))).is_err()
         );
+    }
+
+    #[test]
+    fn import_file_rejects_unsupported_extension() {
+        let temp = std::env::temp_dir().join(format!("yinqidao-test-file-{}", std::process::id()));
+        fs::create_dir_all(&temp).expect("create temp");
+        let txt = temp.join("test.txt");
+        fs::write(&txt, "hello").expect("write txt");
+
+        let err = import_file(&txt).expect_err("should reject txt");
+        assert!(err.to_string().contains("不支持的文件类型"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn inspect_plugin_file_from_wasm_and_toml() {
+        let temp =
+            std::env::temp_dir().join(format!("yinqidao-test-inspect-{}", std::process::id()));
+        fs::create_dir_all(&temp).expect("create temp");
+
+        let toml_content = r#"
+package_schema = 1
+component = "provider.wasm"
+
+id = "test-plugin"
+name = "测试插件"
+version = "1.0.0"
+abi_version = 1
+description = "这是一个测试插件"
+network_domains = ["api.example.com"]
+
+[[providers]]
+id = "test-provider"
+display_name = "测试服务"
+capabilities = ["search", "lyrics"]
+auth_methods = ["qr_code"]
+"#;
+        let toml_path = temp.join("plugin.toml");
+        fs::write(&toml_path, toml_content).expect("write toml");
+
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        let wasm_path = temp.join("provider.wasm");
+        fs::write(&wasm_path, wasm_bytes).expect("write wasm");
+
+        // Inspect via wasm path
+        let candidate_from_wasm = inspect_plugin_file(&wasm_path).expect("inspect wasm");
+        assert_eq!(candidate_from_wasm.plugin_id, "test-plugin");
+        assert_eq!(candidate_from_wasm.name, "测试插件");
+        assert_eq!(candidate_from_wasm.version, "1.0.0");
+        assert_eq!(candidate_from_wasm.description, "这是一个测试插件");
+        assert_eq!(candidate_from_wasm.component_file, "provider.wasm");
+        assert_eq!(candidate_from_wasm.component_bytes, 8);
+        assert_eq!(candidate_from_wasm.network_domains, vec!["api.example.com"]);
+        assert_eq!(candidate_from_wasm.providers.len(), 1);
+        assert_eq!(candidate_from_wasm.providers[0].id, "test-provider");
+        assert_eq!(candidate_from_wasm.providers[0].display_name, "测试服务");
+        assert_eq!(
+            candidate_from_wasm.providers[0].capabilities,
+            vec!["搜索", "歌词"]
+        );
+        assert_eq!(
+            candidate_from_wasm.providers[0].auth_methods,
+            vec!["二维码扫码"]
+        );
+
+        // Inspect via toml path
+        let candidate_from_toml = inspect_plugin_file(&toml_path).expect("inspect toml");
+        assert_eq!(candidate_from_toml.plugin_id, "test-plugin");
+        assert_eq!(candidate_from_toml.component_bytes, 8);
+
+        // Mismatched wasm filename check
+        let mismatched_wasm = temp.join("other.wasm");
+        fs::write(&mismatched_wasm, wasm_bytes).expect("write other wasm");
+        let mismatch_err =
+            inspect_plugin_file(&mismatched_wasm).expect_err("should reject mismatched wasm");
+        assert!(mismatch_err.to_string().contains("不一致"));
+
+        // Corrupted wasm error check in isolated directory
+        let bad_temp =
+            std::env::temp_dir().join(format!("yinqidao-test-inspect-bad-{}", std::process::id()));
+        fs::create_dir_all(&bad_temp).expect("create bad temp");
+        let toml_corrupt = toml_content.replace("provider.wasm", "corrupt.wasm");
+        fs::write(bad_temp.join("plugin.toml"), toml_corrupt).expect("write corrupt toml");
+        let bad_wasm_path = bad_temp.join("corrupt.wasm");
+        fs::write(&bad_wasm_path, b"not_wasm_binary").expect("write corrupt wasm");
+
+        let err = inspect_plugin_file(&bad_wasm_path).expect_err("should reject bad wasm header");
+        assert!(
+            err.to_string()
+                .contains("不是有效的 WebAssembly 组件二进制")
+        );
+
+        let _ = fs::remove_dir_all(temp);
+        let _ = fs::remove_dir_all(bad_temp);
     }
 }

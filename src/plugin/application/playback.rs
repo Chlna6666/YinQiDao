@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow, bail};
 
 use super::{
     abi::{
-        PlaybackSignal, PlaybackSignalKind, PluginRoute, RoutingPolicy, ServiceKind, SourceTrackRef,
-        TrackQuery,
+        PlaybackSignal, PlaybackSignalKind, PluginRoute, RoutingPolicy, ServiceKind,
+        SourceTrackRef, TrackQuery,
     },
     client,
     frontend::PluginServiceFrontend,
@@ -44,7 +44,8 @@ impl PluginServiceFrontend {
             duration_ms,
             occurred_at_ms: runtime.now_ms(),
         };
-        self.report_playback_for_route(started.route(), &signal).await
+        self.report_playback_for_route(started.route(), &signal)
+            .await
     }
 
     /// Report a Host-built playback signal to one exact authenticated account.
@@ -176,7 +177,10 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
     }
     if query.title.contains('\0')
         || query.album.contains('\0')
-        || query.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || query
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
         || query
             .musicbrainz_recording_id
             .as_ref()
@@ -189,7 +193,10 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
         bail!("PlaybackEvents track query 文本包含 NUL");
     }
     if bytes > MAX_TRACK_TEXT_BYTES {
-        bail!("PlaybackEvents track query 文本超过 {} bytes", MAX_TRACK_TEXT_BYTES);
+        bail!(
+            "PlaybackEvents track query 文本超过 {} bytes",
+            MAX_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }

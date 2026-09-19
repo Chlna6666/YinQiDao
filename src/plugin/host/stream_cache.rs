@@ -17,8 +17,7 @@ use crate::plugins::{KeyValue, PluginRoute, StreamDescriptor, StreamRequest};
 
 use super::{
     http::{
-        PluginHttpExecutor, PluginHttpRequest, PluginHttpStreamBodyLimits,
-        PluginHttpStreamResponse,
+        PluginHttpExecutor, PluginHttpRequest, PluginHttpStreamBodyLimits, PluginHttpStreamResponse,
     },
     permissions,
     runtime::{PluginCallKey, PluginHostServices},
@@ -99,10 +98,7 @@ impl PluginStreamCache {
         let audio_name = format!("audio.{}", codec_extension(descriptor.codec.as_deref()));
         let bucket = self.root.join(&locator);
 
-        if let Some(hit) = self
-            .lookup_cached(&bucket, &identity, &audio_name)
-            .await?
-        {
+        if let Some(hit) = self.lookup_cached(&bucket, &identity, &audio_name).await? {
             return self.pin_entry(hit);
         }
 
@@ -115,10 +111,7 @@ impl PluginStreamCache {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("插件 stream download gate 已关闭"))?;
-        if let Some(hit) = self
-            .lookup_cached(&bucket, &identity, &audio_name)
-            .await?
-        {
+        if let Some(hit) = self.lookup_cached(&bucket, &identity, &audio_name).await? {
             return self.pin_entry(hit);
         }
 
@@ -149,10 +142,9 @@ impl PluginStreamCache {
         .context("等待插件 stream cache 磁盘容量预留失败")??;
 
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = self.root.join(format!(
-            ".{locator}.tmp-{}-{nonce}",
-            std::process::id()
-        ));
+        let temp_dir = self
+            .root
+            .join(format!(".{locator}.tmp-{}-{nonce}", std::process::id()));
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(WRITER_QUEUE_DEPTH);
         // A closed channel alone does not mean the transfer completed: dropping/cancelling the
         // materialize future also drops the sender. The blocking writer therefore requires this
@@ -205,9 +197,7 @@ impl PluginStreamCache {
         }
         drop(writer_tx);
 
-        let writer_result = writer
-            .await
-            .context("等待插件 stream cache 写入任务失败")?;
+        let writer_result = writer.await.context("等待插件 stream cache 写入任务失败")?;
 
         let downloaded = match download_result {
             Ok(downloaded) => downloaded,
@@ -226,9 +216,7 @@ impl PluginStreamCache {
         };
         if downloaded == 0 || written != downloaded {
             cleanup_temp_dir(temp_dir).await;
-            bail!(
-                "插件 stream cache 写入长度不一致: downloaded={downloaded}, written={written}"
-            );
+            bail!("插件 stream cache 写入长度不一致: downloaded={downloaded}, written={written}");
         }
 
         let commit_temp_dir = temp_dir.clone();
@@ -362,8 +350,8 @@ async fn download_stream(
                 route.provider_id
             );
         }
-        let permission_state = permissions::global()
-            .ok_or_else(|| anyhow!("插件权限状态尚未初始化"))?;
+        let permission_state =
+            permissions::global().ok_or_else(|| anyhow!("插件权限状态尚未初始化"))?;
         let grant = permission_state
             .read()
             .map_err(|error| anyhow!("插件权限状态锁已损坏: {error}"))?
@@ -437,10 +425,7 @@ async fn download_stream(
         }
 
         if response.status != 206 {
-            bail!(
-                "插件 stream range 请求返回非 206 状态: {}",
-                response.status
-            );
+            bail!("插件 stream range 请求返回非 206 状态: {}", response.status);
         }
 
         let content_range = parse_content_range(&response)?;
@@ -634,8 +619,7 @@ fn push_text(output: &mut Vec<u8>, value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() || value.len() > 8 * 1024 || value.contains('\0') {
         bail!("插件 stream cache {field} 非法");
     }
-    let length =
-        u32::try_from(value.len()).map_err(|_| anyhow!("插件 stream cache 文本过长"))?;
+    let length = u32::try_from(value.len()).map_err(|_| anyhow!("插件 stream cache 文本过长"))?;
     output.extend_from_slice(&length.to_le_bytes());
     output.extend_from_slice(value.as_bytes());
     Ok(())
@@ -707,10 +691,7 @@ fn write_temp_entry(
         fs::create_dir_all(root)
             .with_context(|| format!("创建插件 stream cache root 失败: {}", root.display()))?;
         fs::create_dir(temp_dir).with_context(|| {
-            format!(
-                "创建插件 stream cache 临时目录失败: {}",
-                temp_dir.display()
-            )
+            format!("创建插件 stream cache 临时目录失败: {}", temp_dir.display())
         })?;
 
         let audio_path = temp_dir.join(audio_name);
@@ -743,9 +724,7 @@ fn write_temp_entry(
         if written == 0 {
             bail!("插件 stream cache 不接受空音频");
         }
-        audio
-            .sync_all()
-            .context("同步插件 stream cache 音频失败")?;
+        audio.sync_all().context("同步插件 stream cache 音频失败")?;
         drop(audio);
 
         let identity_path = temp_dir.join("identity.bin");
@@ -854,9 +833,8 @@ fn cached_entry(
         || audio_metadata.len() == 0
         || audio_metadata.len() > max_stream_bytes
     {
-        fs::remove_dir_all(bucket).with_context(|| {
-            format!("清理非法插件 stream cache 失败: {}", bucket.display())
-        })?;
+        fs::remove_dir_all(bucket)
+            .with_context(|| format!("清理非法插件 stream cache 失败: {}", bucket.display()))?;
         return Ok(None);
     }
 
@@ -866,9 +844,8 @@ fn cached_entry(
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|age| age > cache_ttl)
     {
-        fs::remove_dir_all(bucket).with_context(|| {
-            format!("清理过期插件 stream cache 失败: {}", bucket.display())
-        })?;
+        fs::remove_dir_all(bucket)
+            .with_context(|| format!("清理过期插件 stream cache 失败: {}", bucket.display()))?;
         return Ok(None);
     }
 
@@ -1038,8 +1015,7 @@ mod tests {
             header.key.eq_ignore_ascii_case("if-range") && header.value == "\"etag\""
         }));
         assert!(headers.iter().any(|header| {
-            header.key.eq_ignore_ascii_case("authorization")
-                && header.value == "Bearer token"
+            header.key.eq_ignore_ascii_case("authorization") && header.value == "Bearer token"
         }));
     }
 
@@ -1121,14 +1097,7 @@ mod tests {
         drop(tx);
         let completed = Arc::new(AtomicBool::new(false));
 
-        let result = write_temp_entry(
-            &temp_dir,
-            b"identity",
-            "audio.media",
-            1024,
-            rx,
-            completed,
-        );
+        let result = write_temp_entry(&temp_dir, b"identity", "audio.media", 1024, rx, completed);
         assert!(result.is_err());
         assert!(!temp_dir.exists());
         let _ = fs::remove_dir_all(root);

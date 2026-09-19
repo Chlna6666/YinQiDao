@@ -25,7 +25,7 @@ static WASMTIME_RUNTIME: OnceLock<Arc<PluginWasmtimeRuntime>> = OnceLock::new();
 // Keep the exception inside this private generated-binding module; handwritten Host policy remains
 // covered by the crate-level unsafe_code lint.
 #[allow(unsafe_code)]
-mod bindings {
+pub(crate) mod bindings {
     wasmtime::component::bindgen!({
         world: "music-plugin",
         path: "plugins/wit",
@@ -41,7 +41,7 @@ use bindings::yinqidao::music_plugin::{host as wit_host, types as wit_types};
 /// The plugin id is injected by the Host through `PluginStoreContext`; the guest never chooses its
 /// own plugin namespace. WASI starts with an empty capability context and raw networking is disabled
 /// explicitly. All network egress must therefore go through `host.http-request`.
-struct PluginStoreData {
+pub(crate) struct PluginStoreData {
     host: PluginStoreContext,
     wasi: WasiCtx,
     table: ResourceTable,
@@ -204,7 +204,10 @@ pub(crate) struct PluginWasmtimeRuntime {
 }
 
 impl PluginWasmtimeRuntime {
-    fn new(services: Arc<PluginHostServices>, policy: PluginEnginePolicy) -> Result<Self> {
+    pub(crate) fn new(
+        services: Arc<PluginHostServices>,
+        policy: PluginEnginePolicy,
+    ) -> Result<Self> {
         policy.validate()?;
 
         let mut config = Config::new();
@@ -220,7 +223,11 @@ impl PluginWasmtimeRuntime {
         })
     }
 
-    fn linker(&self) -> Result<Linker<PluginStoreData>> {
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    pub(crate) fn linker(&self) -> Result<Linker<PluginStoreData>> {
         let mut linker = Linker::new(&self.engine);
         bindings::MusicPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(|error| anyhow!("注册音栖岛插件 Host imports 失败: {error}"))?;
@@ -229,14 +236,15 @@ impl PluginWasmtimeRuntime {
         Ok(linker)
     }
 
-    fn store(&self, plugin_id: &str) -> Result<Store<PluginStoreData>> {
+    pub(crate) fn store(&self, plugin_id: &str) -> Result<Store<PluginStoreData>> {
         let host = PluginStoreContext::new(plugin_id, self.services.clone())?;
         let mut wasi = WasiCtx::builder();
         // Defense in depth: deny WASI socket creation and name lookup. Plugins must use the
         // Host-mediated HTTP import, whose DNS/SSRF/permission checks remain authoritative.
         wasi.allow_ip_name_lookup(false)
             .allow_tcp(false)
-            .allow_udp(false);
+            .allow_udp(false)
+            .inherit_stderr();
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.policy.max_memory_bytes)

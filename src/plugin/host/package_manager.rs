@@ -15,7 +15,9 @@ use crate::plugin::{
 };
 
 use super::{
-    catalog::{PluginCatalog, PluginHostState},
+    catalog::{
+        PLUGIN_PACKAGE_FILE, PluginCatalog, PluginHostState, PluginPackageFile, valid_identifier,
+    },
     permissions, runtime, secrets, sessions,
 };
 
@@ -125,7 +127,11 @@ impl PluginPackageManager {
                 network_domain_count: plugin.manifest.network_domains.len(),
             });
         }
-        summaries.sort_by(|left, right| left.name.cmp(&right.name).then(left.plugin_id.cmp(&right.plugin_id)));
+        summaries.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.plugin_id.cmp(&right.plugin_id))
+        });
         Ok(summaries)
     }
 
@@ -160,7 +166,21 @@ impl PluginPackageManager {
             .base_dir
             .join(IMPORT_STAGING_DIR)
             .join(format!("{}-{nonce}", std::process::id()));
-        let staged_package = staging_root.join(folder_name);
+        let staged_folder_name =
+            if let Ok(content) = fs::read_to_string(canonical_source.join(PLUGIN_PACKAGE_FILE)) {
+                if let Ok(package) = toml::from_str::<PluginPackageFile>(&content) {
+                    if valid_identifier(&package.manifest.id) {
+                        package.manifest.id
+                    } else {
+                        folder_name.to_string()
+                    }
+                } else {
+                    folder_name.to_string()
+                }
+            } else {
+                folder_name.to_string()
+            };
+        let staged_package = staging_root.join(staged_folder_name);
         fs::create_dir_all(&staging_root)
             .with_context(|| format!("创建插件 staging 目录失败: {}", staging_root.display()))?;
 
@@ -184,8 +204,8 @@ impl PluginPackageManager {
             let staged_plugin = &staged_catalog.plugins()[0];
             let staged_ui = ui_catalog::load_plugin_contributions(staged_plugin)
                 .context("插件 UI contributions 校验失败")?;
-            let registry = ui_registry::global()
-                .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+            let registry =
+                ui_registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
 
             let plugin_id = staged_plugin.manifest.id.clone();
             let version = staged_plugin.manifest.version.clone();
@@ -198,10 +218,15 @@ impl PluginPackageManager {
             let backup = trash_parent.join(&plugin_id);
 
             if updated_existing {
-                fs::create_dir_all(&trash_parent)
-                    .with_context(|| format!("创建插件更新备份目录失败: {}", trash_parent.display()))?;
+                fs::create_dir_all(&trash_parent).with_context(|| {
+                    format!("创建插件更新备份目录失败: {}", trash_parent.display())
+                })?;
                 fs::rename(&destination, &backup).with_context(|| {
-                    format!("暂存旧插件失败: {} -> {}", destination.display(), backup.display())
+                    format!(
+                        "暂存旧插件失败: {} -> {}",
+                        destination.display(),
+                        backup.display()
+                    )
                 })?;
             }
 
@@ -210,7 +235,11 @@ impl PluginPackageManager {
                     let _ = fs::rename(&backup, &destination);
                 }
                 return Err(error).with_context(|| {
-                    format!("提交插件安装失败: {} -> {}", staged_package.display(), destination.display())
+                    format!(
+                        "提交插件安装失败: {} -> {}",
+                        staged_package.display(),
+                        destination.display()
+                    )
                 });
             }
 
@@ -273,6 +302,10 @@ impl PluginPackageManager {
             }
             publish_runtime_catalog(&installed_catalog);
             reconcile_host_catalog(&self.base_dir, &installed_catalog);
+            // The user confirmed the import dialog — that is the explicit permission grant.
+            // Automatically register all manifest-declared network domains so the plugin can
+            // make its first Host HTTP call (e.g. QR-login) without a separate approval step.
+            grant_manifest_network_permissions(&self.base_dir, &installed_catalog, &plugin_id);
 
             if backup.exists() {
                 let _ = fs::remove_dir_all(&backup);
@@ -316,7 +349,8 @@ impl PluginPackageManager {
         // Keep the established lock order used by startup synchronization: UI registry first,
         // then the package enabled-state mutex. Holding both makes the registry + persisted state
         // transition observable as one Host transaction to all in-process readers.
-        let registry = ui_registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+        let registry =
+            ui_registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
         let mut registry = registry
             .write()
             .map_err(|error| anyhow!("插件 UI registry 锁已损坏: {error}"))?;
@@ -369,8 +403,8 @@ impl PluginPackageManager {
         let Some(plugin) = catalog.plugin(plugin_id) else {
             return Ok(false);
         };
-        let registry = ui_registry::global()
-            .ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
+        let registry =
+            ui_registry::global().ok_or_else(|| anyhow!("插件 UI registry 尚未初始化"))?;
 
         let nonce = unique_nonce();
         let trash_parent = self
@@ -381,7 +415,10 @@ impl PluginPackageManager {
         fs::create_dir_all(&trash_parent)
             .with_context(|| format!("创建插件卸载暂存目录失败: {}", trash_parent.display()))?;
         fs::rename(&plugin.package_dir, &trash).with_context(|| {
-            format!("将插件移动到卸载暂存区失败: {}", plugin.package_dir.display())
+            format!(
+                "将插件移动到卸载暂存区失败: {}",
+                plugin.package_dir.display()
+            )
         })?;
 
         // Commit all reversible Host metadata before revoking credentials/accounts. If any lock or
@@ -488,7 +525,9 @@ impl PluginPackageManager {
             match host.write() {
                 Ok(mut host) => {
                     for (plugin_id, provider_id, account_id) in accounts {
-                        if let Err(error) = host.remove_account(&plugin_id, &provider_id, &account_id) {
+                        if let Err(error) =
+                            host.remove_account(&plugin_id, &provider_id, &account_id)
+                        {
                             tracing::error!(
                                 %error,
                                 plugin_id = %plugin_id,
@@ -530,6 +569,55 @@ fn publish_runtime_catalog(catalog: &PluginCatalog) {
     }
 }
 
+/// Auto-grant all network domains declared in the plugin manifest after a successful import.
+///
+/// Importing a plugin is itself the user's permission grant: the import confirmation dialog
+/// already shows the full `network_domains` list, so writing a matching `PluginPermissionGrant`
+/// at this point avoids a separate, unintuitive approval step.  Only domains that already appear
+/// in the manifest are written; the `set_grant` validation will reject anything out of scope.
+fn grant_manifest_network_permissions(_base_dir: &Path, catalog: &PluginCatalog, plugin_id: &str) {
+    let Some(plugin) = catalog.plugin(plugin_id) else {
+        return;
+    };
+    // Skip plugins that declare no network domains — they don't need a grant record.
+    if plugin.manifest.network_domains.is_empty() {
+        return;
+    }
+    let has_playback_events = plugin.manifest.providers.iter().any(|provider| {
+        provider
+            .capabilities
+            .contains(&crate::plugin::abi::PluginCapability::PlaybackEvents)
+    });
+    let grant = super::security::PluginPermissionGrant {
+        plugin_id: plugin_id.to_owned(),
+        network_domains: plugin.manifest.network_domains.clone(),
+        playback_events: has_playback_events,
+    };
+
+    let Some(permissions) = permissions::global() else {
+        // Permissions store not yet initialized (e.g. test environment); skip silently.
+        tracing::debug!(plugin_id, "插件权限全局状态尚未初始化，跳过导入时自动授权");
+        return;
+    };
+    match permissions.write() {
+        Ok(mut state) => {
+            if let Err(error) = state.set_grant(catalog, grant) {
+                tracing::warn!(
+                    plugin_id,
+                    %error,
+                    "自动授予插件 manifest 网络权限失败，需用户在设置中手动授权"
+                );
+            } else {
+                tracing::debug!(plugin_id, "已自动授予插件 manifest 声明的全部网络域名");
+            }
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            "写入插件权限状态锁失败，跳过自动网络授权"
+        ),
+    }
+}
+
 /// Reconcile persisted accounts against the newly committed package catalog before replacing the
 /// Host router snapshot. Removed providers and capability-shrunk accounts must not survive a package
 /// update as ghost routes.
@@ -543,13 +631,15 @@ fn reconcile_host_catalog(base_dir: &Path, catalog: &PluginCatalog) {
             .router()
             .accounts()
             .iter()
-            .filter(|account| match catalog.provider(&account.plugin_id, &account.provider_id) {
-                None => true,
-                Some(provider) => account
-                    .capabilities
-                    .iter()
-                    .any(|capability| !provider.capabilities.contains(capability)),
-            })
+            .filter(
+                |account| match catalog.provider(&account.plugin_id, &account.provider_id) {
+                    None => true,
+                    Some(provider) => account
+                        .capabilities
+                        .iter()
+                        .any(|capability| !provider.capabilities.contains(capability)),
+                },
+            )
             .map(|account| {
                 (
                     account.plugin_id.clone(),
@@ -613,7 +703,10 @@ fn reconcile_host_catalog(base_dir: &Path, catalog: &PluginCatalog) {
     };
     let removed = sessions.retain_host_accounts(host.router().accounts());
     if removed > 0 {
-        tracing::debug!(removed, "已裁剪 live catalog 中不可达的插件 Session overlay");
+        tracing::debug!(
+            removed,
+            "已裁剪 live catalog 中不可达的插件 Session overlay"
+        );
     }
 }
 
@@ -670,8 +763,16 @@ fn save_disabled_plugins(path: &Path, disabled: &HashSet<String>) -> Result<()> 
         disabled_plugins,
     })
     .context("序列化插件启停状态失败")?;
-    fs::write(path, payload)
-        .with_context(|| format!("写入插件启停状态失败: {}", path.display()))
+    fs::write(path, payload).with_context(|| format!("写入插件启停状态失败: {}", path.display()))
+}
+
+fn should_skip_package_entry(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.starts_with('.')
+        || lower == "target"
+        || lower == "node_modules"
+        || lower == "tests"
+        || lower == "benches"
 }
 
 fn copy_tree_bounded(source: &Path, destination: &Path, budget: &mut CopyBudget) -> Result<()> {
@@ -687,7 +788,12 @@ fn copy_tree_bounded(source: &Path, destination: &Path, budget: &mut CopyBudget)
             .with_context(|| format!("读取插件包目录失败: {}", source.display()))?
         {
             let entry = entry?;
-            copy_tree_bounded(&entry.path(), &destination.join(entry.file_name()), budget)?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if should_skip_package_entry(&name_str) {
+                continue;
+            }
+            copy_tree_bounded(&entry.path(), &destination.join(&name), budget)?;
         }
         return Ok(());
     }
@@ -695,7 +801,11 @@ fn copy_tree_bounded(source: &Path, destination: &Path, budget: &mut CopyBudget)
         bail!("插件包仅允许普通文件/目录: {}", source.display());
     }
     if metadata.len() > MAX_SINGLE_FILE_BYTES {
-        bail!("插件包单文件超过 {} bytes: {}", MAX_SINGLE_FILE_BYTES, source.display());
+        bail!(
+            "插件包单文件超过 {} bytes: {}",
+            MAX_SINGLE_FILE_BYTES,
+            source.display()
+        );
     }
     budget.files = budget.files.saturating_add(1);
     budget.bytes = budget.bytes.saturating_add(metadata.len());
@@ -733,7 +843,8 @@ mod tests {
 
     #[test]
     fn state_file_defaults_to_all_enabled() {
-        let path = std::env::temp_dir().join(format!("yinqidao-plugin-state-missing-{}", unique_nonce()));
+        let path =
+            std::env::temp_dir().join(format!("yinqidao-plugin-state-missing-{}", unique_nonce()));
         assert!(load_disabled_plugins(&path).expect("state").is_empty());
     }
 
@@ -747,5 +858,135 @@ mod tests {
         let disabled = next_disabled_plugins(&enabled, "plugin.test", false).expect("disable");
         assert!(disabled.contains("plugin.test"));
         assert!(next_disabled_plugins(&disabled, "plugin.test", false).is_none());
+    }
+
+    #[test]
+    fn import_directory_from_custom_folder_name_succeeds() {
+        let root = std::env::temp_dir().join(format!("yinqidao-pm-test-{}", unique_nonce()));
+        fs::create_dir_all(&root).expect("create root");
+        let source_dir = root.join("netease-source-folder");
+        fs::create_dir_all(&source_dir).expect("create source dir");
+
+        let manifest = r#"package_schema = 1
+component = "provider.wasm"
+id = "io.yinqidao.netease"
+name = "网易云音乐"
+version = "0.1.0"
+abi_version = 1
+description = "网易云测试插件"
+network_domains = ["music.163.com"]
+
+[[providers]]
+id = "netease"
+display_name = "网易云音乐"
+capabilities = ["authentication"]
+auth_methods = ["qr_code"]
+"#;
+        fs::write(source_dir.join(PLUGIN_PACKAGE_FILE), manifest).expect("write manifest");
+        fs::write(source_dir.join("provider.wasm"), b"\0asm").expect("write wasm");
+
+        let app_base = root.join("app_base");
+        fs::create_dir_all(&app_base).expect("create app base");
+        let _ = ui_registry::initialize();
+
+        let manager = PluginPackageManager::load(&app_base);
+        let result = manager
+            .import_directory(&source_dir)
+            .expect("import succeeds with custom source folder name");
+        assert_eq!(result.plugin_id, "io.yinqidao.netease");
+        assert_eq!(result.version, "0.1.0");
+        assert!(
+            app_base
+                .join("plugins")
+                .join("io.yinqidao.netease")
+                .join(PLUGIN_PACKAGE_FILE)
+                .is_file()
+        );
+
+        let installed = manager.list_installed().expect("list installed");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].plugin_id, "io.yinqidao.netease");
+        assert_eq!(installed[0].name, "网易云音乐");
+        assert!(installed[0].enabled);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_directory_skips_target_and_dotfiles() {
+        let root = std::env::temp_dir().join(format!("yinqidao-pm-skip-{}", unique_nonce()));
+        fs::create_dir_all(&root).expect("create root");
+        let source_dir = root.join("source-plugin");
+        fs::create_dir_all(&source_dir).expect("create source dir");
+
+        let manifest = r#"package_schema = 1
+component = "provider.wasm"
+id = "io.yinqidao.netease"
+name = "网易云音乐"
+version = "0.1.0"
+abi_version = 1
+description = "网易云测试插件"
+network_domains = ["music.163.com"]
+
+[[providers]]
+id = "netease"
+display_name = "网易云音乐"
+capabilities = ["authentication"]
+auth_methods = ["qr_code"]
+"#;
+        fs::write(source_dir.join(PLUGIN_PACKAGE_FILE), manifest).expect("write manifest");
+        fs::write(source_dir.join("provider.wasm"), b"\0asm").expect("write wasm");
+
+        let target_dir = source_dir.join("target").join("release");
+        fs::create_dir_all(&target_dir).expect("create target dir");
+        fs::write(target_dir.join("dummy_artifact.bin"), b"build artifact").expect("write dummy");
+
+        let git_dir = source_dir.join(".git");
+        fs::create_dir_all(&git_dir).expect("create git dir");
+        fs::write(git_dir.join("config"), b"git config").expect("write git config");
+
+        let app_base = root.join("app_base");
+        fs::create_dir_all(&app_base).expect("create app base");
+        let _ = ui_registry::initialize();
+
+        let manager = PluginPackageManager::load(&app_base);
+        let result = manager
+            .import_directory(&source_dir)
+            .expect("import succeeds skipping target");
+        assert_eq!(result.plugin_id, "io.yinqidao.netease");
+
+        let installed_plugin = app_base.join("plugins").join("io.yinqidao.netease");
+        assert!(installed_plugin.join(PLUGIN_PACKAGE_FILE).is_file());
+        assert!(installed_plugin.join("provider.wasm").is_file());
+        assert!(!installed_plugin.join("target").exists());
+        assert!(!installed_plugin.join(".git").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_real_netease_folder_skips_huge_target() {
+        let root = std::env::temp_dir().join(format!("yinqidao-pm-real-{}", unique_nonce()));
+        fs::create_dir_all(&root).expect("create root");
+        let app_base = root.join("app_base");
+        fs::create_dir_all(&app_base).expect("create app base");
+        let _ = ui_registry::initialize();
+
+        let real_netease = Path::new("plugins/netease");
+        if real_netease.join("plugin.toml").is_file() {
+            let manager = PluginPackageManager::load(&app_base);
+            let result = manager
+                .import_directory(real_netease)
+                .expect("import real netease directory succeeds");
+            assert_eq!(result.plugin_id, "io.yinqidao.netease");
+            assert!(
+                !app_base
+                    .join("plugins")
+                    .join("io.yinqidao.netease")
+                    .join("target")
+                    .exists()
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

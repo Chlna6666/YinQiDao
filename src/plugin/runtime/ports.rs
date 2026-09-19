@@ -379,12 +379,9 @@ fn clear_ports_under_swap() -> Result<(bool, bool)> {
             false
         }
     };
-    if let Err(error) = hot_swap_adapter()
-        .lock()
-        .map(|mut adapter| {
-            adapter.take();
-        })
-    {
+    if let Err(error) = hot_swap_adapter().lock().map(|mut adapter| {
+        adapter.take();
+    }) {
         if first_error.is_none() {
             first_error = Some(anyhow!("清理插件 hot-swap adapter 失败: {error}"));
         }

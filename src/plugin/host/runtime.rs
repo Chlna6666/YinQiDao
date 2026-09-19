@@ -11,8 +11,8 @@ use crate::{
     plugin_host::PluginCatalog,
     plugin_http::{PluginHttpExecutor, PluginHttpRequest, PluginHttpResponse},
     plugin_permissions::PluginPermissionState,
-    plugin_security::SecretSlot,
     plugin_secrets::PluginSecretStore,
+    plugin_security::SecretSlot,
 };
 
 static PLUGIN_RUNTIME: OnceLock<Arc<PluginHostServices>> = OnceLock::new();
@@ -615,11 +615,7 @@ impl PluginStoreContext {
         }
     }
 
-    pub async fn execute_guest_call<T, F>(
-        &self,
-        provider_id: Option<&str>,
-        call: F,
-    ) -> Result<T>
+    pub async fn execute_guest_call<T, F>(&self, provider_id: Option<&str>, call: F) -> Result<T>
     where
         F: Future<Output = Result<T>>,
     {

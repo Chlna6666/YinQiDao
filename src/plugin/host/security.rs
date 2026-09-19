@@ -131,7 +131,7 @@ fn obvious_local_hostname(host: &str) -> bool {
 /// Provider scope is useful while a login challenge has not produced a stable account id yet.
 /// Account scope keeps long-lived cookies/tokens isolated between multiple simultaneously logged-in
 /// accounts of the same provider.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum SecretScope {
     Provider,
     Account(String),
@@ -140,7 +140,7 @@ pub enum SecretScope {
 /// Structured Secret location owned by the Host. Guest components never receive filesystem or
 /// keychain paths. The storage key is length-prefixed and includes an explicit scope tag so provider
 /// and account scopes cannot collide even when account ids contain separator-like characters.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SecretSlot {
     plugin_id: String,
     provider_id: String,
@@ -247,9 +247,7 @@ impl SecretSlot {
             bail!("Secret namespace 的 plugin/provider id 非法");
         }
         if let SecretScope::Account(account_id) = &self.scope
-            && (account_id.trim().is_empty()
-                || account_id.len() > 512
-                || account_id.contains('\0'))
+            && (account_id.trim().is_empty() || account_id.len() > 512 || account_id.contains('\0'))
         {
             bail!("Secret namespace 的 account id 非法");
         }
@@ -281,9 +279,7 @@ fn valid_namespace_identifier(value: &str) -> bool {
         && !value.starts_with('.')
         && !value.ends_with('.')
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         })
 }
 
@@ -344,29 +340,29 @@ mod tests {
 
     #[test]
     fn http_target_rejects_insecure_local_and_ip_destinations() {
-        let manifest = manifest(&["localhost", "127.0.0.1", "api.example.com"]);
-        let grant = grant(&["localhost", "127.0.0.1", "api.example.com"]);
+        let target_manifest = manifest(&["localhost", "127.0.0.1", "api.example.com"]);
+        let target_grant = grant(&["localhost", "127.0.0.1", "api.example.com"]);
 
         assert!(
             authorize_http_target(
-                &manifest,
-                &grant,
+                &target_manifest,
+                &target_grant,
                 &Url::parse("http://api.example.com/").expect("url")
             )
             .is_err()
         );
         assert!(
             authorize_http_target(
-                &manifest,
-                &grant,
+                &target_manifest,
+                &target_grant,
                 &Url::parse("https://localhost/").expect("url")
             )
             .is_err()
         );
         assert!(
             authorize_http_target(
-                &manifest,
-                &grant,
+                &target_manifest,
+                &target_grant,
                 &Url::parse("https://127.0.0.1/").expect("url")
             )
             .is_err()
@@ -393,25 +389,21 @@ mod tests {
 
     #[test]
     fn account_secret_storage_keys_are_namespace_safe() {
-        let first = SecretSlot::account("plugin.test", "netease", "a/b", "refresh_token")
-            .expect("slot");
-        let second = SecretSlot::account("plugin.test", "netease", "a", "refresh_token")
-            .expect("slot");
+        let first =
+            SecretSlot::account("plugin.test", "netease", "a/b", "refresh_token").expect("slot");
+        let second =
+            SecretSlot::account("plugin.test", "netease", "a", "refresh_token").expect("slot");
         assert_ne!(first.storage_key(), second.storage_key());
         assert!(first.storage_key().starts_with("v1:"));
     }
 
     #[test]
     fn provider_and_account_secret_scopes_never_collide() {
-        let provider = SecretSlot::provider("plugin.test", "netease", "device_secret")
-            .expect("provider");
-        let account = SecretSlot::account(
-            "plugin.test",
-            "netease",
-            "device_secret",
-            "device_secret",
-        )
-        .expect("account");
+        let provider =
+            SecretSlot::provider("plugin.test", "netease", "device_secret").expect("provider");
+        let account =
+            SecretSlot::account("plugin.test", "netease", "device_secret", "device_secret")
+                .expect("account");
         assert_ne!(provider.storage_key(), account.storage_key());
         assert_eq!(provider.account_id(), None);
         assert_eq!(account.account_id(), Some("device_secret"));

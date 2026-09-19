@@ -340,12 +340,18 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bytes = bytes.saturating_add(artist.len());
     }
     if track.album.contains('\0')
-        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
     {
         bail!("library track 文本包含 NUL");
     }
     if bytes > MAX_TRACK_TEXT_BYTES {
-        bail!("library track 文本超过 {} bytes Host 上限", MAX_TRACK_TEXT_BYTES);
+        bail!(
+            "library track 文本超过 {} bytes Host 上限",
+            MAX_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }

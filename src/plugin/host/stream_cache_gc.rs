@@ -284,12 +284,9 @@ pub fn prune(root: &Path, policy: PluginStreamCacheGcPolicy) -> Result<PluginStr
     {
         let entry = entry.context("读取插件 stream cache 目录项失败")?;
         let path = entry.path();
-        let file_type = entry.file_type().with_context(|| {
-            format!(
-                "读取插件 stream cache 目录项类型失败: {}",
-                path.display()
-            )
-        })?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取插件 stream cache 目录项类型失败: {}", path.display()))?;
 
         if file_type.is_symlink() {
             remove_direct_entry(&path, false)?;
@@ -384,12 +381,10 @@ fn ensure_plain_cache_root(root: &Path) -> Result<()> {
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(root).with_context(|| {
-                format!("创建插件 stream cache root 失败: {}", root.display())
-            })?;
-            let metadata = fs::symlink_metadata(root).with_context(|| {
-                format!("复核插件 stream cache root 失败: {}", root.display())
-            })?;
+            fs::create_dir_all(root)
+                .with_context(|| format!("创建插件 stream cache root 失败: {}", root.display()))?;
+            let metadata = fs::symlink_metadata(root)
+                .with_context(|| format!("复核插件 stream cache root 失败: {}", root.display()))?;
             if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
                 bail!("插件 stream cache root 创建后不是普通目录");
             }
@@ -420,18 +415,18 @@ fn cleanup_orphan_temp_entries(root: &Path) -> Result<usize> {
         if !is_temp_dir(&path) {
             continue;
         }
-        let file_type = entry.file_type().with_context(|| {
-            format!(
-                "读取插件 stream cache 临时项类型失败: {}",
-                path.display()
-            )
-        })?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取插件 stream cache 临时项类型失败: {}", path.display()))?;
         if file_type.is_dir() && !file_type.is_symlink() {
             remove_direct_entry(&path, true)?;
         } else if file_type.is_file() || file_type.is_symlink() {
             remove_direct_entry(&path, false)?;
         } else {
-            bail!("插件 stream cache 临时命名空间存在不支持的文件系统对象: {}", path.display());
+            bail!(
+                "插件 stream cache 临时命名空间存在不支持的文件系统对象: {}",
+                path.display()
+            );
         }
         removed += 1;
     }
@@ -501,6 +496,12 @@ fn pin_is_active(pins: &HashMap<PathBuf, usize>, path: &Path) -> bool {
 }
 
 fn is_locator_bucket(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
@@ -582,8 +583,7 @@ mod tests {
         let pinned_bucket = create_bucket(&root, "11111111111111111111111111111111", 4);
         let _other_a = create_bucket(&root, "22222222222222222222222222222222", 4);
         let _other_b = create_bucket(&root, "33333333333333333333333333333333", 4);
-        let lease =
-            pin_materialized_path(&root, &pinned_bucket.join("audio.flac")).expect("lease");
+        let lease = pin_materialized_path(&root, &pinned_bucket.join("audio.flac")).expect("lease");
 
         let stats = prune(
             &root,

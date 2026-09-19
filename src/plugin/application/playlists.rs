@@ -240,6 +240,49 @@ impl PluginServiceFrontend {
             )
             .await
     }
+
+    pub async fn playlist_rename(
+        &self,
+        route: &PluginRoute,
+        playlist_id: &str,
+        name: &str,
+    ) -> Result<bool> {
+        validate_playlist_id(playlist_id)?;
+        validate_playlist_name(name)?;
+        ensure_playlist_route(self, route)?;
+        let client = require_client()?;
+        runtime::global()
+            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.playlist_rename(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    &route.account_id,
+                    playlist_id,
+                    name,
+                ),
+            )
+            .await
+    }
+
+    pub async fn playlist_delete(&self, route: &PluginRoute, playlist_id: &str) -> Result<bool> {
+        validate_playlist_id(playlist_id)?;
+        ensure_playlist_route(self, route)?;
+        let client = require_client()?;
+        runtime::global()
+            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.playlist_delete(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    &route.account_id,
+                    playlist_id,
+                ),
+            )
+            .await
+    }
 }
 
 fn require_client() -> Result<std::sync::Arc<dyn super::client::PluginProviderClient>> {
@@ -355,7 +398,10 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bytes = bytes.saturating_add(artist.len());
     }
     if track.album.contains('\0')
-        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
         || track
             .cover_url
             .as_ref()

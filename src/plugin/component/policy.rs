@@ -45,7 +45,7 @@ impl Default for PluginEnginePolicy {
             max_tables: 4,
             max_instances: 32,
             max_pooled_instances_per_route: 2,
-            fuel_per_call: 50_000_000,
+            fuel_per_call: 500_000_000,
             epoch_tick_interval: Duration::from_millis(10),
             guest_call_deadline: Duration::from_secs(30),
             max_compiled_artifact_bytes: 256 * MIB,
@@ -84,8 +84,7 @@ impl PluginEnginePolicy {
         if self.epoch_tick_interval.is_zero() {
             bail!("插件 epoch tick interval 不能为 0");
         }
-        if self.guest_call_deadline.is_zero()
-            || self.guest_call_deadline < self.epoch_tick_interval
+        if self.guest_call_deadline.is_zero() || self.guest_call_deadline < self.epoch_tick_interval
         {
             bail!("插件 guest call deadline 必须至少覆盖一个 epoch tick");
         }

@@ -207,11 +207,15 @@ impl<I> HostOwnedInstancePool<I> {
             return Ok(false);
         }
         let sequence = state.next_sequence();
-        state.available.entry(key).or_default().push(PooledInstance {
-            instance,
-            last_used: Instant::now(),
-            sequence,
-        });
+        state
+            .available
+            .entry(key)
+            .or_default()
+            .push(PooledInstance {
+                instance,
+                last_used: Instant::now(),
+                sequence,
+            });
         trim_total_lru(&mut state, self.policy.max_warm_instances_total);
         Ok(true)
     }
@@ -361,7 +365,10 @@ impl PluginGcController {
                 .targets
                 .lock()
                 .map_err(|error| anyhow!("插件 GC target registry 锁已损坏: {error}"))?;
-            let live = registered.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            let live = registered
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
             registered.retain(|target| target.strong_count() > 0);
             live
         };
@@ -379,7 +386,10 @@ impl PluginGcController {
                 .targets
                 .lock()
                 .map_err(|error| anyhow!("插件 GC target registry 锁已损坏: {error}"))?;
-            let live = registered.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            let live = registered
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
             registered.retain(|target| target.strong_count() > 0);
             live
         };
@@ -402,25 +412,28 @@ impl PluginGcController {
         let interval = self.policy.sweep_interval;
         thread::Builder::new()
             .name("yinqidao-plugin-gc".into())
-            .spawn(move || loop {
-                thread::sleep(interval);
-                let Some(controller) = weak.upgrade() else {
-                    break;
-                };
-                match controller.sweep_once() {
-                    Ok(stats)
-                        if stats.released_memory_resources > 0 || stats.removed_disk_buckets > 0 =>
-                    {
-                        tracing::debug!(
-                            released_memory_resources = stats.released_memory_resources,
-                            removed_disk_buckets = stats.removed_disk_buckets,
-                            disk_bytes_before = stats.disk_bytes_before,
-                            disk_bytes_after = stats.disk_bytes_after,
-                            "Host 插件 GC 完成资源回收"
-                        );
+            .spawn(move || {
+                loop {
+                    thread::sleep(interval);
+                    let Some(controller) = weak.upgrade() else {
+                        break;
+                    };
+                    match controller.sweep_once() {
+                        Ok(stats)
+                            if stats.released_memory_resources > 0
+                                || stats.removed_disk_buckets > 0 =>
+                        {
+                            tracing::debug!(
+                                released_memory_resources = stats.released_memory_resources,
+                                removed_disk_buckets = stats.removed_disk_buckets,
+                                disk_bytes_before = stats.disk_bytes_before,
+                                disk_bytes_after = stats.disk_bytes_after,
+                                "Host 插件 GC 完成资源回收"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(%error, "Host 插件 GC sweep 失败"),
                     }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "Host 插件 GC sweep 失败"),
                 }
             })
             .context("启动插件 Host GC 线程失败")?;
@@ -429,10 +442,18 @@ impl PluginGcController {
 }
 
 fn collect_disk_cache(cache_root: &Path, policy: &PluginGcPolicy) -> Result<PluginGcStats> {
-    fs::create_dir_all(cache_root)
-        .with_context(|| format!("创建插件 compiled cache root 失败: {}", cache_root.display()))?;
-    let canonical_root = fs::canonicalize(cache_root)
-        .with_context(|| format!("规范化插件 compiled cache root 失败: {}", cache_root.display()))?;
+    fs::create_dir_all(cache_root).with_context(|| {
+        format!(
+            "创建插件 compiled cache root 失败: {}",
+            cache_root.display()
+        )
+    })?;
+    let canonical_root = fs::canonicalize(cache_root).with_context(|| {
+        format!(
+            "规范化插件 compiled cache root 失败: {}",
+            cache_root.display()
+        )
+    })?;
 
     #[derive(Debug)]
     struct Bucket {

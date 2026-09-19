@@ -75,16 +75,17 @@ pub struct KeyValue {
     pub value: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthChallengeKind {
+    #[default]
     QrCode,
     Browser,
     DeviceCode,
     Form,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuthChallenge {
     pub challenge_id: String,
     pub kind: AuthChallengeKind,
@@ -811,12 +812,7 @@ mod tests {
             100,
         );
         high_priority.is_default = true;
-        let mut selected = account(
-            "qqmusic",
-            "selected",
-            &[PluginCapability::Metadata],
-            1,
-        );
+        let mut selected = account("qqmusic", "selected", &[PluginCapability::Metadata], 1);
         selected.is_default = false;
         router.upsert_account(high_priority);
         router.upsert_account(selected);
@@ -833,7 +829,12 @@ mod tests {
         let plan = router.plan(ServiceKind::Metadata, &policy);
         assert_eq!(plan.plugin_routes.len(), 1);
         assert_eq!(plan.plugin_routes[0].account_id, "selected");
-        assert!(router.accounts().iter().any(|account| account.account_id == "high-priority"));
+        assert!(
+            router
+                .accounts()
+                .iter()
+                .any(|account| account.account_id == "high-priority")
+        );
     }
 
     #[test]

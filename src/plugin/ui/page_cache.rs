@@ -297,11 +297,7 @@ impl PluginUiPageCache {
     }
 }
 
-fn evict_lru(
-    state: &mut PageCacheState,
-    max_entries: usize,
-    protected: Option<&PluginUiPageKey>,
-) {
+fn evict_lru(state: &mut PageCacheState, max_entries: usize, protected: Option<&PluginUiPageKey>) {
     while state.entries.len() > max_entries {
         let victim = state
             .entries
@@ -359,16 +355,26 @@ mod tests {
         let fast = cache.begin_load("plugin.demo", "home").expect("fast");
         let fast = cache.publish(fast, page("fast")).expect("publish fast");
         assert!(cache.publish(slow, page("slow")).is_err());
-        let current = cache.get("plugin.demo", "home").expect("get").expect("page");
+        let current = cache
+            .get("plugin.demo", "home")
+            .expect("get")
+            .expect("page");
         assert_eq!(current.revision, fast.revision);
-        assert_eq!(current.model.root, UiNode::Text { text: "fast".into() });
+        assert_eq!(
+            current.model.root,
+            UiNode::Text {
+                text: "fast".into()
+            }
+        );
     }
 
     #[test]
     fn stale_event_cannot_overwrite_newer_revision() {
         let cache = PluginUiPageCache::new(4, UiSchemaLimits::default()).expect("cache");
         let initial = cache.begin_load("plugin.demo", "home").expect("initial");
-        let initial = cache.publish(initial, page("initial")).expect("publish initial");
+        let initial = cache
+            .publish(initial, page("initial"))
+            .expect("publish initial");
         let slow = cache
             .begin_update("plugin.demo", "home", initial.revision)
             .expect("slow event");
@@ -377,9 +383,17 @@ mod tests {
             .expect("fast event");
         let fast = cache.publish(fast, page("fast")).expect("publish fast");
         assert!(cache.publish(slow, page("slow")).is_err());
-        let current = cache.get("plugin.demo", "home").expect("get").expect("page");
+        let current = cache
+            .get("plugin.demo", "home")
+            .expect("get")
+            .expect("page");
         assert_eq!(current.revision, fast.revision);
-        assert_eq!(current.model.root, UiNode::Text { text: "fast".into() });
+        assert_eq!(
+            current.model.root,
+            UiNode::Text {
+                text: "fast".into()
+            }
+        );
     }
 
     #[test]
@@ -393,10 +407,16 @@ mod tests {
         assert!(after_publish > 0);
 
         let _ = cache.get("plugin.demo", "home").expect("get");
-        assert_eq!(cache.observable_revision().expect("LRU revision"), after_publish);
+        assert_eq!(
+            cache.observable_revision().expect("LRU revision"),
+            after_publish
+        );
 
         cache.invalidate_plugin("plugin.demo").expect("invalidate");
-        assert_ne!(cache.observable_revision().expect("invalidated revision"), after_publish);
+        assert_ne!(
+            cache.observable_revision().expect("invalidated revision"),
+            after_publish
+        );
     }
 
     #[test]
@@ -405,8 +425,20 @@ mod tests {
         let first = cache.begin_load("plugin.demo", "first").expect("first");
         cache.publish(first, page("first")).expect("publish first");
         let second = cache.begin_load("plugin.demo", "second").expect("second");
-        cache.publish(second, page("second")).expect("publish second");
-        assert!(cache.get("plugin.demo", "first").expect("first get").is_none());
-        assert!(cache.get("plugin.demo", "second").expect("second get").is_some());
+        cache
+            .publish(second, page("second"))
+            .expect("publish second");
+        assert!(
+            cache
+                .get("plugin.demo", "first")
+                .expect("first get")
+                .is_none()
+        );
+        assert!(
+            cache
+                .get("plugin.demo", "second")
+                .expect("second get")
+                .is_some()
+        );
     }
 }

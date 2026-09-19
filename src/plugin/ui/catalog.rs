@@ -85,7 +85,9 @@ where
                 report.routes = report.routes.saturating_add(delta.added_routes);
                 report.pages = report.pages.saturating_add(delta.added_pages);
                 report.commands = report.commands.saturating_add(delta.added_commands);
-                report.home_sections = report.home_sections.saturating_add(delta.added_home_sections);
+                report.home_sections = report
+                    .home_sections
+                    .saturating_add(delta.added_home_sections);
                 report.themes = report.themes.saturating_add(delta.added_themes);
             }
             Err(error) => report.failures.push(PluginUiLoadFailure {

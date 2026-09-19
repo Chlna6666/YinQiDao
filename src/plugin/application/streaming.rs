@@ -270,9 +270,8 @@ impl PluginServiceFrontend {
                 client_ready,
             });
         };
-        let route = route.ok_or_else(|| {
-            anyhow!("插件 stream descriptor 缺少对应 route，拒绝 materialize")
-        })?;
+        let route = route
+            .ok_or_else(|| anyhow!("插件 stream descriptor 缺少对应 route，拒绝 materialize"))?;
 
         if runtime_ports::package_mutation_generation() != package_generation {
             failures.push(PluginCallFailure {
@@ -322,25 +321,25 @@ impl PluginServiceFrontend {
         // Do not mutate the guest-visible request or the exact account route. Only a private clone is
         // decorated so `stream_cache::cache_identity` sees a new variant after package replacement.
         let cache_request = cache_scoped_request(request, &package_revision);
-        let cache = stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
+        let cache =
+            stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
         match cache
             .materialize(runtime.as_ref(), &route, &cache_request, &descriptor)
             .await
         {
             Ok(materialized) => {
-                let revision_check = if runtime_ports::package_mutation_generation()
-                    != package_generation
-                {
-                    Err(anyhow!("插件在 Stream materialize 期间已更新"))
-                } else {
-                    current_package_revision(runtime.as_ref(), &route).and_then(|current| {
-                        if current == package_revision {
-                            Ok(())
-                        } else {
-                            bail!("插件 package revision 在 Stream materialize 期间发生变化")
-                        }
-                    })
-                };
+                let revision_check =
+                    if runtime_ports::package_mutation_generation() != package_generation {
+                        Err(anyhow!("插件在 Stream materialize 期间已更新"))
+                    } else {
+                        current_package_revision(runtime.as_ref(), &route).and_then(|current| {
+                            if current == package_revision {
+                                Ok(())
+                            } else {
+                                bail!("插件 package revision 在 Stream materialize 期间发生变化")
+                            }
+                        })
+                    };
                 if let Err(error) = revision_check {
                     // Dropping materialized releases its cache lease. The completed old-revision
                     // bucket may remain until normal GC, but the new package scope can never hit it.
@@ -412,7 +411,7 @@ impl PluginServiceFrontend {
             .await?;
         let PluginSingleResult {
             value,
-            route,
+            route: _,
             plan,
             mut failures,
             client_ready,
@@ -560,8 +559,12 @@ fn current_package_revision(
 }
 
 fn regular_file_stamp(path: &Path, label: &str) -> Result<PackageFileStamp> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("读取插件 {label} revision metadata 失败: {}", path.display()))?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "读取插件 {label} revision metadata 失败: {}",
+            path.display()
+        )
+    })?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         bail!("插件 {label} revision 输入不是普通文件: {}", path.display());
     }
@@ -601,7 +604,7 @@ fn hash_text(hasher: &mut Md5, value: &str) {
 }
 
 fn next_remote_track_cursor(current: TrackId) -> Result<TrackId> {
-    if current >= 0 || current < -MAX_REMOTE_TRACKS_PER_PROCESS {
+    if !(-MAX_REMOTE_TRACKS_PER_PROCESS..0).contains(&current) {
         bail!(
             "远程临时 TrackId 已达到单进程上限 {}，请重启应用后继续",
             MAX_REMOTE_TRACKS_PER_PROCESS
@@ -612,7 +615,7 @@ fn next_remote_track_cursor(current: TrackId) -> Result<TrackId> {
         .ok_or_else(|| anyhow!("远程临时 TrackId 命名空间已耗尽"))
 }
 
-fn allocate_remote_track_id() -> Result<TrackId> {
+pub(crate) fn allocate_remote_track_id() -> Result<TrackId> {
     let mut current = NEXT_REMOTE_TRACK_ID.load(Ordering::Relaxed);
     loop {
         let next = next_remote_track_cursor(current)?;
@@ -744,7 +747,12 @@ mod tests {
         let scoped = cache_scoped_request(&request, &first);
         assert_eq!(scoped.track, request.track);
         assert_ne!(scoped.quality, request.quality);
-        assert!(scoped.quality.as_deref().is_some_and(|value| value.contains("lossless")));
+        assert!(
+            scoped
+                .quality
+                .as_deref()
+                .is_some_and(|value| value.contains("lossless"))
+        );
     }
 
     #[test]

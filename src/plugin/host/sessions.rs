@@ -305,12 +305,7 @@ fn mark_host_account_state(
         Some(state) if state == target => return Ok(false),
         Some(_) => {}
     }
-    host.mark_account_state(
-        &key.plugin_id,
-        &key.provider_id,
-        &key.account_id,
-        target,
-    )
+    host.mark_account_state(&key.plugin_id, &key.provider_id, &key.account_id, target)
 }
 
 pub fn initialize(
@@ -335,7 +330,7 @@ pub fn generation() -> u64 {
     PLUGIN_SESSION_GENERATION.load(Ordering::Acquire)
 }
 
-fn bump_session_generation() {
+pub(crate) fn bump_session_generation() {
     PLUGIN_SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
@@ -384,7 +379,10 @@ mod tests {
             startup_errors: Vec::new(),
         };
 
-        assert_eq!(coordinator.retain_host_accounts(std::slice::from_ref(&kept)), 1);
+        assert_eq!(
+            coordinator.retain_host_accounts(std::slice::from_ref(&kept)),
+            1
+        );
         assert_eq!(coordinator.pending_count(), 1);
         assert!(
             coordinator

@@ -238,7 +238,10 @@ pub fn load_theme(qualified_id: &str) -> Result<PluginThemeSnapshot> {
         bail!("插件 Theme asset 必须是普通文件且不能是符号链接");
     }
     if metadata.len() > MAX_THEME_TOKENS_BYTES {
-        bail!("插件 Theme asset 超过 {} bytes Host 上限", MAX_THEME_TOKENS_BYTES);
+        bail!(
+            "插件 Theme asset 超过 {} bytes Host 上限",
+            MAX_THEME_TOKENS_BYTES
+        );
     }
 
     let canonical_package = fs::canonicalize(&plugin.package_dir)
@@ -249,19 +252,21 @@ pub fn load_theme(qualified_id: &str) -> Result<PluginThemeSnapshot> {
         bail!("插件 Theme asset 逃逸插件目录，已拒绝");
     }
 
-    let content = fs::read_to_string(&canonical_asset)
-        .with_context(|| format!("读取插件 Theme token 文件失败: {}", canonical_asset.display()))?;
+    let content = fs::read_to_string(&canonical_asset).with_context(|| {
+        format!(
+            "读取插件 Theme token 文件失败: {}",
+            canonical_asset.display()
+        )
+    })?;
     if content.len() as u64 > MAX_THEME_TOKENS_BYTES {
         bail!("插件 Theme token 文本超过 Host 上限");
     }
-    let tokens: PluginThemeTokens = match canonical_asset
-        .extension()
-        .and_then(|value| value.to_str())
-    {
-        Some("toml") => toml::from_str(&content).context("解析插件 Theme TOML 失败")?,
-        Some("json") => serde_json::from_str(&content).context("解析插件 Theme JSON 失败")?,
-        _ => bail!("插件 Theme token 文件扩展名不受支持"),
-    };
+    let tokens: PluginThemeTokens =
+        match canonical_asset.extension().and_then(|value| value.to_str()) {
+            Some("toml") => toml::from_str(&content).context("解析插件 Theme TOML 失败")?,
+            Some("json") => serde_json::from_str(&content).context("解析插件 Theme JSON 失败")?,
+            _ => bail!("插件 Theme token 文件扩展名不受支持"),
+        };
     validate_theme_tokens(&tokens)?;
 
     Ok(theme_snapshot(

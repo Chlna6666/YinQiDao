@@ -160,9 +160,10 @@ where
 
             let compile_result = compile
                 .take()
-                .expect("compile closure is consumed only by the owning compiler")
-                (snapshot)
-                .map(Arc::new);
+                .expect("compile closure is consumed only by the owning compiler")(
+                snapshot
+            )
+            .map(Arc::new);
 
             let mut state = self
                 .state
@@ -182,7 +183,9 @@ where
                     state.entries.remove(&cache_key);
                 }
                 self.wake.notify_all();
-                return Err(anyhow!("插件 Component 在编译期间已失效，拒绝发布旧编译结果"));
+                return Err(anyhow!(
+                    "插件 Component 在编译期间已失效，拒绝发布旧编译结果"
+                ));
             }
 
             match compile_result {
@@ -224,7 +227,9 @@ where
             .or_insert(0);
         *generation = generation.wrapping_add(1);
         let before = state.entries.len();
-        state.entries.retain(|_, entry| entry.plugin_id != plugin_id);
+        state
+            .entries
+            .retain(|_, entry| entry.plugin_id != plugin_id);
         let removed = before.saturating_sub(state.entries.len());
         self.wake.notify_all();
         Ok(removed)
@@ -276,8 +281,7 @@ fn evict_ready_lru<C>(
             .entries
             .iter()
             .filter(|(key, entry)| {
-                key.as_str() != protected_key
-                    && matches!(&entry.state, CompileEntryState::Ready(_))
+                key.as_str() != protected_key && matches!(&entry.state, CompileEntryState::Ready(_))
             })
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(key, _)| key.clone());
@@ -498,7 +502,11 @@ mod tests {
     fn compile_failure_does_not_poison_key() {
         let cache = LazyCompiledComponentCache::new(2);
         let snapshot = snapshot("plugin.a", "component-a");
-        assert!(cache.get_or_try_compile(&snapshot, |_| Err(anyhow!("boom"))).is_err());
+        assert!(
+            cache
+                .get_or_try_compile(&snapshot, |_| Err(anyhow!("boom")))
+                .is_err()
+        );
         assert_eq!(cache.ready_len().expect("ready len"), 0);
         assert_eq!(
             cache

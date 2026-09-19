@@ -6,7 +6,7 @@ use tokio::task::JoinSet;
 use super::{
     abi::{
         CollectionRecommendationItem, CollectionRecommendationRequest, MediaCollection,
-        MediaCollectionKind, MediaCollectionRef, PluginAccountPreference, PluginRoute,
+        MediaCollectionKind, MediaCollectionRef, PluginAccountPreference, PluginRoute, RemoteTrack,
         RoutingPolicy, ServiceKind, UserProfile,
     },
     client,
@@ -27,6 +27,10 @@ const MAX_TITLE_BYTES: usize = 8 * 1024;
 const MAX_SUBTITLE_BYTES: usize = 16 * 1024;
 const MAX_ARTWORK_URL_BYTES: usize = 16 * 1024;
 const MAX_PROFILE_BIO_BYTES: usize = 32 * 1024;
+const MAX_TRACK_ARTISTS: usize = 128;
+const MAX_TRACK_TEXT_BYTES: usize = 32 * 1024;
+const MAX_COVER_URL_BYTES: usize = 16 * 1024;
+const MAX_TRACK_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Debug)]
 pub struct PluginMediaCollectionBatch {
@@ -120,18 +124,22 @@ impl PluginServiceFrontend {
                 }
             };
             match result {
-                Ok(collections) => match validate_collection_batch(&route, kind, &collections, limit)
-                {
-                    Ok(()) => {
-                        if !collections.is_empty() {
-                            batches.push((rank, PluginMediaCollectionBatch { route, collections }));
+                Ok(collections) => {
+                    match validate_collection_batch(&route, kind, &collections, limit) {
+                        Ok(()) => {
+                            if !collections.is_empty() {
+                                batches.push((
+                                    rank,
+                                    PluginMediaCollectionBatch { route, collections },
+                                ));
+                            }
                         }
+                        Err(error) => failures.push(PluginCallFailure {
+                            route,
+                            error: format!("MediaCollections 返回值非法: {error:#}"),
+                        }),
                     }
-                    Err(error) => failures.push(PluginCallFailure {
-                        route,
-                        error: format!("MediaCollections 返回值非法: {error:#}"),
-                    }),
-                },
+                }
                 Err(error) => failures.push(PluginCallFailure {
                     route,
                     error: format!("{error:#}"),
@@ -214,6 +222,88 @@ impl PluginServiceFrontend {
         validate_user_profile(route, &profile)?;
         Ok(profile)
     }
+
+    pub async fn media_collection_detail(
+        &self,
+        route: &PluginRoute,
+        collection: &MediaCollectionRef,
+    ) -> Result<MediaCollection> {
+        validate_collection_ref(route, collection)?;
+        ensure_exact_route(self, route, ServiceKind::MediaCollections)?;
+        let client = require_client()?;
+        let detail = runtime::global()
+            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.media_collection_detail(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    Some(&route.account_id),
+                    collection,
+                ),
+            )
+            .await?;
+        validate_collection(route, &detail)?;
+        Ok(detail)
+    }
+
+    pub async fn collection_tracks(
+        &self,
+        route: &PluginRoute,
+        collection: &MediaCollectionRef,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<RemoteTrack>> {
+        validate_collection_ref(route, collection)?;
+        validate_page_limit(limit)?;
+        ensure_exact_route(self, route, ServiceKind::MediaCollections)?;
+        let client = require_client()?;
+        let tracks = runtime::global()
+            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.collection_tracks(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    Some(&route.account_id),
+                    collection,
+                    offset,
+                    limit,
+                ),
+            )
+            .await?;
+        validate_track_page(route, &tracks, limit)?;
+        Ok(tracks)
+    }
+
+    pub async fn collection_items(
+        &self,
+        route: &PluginRoute,
+        collection: &MediaCollectionRef,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<MediaCollection>> {
+        validate_collection_ref(route, collection)?;
+        validate_page_limit(limit)?;
+        ensure_exact_route(self, route, ServiceKind::MediaCollections)?;
+        let client = require_client()?;
+        let items = runtime::global()
+            .ok_or_else(|| anyhow!("插件 Host runtime 尚未初始化"))?
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.collection_items(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    Some(&route.account_id),
+                    collection,
+                    offset,
+                    limit,
+                ),
+            )
+            .await?;
+        validate_collection_items_batch(route, &items, limit)?;
+        Ok(items)
+    }
 }
 
 fn require_client() -> Result<std::sync::Arc<dyn super::client::PluginProviderClient>> {
@@ -237,7 +327,11 @@ fn ensure_exact_route(
         ..RoutingPolicy::default()
     };
     let plan = frontend.plan(service, &policy)?;
-    if plan.eligible_routes.iter().any(|candidate| same_route(candidate, route)) {
+    if plan
+        .eligible_routes
+        .iter()
+        .any(|candidate| same_route(candidate, route))
+    {
         return Ok(());
     }
     bail!(
@@ -295,7 +389,11 @@ fn validate_collection_batch(
 fn validate_collection(route: &PluginRoute, collection: &MediaCollection) -> Result<()> {
     validate_collection_ref(route, &collection.source)?;
     validate_required_text("collection title", &collection.title, MAX_TITLE_BYTES)?;
-    validate_optional_text("collection subtitle", collection.subtitle.as_deref(), MAX_SUBTITLE_BYTES)?;
+    validate_optional_text(
+        "collection subtitle",
+        collection.subtitle.as_deref(),
+        MAX_SUBTITLE_BYTES,
+    )?;
     validate_optional_text(
         "collection artwork URL",
         collection.artwork_url.as_deref(),
@@ -380,7 +478,11 @@ fn validate_recommendation_items(
         if item.score.is_some_and(|score| !score.is_finite()) {
             bail!("collection recommendation score 必须为有限值");
         }
-        validate_optional_text("collection recommendation reason", item.reason.as_deref(), MAX_SUBTITLE_BYTES)?;
+        validate_optional_text(
+            "collection recommendation reason",
+            item.reason.as_deref(),
+            MAX_SUBTITLE_BYTES,
+        )?;
         let key = (
             item.collection.source.kind,
             item.collection.source.source_id.as_str(),
@@ -411,9 +513,21 @@ fn validate_user_profile(route: &PluginRoute, profile: &UserProfile) -> Result<(
     {
         bail!("user profile account id 与 route 不匹配或非法");
     }
-    validate_required_text("user profile display name", &profile.display_name, MAX_TITLE_BYTES)?;
-    validate_optional_text("user profile avatar URL", profile.avatar_url.as_deref(), MAX_ARTWORK_URL_BYTES)?;
-    validate_optional_text("user profile bio", profile.bio.as_deref(), MAX_PROFILE_BIO_BYTES)?;
+    validate_required_text(
+        "user profile display name",
+        &profile.display_name,
+        MAX_TITLE_BYTES,
+    )?;
+    validate_optional_text(
+        "user profile avatar URL",
+        profile.avatar_url.as_deref(),
+        MAX_ARTWORK_URL_BYTES,
+    )?;
+    validate_optional_text(
+        "user profile bio",
+        profile.bio.as_deref(),
+        MAX_PROFILE_BIO_BYTES,
+    )?;
     Ok(())
 }
 
@@ -450,6 +564,113 @@ fn validate_optional_text(label: &str, value: Option<&str>, max_bytes: usize) ->
         && (value.len() > max_bytes || value.contains('\0'))
     {
         bail!("{label} 非法或超过 {max_bytes} bytes");
+    }
+    Ok(())
+}
+
+fn validate_track_page(route: &PluginRoute, tracks: &[RemoteTrack], limit: u16) -> Result<()> {
+    if tracks.len() > usize::from(limit) {
+        bail!(
+            "collection tracks 返回 {} 项，超过请求 limit {}",
+            tracks.len(),
+            limit
+        );
+    }
+    for track in tracks {
+        validate_remote_track(route, track)?;
+    }
+    Ok(())
+}
+
+fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()> {
+    validate_provider_id(&track.source.provider_id)?;
+    if track.source.provider_id != route.provider_id {
+        bail!(
+            "collection track provider 不匹配: expected={}, actual={}",
+            route.provider_id,
+            track.source.provider_id
+        );
+    }
+    if track.source.source_id.trim().is_empty()
+        || track.source.source_id.len() > MAX_SOURCE_ID_BYTES
+        || track.source.source_id.contains('\0')
+    {
+        bail!("collection track source id 非法");
+    }
+    if track.title.trim().is_empty() || track.title.contains('\0') {
+        bail!("collection track title 非法");
+    }
+    if track.artists.len() > MAX_TRACK_ARTISTS {
+        bail!("collection track artists 数量超过限制");
+    }
+    if track
+        .duration_ms
+        .is_some_and(|duration_ms| duration_ms == 0 || duration_ms > MAX_TRACK_DURATION_MS)
+    {
+        bail!("collection track duration_ms 超出允许范围");
+    }
+    if track
+        .cover_url
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_COVER_URL_BYTES || value.contains('\0'))
+    {
+        bail!("collection track cover URL 非法或超过大小限制");
+    }
+
+    let mut bytes = track
+        .source
+        .provider_id
+        .len()
+        .saturating_add(track.source.source_id.len())
+        .saturating_add(track.title.len())
+        .saturating_add(track.album.len())
+        .saturating_add(track.isrc.as_ref().map_or(0, String::len))
+        .saturating_add(track.cover_url.as_ref().map_or(0, String::len));
+    for artist in &track.artists {
+        if artist.contains('\0') {
+            bail!("collection track artist 包含 NUL");
+        }
+        bytes = bytes.saturating_add(artist.len());
+    }
+    if track.album.contains('\0')
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
+    {
+        bail!("collection track 文本包含 NUL");
+    }
+    if bytes > MAX_TRACK_TEXT_BYTES {
+        bail!(
+            "collection track 文本超过 {} bytes Host 上限",
+            MAX_TRACK_TEXT_BYTES
+        );
+    }
+    Ok(())
+}
+
+fn validate_collection_items_batch(
+    route: &PluginRoute,
+    collections: &[MediaCollection],
+    limit: u16,
+) -> Result<()> {
+    if collections.len() > usize::from(limit) {
+        bail!(
+            "collection items 返回 {} 项，超过请求 limit {}",
+            collections.len(),
+            limit
+        );
+    }
+    let mut seen = HashSet::with_capacity(collections.len());
+    for collection in collections {
+        validate_collection(route, collection)?;
+        if !seen.insert((collection.source.kind, collection.source.source_id.as_str())) {
+            bail!(
+                "collection items 返回重复 source: {:?}/{}",
+                collection.source.kind,
+                collection.source.source_id
+            );
+        }
     }
     Ok(())
 }

@@ -364,14 +364,19 @@ interface provider {
     playlists: func(provider-id: string, account-id: string) -> result<list<playlist>, string>;
     playlist-tracks: func(provider-id: string, account-id: string, playlist-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
     playlist-create: func(provider-id: string, account-id: string, name: string) -> result<playlist, string>;
+    playlist-rename: func(provider-id: string, account-id: string, playlist-id: string, name: string) -> result<bool, string>;
+    playlist-delete: func(provider-id: string, account-id: string, playlist-id: string) -> result<bool, string>;
     playlist-add: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
     playlist-remove: func(provider-id: string, account-id: string, playlist-id: string, tracks: list<source-track-ref>) -> result<bool, string>;
 
     /// Generic remote-library collection access. This deliberately avoids provider-specific names.
     media-collections: func(provider-id: string, account-id: string, kind: media-collection-kind, offset: u32, limit: u16) -> result<list<media-collection>, string>;
+    media-collection-detail: func(provider-id: string, account-id: option<string>, collection: media-collection-ref) -> result<media-collection, string>;
+    collection-tracks: func(provider-id: string, account-id: option<string>, collection: media-collection-ref, offset: u32, limit: u16) -> result<list<remote-track>, string>;
+    collection-items: func(provider-id: string, account-id: option<string>, collection: media-collection-ref, offset: u32, limit: u16) -> result<list<media-collection>, string>;
     set-media-saved: func(provider-id: string, account-id: string, collection: media-collection-ref, saved: bool) -> result<bool, string>;
     collection-recommendations: func(provider-id: string, account-id: string, request: collection-recommendation-request) -> result<list<collection-recommendation-item>, string>;
-    user-profile: func(provider-id: string, account-id: string) -> result<user-profile, string>;
+    get-user-profile: func(provider-id: string, account-id: string) -> result<user-profile, string>;
 
     cloud-library: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;
     liked-tracks: func(provider-id: string, account-id: string, offset: u32, limit: u16) -> result<list<remote-track>, string>;

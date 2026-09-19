@@ -71,9 +71,12 @@ impl PluginCompiledArtifactStore {
                 return Ok(None);
             }
         };
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("读取 compiled artifact metadata 失败: {}", snapshot.compiled_cache_path.display()))?;
+        let metadata = file.metadata().with_context(|| {
+            format!(
+                "读取 compiled artifact metadata 失败: {}",
+                snapshot.compiled_cache_path.display()
+            )
+        })?;
         if !metadata.is_file()
             || metadata.len() == 0
             || metadata.len() > self.max_artifact_bytes as u64
@@ -84,7 +87,12 @@ impl PluginCompiledArtifactStore {
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         file.take((self.max_artifact_bytes as u64).saturating_add(1))
             .read_to_end(&mut bytes)
-            .with_context(|| format!("读取 compiled artifact 失败: {}", snapshot.compiled_cache_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "读取 compiled artifact 失败: {}",
+                    snapshot.compiled_cache_path.display()
+                )
+            })?;
         if bytes.is_empty() || bytes.len() > self.max_artifact_bytes {
             return Ok(None);
         }
@@ -121,7 +129,12 @@ impl PluginCompiledArtifactStore {
             .create_new(true)
             .write(true)
             .open(&temp_path)
-            .with_context(|| format!("创建 compiled artifact 临时文件失败: {}", temp_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "创建 compiled artifact 临时文件失败: {}",
+                    temp_path.display()
+                )
+            })?;
         if let Err(error) = file.write_all(artifact).and_then(|_| file.sync_all()) {
             let _ = fs::remove_file(&temp_path);
             return Err(error).context("写入 compiled artifact 失败");
@@ -164,7 +177,10 @@ impl PluginCompiledArtifactStore {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(error).with_context(|| {
-                        format!("清理 compiled cache 目录失败: {}", snapshot.cache_dir.display())
+                        format!(
+                            "清理 compiled cache 目录失败: {}",
+                            snapshot.cache_dir.display()
+                        )
                     });
                 }
             }
@@ -187,13 +203,19 @@ fn ensure_safe_cache_dir(snapshot: &PluginComponentSnapshot) -> Result<()> {
         bail!("插件 compiled cache 目录不能是符号链接");
     }
     fs::create_dir_all(&snapshot.cache_dir).with_context(|| {
-        format!("创建 compiled cache 目录失败: {}", snapshot.cache_dir.display())
+        format!(
+            "创建 compiled cache 目录失败: {}",
+            snapshot.cache_dir.display()
+        )
     })?;
 
     let canonical_root = fs::canonicalize(root)
         .with_context(|| format!("规范化 compiled cache root 失败: {}", root.display()))?;
     let canonical_dir = fs::canonicalize(&snapshot.cache_dir).with_context(|| {
-        format!("规范化 compiled cache 目录失败: {}", snapshot.cache_dir.display())
+        format!(
+            "规范化 compiled cache 目录失败: {}",
+            snapshot.cache_dir.display()
+        )
     })?;
     if !canonical_dir.starts_with(&canonical_root) {
         bail!("插件 compiled cache 目录逃逸出 cache root");
@@ -229,13 +251,16 @@ fn cache_dir_is_safe(snapshot: &PluginComponentSnapshot) -> Result<bool> {
 }
 
 fn cache_entry_files_are_regular(snapshot: &PluginComponentSnapshot) -> bool {
-    [&snapshot.compiled_cache_path, &snapshot.source_verifier_path]
-        .into_iter()
-        .all(|path| {
-            fs::symlink_metadata(path)
-                .map(|metadata| metadata.file_type().is_file())
-                .unwrap_or(false)
-        })
+    [
+        &snapshot.compiled_cache_path,
+        &snapshot.source_verifier_path,
+    ]
+    .into_iter()
+    .all(|path| {
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false)
+    })
 }
 
 fn remove_file_if_present(path: &Path) -> Result<bool> {
@@ -243,7 +268,8 @@ fn remove_file_if_present(path: &Path) -> Result<bool> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
-            return Err(error).with_context(|| format!("读取 cache entry metadata 失败: {}", path.display()));
+            return Err(error)
+                .with_context(|| format!("读取 cache entry metadata 失败: {}", path.display()));
         }
     };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -276,7 +302,7 @@ pub fn global() -> Option<Arc<PluginCompiledArtifactStore>> {
 mod tests {
     use super::*;
     use crate::plugin::{
-        abi::{PluginManifest, PLUGIN_ABI_VERSION},
+        abi::{PLUGIN_ABI_VERSION, PluginManifest},
         component::registry::{PluginComponentLimits, PluginComponentRegistry},
         host::catalog::InstalledPlugin,
     };
@@ -319,7 +345,9 @@ mod tests {
         let snapshot = snapshot(&root);
         let store = PluginCompiledArtifactStore::new(1024);
         assert_eq!(store.load(&snapshot).expect("initial load"), None);
-        store.store(&snapshot, b"serialized-wasmtime-component").expect("store");
+        store
+            .store(&snapshot, b"serialized-wasmtime-component")
+            .expect("store");
         assert_eq!(
             store.load(&snapshot).expect("load"),
             Some(b"serialized-wasmtime-component".to_vec())

@@ -2,12 +2,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::{
     frontend::{PluginLogoutResult, PluginServiceFrontend},
-    host::{
-        catalog,
-        secrets,
-        security::SecretSlot,
-        sessions::PluginAccountKey,
-    },
+    host::{catalog, secrets, security::SecretSlot, sessions::PluginAccountKey},
 };
 
 const MAX_PLUGIN_LOGOUT_ACCOUNTS: usize = 512;
@@ -57,7 +52,11 @@ impl PluginLogoutAllResult {
     }
 
     pub fn secret_cleanup_failures(&self) -> usize {
-        let scope_failure = if self.secret_cleanup_error.is_some() { 1 } else { 0 };
+        let scope_failure = if self.secret_cleanup_error.is_some() {
+            1
+        } else {
+            0
+        };
         scope_failure
             + self
                 .accounts
@@ -149,12 +148,7 @@ async fn logout_account_key(
                 local_state_changed,
                 remote_acknowledged,
                 remote_error,
-            }) => (
-                local_state_changed,
-                remote_acknowledged,
-                remote_error,
-                None,
-            ),
+            }) => (local_state_changed, remote_acknowledged, remote_error, None),
             Err(error) => (false, false, None, Some(format!("{error:#}"))),
         }
     } else {
@@ -167,14 +161,12 @@ async fn logout_account_key(
     };
 
     let (secrets_revoked, secret_cleanup_error) = match secrets::global() {
-        Some(store) => match store.delete_account(
-            &key.plugin_id,
-            &key.provider_id,
-            &key.account_id,
-        ) {
-            Ok(removed) => (removed, None),
-            Err(error) => (0, Some(format!("{error:#}"))),
-        },
+        Some(store) => {
+            match store.delete_account(&key.plugin_id, &key.provider_id, &key.account_id) {
+                Ok(removed) => (removed, None),
+                Err(error) => (0, Some(format!("{error:#}"))),
+            }
+        }
         None => (0, Some("插件 Secret backend 尚未初始化".into())),
     };
 
@@ -272,11 +264,7 @@ fn validate_plugin_id(plugin_id: &str) -> Result<()> {
 }
 
 fn validate_provider_scope(plugin_id: &str, provider_id: &str) -> Result<()> {
-    let _ = SecretSlot::provider(
-        plugin_id.to_owned(),
-        provider_id.to_owned(),
-        "logout_probe",
-    )?;
+    let _ = SecretSlot::provider(plugin_id.to_owned(), provider_id.to_owned(), "logout_probe")?;
     Ok(())
 }
 

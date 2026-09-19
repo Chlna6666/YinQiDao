@@ -180,7 +180,9 @@ impl PluginImageCache {
             bail!("插件图片在解码期间已失效，拒绝发布旧图片");
         }
         if let Some(existing) = state.entries.remove(&key) {
-            state.retained_bytes = state.retained_bytes.saturating_sub(existing.retained_bytes());
+            state.retained_bytes = state
+                .retained_bytes
+                .saturating_sub(existing.retained_bytes());
         }
         let last_used = state.next_clock();
         let entry = CachedImage {
@@ -281,11 +283,14 @@ pub fn load_image(plugin_id: &str, asset: &str) -> Result<PluginImageAsset> {
         bail!("插件图片 asset 逃逸插件目录，已拒绝");
     }
 
-    let mut file = File::open(&canonical_asset)
+    let file = File::open(&canonical_asset)
         .with_context(|| format!("打开插件图片 asset 失败: {}", canonical_asset.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("读取已打开图片 asset metadata 失败: {}", canonical_asset.display()))?;
+    let metadata = file.metadata().with_context(|| {
+        format!(
+            "读取已打开图片 asset metadata 失败: {}",
+            canonical_asset.display()
+        )
+    })?;
     if !metadata.is_file() || metadata.len() > MAX_SOURCE_BYTES as u64 {
         bail!("插件图片 asset 不是普通文件或超过 {MAX_SOURCE_BYTES} bytes Host 上限");
     }
@@ -319,7 +324,10 @@ pub fn load_image(plugin_id: &str, asset: &str) -> Result<PluginImageAsset> {
     )
 }
 
-pub fn preload_page_images(plugin_id: &str, page: &UiPageModel) -> Result<PluginImagePreloadReport> {
+pub fn preload_page_images(
+    plugin_id: &str,
+    page: &UiPageModel,
+) -> Result<PluginImagePreloadReport> {
     let mut assets = HashSet::new();
     collect_image_assets(&page.root, &mut assets)?;
     if assets.len() > MAX_PAGE_IMAGES {

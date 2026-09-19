@@ -86,37 +86,27 @@ impl PluginUiRegistry {
         let pages = contributions
             .pages
             .into_iter()
-            .map(|contribution| {
-                Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution))
-            })
+            .map(|contribution| Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution)))
             .collect::<Result<Vec<_>>>()?;
         let routes = contributions
             .routes
             .into_iter()
-            .map(|contribution| {
-                Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution))
-            })
+            .map(|contribution| Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution)))
             .collect::<Result<Vec<_>>>()?;
         let commands = contributions
             .commands
             .into_iter()
-            .map(|contribution| {
-                Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution))
-            })
+            .map(|contribution| Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution)))
             .collect::<Result<Vec<_>>>()?;
         let home_sections = contributions
             .home_sections
             .into_iter()
-            .map(|contribution| {
-                Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution))
-            })
+            .map(|contribution| Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution)))
             .collect::<Result<Vec<_>>>()?;
         let themes = contributions
             .themes
             .into_iter()
-            .map(|contribution| {
-                Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution))
-            })
+            .map(|contribution| Ok((qualified_ui_id(plugin_id, &contribution.id)?, contribution)))
             .collect::<Result<Vec<_>>>()?;
 
         let mut delta = self.remove_plugin_entries(plugin_id);

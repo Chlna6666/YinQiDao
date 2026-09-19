@@ -181,7 +181,10 @@ fn validate_context(plugin_id: &str, context: &PluginCommandContext) -> Result<(
         }
     }
     if total > MAX_COMMAND_CONTEXT_BYTES {
-        bail!("插件 Command context 超过 {} bytes Host 上限", MAX_COMMAND_CONTEXT_BYTES);
+        bail!(
+            "插件 Command context 超过 {} bytes Host 上限",
+            MAX_COMMAND_CONTEXT_BYTES
+        );
     }
     Ok(())
 }

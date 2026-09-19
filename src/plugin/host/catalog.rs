@@ -9,12 +9,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::plugins::{
-    AccountState, AuthMethod, PluginAccount, PluginCapability, PluginManifest, PluginServiceRouter,
-    ProviderDescriptor, PLUGIN_ABI_VERSION,
+    AccountState, AuthMethod, PLUGIN_ABI_VERSION, PluginAccount, PluginCapability, PluginManifest,
+    PluginServiceRouter, ProviderDescriptor,
 };
 
 pub const PLUGIN_PACKAGE_SCHEMA_VERSION: u32 = 1;
-const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
+pub(crate) const PLUGIN_PACKAGE_FILE: &str = "plugin.toml";
 const PLUGIN_ACCOUNT_STORE_SCHEMA_VERSION: u32 = 1;
 const PLUGIN_ACCOUNT_STORE_FILE: &str = "plugin-accounts.json";
 const MAX_IDENTIFIER_BYTES: usize = 128;
@@ -34,12 +34,12 @@ const MAX_ACCOUNT_TEXT_BYTES: usize = 8 * 1_024;
 static PLUGIN_HOST: OnceLock<Arc<RwLock<PluginHostState>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize)]
-struct PluginPackageFile {
+pub(crate) struct PluginPackageFile {
     #[serde(default = "default_package_schema_version")]
-    package_schema: u32,
-    component: String,
+    pub(crate) package_schema: u32,
+    pub(crate) component: String,
     #[serde(flatten)]
-    manifest: PluginManifest,
+    pub(crate) manifest: PluginManifest,
 }
 
 fn default_package_schema_version() -> u32 {
@@ -283,7 +283,10 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             || provider.display_name.len() > MAX_PROVIDER_DISPLAY_NAME_BYTES
             || provider.display_name.contains('\0')
         {
-            bail!("provider {} 的 display_name 为空或超过 Host 文本上限", provider.id);
+            bail!(
+                "provider {} 的 display_name 为空或超过 Host 文本上限",
+                provider.id
+            );
         }
         if provider.capabilities.is_empty() {
             bail!("provider {} 未声明任何 capability", provider.id);
@@ -292,7 +295,10 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         let mut capabilities = HashSet::new();
         for capability in &provider.capabilities {
             if !capabilities.insert(*capability) {
-                bail!("provider {} 重复声明 capability {capability:?}", provider.id);
+                bail!(
+                    "provider {} 重复声明 capability {capability:?}",
+                    provider.id
+                );
             }
         }
         let mut auth_methods = HashSet::new();
@@ -336,16 +342,14 @@ fn auth_method_key(method: AuthMethod) -> u8 {
     }
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES
         && !value.starts_with('.')
         && !value.ends_with('.')
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         })
 }
 
@@ -487,7 +491,10 @@ fn validate_account_shape(account: &PluginAccount) -> Result<()> {
             .as_ref()
             .is_some_and(|value| value.contains('\0'))
     {
-        bail!("插件账号展示信息超过 {} bytes Host 上限或包含 NUL", MAX_ACCOUNT_TEXT_BYTES);
+        bail!(
+            "插件账号展示信息超过 {} bytes Host 上限或包含 NUL",
+            MAX_ACCOUNT_TEXT_BYTES
+        );
     }
     let mut capabilities = HashSet::with_capacity(account.capabilities.len());
     for capability in &account.capabilities {
@@ -558,16 +565,18 @@ impl PluginHostState {
                 Vec::new()
             }
         };
-        accounts.retain(|account| match validate_account_against_catalog(&catalog, account) {
-            Ok(()) => true,
-            Err(error) => {
-                startup_errors.push(format!(
-                    "忽略与当前插件 catalog 不兼容的账号 {}/{}/{}: {error:#}",
-                    account.plugin_id, account.provider_id, account.account_id
-                ));
-                false
-            }
-        });
+        accounts.retain(
+            |account| match validate_account_against_catalog(&catalog, account) {
+                Ok(()) => true,
+                Err(error) => {
+                    startup_errors.push(format!(
+                        "忽略与当前插件 catalog 不兼容的账号 {}/{}/{}: {error:#}",
+                        account.plugin_id, account.provider_id, account.account_id
+                    ));
+                    false
+                }
+            },
+        );
         normalize_provider_defaults(&mut accounts);
 
         let mut router = PluginServiceRouter::default();
@@ -623,6 +632,44 @@ impl PluginHostState {
         Ok(())
     }
 
+    pub fn set_default_account(
+        &mut self,
+        plugin_id: &str,
+        provider_id: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        let mut accounts = self.router.accounts().to_vec();
+        let mut found = false;
+        let mut changed = false;
+        for account in &mut accounts {
+            if account.plugin_id == plugin_id && account.provider_id == provider_id {
+                if account.account_id == account_id {
+                    found = true;
+                    if account.state == AccountState::LoggedOut {
+                        bail!("无法将已注销的账号设为当前默认账号");
+                    }
+                    if !account.is_default {
+                        account.is_default = true;
+                        changed = true;
+                    }
+                } else if account.is_default {
+                    account.is_default = false;
+                    changed = true;
+                }
+            }
+        }
+        if !found {
+            bail!("未找到指定插件账号: {plugin_id}/{provider_id}/{account_id}");
+        }
+        if !changed {
+            return Ok(false);
+        }
+        normalize_provider_defaults(&mut accounts);
+        self.account_store.save(&accounts)?;
+        self.replace_router_accounts(accounts);
+        Ok(true)
+    }
+
     pub fn remove_account(
         &mut self,
         plugin_id: &str,
@@ -631,14 +678,36 @@ impl PluginHostState {
     ) -> Result<bool> {
         let mut accounts = self.router.accounts().to_vec();
         let old_len = accounts.len();
+        let mut removed_was_default = false;
         accounts.retain(|account| {
-            account.plugin_id != plugin_id
-                || account.provider_id != provider_id
-                || account.account_id != account_id
+            let matches = account.plugin_id == plugin_id
+                && account.provider_id == provider_id
+                && account.account_id == account_id;
+            if matches && account.is_default {
+                removed_was_default = true;
+            }
+            !matches
         });
         if accounts.len() == old_len {
             return Ok(false);
         }
+        if removed_was_default {
+            if let Some(replacement) = accounts
+                .iter_mut()
+                .filter(|account| {
+                    account.plugin_id == plugin_id && account.provider_id == provider_id
+                })
+                .max_by(|a, b| {
+                    (a.state == AccountState::Authenticated)
+                        .cmp(&(b.state == AccountState::Authenticated))
+                        .then_with(|| a.priority.cmp(&b.priority))
+                        .then_with(|| b.account_id.cmp(&a.account_id))
+                })
+            {
+                replacement.is_default = true;
+            }
+        }
+        normalize_provider_defaults(&mut accounts);
         self.account_store.save(&accounts)?;
         self.replace_router_accounts(accounts);
         Ok(true)
@@ -660,6 +729,27 @@ impl PluginHostState {
             return Ok(false);
         };
         account.state = state;
+        if state == AccountState::LoggedOut && account.is_default {
+            account.is_default = false;
+            if let Some(replacement) = accounts
+                .iter_mut()
+                .filter(|other| {
+                    other.plugin_id == plugin_id
+                        && other.provider_id == provider_id
+                        && other.account_id != account_id
+                        && other.state != AccountState::LoggedOut
+                })
+                .max_by(|a, b| {
+                    (a.state == AccountState::Authenticated)
+                        .cmp(&(b.state == AccountState::Authenticated))
+                        .then_with(|| a.priority.cmp(&b.priority))
+                        .then_with(|| b.account_id.cmp(&a.account_id))
+                })
+            {
+                replacement.is_default = true;
+            }
+        }
+        normalize_provider_defaults(&mut accounts);
         self.account_store.save(&accounts)?;
         self.replace_router_accounts(accounts);
         Ok(true)
@@ -674,7 +764,10 @@ impl PluginHostState {
     }
 }
 
-fn validate_account_against_catalog(catalog: &PluginCatalog, account: &PluginAccount) -> Result<()> {
+fn validate_account_against_catalog(
+    catalog: &PluginCatalog,
+    account: &PluginAccount,
+) -> Result<()> {
     validate_account_shape(account)?;
     let provider = catalog
         .provider(&account.plugin_id, &account.provider_id)
@@ -785,7 +878,11 @@ auth_methods = ["qr_code"]
         assert!(catalog.failures().is_empty());
         assert_eq!(catalog.plugins().len(), 1);
         assert_eq!(catalog.plugins()[0].manifest.id, "plugin.test");
-        assert!(catalog.plugins()[0].component_path.ends_with("provider.wasm"));
+        assert!(
+            catalog.plugins()[0]
+                .component_path
+                .ends_with("provider.wasm")
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -843,8 +940,16 @@ auth_methods = ["qr_code"]
 
         let restored = store.load().expect("load");
         assert_eq!(restored.len(), 2);
-        assert!(restored.iter().any(|account| account.account_id == "a" && account.is_default));
-        assert!(restored.iter().any(|account| account.account_id == "b" && !account.is_default));
+        assert!(
+            restored
+                .iter()
+                .any(|account| account.account_id == "a" && account.is_default)
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|account| account.account_id == "b" && !account.is_default)
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -913,6 +1018,138 @@ auth_methods = ["qr_code"]
         let restored = PluginHostState::load(&root);
         assert_eq!(restored.router().accounts().len(), 2);
         assert!(root.join(PLUGIN_ACCOUNT_STORE_FILE).is_file());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn netease_plugin_package_is_valid_and_has_all_extended_capabilities() {
+        let manifest_path = PathBuf::from("plugins/netease/plugin.toml");
+        assert!(
+            manifest_path.is_file(),
+            "plugins/netease/plugin.toml 必须存在"
+        );
+        let content = fs::read_to_string(&manifest_path).expect("read netease plugin.toml");
+        let package =
+            toml::from_str::<PluginPackageFile>(&content).expect("parse netease plugin.toml");
+        assert_eq!(package.manifest.id, "io.yinqidao.netease");
+        let provider = package
+            .manifest
+            .providers
+            .iter()
+            .find(|p| p.id == "netease")
+            .expect("netease provider");
+        assert!(
+            provider
+                .capabilities
+                .contains(&PluginCapability::MediaCollections)
+        );
+        assert!(
+            provider
+                .capabilities
+                .contains(&PluginCapability::UserProfile)
+        );
+        assert!(
+            provider
+                .capabilities
+                .contains(&PluginCapability::Recommendations)
+        );
+        assert!(provider.capabilities.contains(&PluginCapability::Playlists));
+        assert!(provider.auth_methods.contains(&AuthMethod::QrCode));
+        assert!(provider.auth_methods.contains(&AuthMethod::CustomForm));
+        assert!(provider.auth_methods.contains(&AuthMethod::CookieImport));
+    }
+
+    #[test]
+    fn netease_plugin_catalog_discovery_and_host_state() {
+        let root = temp_dir("netease-discovery");
+        let plugin_dir = root.join("plugins").join("io.yinqidao.netease");
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+
+        let source_manifest = PathBuf::from("plugins/netease/plugin.toml");
+        assert!(source_manifest.is_file());
+        fs::copy(&source_manifest, plugin_dir.join("plugin.toml")).expect("copy plugin.toml");
+
+        let wasm_file = PathBuf::from(
+            "plugins/netease/target/wasm32-wasip2/release/yinqidao_netease_plugin.wasm",
+        );
+        if wasm_file.is_file() {
+            fs::copy(&wasm_file, plugin_dir.join("provider.wasm")).expect("copy wasm");
+        } else {
+            fs::write(plugin_dir.join("provider.wasm"), b"\0asm").expect("stub wasm");
+        }
+
+        let host = PluginHostState::load(&root);
+        assert_eq!(host.startup_errors(), &[] as &[String]);
+        let plugin = host
+            .catalog()
+            .plugin("io.yinqidao.netease")
+            .expect("plugin found");
+        assert_eq!(plugin.manifest.name, "网易云音乐");
+        let provider = plugin.provider("netease").expect("provider found");
+        assert_eq!(provider.display_name, "网易云音乐");
+        assert!(
+            provider
+                .capabilities
+                .contains(&PluginCapability::MediaCollections)
+        );
+        assert!(provider.capabilities.contains(&PluginCapability::Playlists));
+        assert!(provider.auth_methods.contains(&AuthMethod::QrCode));
+        assert!(provider.auth_methods.contains(&AuthMethod::CustomForm));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn host_set_default_account_and_removal_promotion() {
+        let root = temp_dir("host-defaults");
+        let plugin_root = root.join("plugins");
+        write_plugin(&plugin_root, "plugin.test", "provider.wasm");
+        let mut host = PluginHostState::load(&root);
+
+        host.upsert_account(account("user_1", 10, true))
+            .expect("upsert user_1");
+        host.upsert_account(account("user_2", 5, false))
+            .expect("upsert user_2");
+
+        let accs = host.router().accounts();
+        assert!(
+            accs.iter()
+                .any(|a| a.account_id == "user_1" && a.is_default)
+        );
+        assert!(
+            accs.iter()
+                .any(|a| a.account_id == "user_2" && !a.is_default)
+        );
+
+        // Switch default to user_2
+        let changed = host
+            .set_default_account("plugin.test", "test", "user_2")
+            .expect("switch default");
+        assert!(changed);
+
+        let accs = host.router().accounts();
+        assert!(
+            accs.iter()
+                .any(|a| a.account_id == "user_1" && !a.is_default)
+        );
+        assert!(
+            accs.iter()
+                .any(|a| a.account_id == "user_2" && a.is_default)
+        );
+
+        // When default user_2 is removed, user_1 is promoted to default
+        let removed = host
+            .remove_account("plugin.test", "test", "user_2")
+            .expect("remove user_2");
+        assert!(removed);
+
+        let accs = host.router().accounts();
+        assert_eq!(accs.len(), 1);
+        assert!(
+            accs.iter()
+                .any(|a| a.account_id == "user_1" && a.is_default)
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }

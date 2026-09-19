@@ -19,7 +19,8 @@ use super::{
         catalog::PluginHostState,
         http::PluginHttpRequest,
         runtime::{PluginCallKey, PluginHostServices},
-        sessions::{PluginAccountKey, PluginSessionCoordinator},
+        secrets,
+        sessions::{PluginAccountKey, PluginSessionCoordinator, bump_session_generation},
     },
     routing::gate::{GatedRoutePlan, plan_routes},
 };
@@ -178,10 +179,7 @@ impl PluginServiceFrontend {
         let key = PluginCallKey::provider(plugin_id, provider_id);
         let result = self
             .runtime
-            .execute_guest_call(
-                key,
-                client.auth_poll(plugin_id, provider_id, challenge_id),
-            )
+            .execute_guest_call(key, client.auth_poll(plugin_id, provider_id, challenge_id))
             .await?;
         validate_auth_poll_result(&result, provider_id)?;
         if let AuthPollResult::Authenticated(account) = &result {
@@ -235,6 +233,94 @@ impl PluginServiceFrontend {
         Ok(false)
     }
 
+    /// Attempt to restore every quarantined pending account across all providers.
+    /// This is typically called once on startup after the async runtime is initialized.
+    pub async fn restore_all_pending_accounts(&self) -> Vec<(PluginAccountKey, Result<bool>)> {
+        let pending: Vec<PluginAccountKey> = {
+            let Ok(sessions) = self.sessions.read() else {
+                return Vec::new();
+            };
+            sessions.pending_accounts().cloned().collect()
+        };
+        let mut results = Vec::with_capacity(pending.len());
+        for key in pending {
+            if super::host::package_manager::global().is_some_and(|m| !m.is_enabled(&key.plugin_id))
+            {
+                // Skip disabled plugins so their accounts are not failed closed during startup quarantine.
+                continue;
+            }
+            let res = self.restore_pending_account(&key).await;
+            results.push((key, res));
+        }
+        results
+    }
+
+    /// Attempt to restore sessions for a specific plugin after it is enabled.
+    /// This queries the plugin's persisted credentials and revives any matching accounts to Authenticated.
+    pub async fn restore_plugin_accounts(&self, plugin_id: &str) -> Result<usize> {
+        if super::host::package_manager::global().is_some_and(|m| !m.is_enabled(plugin_id)) {
+            return Ok(0);
+        }
+
+        let providers: Vec<String> = {
+            let catalog_view = self.runtime.catalog();
+            let plugin = catalog_view
+                .plugins()
+                .iter()
+                .find(|p| p.manifest.id == plugin_id);
+            let Some(plugin) = plugin else {
+                return Ok(0);
+            };
+            plugin
+                .manifest
+                .providers
+                .iter()
+                .filter(|p| p.capabilities.contains(&PluginCapability::Authentication))
+                .map(|p| p.id.clone())
+                .collect()
+        };
+
+        if providers.is_empty() {
+            return Ok(0);
+        }
+
+        let client = self.require_client()?;
+        let mut restored_count = 0;
+
+        for provider_id in providers {
+            let call_key = PluginCallKey::provider(plugin_id, &provider_id);
+            let accounts_result = self
+                .runtime
+                .execute_guest_call(call_key, client.accounts(plugin_id, &provider_id))
+                .await;
+
+            let accounts = match accounts_result {
+                Ok(accounts) => accounts,
+                Err(error) => {
+                    tracing::warn!(%error, plugin_id, provider_id = %provider_id, "查询插件已存账号以自愈恢复会话失败");
+                    continue;
+                }
+            };
+
+            if let Err(error) = validate_provider_accounts(&accounts, &provider_id) {
+                tracing::warn!(%error, plugin_id, provider_id = %provider_id, "插件返回的已存账号校验失败");
+                continue;
+            }
+
+            for account in accounts {
+                if let Err(error) =
+                    self.accept_authenticated_account(plugin_id, &provider_id, account)
+                {
+                    tracing::warn!(%error, plugin_id, provider_id = %provider_id, "自愈恢复插件账号失败");
+                } else {
+                    restored_count += 1;
+                }
+            }
+        }
+
+        Ok(restored_count)
+    }
+
     /// Local logout is authoritative and happens before best-effort remote cleanup.
     pub async fn logout(&self, key: &PluginAccountKey) -> Result<PluginLogoutResult> {
         let local_state_changed = self
@@ -270,6 +356,45 @@ impl PluginServiceFrontend {
                 remote_error: Some(format!("{error:#}")),
             }),
         }
+    }
+
+    /// Switch the active/default account for a provider.
+    pub fn set_default_account(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        let changed = self
+            .host
+            .write()
+            .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
+            .set_default_account(plugin_id, provider_id, account_id)?;
+        if changed {
+            bump_session_generation();
+        }
+        Ok(changed)
+    }
+
+    /// Completely remove an account from Host state and clean its secrets.
+    pub fn remove_account_by_id(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        if let Some(store) = secrets::global() {
+            let _ = store.delete_account(plugin_id, provider_id, account_id);
+        }
+        let changed = self
+            .host
+            .write()
+            .map_err(|error| anyhow!("插件宿主状态锁已损坏: {error}"))?
+            .remove_account(plugin_id, provider_id, account_id)?;
+        if changed {
+            bump_session_generation();
+        }
+        Ok(changed)
     }
 
     pub async fn resolve_track(
@@ -826,7 +951,10 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
     }
     if query.title.contains('\0')
         || query.album.contains('\0')
-        || query.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || query
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
         || query
             .musicbrainz_recording_id
             .as_ref()
@@ -839,7 +967,10 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
         bail!("Metadata track query 文本包含 NUL");
     }
     if bytes > MAX_PLUGIN_TRACK_TEXT_BYTES {
-        bail!("Metadata track query 文本超过 {} bytes", MAX_PLUGIN_TRACK_TEXT_BYTES);
+        bail!(
+            "Metadata track query 文本超过 {} bytes",
+            MAX_PLUGIN_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }
@@ -905,12 +1036,18 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bytes = bytes.saturating_add(artist.len());
     }
     if track.album.contains('\0')
-        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
     {
         bail!("Metadata track 文本包含 NUL");
     }
     if bytes > MAX_PLUGIN_TRACK_TEXT_BYTES {
-        bail!("Metadata track 文本超过 {} bytes Host 上限", MAX_PLUGIN_TRACK_TEXT_BYTES);
+        bail!(
+            "Metadata track 文本超过 {} bytes Host 上限",
+            MAX_PLUGIN_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }
@@ -1061,10 +1198,7 @@ pub fn plugin_lyrics_to_player(
         format!("{} · {}", source_prefix.trim(), guest_source)
     };
     Ok(Some(LyricsDocument::from_sources(
-        plain,
-        synced,
-        None,
-        source,
+        plain, synced, None, source,
     )))
 }
 
@@ -1073,7 +1207,10 @@ fn checked_lyric_bytes(current: usize, additional: usize) -> Result<usize> {
         .checked_add(additional)
         .ok_or_else(|| anyhow!("插件歌词文本大小溢出"))?;
     if total > MAX_PLUGIN_LYRIC_INPUT_BYTES {
-        bail!("插件歌词文本超过 {} bytes 限制", MAX_PLUGIN_LYRIC_INPUT_BYTES);
+        bail!(
+            "插件歌词文本超过 {} bytes 限制",
+            MAX_PLUGIN_LYRIC_INPUT_BYTES
+        );
     }
     Ok(total)
 }
@@ -1162,7 +1299,10 @@ fn push_xml_text(output: &mut String, value: &str) -> Result<()> {
             character => output.push(character),
         }
         if output.len() > MAX_PLUGIN_LYRIC_TTML_BYTES {
-            bail!("插件 canonical TTML 超过 {} bytes 限制", MAX_PLUGIN_LYRIC_TTML_BYTES);
+            bail!(
+                "插件 canonical TTML 超过 {} bytes 限制",
+                MAX_PLUGIN_LYRIC_TTML_BYTES
+            );
         }
     }
     Ok(())
@@ -1170,7 +1310,10 @@ fn push_xml_text(output: &mut String, value: &str) -> Result<()> {
 
 fn ensure_ttml_limit(output: &str) -> Result<()> {
     if output.len() > MAX_PLUGIN_LYRIC_TTML_BYTES {
-        bail!("插件 canonical TTML 超过 {} bytes 限制", MAX_PLUGIN_LYRIC_TTML_BYTES);
+        bail!(
+            "插件 canonical TTML 超过 {} bytes 限制",
+            MAX_PLUGIN_LYRIC_TTML_BYTES
+        );
     }
     Ok(())
 }
@@ -1361,7 +1504,12 @@ mod tests {
             .expect("convert")
             .expect("lyrics");
         assert_eq!(player.source, "插件 QQ · provider-authored");
-        assert!(player.synced.as_deref().is_some_and(|value| value.contains("&amp;")));
+        assert!(
+            player
+                .synced
+                .as_deref()
+                .is_some_and(|value| value.contains("&amp;"))
+        );
         let line = &player.timed_lines()[0];
         assert_eq!(line.text, "你&好");
         assert_eq!(line.translation.as_deref(), Some("<hello & hi>"));

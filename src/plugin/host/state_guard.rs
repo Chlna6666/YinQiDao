@@ -87,9 +87,8 @@ fn validate_plugin_package_descriptors(base_dir: &Path) -> Result<()> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("读取插件目录 metadata 失败: {}", plugin_root.display())
-            });
+            return Err(error)
+                .with_context(|| format!("读取插件目录 metadata 失败: {}", plugin_root.display()));
         }
     };
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -103,17 +102,16 @@ fn validate_plugin_package_descriptors(base_dir: &Path) -> Result<()> {
         .with_context(|| format!("读取插件目录失败: {}", plugin_root.display()))?;
     let mut root_entries = 0usize;
     for entry in entries {
-        let entry = entry.with_context(|| {
-            format!("读取插件目录条目失败: {}", plugin_root.display())
-        })?;
+        let entry =
+            entry.with_context(|| format!("读取插件目录条目失败: {}", plugin_root.display()))?;
         root_entries = root_entries.saturating_add(1);
         if root_entries > MAX_PLUGIN_ROOT_ENTRIES {
             bail!("插件目录条目数量超过 {MAX_PLUGIN_ROOT_ENTRIES} Host 启动上限");
         }
 
-        let file_type = entry.file_type().with_context(|| {
-            format!("读取插件目录条目类型失败: {}", entry.path().display())
-        })?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取插件目录条目类型失败: {}", entry.path().display()))?;
         if !file_type.is_dir() {
             continue;
         }
@@ -217,8 +215,12 @@ pub fn repair_fail_closed_state(
     // the next startup runs this guard again before PackageManager/runtime initialization and again
     // converges to all-disabled. We must not rename the corrupt file away first because that would
     // create a crash window where a missing state file means "all enabled".
-    fs::write(&state_path, payload)
-        .with_context(|| format!("写入 fail-closed 插件启停状态失败: {}", state_path.display()))?;
+    fs::write(&state_path, payload).with_context(|| {
+        format!(
+            "写入 fail-closed 插件启停状态失败: {}",
+            state_path.display()
+        )
+    })?;
 
     Ok(Some(PluginStateRecovery {
         reason,
@@ -276,7 +278,11 @@ auth_methods = ["qr_code"]
         fs::write(&path, content).expect("write state");
         let catalog = PluginCatalog::discover(root.join("plugins"));
 
-        assert!(repair_fail_closed_state(&root, &catalog).expect("guard").is_none());
+        assert!(
+            repair_fail_closed_state(&root, &catalog)
+                .expect("guard")
+                .is_none()
+        );
         assert_eq!(fs::read_to_string(&path).expect("read"), content);
         fs::remove_dir_all(root).expect("cleanup");
     }

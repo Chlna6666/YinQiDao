@@ -180,6 +180,18 @@ pub fn service_summaries() -> Result<Vec<PluginServiceSummary>> {
     Ok(summaries)
 }
 
+pub fn set_default_account(plugin_id: &str, provider_id: &str, account_id: &str) -> Result<bool> {
+    let host_state = catalog::global().ok_or_else(|| anyhow!("插件 Host state 尚未初始化"))?;
+    let changed = host_state
+        .write()
+        .map_err(|error| anyhow!("插件 Host state 锁已损坏: {error}"))?
+        .set_default_account(plugin_id, provider_id, account_id)?;
+    if changed {
+        sessions::bump_session_generation();
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

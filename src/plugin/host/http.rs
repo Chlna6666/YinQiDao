@@ -453,7 +453,8 @@ fn rewrite_redirect_request(
     body: &mut Vec<u8>,
     headers: &mut HeaderMap,
 ) {
-    let switch_to_get = status == 303 || ((status == 301 || status == 302) && *method == Method::POST);
+    let switch_to_get =
+        status == 303 || ((status == 301 || status == 302) && *method == Method::POST);
     if switch_to_get && *method != Method::HEAD {
         *method = Method::GET;
         body.clear();
@@ -601,7 +602,10 @@ async fn stream_response(
     })
 }
 
-fn collect_response_headers(headers: &HeaderMap, limits: &PluginHttpLimits) -> Result<Vec<KeyValue>> {
+fn collect_response_headers(
+    headers: &HeaderMap,
+    limits: &PluginHttpLimits,
+) -> Result<Vec<KeyValue>> {
     if headers.len() > limits.max_header_count {
         bail!("插件 HTTP response header 数量超过限制");
     }
@@ -659,16 +663,13 @@ fn ipv6_is_public(ip: Ipv6Addr) -> bool {
         && segments[3] == 0
         && segments[4] == 0;
     let local_nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001;
-    let discard_only = segments[0] == 0x0100
-        && segments[1] == 0
-        && segments[2] == 0
-        && segments[3] == 0;
+    let discard_only =
+        segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0;
     let teredo = segments[0] == 0x2001 && segments[1] == 0;
     let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002;
     let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
     let orchid = segments[0] == 0x2001
-        && ((0x0010..=0x001f).contains(&segments[1])
-            || (0x0020..=0x002f).contains(&segments[1]));
+        && ((0x0010..=0x001f).contains(&segments[1]) || (0x0020..=0x002f).contains(&segments[1]));
     let six_to_four = segments[0] == 0x2002;
 
     !(ip.is_loopback()
@@ -736,8 +737,20 @@ mod tests {
         assert!(parse_method("GET", &limits).is_ok());
         assert!(parse_request_url("https://api.example.com/v1", &limits).is_ok());
         assert!(parse_method(&"X".repeat(limits.max_method_bytes + 1), &limits).is_err());
-        assert!(parse_method(&format!("{}GET", " ".repeat(limits.max_method_bytes)), &limits).is_err());
-        assert!(parse_request_url(&format!("https://example.com/{}", "x".repeat(limits.max_url_bytes)), &limits).is_err());
+        assert!(
+            parse_method(
+                &format!("{}GET", " ".repeat(limits.max_method_bytes)),
+                &limits
+            )
+            .is_err()
+        );
+        assert!(
+            parse_request_url(
+                &format!("https://example.com/{}", "x".repeat(limits.max_url_bytes)),
+                &limits
+            )
+            .is_err()
+        );
         assert!(parse_request_url("https://example.com/bad\0url", &limits).is_err());
     }
 
@@ -784,11 +797,17 @@ mod tests {
         let first = ["1.1.1.1:443".parse().expect("socket")];
         let second = ["1.0.0.1:443".parse().expect("socket")];
 
-        executor.pinned_client("api.example.com", &first).expect("first client");
-        executor.pinned_client("api.example.com", &first).expect("reused client");
+        executor
+            .pinned_client("api.example.com", &first)
+            .expect("first client");
+        executor
+            .pinned_client("api.example.com", &first)
+            .expect("reused client");
         assert_eq!(executor.cached_client_count().expect("count"), 1);
 
-        executor.pinned_client("api.example.com", &second).expect("second dns set");
+        executor
+            .pinned_client("api.example.com", &second)
+            .expect("second dns set");
         assert_eq!(executor.cached_client_count().expect("count"), 2);
     }
 

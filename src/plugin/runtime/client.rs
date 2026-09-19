@@ -11,8 +11,8 @@ use super::abi::{
     CollectionRecommendationRequest, KeyValue, MediaCollection, MediaCollectionKind,
     MediaCollectionRef, PlaybackSignal, PlaylistDescriptor, PluginLyricDocument, PluginManifest,
     ProviderAccount, RecognitionRequest, RecognitionResult, RecommendationItem,
-    RecommendationRequest, RemoteTrack, SourceTrackRef, StreamDescriptor, StreamRequest, TrackQuery,
-    UserProfile,
+    RecommendationRequest, RemoteTrack, SourceTrackRef, StreamDescriptor, StreamRequest,
+    TrackQuery, UserProfile,
 };
 
 /// Future returned by the runtime-neutral provider client boundary.
@@ -156,12 +156,57 @@ pub trait PluginProviderClient: Send + Sync {
         tracks: &'a [SourceTrackRef],
     ) -> PluginClientFuture<'a, bool>;
 
+    fn playlist_rename<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        playlist_id: &'a str,
+        name: &'a str,
+    ) -> PluginClientFuture<'a, bool>;
+
+    fn playlist_delete<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        playlist_id: &'a str,
+    ) -> PluginClientFuture<'a, bool>;
+
     fn media_collections<'a>(
         &'a self,
         plugin_id: &'a str,
         provider_id: &'a str,
         account_id: &'a str,
         kind: MediaCollectionKind,
+        offset: u32,
+        limit: u16,
+    ) -> PluginClientFuture<'a, Vec<MediaCollection>>;
+
+    fn media_collection_detail<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: Option<&'a str>,
+        collection: &'a MediaCollectionRef,
+    ) -> PluginClientFuture<'a, MediaCollection>;
+
+    fn collection_tracks<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: Option<&'a str>,
+        collection: &'a MediaCollectionRef,
+        offset: u32,
+        limit: u16,
+    ) -> PluginClientFuture<'a, Vec<RemoteTrack>>;
+
+    fn collection_items<'a>(
+        &'a self,
+        plugin_id: &'a str,
+        provider_id: &'a str,
+        account_id: Option<&'a str>,
+        collection: &'a MediaCollectionRef,
         offset: u32,
         limit: u16,
     ) -> PluginClientFuture<'a, Vec<MediaCollection>>;
@@ -264,7 +309,9 @@ impl std::fmt::Debug for PluginClientRegistry {
 impl PluginClientRegistry {
     pub fn client(&self) -> Result<Option<Arc<dyn PluginProviderClient>>> {
         if super::runtime_ports::is_swapping() {
-            return Err(anyhow!("插件 Component runtime 正在切换，Provider 调用暂不可用"));
+            return Err(anyhow!(
+                "插件 Component runtime 正在切换，Provider 调用暂不可用"
+            ));
         }
         Ok(self
             .client

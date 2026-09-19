@@ -118,7 +118,10 @@ impl PluginServiceFrontend {
         }
         prune_stale_auth_flows(&mut flows, current_generation);
         if flows.len() >= MAX_ACTIVE_AUTH_FLOWS {
-            bail!("Host 活跃插件认证 flow 已达到 {} 个上限", MAX_ACTIVE_AUTH_FLOWS);
+            bail!(
+                "Host 活跃插件认证 flow 已达到 {} 个上限",
+                MAX_ACTIVE_AUTH_FLOWS
+            );
         }
         let flow_id = allocate_flow_id(&flows);
         let flow = ActiveAuthFlow {
@@ -652,11 +655,9 @@ mod tests {
 
     #[test]
     fn auth_submit_rejects_oversized_value() {
-        let error = validate_submission(&[field(
-            "cookie",
-            &"x".repeat(MAX_AUTH_FIELD_VALUE_BYTES + 1),
-        )])
-        .expect_err("oversized value must fail");
+        let error =
+            validate_submission(&[field("cookie", &"x".repeat(MAX_AUTH_FIELD_VALUE_BYTES + 1))])
+                .expect_err("oversized value must fail");
         assert!(error.to_string().contains("大小限制"));
     }
 

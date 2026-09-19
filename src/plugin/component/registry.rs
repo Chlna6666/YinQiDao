@@ -10,10 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use md5::{Digest, Md5};
 
-use super::super::{
-    abi::PLUGIN_ABI_VERSION,
-    host::catalog::InstalledPlugin,
-};
+use super::super::{abi::PLUGIN_ABI_VERSION, host::catalog::InstalledPlugin};
 
 pub const SELECTED_WASMTIME_VERSION: &str = "48.0.1";
 const COMPONENT_CACHE_SCHEMA_VERSION: u32 = 1;
@@ -85,7 +82,10 @@ impl PluginComponentSnapshot {
     /// A crash before the verifier rename simply makes that artifact ineligible for reuse.
     pub fn persist_source_verifier(&self) -> Result<()> {
         fs::create_dir_all(&self.cache_dir).with_context(|| {
-            format!("创建插件 compiled cache 目录失败: {}", self.cache_dir.display())
+            format!(
+                "创建插件 compiled cache 目录失败: {}",
+                self.cache_dir.display()
+            )
         })?;
 
         let nonce = SystemTime::now()
@@ -100,8 +100,16 @@ impl PluginComponentSnapshot {
             .create_new(true)
             .write(true)
             .open(&temp_path)
-            .with_context(|| format!("创建插件 source verifier 临时文件失败: {}", temp_path.display()))?;
-        if let Err(error) = file.write_all(self.bytes.as_ref()).and_then(|_| file.sync_all()) {
+            .with_context(|| {
+                format!(
+                    "创建插件 source verifier 临时文件失败: {}",
+                    temp_path.display()
+                )
+            })?;
+        if let Err(error) = file
+            .write_all(self.bytes.as_ref())
+            .and_then(|_| file.sync_all())
+        {
             let _ = fs::remove_file(&temp_path);
             return Err(error).context("写入插件 source verifier 失败");
         }
@@ -242,12 +250,8 @@ fn load_snapshot(
 ) -> Result<PluginComponentSnapshot> {
     // Revalidate both canonical paths at lazy-load time. The catalog may have been created much
     // earlier than the first plugin call, and installers/updaters can replace files in between.
-    let package_dir = fs::canonicalize(&plugin.package_dir).with_context(|| {
-        format!(
-            "重新规范化插件目录失败: {}",
-            plugin.package_dir.display()
-        )
-    })?;
+    let package_dir = fs::canonicalize(&plugin.package_dir)
+        .with_context(|| format!("重新规范化插件目录失败: {}", plugin.package_dir.display()))?;
     let component_path = fs::canonicalize(&plugin.component_path).with_context(|| {
         format!(
             "重新规范化插件 Component 失败: {}",
@@ -260,9 +264,12 @@ fn load_snapshot(
 
     let file = File::open(&component_path)
         .with_context(|| format!("打开插件 Component 失败: {}", component_path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("读取已打开 Component metadata 失败: {}", component_path.display()))?;
+    let metadata = file.metadata().with_context(|| {
+        format!(
+            "读取已打开 Component metadata 失败: {}",
+            component_path.display()
+        )
+    })?;
     if !metadata.is_file() {
         bail!("插件 Component 不是普通文件: {}", component_path.display());
     }
@@ -326,7 +333,10 @@ fn compiled_cache_key(plugin_id: &str, bytes: &[u8]) -> String {
     hasher.update(plugin_id.as_bytes());
     hasher.update([0]);
     hasher.update(bytes);
-    format!("component-v{COMPONENT_CACHE_SCHEMA_VERSION}-{}", to_hex(&hasher.finalize()))
+    format!(
+        "component-v{COMPONENT_CACHE_SCHEMA_VERSION}-{}",
+        to_hex(&hasher.finalize())
+    )
 }
 
 fn file_contents_equal(path: &Path, expected: &[u8]) -> Result<bool> {
@@ -439,8 +449,14 @@ mod tests {
         assert_eq!(snapshot.plugin_id, "plugin.test");
         assert!(snapshot.compiled_cache_key.starts_with("component-v1-"));
         assert_eq!(snapshot.cache_dir.parent(), Some(registry.cache_root()));
-        assert_eq!(snapshot.compiled_cache_path.parent(), Some(snapshot.cache_dir.as_path()));
-        assert_eq!(snapshot.source_verifier_path.parent(), Some(snapshot.cache_dir.as_path()));
+        assert_eq!(
+            snapshot.compiled_cache_path.parent(),
+            Some(snapshot.cache_dir.as_path())
+        );
+        assert_eq!(
+            snapshot.source_verifier_path.parent(),
+            Some(snapshot.cache_dir.as_path())
+        );
         assert_eq!(snapshot.bytes.as_ref(), b"\0asm\x0d\x00\x01\x00");
         let _ = fs::remove_dir_all(root);
     }
@@ -455,10 +471,20 @@ mod tests {
         fs::write(&snapshot.compiled_cache_path, b"compiled").expect("compiled artifact");
 
         fs::write(&snapshot.source_verifier_path, b"different").expect("wrong verifier");
-        assert!(!snapshot.cached_artifact_is_reusable().expect("wrong verifier check"));
+        assert!(
+            !snapshot
+                .cached_artifact_is_reusable()
+                .expect("wrong verifier check")
+        );
 
-        snapshot.persist_source_verifier().expect("persist verifier");
-        assert!(snapshot.cached_artifact_is_reusable().expect("exact verifier check"));
+        snapshot
+            .persist_source_verifier()
+            .expect("persist verifier");
+        assert!(
+            snapshot
+                .cached_artifact_is_reusable()
+                .expect("exact verifier check")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

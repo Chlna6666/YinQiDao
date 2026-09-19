@@ -217,7 +217,12 @@ mod tests {
     fn unhealthy_primary_does_not_hide_healthy_secondary_for_single_route() {
         let mut router = PluginServiceRouter::default();
         router.upsert_account(account("netease", "primary", 100, PluginCapability::Lyrics));
-        router.upsert_account(account("qqmusic", "secondary", 10, PluginCapability::Lyrics));
+        router.upsert_account(account(
+            "qqmusic",
+            "secondary",
+            10,
+            PluginCapability::Lyrics,
+        ));
         let sessions = PluginSessionCoordinator::default();
         let mut health = MockHealth::default();
         health.values.insert(
@@ -244,8 +249,18 @@ mod tests {
     #[test]
     fn single_route_plan_keeps_secondary_execution_candidates() {
         let mut router = PluginServiceRouter::default();
-        router.upsert_account(account("netease", "primary", 100, PluginCapability::Metadata));
-        router.upsert_account(account("qqmusic", "secondary", 10, PluginCapability::Metadata));
+        router.upsert_account(account(
+            "netease",
+            "primary",
+            100,
+            PluginCapability::Metadata,
+        ));
+        router.upsert_account(account(
+            "qqmusic",
+            "secondary",
+            10,
+            PluginCapability::Metadata,
+        ));
         let gated = plan_routes(
             &router,
             &PluginSessionCoordinator::default(),

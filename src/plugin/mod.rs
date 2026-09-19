@@ -52,10 +52,10 @@ use anyhow::Result;
 pub(crate) mod abi;
 #[path = "application/accounts.rs"]
 pub(crate) mod accounts;
-#[path = "application/auth.rs"]
-pub(crate) mod auth;
 #[path = "application/assets.rs"]
 pub(crate) mod assets;
+#[path = "application/auth.rs"]
+pub(crate) mod auth;
 #[path = "runtime/client.rs"]
 pub(crate) mod client;
 #[path = "application/cloud_library.rs"]
@@ -80,12 +80,12 @@ pub(crate) mod playlists;
 pub(crate) mod recognition;
 #[path = "application/recommendations.rs"]
 pub(crate) mod recommendations;
+#[path = "runtime/ports.rs"]
+pub(crate) mod runtime_ports;
 #[path = "application/search.rs"]
 pub(crate) mod search;
 #[path = "application/streaming.rs"]
 pub(crate) mod streaming;
-#[path = "runtime/ports.rs"]
-pub(crate) mod runtime_ports;
 
 pub(crate) mod component;
 pub(crate) mod host;
@@ -120,7 +120,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
     )?;
 
     let secret_store = host::secrets::initialize(std::sync::Arc::new(
-        host::secrets::MemorySecretStore::default(),
+        host::secrets::ProtectedFileSecretStore::new(base_dir.join("plugin-secrets.dat"))?,
     ));
     let secret_backend = host::secrets::PluginSecretStore::backend_name(secret_store.as_ref());
     let secret_protection = host::secrets::PluginSecretStore::protection(secret_store.as_ref());
@@ -129,7 +129,7 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
 
     let mut gc_policy = component::gc::PluginGcPolicy::default();
     gc_policy.max_warm_instances_per_route = engine_policy.max_pooled_instances_per_route;
-    let gc = component::gc::initialize(components.cache_root().to_path_buf(), gc_policy)?;
+    let gc = component::gc::initialize(components.cache_root().to_path_buf(), gc_policy.clone())?;
     let initial_gc = gc.sweep_once()?;
 
     let ui_registry = ui::registry::initialize();
@@ -176,6 +176,18 @@ pub(crate) fn initialize(base_dir: &Path) -> Result<()> {
             clients.clone(),
         )
     });
+
+    if let Some(runtime_services) = runtime.as_ref() {
+        let wasmtime_runtime =
+            component::wasmtime::initialize(runtime_services.clone(), engine_policy.clone())?;
+        let adapter = std::sync::Arc::new(component::adapter::WasmtimeComponentAdapter::new(
+            wasmtime_runtime,
+            components.clone(),
+            plugin_host.clone(),
+            gc_policy.max_compiled_components,
+        ));
+        runtime_ports::install(adapter)?;
+    }
 
     tracing::info!(
         selected_wasmtime = components.selected_runtime_version(),

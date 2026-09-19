@@ -99,12 +99,7 @@ impl PluginServiceFrontend {
                 let result = runtime
                     .execute_guest_call(
                         key,
-                        client.recommendations(
-                            &plugin_id,
-                            &provider_id,
-                            &account_id,
-                            &request,
-                        ),
+                        client.recommendations(&plugin_id, &provider_id, &account_id, &request),
                     )
                     .await;
                 (rank, route, result)
@@ -221,7 +216,10 @@ fn validate_track_query(query: &TrackQuery) -> Result<()> {
     }
     if query.title.contains('\0')
         || query.album.contains('\0')
-        || query.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || query
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
         || query
             .musicbrainz_recording_id
             .as_ref()
@@ -298,7 +296,10 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bytes = bytes.saturating_add(artist.len());
     }
     if track.album.contains('\0')
-        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
         || track
             .cover_url
             .as_ref()
@@ -307,7 +308,10 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bail!("recommendation track 文本包含 NUL");
     }
     if bytes > MAX_TRACK_TEXT_BYTES {
-        bail!("recommendation track 文本超过 {} bytes", MAX_TRACK_TEXT_BYTES);
+        bail!(
+            "recommendation track 文本超过 {} bytes",
+            MAX_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }

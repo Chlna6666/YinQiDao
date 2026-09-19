@@ -97,7 +97,10 @@ pub struct UiThemeContribution {
     pub tokens_asset: String,
 }
 
-pub fn validate_contributions(plugin_id: &str, contributions: &PluginUiContributions) -> Result<()> {
+pub fn validate_contributions(
+    plugin_id: &str,
+    contributions: &PluginUiContributions,
+) -> Result<()> {
     validate_namespace_id(plugin_id, "plugin id")?;
     if contributions.routes.len() > MAX_ROUTES {
         bail!("插件 UI route 数量超过 {MAX_ROUTES}");
@@ -138,7 +141,11 @@ pub fn validate_contributions(plugin_id: &str, contributions: &PluginUiContribut
             validate_namespace_id(provider_id, "required provider id")?;
         }
         if !page_ids.contains(route.page_id.as_str()) {
-            bail!("插件 UI route {} 引用了不存在的 page {}", route.id, route.page_id);
+            bail!(
+                "插件 UI route {} 引用了不存在的 page {}",
+                route.id,
+                route.page_id
+            );
         }
         if !route_ids.insert(route.id.as_str()) {
             bail!("插件 UI route id 重复: {}", route.id);
@@ -184,7 +191,10 @@ pub fn validate_contributions(plugin_id: &str, contributions: &PluginUiContribut
             .extension()
             .and_then(|value| value.to_str());
         if !matches!(extension, Some("toml" | "json")) {
-            bail!("插件 Theme tokens 仅支持 .toml/.json: {}", theme.tokens_asset);
+            bail!(
+                "插件 Theme tokens 仅支持 .toml/.json: {}",
+                theme.tokens_asset
+            );
         }
         if !theme_ids.insert(theme.id.as_str()) {
             bail!("插件 UI theme id 重复: {}", theme.id);
@@ -228,9 +238,7 @@ fn validate_namespace_id(value: &str, label: &str) -> Result<()> {
         || value.starts_with('.')
         || value.ends_with('.')
         || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         })
     {
         bail!("插件 UI {label} 非法: {value:?}");

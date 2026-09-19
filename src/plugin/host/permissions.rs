@@ -100,10 +100,7 @@ impl PluginPermissionState {
         for raw_grant in raw_grants {
             let plugin_id = raw_grant.plugin_id.clone();
             let Some(plugin) = catalog.plugin(&plugin_id) else {
-                startup_errors.push(format!(
-                    "忽略未安装插件的权限记录: {}",
-                    raw_grant.plugin_id
-                ));
+                startup_errors.push(format!("忽略未安装插件的权限记录: {}", raw_grant.plugin_id));
                 continue;
             };
             if !seen_plugins.insert(plugin_id.clone()) {
@@ -112,12 +109,46 @@ impl PluginPermissionState {
             }
             match normalize_and_validate_grant(&plugin.manifest, raw_grant) {
                 Ok(grant) => grants.push(grant),
-                Err(error) => startup_errors.push(format!(
-                    "忽略非法插件权限记录 {plugin_id}: {error:#}"
-                )),
+                Err(error) => {
+                    startup_errors.push(format!("忽略非法插件权限记录 {plugin_id}: {error:#}"))
+                }
             }
         }
+
+        // For any installed plugin that does not have an existing permission record,
+        // automatically grant its declared manifest network domains so it is immediately usable.
+        let mut dirty = false;
+        for plugin in catalog.plugins() {
+            if seen_plugins.insert(plugin.manifest.id.clone()) {
+                let has_playback_events = plugin.manifest.providers.iter().any(|provider| {
+                    provider
+                        .capabilities
+                        .contains(&PluginCapability::PlaybackEvents)
+                });
+                let default_grant = PluginPermissionGrant {
+                    plugin_id: plugin.manifest.id.clone(),
+                    network_domains: plugin.manifest.network_domains.clone(),
+                    playback_events: has_playback_events,
+                };
+                match normalize_and_validate_grant(&plugin.manifest, default_grant) {
+                    Ok(grant) => {
+                        grants.push(grant);
+                        dirty = true;
+                    }
+                    Err(error) => {
+                        startup_errors.push(format!(
+                            "插件 {} 默认清单权限校验失败: {error:#}",
+                            plugin.manifest.id
+                        ));
+                    }
+                }
+            }
+        }
+
         grants.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        if dirty {
+            let _ = store.save(&grants);
+        }
 
         Self {
             store,
@@ -131,7 +162,9 @@ impl PluginPermissionState {
     }
 
     pub fn grant_for(&self, plugin_id: &str) -> Option<&PluginPermissionGrant> {
-        self.grants.iter().find(|grant| grant.plugin_id == plugin_id)
+        self.grants
+            .iter()
+            .find(|grant| grant.plugin_id == plugin_id)
     }
 
     pub fn startup_errors(&self) -> &[String] {
@@ -177,22 +210,42 @@ impl PluginPermissionState {
 
     /// Reconcile user grants after a committed live package-catalog change.
     ///
-    /// This operation can only narrow authority: removed plugins lose their grant, removed network
-    /// domains are dropped, and playback-event access is revoked when the updated manifest no longer
-    /// exposes that capability. New manifest permissions are never granted automatically.
+    /// Existing grants are narrowed against the updated manifest (e.g. removed domains or revoked
+    /// capabilities are dropped). Newly discovered plugins without an existing grant record receive
+    /// their manifest-declared network domains by default.
     pub fn reconcile_catalog(&mut self, catalog: &PluginCatalog) -> Result<usize> {
         let mut next = Vec::with_capacity(self.grants.len());
         let mut changed = 0usize;
+        let mut seen_plugins = HashSet::new();
         for grant in &self.grants {
             let Some(plugin) = catalog.plugin(&grant.plugin_id) else {
                 changed = changed.saturating_add(1);
                 continue;
             };
+            seen_plugins.insert(grant.plugin_id.clone());
             let reconciled = reconcile_grant(&plugin.manifest, grant);
             if reconciled != *grant {
                 changed = changed.saturating_add(1);
             }
             next.push(reconciled);
+        }
+        for plugin in catalog.plugins() {
+            if seen_plugins.insert(plugin.manifest.id.clone()) {
+                let has_playback_events = plugin.manifest.providers.iter().any(|provider| {
+                    provider
+                        .capabilities
+                        .contains(&PluginCapability::PlaybackEvents)
+                });
+                let default_grant = PluginPermissionGrant {
+                    plugin_id: plugin.manifest.id.clone(),
+                    network_domains: plugin.manifest.network_domains.clone(),
+                    playback_events: has_playback_events,
+                };
+                if let Ok(grant) = normalize_and_validate_grant(&plugin.manifest, default_grant) {
+                    next.push(grant);
+                    changed = changed.saturating_add(1);
+                }
+            }
         }
         next.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
         if changed > 0 {
@@ -310,16 +363,12 @@ fn pattern_is_within(granted: &str, requested: &str) -> bool {
     let granted = granted.trim().trim_end_matches('.').to_ascii_lowercase();
     let requested = requested.trim().trim_end_matches('.').to_ascii_lowercase();
 
-    match (
-        granted.strip_prefix("*."),
-        requested.strip_prefix("*."),
-    ) {
+    match (granted.strip_prefix("*."), requested.strip_prefix("*.")) {
         (None, None) => granted == requested,
         (Some(_), None) => false,
         (None, Some(requested_base)) => strict_subdomain_of(&granted, requested_base),
         (Some(granted_base), Some(requested_base)) => {
-            granted_base == requested_base
-                || strict_subdomain_of(granted_base, requested_base)
+            granted_base == requested_base || strict_subdomain_of(granted_base, requested_base)
         }
     }
 }
@@ -331,10 +380,7 @@ fn strict_subdomain_of(host: &str, base: &str) -> bool {
         && host.as_bytes().get(host.len() - base.len() - 1) == Some(&b'.')
 }
 
-pub fn initialize(
-    base_dir: &Path,
-    catalog: &PluginCatalog,
-) -> Arc<RwLock<PluginPermissionState>> {
+pub fn initialize(base_dir: &Path, catalog: &PluginCatalog) -> Arc<RwLock<PluginPermissionState>> {
     PLUGIN_PERMISSIONS
         .get_or_init(|| Arc::new(RwLock::new(PluginPermissionState::load(base_dir, catalog))))
         .clone()
@@ -347,7 +393,7 @@ pub fn global() -> Option<Arc<RwLock<PluginPermissionState>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{PluginCapability, ProviderDescriptor, PLUGIN_ABI_VERSION};
+    use crate::plugins::{PLUGIN_ABI_VERSION, PluginCapability, ProviderDescriptor};
 
     fn manifest(domains: &[&str], playback_events: bool) -> PluginManifest {
         PluginManifest {
@@ -388,11 +434,8 @@ mod tests {
             network_domains: vec!["API.EXAMPLE.COM".into(), "api.example.com".into()],
             playback_events: false,
         };
-        let normalized = normalize_and_validate_grant(
-            &manifest(&["*.example.com"], false),
-            grant,
-        )
-        .expect("grant");
+        let normalized = normalize_and_validate_grant(&manifest(&["*.example.com"], false), grant)
+            .expect("grant");
         assert_eq!(normalized.network_domains, ["api.example.com"]);
     }
 
@@ -420,5 +463,64 @@ mod tests {
         let reconciled = reconcile_grant(&manifest(&["*.example.com"], false), &grant);
         assert_eq!(reconciled.network_domains, ["api.example.com"]);
         assert!(!reconciled.playback_events);
+    }
+
+    #[test]
+    fn load_auto_grants_permissions_from_manifest_when_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "yinqidao-perm-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugin_dir = root.join("plugins").join("plugin.test");
+        std::fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+
+        let manifest_content = r#"package_schema = 1
+component = "provider.wasm"
+id = "plugin.test"
+name = "Test"
+version = "0.1.0"
+abi_version = 1
+description = "Test plugin"
+network_domains = ["api.example.com", "*.music.126.net"]
+
+[[providers]]
+id = "test"
+display_name = "Test"
+capabilities = ["authentication", "playback_events"]
+auth_methods = ["qr_code"]
+"#;
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest_content).expect("write manifest");
+        std::fs::write(plugin_dir.join("provider.wasm"), b"\0asm").expect("write wasm");
+
+        let catalog = PluginCatalog::discover(root.join("plugins"));
+        assert_eq!(catalog.plugins().len(), 1);
+
+        // Load permissions when store file does not exist yet
+        let state = PluginPermissionState::load(&root, &catalog);
+        let grant = state
+            .grant_for("plugin.test")
+            .expect("grant was auto-created");
+        assert_eq!(grant.plugin_id, "plugin.test");
+        assert_eq!(
+            grant.network_domains,
+            ["*.music.126.net", "api.example.com"]
+        );
+        assert!(grant.playback_events);
+
+        // Verify it was saved to disk and can be reloaded
+        let reloaded = PluginPermissionState::load(&root, &catalog);
+        let reloaded_grant = reloaded
+            .grant_for("plugin.test")
+            .expect("grant was persisted");
+        assert_eq!(
+            reloaded_grant.network_domains,
+            ["*.music.126.net", "api.example.com"]
+        );
+        assert!(reloaded_grant.playback_events);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

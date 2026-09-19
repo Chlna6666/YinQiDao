@@ -172,9 +172,7 @@ fn validate_node(
             }
         }
         UiNode::Button {
-            label,
-            action_id,
-            ..
+            label, action_id, ..
         } => {
             record_text(label, limits, state)?;
             record_action_id(action_id, state)?;

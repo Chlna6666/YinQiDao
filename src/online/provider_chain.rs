@@ -71,9 +71,10 @@ impl OnlineServices {
         let mut authenticated = self
             .enrich_from_authenticated_plugin(track, fetch_lyrics, fetch_artwork)
             .await?;
-        if authenticated.as_ref().is_some_and(|enrichment| {
-            !fetch_artwork || enrichment.result.artwork.is_some()
-        }) {
+        if authenticated
+            .as_ref()
+            .is_some_and(|enrichment| !fetch_artwork || enrichment.result.artwork.is_some())
+        {
             return Ok(authenticated.take().map(|enrichment| enrichment.result));
         }
 
@@ -81,9 +82,10 @@ impl OnlineServices {
         // authenticated plugin already resolved the track but did not provide valid artwork, these
         // searches are used only for artwork; search with the resolved identity so stale local tags
         // cannot poison that fallback.
-        let search_track = authenticated
-            .as_ref()
-            .map_or_else(|| track.clone(), |enrichment| enrichment.identity_track.clone());
+        let search_track = authenticated.as_ref().map_or_else(
+            || track.clone(),
+            |enrichment| enrichment.identity_track.clone(),
+        );
         let spotify_token = self.spotify_token().await;
         let mut searches = Vec::with_capacity(providers::ProviderKind::priority_order().len());
         for provider in providers::ProviderKind::priority_order() {
@@ -138,12 +140,8 @@ impl OnlineServices {
         if let Some(mut enrichment) = authenticated {
             if fetch_artwork && enrichment.result.artwork.is_none() {
                 let (artwork, artwork_key) = if let Some(matched) = matched.as_ref() {
-                    self.resolve_online_artwork(
-                        &enrichment.identity_track,
-                        matched,
-                        &candidates,
-                    )
-                    .await
+                    self.resolve_online_artwork(&enrichment.identity_track, matched, &candidates)
+                        .await
                 } else {
                     self.resolve_musicbrainz_artwork(&enrichment.identity_track)
                         .await
@@ -193,7 +191,7 @@ impl OnlineServices {
             let mut selected = provider_lyrics;
             if selected
                 .as_ref()
-                .map_or(true, |lyrics| !lyrics_have_word_timing(lyrics))
+                .is_none_or(|lyrics| !lyrics_have_word_timing(lyrics))
                 && let Some(word_timed) = self
                     .fetch_word_timed_lyrics_fallback(track, Some(matched.provider))
                     .await
@@ -206,7 +204,7 @@ impl OnlineServices {
 
             if selected
                 .as_ref()
-                .map_or(true, |lyrics| !lyrics.has_translation())
+                .is_none_or(|lyrics| !lyrics.has_translation())
                 && let Some(translated) = self
                     .fetch_translated_lyrics_fallback(track, Some(matched.provider))
                     .await
@@ -391,7 +389,7 @@ impl OnlineServices {
         if fetch_lyrics {
             if lyrics
                 .as_ref()
-                .map_or(true, |lyrics| !lyrics_have_word_timing(lyrics))
+                .is_none_or(|lyrics| !lyrics_have_word_timing(lyrics))
                 && let Some(word_timed) = self
                     .fetch_word_timed_lyrics_fallback(&identity_track, None)
                     .await
@@ -403,7 +401,7 @@ impl OnlineServices {
             }
             if lyrics
                 .as_ref()
-                .map_or(true, |lyrics| !lyrics.has_translation())
+                .is_none_or(|lyrics| !lyrics.has_translation())
                 && let Some(translated) = self
                     .fetch_translated_lyrics_fallback(&identity_track, None)
                     .await
@@ -443,9 +441,7 @@ impl OnlineServices {
                                     Some(bytes),
                                     Some(format!(
                                         "plugin:{}:{}:{}",
-                                        route.plugin_id,
-                                        route.provider_id,
-                                        remote.source.source_id
+                                        route.plugin_id, route.provider_id, remote.source.source_id
                                     )),
                                 )
                             }
@@ -624,7 +620,9 @@ impl OnlineServices {
                 }
             }
             Ok(None) => {}
-            Err(error) => tracing::debug!(%error, "authenticated identity MusicBrainz 封面搜索失败"),
+            Err(error) => {
+                tracing::debug!(%error, "authenticated identity MusicBrainz 封面搜索失败")
+            }
         }
         (None, None)
     }
@@ -680,7 +678,10 @@ impl OnlineServices {
 
             match providers::lyrics(&self.client, &matched).await {
                 Ok(Some(lyrics)) if lyrics_have_word_timing(&lyrics) => {
-                    tracing::debug!(provider = provider.name(), "使用备用平台补全 authored 逐字时间");
+                    tracing::debug!(
+                        provider = provider.name(),
+                        "使用备用平台补全 authored 逐字时间"
+                    );
                     return Some(lyrics);
                 }
                 Ok(Some(_)) | Ok(None) => {}
@@ -808,10 +809,7 @@ fn lyric_quality(lyrics: &LyricsDocument) -> u8 {
         + u8::from(!lyrics.timed_lines().is_empty())
 }
 
-fn attach_raw_translation(
-    target: LyricsDocument,
-    translation: Option<String>,
-) -> LyricsDocument {
+fn attach_raw_translation(target: LyricsDocument, translation: Option<String>) -> LyricsDocument {
     if target.has_translation() {
         return target;
     }

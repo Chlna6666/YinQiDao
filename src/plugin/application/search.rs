@@ -94,13 +94,7 @@ impl PluginServiceFrontend {
                 let result = runtime
                     .execute_guest_call(
                         PluginCallKey::provider(&plugin_id, &provider_id),
-                        client.search(
-                            &plugin_id,
-                            &provider_id,
-                            Some(&account_id),
-                            &query,
-                            limit,
-                        ),
+                        client.search(&plugin_id, &provider_id, Some(&account_id), &query, limit),
                     )
                     .await;
                 (rank, route, result)
@@ -141,10 +135,7 @@ impl PluginServiceFrontend {
         deduplicate_ranked_batches(&mut ranked_batches);
 
         Ok(PluginSearchFanout {
-            batches: ranked_batches
-                .into_iter()
-                .map(|(_, batch)| batch)
-                .collect(),
+            batches: ranked_batches.into_iter().map(|(_, batch)| batch).collect(),
             plan,
             failures,
             task_errors,
@@ -155,21 +146,24 @@ impl PluginServiceFrontend {
 
 fn validate_search_request(query: &str, limit: u16) -> Result<()> {
     if query.trim().is_empty() || query.len() > MAX_SEARCH_QUERY_BYTES || query.contains('\0') {
-        bail!("Search query 为空、包含 NUL 或超过 {} bytes Host 上限", MAX_SEARCH_QUERY_BYTES);
+        bail!(
+            "Search query 为空、包含 NUL 或超过 {} bytes Host 上限",
+            MAX_SEARCH_QUERY_BYTES
+        );
     }
     if limit == 0 || limit > MAX_SEARCH_LIMIT {
-        bail!("Search limit 必须位于 1..={}，实际为 {}", MAX_SEARCH_LIMIT, limit);
+        bail!(
+            "Search limit 必须位于 1..={}，实际为 {}",
+            MAX_SEARCH_LIMIT,
+            limit
+        );
     }
     Ok(())
 }
 
 fn validate_search_tracks(route: &PluginRoute, tracks: &[RemoteTrack], limit: u16) -> Result<()> {
     if tracks.len() > usize::from(limit) {
-        bail!(
-            "Search 返回 {} 项，超过请求 limit {}",
-            tracks.len(),
-            limit
-        );
+        bail!("Search 返回 {} 项，超过请求 limit {}", tracks.len(), limit);
     }
     for track in tracks {
         validate_remote_track(route, track)?;
@@ -233,12 +227,18 @@ fn validate_remote_track(route: &PluginRoute, track: &RemoteTrack) -> Result<()>
         bytes = bytes.saturating_add(artist.len());
     }
     if track.album.contains('\0')
-        || track.isrc.as_ref().is_some_and(|value| value.contains('\0'))
+        || track
+            .isrc
+            .as_ref()
+            .is_some_and(|value| value.contains('\0'))
     {
         bail!("Search track 文本包含 NUL");
     }
     if bytes > MAX_TRACK_TEXT_BYTES {
-        bail!("Search track 文本超过 {} bytes Host 上限", MAX_TRACK_TEXT_BYTES);
+        bail!(
+            "Search track 文本超过 {} bytes Host 上限",
+            MAX_TRACK_TEXT_BYTES
+        );
     }
     Ok(())
 }
