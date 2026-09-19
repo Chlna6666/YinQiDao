@@ -57,8 +57,17 @@ fn remove_overlay_non_client_chrome(hwnd: *mut c_void) {
 }
 
 #[cfg(windows)]
-fn apply_desktop_lyrics_extended_style(hwnd: *mut c_void) {
+fn apply_desktop_lyrics_widget_style(hwnd: *mut c_void) {
+    const GWL_STYLE: i32 = -16;
     const GWL_EXSTYLE: i32 = -20;
+
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_CAPTION: u32 = 0x00c0_0000;
+    const WS_THICKFRAME: u32 = 0x0004_0000;
+    const WS_SYSMENU: u32 = 0x0008_0000;
+    const WS_MINIMIZEBOX: u32 = 0x0002_0000;
+    const WS_MAXIMIZEBOX: u32 = 0x0001_0000;
+
     const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
     const WS_EX_APPWINDOW: u32 = 0x0004_0000;
     const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -69,14 +78,24 @@ fn apply_desktop_lyrics_extended_style(hwnd: *mut c_void) {
         fn SetWindowLongW(hwnd: *mut c_void, index: i32, value: i32) -> i32;
     }
 
-    // TOOLWINDOW keeps this independent overlay out of the taskbar and Alt-Tab. NOACTIVATE keeps
-    // mouse interaction from stealing focus from the application underneath the desktop lyrics.
-    // SAFETY: the HWND belongs to a live GPUI window and these style calls do not retain pointers.
+    // Desktop lyrics are a widget surface, not an application document window. Removing caption,
+    // sizing frame and maximize/minimize affordances prevents Windows Snap Layouts / edge tiling
+    // from classifying the surface as a normal resizable window. TOOLWINDOW also keeps it out of
+    // taskbar/Alt-Tab, while NOACTIVATE lets toolbar clicks work without stealing foreground focus.
+    //
+    // SAFETY: hwnd belongs to a live GPUI window; these calls copy scalar style values synchronously.
     unsafe {
-        let current = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let desired = (current | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & !WS_EX_APPWINDOW;
-        if desired != current {
-            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32);
+        let current_style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let desired_style = (current_style | WS_POPUP)
+            & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+        if desired_style != current_style {
+            let _ = SetWindowLongW(hwnd, GWL_STYLE, desired_style as i32);
+        }
+
+        let current_ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let desired_ex = (current_ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & !WS_EX_APPWINDOW;
+        if desired_ex != current_ex {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, desired_ex as i32);
         }
     }
 }
@@ -120,7 +139,7 @@ pub(crate) fn configure_desktop_lyrics_window(window: &gpui::Window, always_on_t
         return false;
     };
 
-    apply_desktop_lyrics_extended_style(hwnd);
+    apply_desktop_lyrics_widget_style(hwnd);
     remove_overlay_non_client_chrome(hwnd);
     apply_topmost(hwnd, always_on_top)
 }
@@ -143,3 +162,48 @@ pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
 pub(crate) fn set_always_on_top(_window: &gpui::Window, _enabled: bool) -> bool {
     false
 }
+
+#[cfg(windows)]
+pub(crate) fn set_desktop_lyrics_bounds(
+    window: &gpui::Window,
+    bounds: gpui::Bounds<gpui::Pixels>,
+) -> bool {
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_NOOWNERZORDER: u32 = 0x0200;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowPos(
+            hwnd: *mut c_void,
+            hwnd_insert_after: *mut c_void,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let Some(hwnd) = native_hwnd(window) else {
+        return false;
+    };
+    let scale = window.scale_factor();
+    let x = (f32::from(bounds.origin.x) * scale).round() as i32;
+    let y = (f32::from(bounds.origin.y) * scale).round() as i32;
+    let width = (f32::from(bounds.size.width) * scale).round().max(1.0) as i32;
+    let height = (f32::from(bounds.size.height) * scale).round().max(1.0) as i32;
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+
+    // SAFETY: the HWND is live and SetWindowPos consumes only scalar geometry synchronously.
+    unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), x, y, width, height, flags) != 0 }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_desktop_lyrics_bounds(
+    _window: &gpui::Window,
+    _bounds: gpui::Bounds<gpui::Pixels>,
+) -> bool {
+    false
+}
+
