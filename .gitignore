@@ -1,5 +1,5 @@
 # Rust build output
-/target/
+target/
 
 # IDE and editor metadata
 /.idea/
@@ -30,6 +30,7 @@
 *.bak
 *.exe
 *.pdb
+*.wasm
 **/.cargo-ok
 **/.cargo_vcs_info.json
 .DS_Store

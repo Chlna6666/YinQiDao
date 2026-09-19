@@ -11,7 +11,8 @@ const WEB_BASE: &str = "https://music.163.com";
 const EAPI_BASE: &str = "https://interface.music.163.com";
 const WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36";
-const EAPI_USER_AGENT: &str = "NeteaseMusic/3.1.17.204416 (Windows; Microsoft-Windows-10-Professional-build-19045-64bit)";
+const EAPI_USER_AGENT: &str =
+    "NeteaseMusic/3.1.17.204416 (Windows; Microsoft-Windows-10-Professional-build-19045-64bit)";
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_COOKIE_BYTES: usize = 16 * 1024;
@@ -53,9 +54,8 @@ fn weapi_with(
         .ok_or_else(|| "WeAPI payload 必须是 JSON object".to_string())?;
     object.insert("csrf_token".into(), Value::String(csrf.into()));
 
-    let entropy = host::now_ms()
-        ^ stable_entropy(identity.as_bytes())
-        ^ stable_entropy(path.as_bytes());
+    let entropy =
+        host::now_ms() ^ stable_entropy(identity.as_bytes()) ^ stable_entropy(path.as_bytes());
     let encrypted = crypto::weapi(&data, entropy)?;
     let endpoint = format!("{WEB_BASE}/weapi/{}", path.trim_start_matches("/api/"));
     send(
@@ -86,14 +86,7 @@ pub fn eapi_anonymous_status(
     data: Value,
     accepted_codes: &[i64],
 ) -> Result<Value, String> {
-    eapi_with(
-        None,
-        "anonymous",
-        "",
-        path,
-        data,
-        accepted_codes,
-    )
+    eapi_with(None, "anonymous", "", path, data, accepted_codes)
 }
 
 fn eapi_with(
@@ -252,10 +245,100 @@ fn send(
         return Err(format!("网易云 HTTP 状态异常: {}", response.status));
     }
 
-    let value: Value = serde_json::from_slice(&response.body)
+    let mut value: Value = serde_json::from_slice(&response.body)
         .map_err(|error| format!("网易云返回 JSON 解析失败: {error}"))?;
     validate_response_code(&value, accepted_codes)?;
+
+    // Extract cookies from Set-Cookie headers and merge into JSON response
+    let header_cookies = extract_cookies_from_headers(&response.headers);
+    if let Value::Object(ref mut map) = value {
+        let body_cookie = map.get("cookie").and_then(Value::as_str).unwrap_or("").trim();
+        let combined = if !header_cookies.is_empty() && !body_cookie.is_empty() {
+            merge_cookie_strings(body_cookie, &header_cookies)
+        } else if !header_cookies.is_empty() {
+            header_cookies
+        } else {
+            body_cookie.to_string()
+        };
+        if !combined.is_empty() {
+            map.insert("cookie".into(), Value::String(combined));
+        }
+    }
+
     Ok(value)
+}
+
+pub fn extract_cookies_from_headers(headers: &[types::KeyValue]) -> String {
+    let mut map = std::collections::BTreeMap::new();
+    for header in headers {
+        if header.key.eq_ignore_ascii_case("set-cookie") {
+            let pair = header.value.split(';').next().unwrap_or("").trim();
+            if let Some((k, v)) = pair.split_once('=') {
+                let k = k.trim();
+                let v = v.trim();
+                if !k.is_empty() && !v.is_empty() {
+                    let k_lower = k.to_ascii_lowercase();
+                    if !matches!(
+                        k_lower.as_str(),
+                        "path"
+                            | "domain"
+                            | "expires"
+                            | "max-age"
+                            | "samesite"
+                            | "priority"
+                            | "httponly"
+                            | "secure"
+                    ) {
+                        map.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+pub fn merge_cookie_strings(c1: &str, c2: &str) -> String {
+    let mut map = std::collections::BTreeMap::new();
+    for c in [c1, c2] {
+        for part in c.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                let k = k.trim();
+                let v = v.trim();
+                if !k.is_empty() && !v.is_empty() {
+                    map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+pub fn http_get(url: &str, headers: Vec<types::KeyValue>) -> Result<Vec<u8>, String> {
+    let response = host::http_request(&host::HttpRequestData {
+        provider_id: PROVIDER_ID.into(),
+        account_id: None,
+        method: "GET".into(),
+        url: url.into(),
+        headers,
+        body: Vec::new(),
+    })
+    .map_err(|error| format!("Host HTTP 调用失败: {error}"))?;
+
+    if !(200..300).contains(&response.status) {
+        return Err(format!("HTTP 状态异常: {}", response.status));
+    }
+    if response.body.len() > MAX_HTTP_BODY_BYTES {
+        return Err("HTTP 响应超过上限".into());
+    }
+    Ok(response.body)
 }
 
 fn account_cookie(account_id: &str) -> Result<String, String> {
@@ -279,10 +362,7 @@ fn account_cookie(account_id: &str) -> Result<String, String> {
 }
 
 fn ensure_os_cookie(cookie: &str) -> String {
-    if cookie
-        .split(';')
-        .any(|part| part.trim().starts_with("os="))
-    {
+    if cookie.split(';').any(|part| part.trim().starts_with("os=")) {
         cookie.to_owned()
     } else if cookie.is_empty() {
         "os=pc".into()
@@ -397,15 +477,8 @@ mod tests {
 
     #[test]
     fn eapi_header_keeps_login_token_in_protocol_boundary() {
-        let header = eapi_header(
-            "123",
-            "MUSIC_U=token; __csrf=csrf-value",
-            1_700_000_000_123,
-        );
-        assert_eq!(
-            header.get("MUSIC_U").and_then(Value::as_str),
-            Some("token")
-        );
+        let header = eapi_header("123", "MUSIC_U=token; __csrf=csrf-value", 1_700_000_000_123);
+        assert_eq!(header.get("MUSIC_U").and_then(Value::as_str), Some("token"));
         assert_eq!(
             header.get("__csrf").and_then(Value::as_str),
             Some("csrf-value")

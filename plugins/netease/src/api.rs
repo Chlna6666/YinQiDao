@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,8 @@ const PROVIDER_ID: &str = "netease";
 const ACCOUNT_INDEX_KEY: &str = "account-index-v1";
 const COOKIE_KEY: &str = "cookie-v1";
 const COOKIE_CHALLENGE_ID: &str = "cookie-import-v1";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36";
 const API_BASE: &str = "https://music.163.com";
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COOKIE_BYTES: usize = 16 * 1024;
@@ -48,6 +51,13 @@ pub fn manifest() -> types::PluginManifest {
             "music.163.com".into(),
             "interface.music.163.com".into(),
             "*.music.126.net".into(),
+            "*.kuwo.cn".into(),
+            "*.sycdn.kuwo.cn".into(),
+            "*.kugou.com".into(),
+            "*.migu.cn".into(),
+            "*.gdstudio.xyz".into(),
+            "*.qijieya.cn".into(),
+            "*.msls1441.com".into(),
         ],
     }
 }
@@ -83,33 +93,16 @@ pub fn auth_poll(provider_id: &str, challenge_id: &str) -> ApiResult<types::Auth
     Ok(types::AuthPoll::Pending)
 }
 
-pub fn auth_submit(
-    provider_id: &str,
-    challenge_id: &str,
-    values: Vec<types::KeyValue>,
-) -> ApiResult<types::AuthPoll> {
-    ensure_provider(provider_id)?;
-    ensure_cookie_challenge(challenge_id)?;
-    let cookie = values
-        .into_iter()
-        .find(|entry| entry.key == "cookie")
-        .map(|entry| entry.value)
-        .ok_or_else(|| "Cookie 登录表单缺少 cookie 字段".to_string())?;
-    let cookie = normalize_cookie(&cookie)?;
-
-    let account_json = request_json_with_cookie(
-        None,
-        "GET",
-        "/api/nuser/account/get",
-        None,
-        Some(&cookie),
-    )?;
+pub fn register_authenticated_cookie(cookie: &str) -> ApiResult<types::Account> {
+    let cookie = normalize_cookie(cookie)?;
+    let account_json =
+        request_json_with_cookie(None, "GET", "/api/nuser/account/get", None, Some(&cookie))?;
     let profile = account_json
         .get("profile")
         .filter(|profile| !profile.is_null())
         .ok_or_else(|| "网易云 Cookie 无效或登录态已过期".to_string())?;
-    let uid = value_u64(profile, &["userId"])
-        .ok_or_else(|| "网易云账号信息缺少 userId".to_string())?;
+    let uid =
+        value_u64(profile, &["userId"]).ok_or_else(|| "网易云账号信息缺少 userId".to_string())?;
     let display_name = value_string(profile, &["nickname"])
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("网易云用户 {uid}"));
@@ -153,7 +146,66 @@ pub fn auth_submit(
     accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
     save_accounts(&accounts)?;
 
-    Ok(types::AuthPoll::Authenticated(account_to_wit(stored)))
+    Ok(account_to_wit(stored))
+}
+
+pub fn register_anonymous_account(user_id: u64, cookie: &str) -> ApiResult<types::Account> {
+    let account_id = user_id.to_string();
+    secret_set(
+        &host::SecretScope {
+            provider_id: PROVIDER_ID.into(),
+            account_id: Some(account_id.clone()),
+        },
+        COOKIE_KEY,
+        cookie.as_bytes(),
+    )?;
+
+    let mut accounts = load_accounts()?;
+    let stored = StoredAccount {
+        account_id: account_id.clone(),
+        display_name: format!("网易云游客 {user_id}"),
+        avatar_url: None,
+        uid: user_id,
+    };
+    if let Some(existing) = accounts
+        .iter_mut()
+        .find(|account| account.account_id == account_id)
+    {
+        *existing = stored.clone();
+    } else {
+        if accounts.len() >= MAX_ACCOUNTS {
+            let _ = secret_delete(
+                &host::SecretScope {
+                    provider_id: PROVIDER_ID.into(),
+                    account_id: Some(account_id),
+                },
+                COOKIE_KEY,
+            );
+            return Err(format!("网易云账号数量超过 Host 插件上限 {MAX_ACCOUNTS}"));
+        }
+        accounts.push(stored.clone());
+    }
+    accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    save_accounts(&accounts)?;
+
+    Ok(account_to_wit(stored))
+}
+
+pub fn auth_submit(
+    provider_id: &str,
+    challenge_id: &str,
+    values: Vec<types::KeyValue>,
+) -> ApiResult<types::AuthPoll> {
+    ensure_provider(provider_id)?;
+    ensure_cookie_challenge(challenge_id)?;
+    let cookie = values
+        .into_iter()
+        .find(|entry| entry.key == "cookie")
+        .map(|entry| entry.value)
+        .ok_or_else(|| "Cookie 登录表单缺少 cookie 字段".to_string())?;
+
+    let account = register_authenticated_cookie(&cookie)?;
+    Ok(types::AuthPoll::Authenticated(account))
 }
 
 pub fn auth_cancel(provider_id: &str, challenge_id: &str) -> ApiResult<bool> {
@@ -259,11 +311,16 @@ pub fn resolve_track(
         {
             score = score.saturating_add(1);
         }
-        if best.as_ref().is_none_or(|(best_score, _)| score > *best_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score > *best_score)
+        {
             best = Some((score, track));
         }
     }
-    Ok(best.filter(|(score, _)| *score >= 4).map(|(_, track)| track))
+    Ok(best
+        .filter(|(score, _)| *score >= 4)
+        .map(|(_, track)| track))
 }
 
 pub fn lyrics(
@@ -302,8 +359,8 @@ pub fn artwork(
     let Some(song) = detail.first() else {
         return Ok(None);
     };
-    let url = value_string(song, &["al", "picUrl"])
-        .or_else(|| value_string(song, &["album", "picUrl"]));
+    let url =
+        value_string(song, &["al", "picUrl"]).or_else(|| value_string(song, &["album", "picUrl"]));
     Ok(url.map(|url| types::ArtworkDescriptor {
         url: force_https(url),
         headers: Vec::new(),
@@ -354,7 +411,10 @@ pub fn stream(
 pub fn playlists(provider_id: &str, account_id: &str) -> ApiResult<Vec<types::Playlist>> {
     ensure_provider(provider_id)?;
     let account = require_stored_account(account_id)?;
-    let path = format!("/api/user/playlist/?uid={}&limit=1000&offset=0", account.uid);
+    let path = format!(
+        "/api/user/playlist/?uid={}&limit=1000&offset=0",
+        account.uid
+    );
     let json = request_json(Some(account_id), "GET", &path, None)?;
     let values = json
         .get("playlist")
@@ -392,8 +452,12 @@ pub fn playlist_tracks(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(track_ids.len());
-    let end = start.saturating_add(usize::from(limit)).min(track_ids.len());
+    let start = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(track_ids.len());
+    let end = start
+        .saturating_add(usize::from(limit))
+        .min(track_ids.len());
     if start == end {
         return Ok(Vec::new());
     }
@@ -458,6 +522,41 @@ pub fn playlist_mutate(
     Ok(api_code_success(&json))
 }
 
+pub fn playlist_rename(
+    provider_id: &str,
+    account_id: &str,
+    playlist_id: &str,
+    name: &str,
+) -> ApiResult<bool> {
+    ensure_provider(provider_id)?;
+    validate_account_id(account_id)?;
+    let playlist_id = numeric_source_id(playlist_id)?;
+    let name = name.trim();
+    if name.is_empty() || name.len() > MAX_PLAYLIST_NAME_BYTES || name.contains('\0') {
+        return Err("歌单名称为空或超过大小限制".into());
+    }
+    let body = form_encode(&[("id", playlist_id.to_string()), ("name", name.to_owned())]);
+    let json = request_json(
+        Some(account_id),
+        "POST",
+        "/api/playlist/update/name",
+        Some(body),
+    )?;
+    Ok(api_code_success(&json))
+}
+
+pub fn playlist_delete(provider_id: &str, account_id: &str, playlist_id: &str) -> ApiResult<bool> {
+    ensure_provider(provider_id)?;
+    validate_account_id(account_id)?;
+    let playlist_id = numeric_source_id(playlist_id)?;
+    let body = form_encode(&[
+        ("pid", playlist_id.to_string()),
+        ("id", playlist_id.to_string()),
+    ]);
+    let json = request_json(Some(account_id), "POST", "/api/playlist/delete", Some(body))?;
+    Ok(api_code_success(&json))
+}
+
 pub fn liked_tracks(
     provider_id: &str,
     account_id: &str,
@@ -466,7 +565,13 @@ pub fn liked_tracks(
 ) -> ApiResult<Vec<types::RemoteTrack>> {
     let playlist_id = liked_playlist_id(provider_id, account_id)?
         .ok_or_else(|| "未找到“我喜欢的音乐”歌单".to_string())?;
-    playlist_tracks(provider_id, account_id, &playlist_id.to_string(), offset, limit)
+    playlist_tracks(
+        provider_id,
+        account_id,
+        &playlist_id.to_string(),
+        offset,
+        limit,
+    )
 }
 
 pub fn cloud_library(
@@ -480,10 +585,7 @@ pub fn cloud_library(
     if limit == 0 || limit > MAX_PAGE_LIMIT {
         return Err(format!("cloud library limit 必须位于 1..={MAX_PAGE_LIMIT}"));
     }
-    let body = form_encode(&[
-        ("offset", offset.to_string()),
-        ("limit", limit.to_string()),
-    ]);
+    let body = form_encode(&[("offset", offset.to_string()), ("limit", limit.to_string())]);
     let json = request_json(Some(account_id), "POST", "/api/v1/cloud/get", Some(body))?;
     let values = json
         .get("data")
@@ -629,8 +731,8 @@ fn load_accounts() -> ApiResult<Vec<StoredAccount>> {
     if bytes.len() > 256 * 1024 {
         return Err("网易云账号索引超过大小限制".into());
     }
-    let mut accounts: Vec<StoredAccount> =
-        serde_json::from_slice(&bytes).map_err(|error| format!("解析网易云账号索引失败: {error}"))?;
+    let mut accounts: Vec<StoredAccount> = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("解析网易云账号索引失败: {error}"))?;
     accounts.retain(|account| validate_account_id(&account.account_id).is_ok());
     accounts.truncate(MAX_ACCOUNTS);
     Ok(accounts)
@@ -664,7 +766,8 @@ fn account_cookie(account_id: &str) -> ApiResult<String> {
         COOKIE_KEY,
     )?
     .ok_or_else(|| "网易云账号 Cookie 不存在，请重新登录".to_string())?;
-    let cookie = String::from_utf8(bytes).map_err(|_| "网易云 Cookie 不是合法 UTF-8".to_string())?;
+    let cookie =
+        String::from_utf8(bytes).map_err(|_| "网易云 Cookie 不是合法 UTF-8".to_string())?;
     normalize_cookie(&cookie)
 }
 
@@ -833,7 +936,10 @@ fn parse_playlist(value: &Value, uid: u64) -> Option<types::Playlist> {
 fn liked_playlist_id(provider_id: &str, account_id: &str) -> ApiResult<Option<u64>> {
     ensure_provider(provider_id)?;
     let account = require_stored_account(account_id)?;
-    let path = format!("/api/user/playlist/?uid={}&limit=1000&offset=0", account.uid);
+    let path = format!(
+        "/api/user/playlist/?uid={}&limit=1000&offset=0",
+        account.uid
+    );
     let json = request_json(Some(account_id), "GET", &path, None)?;
     Ok(json
         .get("playlist")
@@ -937,7 +1043,9 @@ fn merge_lrc(original: &str, translated: &str) -> Vec<types::LyricLine> {
     for (timestamp, text) in parse_lrc(original) {
         lines.entry(timestamp).or_insert(text);
     }
-    let translations = parse_lrc(translated).into_iter().collect::<BTreeMap<_, _>>();
+    let translations = parse_lrc(translated)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     lines
         .into_iter()
         .map(|(timestamp_ms, text)| types::LyricLine {

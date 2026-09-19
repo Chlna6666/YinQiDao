@@ -2,10 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Value, json};
 
-use crate::{
-    protocol,
-    bindings::yinqidao::music_plugin::types,
-};
+use crate::{bindings::yinqidao::music_plugin::types, protocol};
 
 const PROVIDER_ID: &str = "netease";
 const MAX_QUERY_BYTES: usize = 2 * 1024;
@@ -38,15 +35,15 @@ pub fn search(
             "total": true,
         }),
     )?;
-    response
+    Ok(response
         .pointer("/result/songs")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
         .take(usize::from(limit))
-        .map(parse_remote_track)
-        .collect()
+        .filter_map(|s| parse_remote_track(s).ok())
+        .collect())
 }
 
 pub fn resolve_track(
@@ -96,11 +93,16 @@ pub fn resolve_track(
         {
             score = score.saturating_add(1);
         }
-        if best.as_ref().is_none_or(|(best_score, _)| score > *best_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score > *best_score)
+        {
             best = Some((score, track));
         }
     }
-    Ok(best.filter(|(score, _)| *score >= 4).map(|(_, track)| track))
+    Ok(best
+        .filter(|(score, _)| *score >= 4)
+        .map(|(_, track)| track))
 }
 
 pub fn lyrics(
@@ -192,68 +194,78 @@ pub fn stream(
     if level == "sky" {
         data["immerseType"] = Value::String("c51".into());
     }
-    let response = protocol::eapi(account_id, "/api/song/enhance/player/url/v1", data)?;
-    let item = response
-        .get("data")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .ok_or_else(|| "网易云未返回播放地址".to_string())?;
-    let url = value_string(item, &["url"])
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| "网易云当前账号/版权状态下无可用播放地址".to_string())?;
+    // 优先尝试网易云官方接口获取音频流
+    if let Ok(response) = protocol::eapi(account_id, "/api/song/enhance/player/url/v1", data) {
+        let item = response
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first());
+        if let Some(item) = item {
+            let url = value_string(item, &["url"]).filter(|url| !url.is_empty());
+            if let Some(url) = url {
+                return Ok(types::StreamDescriptor {
+                    url: force_https(url),
+                    headers: vec![types::KeyValue {
+                        key: "Referer".into(),
+                        value: "https://music.163.com/".into(),
+                    }],
+                    codec: value_string(item, &["type"])
+                        .map(|value| value.to_ascii_lowercase())
+                        .filter(|value| !value.is_empty()),
+                    bitrate: value_u64(item, &["br"]).and_then(|value| u32::try_from(value).ok()),
+                    sample_rate: value_u64(item, &["sr"]).and_then(|value| u32::try_from(value).ok()),
+                    channels: value_u64(item, &["channels"])
+                        .or_else(|| value_u64(item, &["channel"]))
+                        .and_then(|value| u16::try_from(value).ok()),
+                    expires_at_ms: None,
+                });
+            }
+        }
+    }
 
-    Ok(types::StreamDescriptor {
-        url: force_https(url),
-        headers: vec![types::KeyValue {
-            key: "Referer".into(),
-            value: "https://music.163.com/".into(),
-        }],
-        codec: value_string(item, &["type"])
-            .map(|value| value.to_ascii_lowercase())
-            .filter(|value| !value.is_empty()),
-        bitrate: value_u64(item, &["br"]).and_then(|value| u32::try_from(value).ok()),
-        sample_rate: value_u64(item, &["sr"]).and_then(|value| u32::try_from(value).ok()),
-        channels: value_u64(item, &["channels"])
-            .or_else(|| value_u64(item, &["channel"]))
-            .and_then(|value| u16::try_from(value).ok()),
-        expires_at_ms: None,
-    })
+    // 官方接口未返回可用播放地址（歌曲为灰色/版权受限/VIP限制），自动启动音源解灰
+    let (title, artists, duration_ms) = {
+        let songs = song_detail(Some(account_id), &[id]).unwrap_or_default();
+        if let Some(song) = songs.first() {
+            let name = value_string(song, &["name"]).unwrap_or_default();
+            let arts = song
+                .get("ar")
+                .or_else(|| song.get("artists"))
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(|v| value_string(v, &["name"])).collect())
+                .unwrap_or_default();
+            let dur = value_u64(song, &["dt"]).or_else(|| value_u64(song, &["duration"]));
+            (name, arts, dur)
+        } else {
+            (String::new(), Vec::new(), None)
+        }
+    };
+
+    crate::unblock::resolve_stream(id, &title, &artists, duration_ms)
 }
 
-fn request_eapi(
-    account_id: Option<&str>,
-    path: &str,
-    data: Value,
-) -> Result<Value, String> {
+fn request_eapi(account_id: Option<&str>, path: &str, data: Value) -> Result<Value, String> {
     match account_id {
         Some(account_id) => protocol::eapi(account_id, path, data),
         None => protocol::eapi_anonymous(path, data),
     }
 }
 
-fn request_weapi(
-    account_id: Option<&str>,
-    path: &str,
-    data: Value,
-) -> Result<Value, String> {
+fn request_weapi(account_id: Option<&str>, path: &str, data: Value) -> Result<Value, String> {
     match account_id {
         Some(account_id) => protocol::weapi(account_id, path, data),
         None => protocol::weapi_anonymous(path, data),
     }
 }
 
-fn song_detail(account_id: Option<&str>, ids: &[u64]) -> Result<Vec<Value>, String> {
+pub fn song_detail(account_id: Option<&str>, ids: &[u64]) -> Result<Vec<Value>, String> {
     if ids.is_empty() || ids.len() > MAX_DETAIL_IDS {
         return Err("歌曲详情批量 id 数量非法".into());
     }
     let c = ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>();
     let c = serde_json::to_string(&c)
         .map_err(|error| format!("序列化网易云歌曲详情请求失败: {error}"))?;
-    let response = request_weapi(
-        account_id,
-        "/api/v3/song/detail",
-        json!({ "c": c }),
-    )?;
+    let response = request_weapi(account_id, "/api/v3/song/detail", json!({ "c": c }))?;
     Ok(response
         .get("songs")
         .and_then(Value::as_array)
@@ -261,30 +273,43 @@ fn song_detail(account_id: Option<&str>, ids: &[u64]) -> Result<Vec<Value>, Stri
         .unwrap_or_default())
 }
 
-fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
+pub fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
     let id = value_u64(value, &["id"]).ok_or_else(|| "歌曲缺少 id".to_string())?;
     let title = value_string(value, &["name"])
-        .filter(|value| !value.trim().is_empty())
+        .filter(|value| !value.is_empty())
         .ok_or_else(|| "歌曲缺少 name".to_string())?;
-    let artists = value
-        .get("ar")
-        .or_else(|| value.get("artists"))
-        .and_then(Value::as_array)
-        .map(|artists| {
-            artists
-                .iter()
-                .filter_map(|artist| value_string(artist, &["name"]))
-                .filter(|artist| !artist.trim().is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+
+    let mut artists = Vec::new();
+    if let Some(arr) = value.get("ar").or_else(|| value.get("artists")).and_then(Value::as_array) {
+        for a in arr {
+            if let Some(name) = a.get("name").and_then(Value::as_str) {
+                if !name.is_empty() {
+                    artists.push(name.to_string());
+                }
+            } else if let Some(name) = a.as_str() {
+                if !name.is_empty() {
+                    artists.push(name.to_string());
+                }
+            }
+        }
+    }
+
     let album_value = value.get("al").or_else(|| value.get("album"));
     let album = album_value
-        .and_then(|album| value_string(album, &["name"]))
+        .and_then(|alb| alb.get("name"))
+        .and_then(Value::as_str)
+        .map(String::from)
         .unwrap_or_default();
+
     let cover_url = album_value
-        .and_then(|album| value_string(album, &["picUrl"]))
+        .and_then(|alb| alb.get("picUrl").or_else(|| alb.get("coverImgUrl")))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("picUrl").and_then(Value::as_str))
+        .map(str::to_string)
         .map(force_https);
+
+    let duration_ms = value_u64(value, &["dt"]).or_else(|| value_u64(value, &["duration"]));
+    let isrc = value_string(value, &["isrc"]);
 
     Ok(types::RemoteTrack {
         source: types::SourceTrackRef {
@@ -294,8 +319,8 @@ fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
         title,
         artists,
         album,
-        duration_ms: value_u64(value, &["dt"]).or_else(|| value_u64(value, &["duration"])),
-        isrc: value_string(value, &["isrc"]),
+        duration_ms,
+        isrc,
         cover_url,
         playable: true,
         explicit: false,
@@ -303,19 +328,23 @@ fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
 }
 
 fn merge_yrc(original: &str, translated: &str) -> Vec<types::LyricLine> {
-    let translations = parse_lrc(translated).into_iter().collect::<BTreeMap<_, _>>();
+    let translations = parse_lrc(translated)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     original
         .lines()
         .filter_map(parse_yrc_line)
-        .map(|(timestamp_ms, _duration_ms, text, words)| types::LyricLine {
-            timestamp_ms,
-            text,
-            translation: translations
-                .get(&timestamp_ms)
-                .filter(|value| !value.trim().is_empty())
-                .cloned(),
-            words,
-        })
+        .map(
+            |(timestamp_ms, _duration_ms, text, words)| types::LyricLine {
+                timestamp_ms,
+                text,
+                translation: translations
+                    .get(&timestamp_ms)
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned(),
+                words,
+            },
+        )
         .collect()
 }
 
@@ -358,7 +387,9 @@ fn merge_lrc(original: &str, translated: &str) -> Vec<types::LyricLine> {
     for (timestamp, text) in parse_lrc(original) {
         lines.entry(timestamp).or_insert(text);
     }
-    let translations = parse_lrc(translated).into_iter().collect::<BTreeMap<_, _>>();
+    let translations = parse_lrc(translated)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     lines
         .into_iter()
         .map(|(timestamp_ms, text)| types::LyricLine {
@@ -512,10 +543,8 @@ mod tests {
 
     #[test]
     fn yrc_parser_preserves_word_timing() {
-        let (_, _, text, words) = parse_yrc_line(
-            "[1000,900](1000,300,0)你(1300,200,0)好(1500,400,0)世界",
-        )
-        .unwrap();
+        let (_, _, text, words) =
+            parse_yrc_line("[1000,900](1000,300,0)你(1300,200,0)好(1500,400,0)世界").unwrap();
         assert_eq!(text, "你好世界");
         assert_eq!(words.len(), 3);
         assert_eq!(words[0].timestamp_ms, 1000);

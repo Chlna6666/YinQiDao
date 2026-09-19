@@ -1,20 +1,16 @@
+#![allow(unsafe_code)]
+
 mod crypto;
 pub mod decoder;
 
-#[cfg(target_arch = "wasm32")]
 mod api;
-#[cfg(target_arch = "wasm32")]
 mod auth;
-#[cfg(target_arch = "wasm32")]
 mod collections;
-#[cfg(target_arch = "wasm32")]
 mod features;
-#[cfg(target_arch = "wasm32")]
 mod music;
-#[cfg(target_arch = "wasm32")]
 mod protocol;
+mod unblock;
 
-#[cfg(target_arch = "wasm32")]
 pub mod bindings {
     wit_bindgen::generate!({
         world: "music-plugin",
@@ -23,9 +19,7 @@ pub mod bindings {
     });
 }
 
-#[cfg(target_arch = "wasm32")]
 use bindings::exports::yinqidao::music_plugin::{provider, ui};
-#[cfg(target_arch = "wasm32")]
 use bindings::yinqidao::music_plugin::types;
 
 #[cfg(target_arch = "wasm32")]
@@ -67,6 +61,12 @@ fn add_extended_auth_methods(methods: &mut Vec<types::AuthMethod>) {
     {
         methods.push(types::AuthMethod::QrCode);
     }
+    if !methods
+        .iter()
+        .any(|method| matches!(method, types::AuthMethod::CustomForm))
+    {
+        methods.push(types::AuthMethod::CustomForm);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -106,7 +106,7 @@ impl provider::Guest for NeteasePlugin {
         challenge_id: String,
         values: Vec<types::KeyValue>,
     ) -> Result<types::AuthPoll, String> {
-        api::auth_submit(&provider_id, &challenge_id, values)
+        auth::auth_submit(&provider_id, &challenge_id, values)
     }
 
     fn auth_cancel(provider_id: String, challenge_id: String) -> Result<bool, String> {
@@ -180,6 +180,23 @@ impl provider::Guest for NeteasePlugin {
         api::playlist_create(&provider_id, &account_id, &name)
     }
 
+    fn playlist_rename(
+        provider_id: String,
+        account_id: String,
+        playlist_id: String,
+        name: String,
+    ) -> Result<bool, String> {
+        collections::playlist_rename(&provider_id, &account_id, &playlist_id, &name)
+    }
+
+    fn playlist_delete(
+        provider_id: String,
+        account_id: String,
+        playlist_id: String,
+    ) -> Result<bool, String> {
+        collections::playlist_delete(&provider_id, &account_id, &playlist_id)
+    }
+
     fn playlist_add(
         provider_id: String,
         account_id: String,
@@ -208,6 +225,46 @@ impl provider::Guest for NeteasePlugin {
         collections::media_collections(&provider_id, &account_id, kind, offset, limit)
     }
 
+    fn media_collection_detail(
+        provider_id: String,
+        account_id: Option<String>,
+        collection: types::MediaCollectionRef,
+    ) -> Result<types::MediaCollection, String> {
+        collections::media_collection_detail(&provider_id, account_id.as_deref(), &collection)
+    }
+
+    fn collection_tracks(
+        provider_id: String,
+        account_id: Option<String>,
+        collection: types::MediaCollectionRef,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<types::RemoteTrack>, String> {
+        collections::collection_tracks(
+            &provider_id,
+            account_id.as_deref(),
+            &collection,
+            offset,
+            limit,
+        )
+    }
+
+    fn collection_items(
+        provider_id: String,
+        account_id: Option<String>,
+        collection: types::MediaCollectionRef,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<types::MediaCollection>, String> {
+        collections::collection_items(
+            &provider_id,
+            account_id.as_deref(),
+            &collection,
+            offset,
+            limit,
+        )
+    }
+
     fn set_media_saved(
         provider_id: String,
         account_id: String,
@@ -225,7 +282,7 @@ impl provider::Guest for NeteasePlugin {
         collections::collection_recommendations(&provider_id, &account_id, &request)
     }
 
-    fn user_profile(
+    fn get_user_profile(
         provider_id: String,
         account_id: String,
     ) -> Result<types::UserProfile, String> {

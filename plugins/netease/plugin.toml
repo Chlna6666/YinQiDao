@@ -11,6 +11,13 @@ network_domains = [
   "music.163.com",
   "interface.music.163.com",
   "*.music.126.net",
+  "*.kuwo.cn",
+  "*.sycdn.kuwo.cn",
+  "*.kugou.com",
+  "*.migu.cn",
+  "*.gdstudio.xyz",
+  "*.qijieya.cn",
+  "*.msls1441.com",
 ]
 
 [[providers]]
@@ -24,9 +31,11 @@ capabilities = [
   "artwork",
   "streaming",
   "playlists",
+  "media_collections",
   "cloud_library",
   "like_sync",
   "recommendations",
   "playback_events",
+  "user_profile",
 ]
-auth_methods = ["cookie_import"]
+auth_methods = ["cookie_import", "qr_code", "custom_form"]

@@ -28,9 +28,7 @@ all = "warn"
 
 [profile.release]
 opt-level = "z"
-lto = "fat"
+lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-incremental = false
-debug = 0

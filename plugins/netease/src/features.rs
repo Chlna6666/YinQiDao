@@ -2,10 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use crate::{
-    api, protocol,
-    bindings::yinqidao::music_plugin::types,
-};
+use crate::{api, bindings::yinqidao::music_plugin::types, music, protocol};
 
 const PROVIDER_ID: &str = "netease";
 const MAX_RECOMMENDATION_LIMIT: u16 = 100;
@@ -23,7 +20,7 @@ pub fn recommendations(
         ));
     }
 
-    let (mut tracks, reason) = match request.surface.clone() {
+    let (mut tracks, reason) = match request.surface {
         types::RecommendationSurface::Home | types::RecommendationSurface::Discovery => (
             personalized_new_music(account_id, request.limit)?,
             "网易云个性推荐",
@@ -39,7 +36,10 @@ pub fn recommendations(
             (personal_fm(account_id)?, "网易云私人 FM")
         }
         types::RecommendationSurface::ArtistRadio => {
-            return Err("网易云 Artist Radio 需要 artist-aware recommendation ABI，当前不会伪装为私人 FM".into());
+            return Err(
+                "网易云 Artist Radio 需要 artist-aware recommendation ABI，当前不会伪装为私人 FM"
+                    .into(),
+            );
         }
     };
 
@@ -94,7 +94,7 @@ pub fn report_playback(
     ensure_provider(provider_id)?;
     validate_account_id(account_id)?;
 
-    match signal.kind.clone() {
+    match signal.kind {
         types::PlaybackSignalKind::Liked | types::PlaybackSignalKind::Unliked => {
             let source = require_signal_source(signal)?;
             set_liked(
@@ -110,7 +110,11 @@ pub fn report_playback(
         }
         types::PlaybackSignalKind::Completed => {
             let source = require_signal_source(signal)?;
-            scrobble(account_id, source, signal.duration_ms.max(signal.position_ms))
+            scrobble(
+                account_id,
+                source,
+                signal.duration_ms.max(signal.position_ms),
+            )
         }
         types::PlaybackSignalKind::Skipped => {
             if signal.position_ms < 30_000 {
@@ -178,27 +182,31 @@ fn scrobble(
     }]);
     let logs = serde_json::to_string(&logs)
         .map_err(|error| format!("序列化网易云听歌打卡失败: {error}"))?;
-    let json = protocol::weapi(
-        account_id,
-        "/api/feedback/weblog",
-        json!({ "logs": logs }),
-    )?;
+    let json = protocol::weapi(account_id, "/api/feedback/weblog", json!({ "logs": logs }))?;
     Ok(api_code_success(&json))
 }
 
 fn daily_recommendations(account_id: &str) -> Result<Vec<types::RemoteTrack>, String> {
-    let json = protocol::weapi(
-        account_id,
-        "/api/v3/discovery/recommend/songs",
-        json!({}),
-    )?;
-    parse_track_array(json.pointer("/data/dailySongs"))
+    let res = protocol::weapi(account_id, "/api/v3/discovery/recommend/songs", json!({}))
+        .or_else(|_| protocol::weapi(account_id, "/api/v1/discovery/recommend/songs", json!({})));
+    let songs = match res {
+        Ok(json) => {
+            let list = json
+                .pointer("/data/dailySongs")
+                .or_else(|| json.get("recommend"))
+                .or_else(|| json.pointer("/data/orderSongs"));
+            parse_track_array(list).unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
+    if !songs.is_empty() {
+        Ok(songs)
+    } else {
+        personalized_new_music(account_id, 30)
+    }
 }
 
-fn personalized_new_music(
-    account_id: &str,
-    limit: u16,
-) -> Result<Vec<types::RemoteTrack>, String> {
+fn personalized_new_music(account_id: &str, limit: u16) -> Result<Vec<types::RemoteTrack>, String> {
     let json = protocol::weapi(
         account_id,
         "/api/personalized/newsong",
@@ -230,58 +238,26 @@ fn similar_tracks(
 }
 
 fn parse_track_array(value: Option<&Value>) -> Result<Vec<types::RemoteTrack>, String> {
-    value
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .map(|value| parse_remote_track(value.get("song").unwrap_or(value)))
-        .collect()
+    let Some(arr) = value.and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut tracks = Vec::new();
+    for item in arr {
+        let song = item.get("song").unwrap_or(item);
+        if let Ok(mut track) = music::parse_remote_track(song) {
+            if track.cover_url.is_none() {
+                track.cover_url = item
+                    .get("picUrl")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .map(force_https);
+            }
+            tracks.push(track);
+        }
+    }
+    Ok(tracks)
 }
 
-fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
-    let id = value_u64(value, &["id"]).ok_or_else(|| "推荐歌曲缺少 id".to_string())?;
-    let title = value_string(value, &["name"])
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "推荐歌曲缺少 name".to_string())?;
-    let artists = value
-        .get("ar")
-        .or_else(|| value.get("artists"))
-        .and_then(Value::as_array)
-        .map(|artists| {
-            artists
-                .iter()
-                .filter_map(|artist| value_string(artist, &["name"]))
-                .filter(|artist| !artist.trim().is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let album = value
-        .get("al")
-        .or_else(|| value.get("album"))
-        .and_then(|album| value_string(album, &["name"]))
-        .unwrap_or_default();
-    let cover_url = value
-        .get("al")
-        .or_else(|| value.get("album"))
-        .and_then(|album| value_string(album, &["picUrl"]))
-        .map(force_https);
-
-    Ok(types::RemoteTrack {
-        source: types::SourceTrackRef {
-            provider_id: PROVIDER_ID.into(),
-            source_id: id.to_string(),
-        },
-        title,
-        artists,
-        album,
-        duration_ms: value_u64(value, &["dt"]).or_else(|| value_u64(value, &["duration"])),
-        isrc: value_string(value, &["isrc"]),
-        cover_url,
-        playable: true,
-        explicit: false,
-    })
-}
 
 fn ensure_provider(provider_id: &str) -> Result<(), String> {
     if provider_id == PROVIDER_ID {
@@ -317,25 +293,6 @@ fn api_code_success(json: &Value) -> bool {
     json.get("code")
         .and_then(Value::as_i64)
         .is_none_or(|code| (200..300).contains(&code))
-}
-
-fn value_string(value: &Value, path: &[&str]) -> Option<String> {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current.as_str().map(str::to_owned)
-}
-
-fn value_u64(value: &Value, path: &[&str]) -> Option<u64> {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current
-        .as_u64()
-        .or_else(|| current.as_i64().and_then(|value| u64::try_from(value).ok()))
-        .or_else(|| current.as_str().and_then(|value| value.parse::<u64>().ok()))
 }
 
 fn force_https(url: String) -> String {
