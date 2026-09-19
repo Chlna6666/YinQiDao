@@ -734,16 +734,14 @@ fn render_lyric_row(
         .transition(lyric_focus_transition());
 
     let text = if index == active && !reading_mode {
+        // Vertical motion already belongs to the retained list's compositor translation. Scaling
+        // the newly active row around its center at the same time creates a second apparent Y
+        // motion, especially for translated/two-line lyrics, which reads as a bounce at every line
+        // hand-off. Keep focus paint-only so row geometry and its visual center stay stable.
         let active_focus = Animation::from_spec(
             AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
         )
-        .with_property(AnimationProperty::scale_opacity(
-            0.985,
-            1.0,
-            0.80,
-            1.0,
-            gpui::TransformOrigin::CENTER,
-        ));
+        .with_property(AnimationProperty::opacity(0.80, 1.0));
         let animation_key = motion_epoch
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(index as u64);
