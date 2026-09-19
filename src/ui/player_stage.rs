@@ -181,22 +181,29 @@ impl Render for StagePlayerView {
                     .px_8()
                     .pt(px(54.0))
                     .pb_8()
-                    .gap_6()
                     .child(
                         div()
                             .relative()
                             .flex()
                             .flex_1()
                             .min_h(px(0.0))
-                            // Keep the full-height retained lyric/list hitbox clipped to the content
-                            // row. It must never extend into the sibling bottom transport dock.
-                            .overflow_hidden()
                             .gap_12()
                             .items_center()
+                            // The transport dock is an overlay, not a layout sibling. Lyrics keep
+                            // painting to the bottom edge and remain visible underneath the
+                            // translucent dock like Apple Music, while the dock's occlude() hitbox
+                            // still owns pointer input above the lyric surface.
                             .child(stage_cover(&self.cover))
-                            .child(lyrics),
-                    )
-                    .child(self.controls.clone()),
+                            .child(lyrics)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(0.0))
+                                    .right(px(0.0))
+                                    .bottom(px(0.0))
+                                    .child(self.controls.clone()),
+                            ),
+                    ),
             )
     }
 }
