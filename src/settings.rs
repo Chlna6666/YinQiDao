@@ -5,7 +5,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    EqSettings, RepeatMode, SmartAudioSettings, SpatialSettings, TrackId, TrackTransitionSettings,
+    EqSettings, RepeatMode, SmartAudioSettings, SpatialSettings, Track, TrackData, TrackId,
+    TrackTransitionSettings,
 };
 
 /// Schema versions are reserved for breaking configuration changes only.
@@ -76,6 +77,60 @@ pub struct LyricsShortcutSettings {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct SavedTrackInfo {
+    pub id: TrackId,
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub year: Option<i32>,
+    pub genre: Option<String>,
+    pub duration_ms: u64,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub artwork_key: Option<String>,
+}
+
+impl From<&Track> for SavedTrackInfo {
+    fn from(t: &Track) -> Self {
+        Self {
+            id: t.id,
+            path: t.path.to_string_lossy().to_string(),
+            title: t.title.clone(),
+            artist: t.artist.clone(),
+            album: t.album.clone(),
+            year: t.year,
+            genre: t.genre.clone(),
+            duration_ms: t.duration_ms,
+            codec: t.codec.clone(),
+            sample_rate: t.sample_rate,
+            channels: t.channels,
+            artwork_key: t.artwork_key.clone(),
+        }
+    }
+}
+
+impl From<SavedTrackInfo> for Track {
+    fn from(info: SavedTrackInfo) -> Self {
+        Track::new(TrackData {
+            id: info.id,
+            path: PathBuf::from(info.path),
+            title: info.title,
+            artist: info.artist,
+            album: info.album,
+            year: info.year,
+            genre: info.genre,
+            duration_ms: info.duration_ms,
+            codec: info.codec,
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            artwork_key: info.artwork_key,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "current_schema_version")]
@@ -106,6 +161,8 @@ pub struct AppConfig {
     pub queue: Arc<Vec<TrackId>>,
     #[serde(default)]
     pub current_track: Option<TrackId>,
+    #[serde(default)]
+    pub last_played_track: Option<SavedTrackInfo>,
     #[serde(default)]
     pub position_ms: u64,
     #[serde(default = "default_dynamic_blur")]
@@ -215,6 +272,7 @@ impl AppConfigV1 {
             shuffle: self.shuffle,
             queue: self.queue,
             current_track: self.current_track,
+            last_played_track: None,
             position_ms: self.position_ms,
             dynamic_blur: self.dynamic_blur,
             blur_radius: self.blur_radius,
@@ -281,6 +339,7 @@ impl Default for AppConfig {
             shuffle: false,
             queue: Arc::new(Vec::new()),
             current_track: None,
+            last_played_track: None,
             position_ms: 0,
             dynamic_blur: default_dynamic_blur(),
             blur_radius: default_blur_radius(),
