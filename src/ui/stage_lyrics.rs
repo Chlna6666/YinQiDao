@@ -22,7 +22,7 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 120.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(360);
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(380);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 4;
@@ -102,7 +102,6 @@ impl StageLyricLine {
 
 #[derive(Clone, Copy)]
 struct LyricScrollAnimation {
-    epoch: u64,
     from_y: f32,
     started_at: Instant,
 }
@@ -154,7 +153,6 @@ pub(super) struct StageLyricsView {
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
-    scroll_epoch: u64,
     stage_active: bool,
     scrubbing: bool,
 }
@@ -184,7 +182,6 @@ impl StageLyricsView {
             reading_until: None,
             scroll_target: None,
             scroll_animation: None,
-            scroll_epoch: 0,
             stage_active: false,
             scrubbing: false,
         }
@@ -413,7 +410,6 @@ impl StageLyricsView {
     }
 
     fn cancel_scroll_animation(&mut self) {
-        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
         self.scroll_animation = None;
     }
 
@@ -428,9 +424,7 @@ impl StageLyricsView {
             return;
         }
 
-        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
         self.scroll_animation = Some(LyricScrollAnimation {
-            epoch: self.scroll_epoch,
             from_y,
             started_at,
         });
@@ -934,7 +928,9 @@ fn lyric_handoff_progress(started_at: Instant, now: Instant) -> f32 {
     let duration = LYRIC_HANDOFF_DURATION.as_secs_f32().max(f32::EPSILON);
     let raw =
         (now.saturating_duration_since(started_at).as_secs_f32() / duration).clamp(0.0, 1.0);
-    1.0 - (1.0 - raw).powi(3)
+    // Quintic smootherstep keeps both velocity and acceleration continuous at the hand-off edges.
+    // Unlike OutCubic it does not consume most of the blur change in the first few frames.
+    raw * raw * raw * (raw * (raw * 6.0 - 15.0) + 10.0)
 }
 
 #[inline]
@@ -1223,7 +1219,6 @@ mod tests {
     fn scroll_animation_keeps_continuity_and_settles() {
         let start = Instant::now();
         let animation = LyricScrollAnimation {
-            epoch: 1,
             from_y: 120.0,
             started_at: start,
         };
