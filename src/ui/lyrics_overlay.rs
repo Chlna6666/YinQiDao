@@ -1,18 +1,28 @@
-use std::sync::{Arc, OnceLock};
-
-use gpui::{
-    Context, GpuMesh3d, GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange,
-    GpuMesh3dShader, GpuMesh3dVertex, IntoElement, Subscription, Task, Timer, WeakEntity,
-    WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, prelude::*, px, rgb,
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
-use crate::settings::DesktopLyricsAlignment;
+use gpui::{
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, Context, Easing, ElementId,
+    GpuMesh3d, GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader,
+    GpuMesh3dVertex, HorizontalRevealEdge, IntoElement, SharedString, Subscription, Task, Timer,
+    TransformOrigin, WeakEntity, WgslShaderSource, Window, WindowControlArea, canvas, div, hsla,
+    point, prelude::*, px, rgb,
+};
+
+use crate::{
+    desktop_lyrics::LyricsDisplay,
+    lyrics::LyricWord,
+    model::{PlaybackState, TrackId},
+    settings::DesktopLyricsAlignment,
+};
 
 use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
-const CONTROL_LANE_WIDTH: f32 = 224.0;
+const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -23,6 +33,11 @@ pub(crate) struct DesktopLyricsView {
     clock_armed: bool,
     hovered: bool,
     settings_open: bool,
+    display_key: Option<(TrackId, usize)>,
+    last_display: Option<LyricsDisplay>,
+    previous_display: Option<LyricsDisplay>,
+    line_epoch: u64,
+    line_transition_deadline: Option<Instant>,
 }
 
 impl DesktopLyricsView {
@@ -44,6 +59,11 @@ impl DesktopLyricsView {
             clock_armed: false,
             hovered: false,
             settings_open: false,
+            display_key: None,
+            last_display: None,
+            previous_display: None,
+            line_epoch: 0,
+            line_transition_deadline: None,
         }
     }
 
@@ -93,25 +113,44 @@ impl gpui::Render for DesktopLyricsView {
         let Some(parent) = self.parent.upgrade() else {
             return div().size_full().into_any_element();
         };
-        let app = parent.read(cx);
-        let config = app.config.desktop_lyrics.clone();
-        let display = app.desktop_lyrics_display();
-        let current = display.as_ref().map_or_else(
-            || "暂无同步歌词".to_string(),
-            |lyrics| lyrics.current.clone(),
-        );
-        let translation = display
-            .as_ref()
-            .and_then(|lyrics| lyrics.translation.clone())
-            .filter(|text| config.show_translation && !text.trim().is_empty());
-        let next = display
-            .as_ref()
-            .and_then(|lyrics| lyrics.next.clone())
-            .filter(|text| config.two_line && !text.trim().is_empty());
-        let next_translation = display
-            .as_ref()
-            .and_then(|lyrics| lyrics.next_translation.clone())
-            .filter(|text| config.two_line && config.show_translation && !text.trim().is_empty());
+        let (config, display, karaoke_running) = {
+            let app = parent.read(cx);
+            (
+                app.config.desktop_lyrics.clone(),
+                app.desktop_lyrics_display(),
+                app.snapshot.state == PlaybackState::Playing,
+            )
+        };
+
+        let now = window.animation_time();
+        if self
+            .line_transition_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.previous_display = None;
+            self.line_transition_deadline = None;
+        }
+
+        let next_key = display.as_ref().map(|display| (display.track_id, display.line_index));
+        if next_key != self.display_key {
+            if self.display_key.is_some() && next_key.is_some() {
+                self.previous_display = self.last_display.clone();
+                self.line_transition_deadline = Some(now + LYRIC_LINE_TRANSITION_DURATION);
+            } else {
+                self.previous_display = None;
+                self.line_transition_deadline = None;
+            }
+            self.display_key = next_key;
+            self.line_epoch = self.line_epoch.wrapping_add(1);
+        }
+        self.last_display = display.clone();
+
+        if let Some(deadline) = self.line_transition_deadline
+            && deadline > now
+        {
+            window.request_invalidation_at(deadline, cx);
+        }
+
         let interacting = self.hovered || self.settings_open;
         let background_opacity = if interacting {
             config
@@ -122,59 +161,95 @@ impl gpui::Render for DesktopLyricsView {
         }
         .clamp(0.0, 0.85);
 
-        let mut lyrics = div()
-            .flex_1()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(3.0));
-
-        lyrics = match config.alignment {
-            DesktopLyricsAlignment::Left => lyrics.items_start(),
-            DesktopLyricsAlignment::Center => lyrics.items_center(),
-            DesktopLyricsAlignment::Right => lyrics.items_end(),
+        let lyrics = if let Some(display) = &display {
+            desktop_lyrics_stack(
+                display,
+                &config,
+                karaoke_running,
+                self.line_epoch,
+                true,
+            )
+        } else {
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(config.font_size))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(config.active_color & 0x00ff_ffff))
+                .child("暂无同步歌词")
+                .into_any_element()
         };
 
-        lyrics = lyrics.child(aligned_line(
-            current,
-            config.alignment,
-            config.font_size,
-            config.active_color,
-            gpui::FontWeight::SEMIBOLD,
-            1.0,
-        ));
+        let lyrics = if let Some(previous) = self.previous_display.as_ref()
+            && self.line_transition_deadline.is_some_and(|deadline| deadline > now)
+        {
+            let key = self.line_epoch;
+            let incoming = div()
+                .w_full()
+                .min_w(px(0.0))
+                .child(lyrics)
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("desktop-lyric-line-in-scale"),
+                        key,
+                    ),
+                    lyric_line_scale_opacity(0.985, 1.0, 0.0, 1.0),
+                    |element, _| element,
+                )
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("desktop-lyric-line-in-translation"),
+                        key,
+                    ),
+                    lyric_line_translation(7.0, 0.0),
+                    |element, _| element,
+                )
+                .into_any_element();
 
-        if let Some(translation) = translation {
-            lyrics = lyrics.child(aligned_line(
-                translation,
-                config.alignment,
-                (config.font_size * 0.52).max(13.0),
-                config.translation_color,
-                gpui::FontWeight::MEDIUM,
-                0.90,
-            ));
-        }
-        if let Some(next) = next {
-            lyrics = lyrics.child(aligned_line(
-                next,
-                config.alignment,
-                (config.font_size * 0.66).max(15.0),
-                config.inactive_color,
-                gpui::FontWeight::MEDIUM,
-                0.70,
-            ));
-        }
-        if let Some(next_translation) = next_translation {
-            lyrics = lyrics.child(aligned_line(
-                next_translation,
-                config.alignment,
-                (config.font_size * 0.44).max(12.0),
-                config.translation_color,
-                gpui::FontWeight::NORMAL,
-                0.58,
-            ));
-        }
+            let outgoing = div()
+                .absolute()
+                .inset_0()
+                .px(px(24.0))
+                .py(px(12.0))
+                .flex()
+                .child(desktop_lyrics_stack(
+                    previous,
+                    &config,
+                    false,
+                    key.wrapping_sub(1),
+                    false,
+                ))
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("desktop-lyric-line-out-scale"),
+                        key,
+                    ),
+                    lyric_line_scale_opacity(1.0, 0.985, 1.0, 0.0),
+                    |element, _| element,
+                )
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("desktop-lyric-line-out-translation"),
+                        key,
+                    ),
+                    lyric_line_translation(0.0, -7.0),
+                    |element, _| element,
+                )
+                .into_any_element();
+
+            div()
+                .relative()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(incoming)
+                .child(outgoing)
+                .into_any_element()
+        } else {
+            lyrics
+        };
 
         let mut root = div()
             .id("desktop-lyrics-root")
@@ -190,14 +265,14 @@ impl gpui::Render for DesktopLyricsView {
             }));
 
         if !config.locked {
+            // Buttons/panels stop propagation themselves, so every other pixel is a valid drag
+            // surface. The previous fixed 224 px exclusion made almost half of a narrow widget
+            // permanently non-draggable even while the toolbar was hidden.
             root = root.on_mouse_down(
                 gpui::MouseButton::Left,
-                move |event: &gpui::MouseDownEvent, window, cx| {
-                    let drag_right = window.bounds().size.width - px(CONTROL_LANE_WIDTH);
-                    if event.position.x < drag_right {
-                        cx.stop_propagation();
-                        window.start_window_move();
-                    }
+                move |_: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    window.start_window_move();
                 },
             );
         }
@@ -230,6 +305,10 @@ impl gpui::Render for DesktopLyricsView {
                 .gap(px(5.0))
                 .occlude()
                 .window_control_area(WindowControlArea::Client)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    |_: &gpui::MouseDownEvent, _, cx| cx.stop_propagation(),
+                )
                 .child(toolbar_button(
                     "desktop-lyrics-lock",
                     if config.locked { "解" } else { "锁" },
@@ -277,6 +356,319 @@ impl gpui::Render for DesktopLyricsView {
 
         root.into_any_element()
     }
+}
+
+fn desktop_lyrics_stack(
+    display: &LyricsDisplay,
+    config: &crate::settings::DesktopLyricsConfig,
+    karaoke_running: bool,
+    line_epoch: u64,
+    animate_words: bool,
+) -> gpui::AnyElement {
+    let mut lyrics = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex_1()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(3.0));
+
+    lyrics = match config.alignment {
+        DesktopLyricsAlignment::Left => lyrics.items_start(),
+        DesktopLyricsAlignment::Center => lyrics.items_center(),
+        DesktopLyricsAlignment::Right => lyrics.items_end(),
+    };
+
+    lyrics = lyrics.child(animated_current_line(
+        display,
+        config.alignment,
+        config.font_size,
+        config.active_color,
+        karaoke_running && animate_words,
+        line_epoch,
+    ));
+
+    if config.show_translation
+        && let Some(translation) = display
+            .translation
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+    {
+        lyrics = lyrics.child(aligned_line(
+            translation.clone(),
+            config.alignment,
+            (config.font_size * 0.52).max(13.0),
+            config.translation_color,
+            gpui::FontWeight::MEDIUM,
+            0.90,
+        ));
+    }
+    if config.two_line
+        && let Some(next) = display.next.as_ref().filter(|text| !text.trim().is_empty())
+    {
+        lyrics = lyrics.child(aligned_line(
+            next.clone(),
+            config.alignment,
+            (config.font_size * 0.66).max(15.0),
+            config.inactive_color,
+            gpui::FontWeight::MEDIUM,
+            0.70,
+        ));
+    }
+    if config.two_line
+        && config.show_translation
+        && let Some(next_translation) = display
+            .next_translation
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+    {
+        lyrics = lyrics.child(aligned_line(
+            next_translation.clone(),
+            config.alignment,
+            (config.font_size * 0.44).max(12.0),
+            config.translation_color,
+            gpui::FontWeight::NORMAL,
+            0.58,
+        ));
+    }
+
+    lyrics.into_any_element()
+}
+
+fn animated_current_line(
+    display: &LyricsDisplay,
+    alignment: DesktopLyricsAlignment,
+    font_size: f32,
+    color: u32,
+    animate: bool,
+    line_epoch: u64,
+) -> gpui::AnyElement {
+    if display.current_words.is_empty()
+        || !words_cover_primary_text(&display.current, &display.current_words)
+    {
+        return aligned_line(
+            display.current.clone(),
+            alignment,
+            font_size,
+            color,
+            gpui::FontWeight::SEMIBOLD,
+            1.0,
+        );
+    }
+
+    let current_word = display
+        .current_words
+        .partition_point(|word| word.timestamp_ms <= display.position_ms)
+        .checked_sub(1);
+    let mut content = div()
+        .max_w(px(1_420.0))
+        .min_w(px(0.0))
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .text_size(px(font_size))
+        .font_weight(gpui::FontWeight::SEMIBOLD);
+
+    for (index, word) in display.current_words.iter().enumerate() {
+        content = content.child(desktop_karaoke_word(
+            &display.current_words,
+            word,
+            index,
+            current_word,
+            display.position_ms,
+            animate,
+            color,
+            line_epoch,
+        ));
+    }
+
+    let row = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .items_center()
+        .child(content);
+    match alignment {
+        DesktopLyricsAlignment::Left => row.justify_start(),
+        DesktopLyricsAlignment::Center => row.justify_center(),
+        DesktopLyricsAlignment::Right => row.justify_end(),
+    }
+    .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn desktop_karaoke_word(
+    words: &[LyricWord],
+    word: &LyricWord,
+    index: usize,
+    current_word: Option<usize>,
+    position_ms: u64,
+    animate: bool,
+    color: u32,
+    line_epoch: u64,
+) -> gpui::AnyElement {
+    const DIM_ALPHA: f32 = 0.34;
+    let color = color & 0x00ff_ffff;
+
+    let Some(current_word) = current_word else {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .opacity(DIM_ALPHA)
+            .text_color(rgb(color))
+            .child(word.text.clone())
+            .into_any_element();
+    };
+    if index < current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(rgb(color))
+            .child(word.text.clone())
+            .into_any_element();
+    }
+    if index > current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .opacity(DIM_ALPHA)
+            .text_color(rgb(color))
+            .child(word.text.clone())
+            .into_any_element();
+    }
+
+    let duration_ms = authored_or_inferred_word_duration(words, index);
+    let progress = word_reveal_progress(word, duration_ms, position_ms);
+    let base = div()
+        .flex_none()
+        .whitespace_nowrap()
+        .opacity(DIM_ALPHA)
+        .text_color(rgb(color))
+        .child(word.text.clone());
+    let overlay = div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w_full()
+        .h_full()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(rgb(color))
+        .child(word.text.clone());
+
+    let overlay = if animate
+        && progress < 1.0
+        && let Some(duration_ms) = duration_ms
+    {
+        let end = word.timestamp_ms.saturating_add(duration_ms);
+        let remaining = end.saturating_sub(position_ms);
+        if remaining > 0 {
+            let key = line_epoch
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(word.timestamp_ms.rotate_left(17))
+                .wrapping_add(index as u64);
+            overlay
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("desktop-lyric-word-sweep"),
+                        key,
+                    ),
+                    Animation::new(Duration::from_millis(remaining)).with_property(
+                        AnimationProperty::horizontal_reveal(
+                            HorizontalRevealEdge::Left,
+                            progress,
+                            1.0,
+                        ),
+                    ),
+                    |element, _| element,
+                )
+                .into_any_element()
+        } else {
+            overlay.into_any_element()
+        }
+    } else if progress < 1.0 {
+        overlay
+            .with_sampled_animation(
+                AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
+                progress,
+            )
+            .into_any_element()
+    } else {
+        overlay.into_any_element()
+    };
+
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(base)
+        .child(overlay)
+        .into_any_element()
+}
+
+fn authored_or_inferred_word_duration(words: &[LyricWord], index: usize) -> Option<u64> {
+    let word = words.get(index)?;
+    word.duration_ms
+        .filter(|duration| *duration > 0)
+        .or_else(|| {
+            words.get(index + 1).and_then(|next| {
+                let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
+                (duration > 0).then_some(duration)
+            })
+        })
+}
+
+fn word_reveal_progress(word: &LyricWord, duration_ms: Option<u64>, position_ms: u64) -> f32 {
+    let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
+        return if position_ms >= word.timestamp_ms { 1.0 } else { 0.0 };
+    };
+    let elapsed = position_ms
+        .saturating_sub(word.timestamp_ms)
+        .min(duration_ms);
+    (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
+}
+
+fn words_cover_primary_text(text: &str, words: &[LyricWord]) -> bool {
+    if words.is_empty() || text.is_empty() {
+        return false;
+    }
+    let mut remaining = text;
+    for word in words {
+        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    remaining.is_empty()
+}
+
+fn lyric_line_scale_opacity(
+    from_scale: f32,
+    to_scale: f32,
+    from_opacity: f32,
+    to_opacity: f32,
+) -> Animation {
+    Animation::from_spec(
+        AnimationSpec::new(LYRIC_LINE_TRANSITION_DURATION).ease(Easing::OutCubic),
+    )
+    .with_property(AnimationProperty::scale_opacity(
+        from_scale,
+        to_scale,
+        from_opacity,
+        to_opacity,
+        TransformOrigin::new(0.5, 0.5),
+    ))
+}
+
+fn lyric_line_translation(from_y: f32, to_y: f32) -> Animation {
+    Animation::from_spec(
+        AnimationSpec::new(LYRIC_LINE_TRANSITION_DURATION).ease(Easing::OutCubic),
+    )
+    .with_property(AnimationProperty::translation(
+        point(px(0.0), px(from_y)),
+        point(px(0.0), px(to_y)),
+    ))
 }
 
 fn aligned_line(
@@ -359,7 +751,7 @@ fn settings_panel(
         .absolute()
         .top(px(35.0))
         .right(px(8.0))
-        .w(px(190.0))
+        .w(px(322.0))
         .p(px(6.0))
         .rounded(px(12.0))
         .occlude()
@@ -369,7 +761,12 @@ fn settings_panel(
         .border_color(hsla(0.0, 0.0, 1.0, 0.16))
         .shadow_md()
         .flex()
-        .flex_col()
+        .flex_wrap()
+        .gap(px(4.0))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            |_: &gpui::MouseDownEvent, _, cx| cx.stop_propagation(),
+        )
         .child(settings_row(
             "desktop-lyrics-menu-topmost",
             "总在最前",
@@ -439,6 +836,7 @@ fn settings_row(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .w(px(98.0))
         .h(px(20.0))
         .px(px(7.0))
         .rounded(px(7.0))
