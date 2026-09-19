@@ -895,7 +895,7 @@ fn lyric_text_layer(
     blur_sigma: f32,
     text_id: &'static str,
     index: usize,
-) -> gpui::Div {
+) -> gpui::Stateful<gpui::Div> {
     let mut text = div()
         .id(ElementId::named_usize(text_id, index))
         .w_full()
