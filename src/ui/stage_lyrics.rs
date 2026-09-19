@@ -25,6 +25,7 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(220);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
+const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 5;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -147,6 +148,7 @@ pub(super) struct StageLyricsView {
     position_ms: u64,
     playback_state: PlaybackState,
     active_index: Option<usize>,
+    focus_from_index: Option<usize>,
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
@@ -175,6 +177,7 @@ impl StageLyricsView {
             position_ms: 0,
             playback_state: PlaybackState::Paused,
             active_index: None,
+            focus_from_index: None,
             active_word_index: None,
             hovered_index: None,
             karaoke_epoch: 0,
@@ -232,6 +235,7 @@ impl StageLyricsView {
                 .into();
             self.list_state.reset(source_len);
             self.active_index = None;
+            self.focus_from_index = None;
             self.active_word_index = None;
             self.hovered_index = None;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -323,6 +327,7 @@ impl StageLyricsView {
         if self.active_index == active {
             return false;
         }
+        self.focus_from_index = self.active_index;
         self.active_index = active;
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -581,6 +586,7 @@ impl Render for StageLyricsView {
         let text_id = "lyric-text";
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
+        let focus_from_index = self.focus_from_index;
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
@@ -590,6 +596,7 @@ impl Render for StageLyricsView {
                 &lines[index],
                 index,
                 active,
+                focus_from_index,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -654,6 +661,7 @@ fn render_lyric_row(
     line: &StageLyricLine,
     index: usize,
     active: usize,
+    focus_from_index: Option<usize>,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -668,6 +676,8 @@ fn render_lyric_row(
 ) -> gpui::AnyElement {
     let distance = index.abs_diff(active);
     let (alpha, blur_sigma) = lyric_focus_profile(distance, reading_mode, depth_blur_active);
+    let animate_depth =
+        lyric_depth_transition_bound(index, active, focus_from_index, reading_mode);
     let timestamp = line.timestamp_ms;
     // Keep glyph shaping stable across active-line changes. Emphasis is compositor-owned below;
     // changing Medium/Semibold/Bold for neighboring rows used to reshape several lines per step.
@@ -702,16 +712,18 @@ fn render_lyric_row(
         );
     }
 
-    if blur_sigma > 0.0 && !hovered {
-        text = text.blur(px(blur_sigma));
-    }
+    // Keep blur as an explicit per-line style even at sigma=0. GPUI's transition state then has a
+    // concrete endpoint when a blurred neighbor becomes the active sharp line. paint_element_blur
+    // treats sigma <= 0 as a no-op, so the active line does not allocate an offscreen blur pass.
+    let effective_blur = if hovered { 0.0 } else { blur_sigma };
     text = text
+        .blur(px(effective_blur))
         .opacity(if hovered { 1.0 } else { alpha })
-        .transition(lyric_focus_transition());
+        .transition(lyric_focus_transition(animate_depth));
 
-    // The distance-based opacity transition above is the only active-line focus animation. Keeping
-    // one paint transition avoids a second animation timeline restarting on the exact frame where
-    // the retained list begins its vertical hand-off.
+    // Each lyric line owns a stable ElementId and therefore its own retained blur timeline. Only
+    // the old/new focus neighborhoods participate in Blur transitions; remote rows keep a static
+    // depth value and do not join the 180 ms paint animation on every line hand-off.
     let text = text.into_any_element();
 
     let mut row = div()
@@ -791,6 +803,7 @@ fn render_lyric_row(
             this.reading_until = None;
             this.hovered_index = None;
             this.position_ms = timestamp;
+            this.focus_from_index = this.active_index;
             this.active_index = Some(index);
             this.active_word_index = this.compute_active_word_index();
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
@@ -820,9 +833,11 @@ fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: b
     let blur_sigma = if depth_blur_active {
         match distance {
             0 => 0.0,
-            1 => 0.65,
-            2 => 1.15,
-            3 => 1.65,
+            // Keep the first defocused row at a real one-pixel sigma. Sub-pixel blur is visually
+            // close to identity on the retained Nova path and made the depth hand-off look absent.
+            1 => 1.00,
+            2 => 1.35,
+            3 => 1.70,
             4 => 2.00,
             _ => 2.20,
         }
@@ -1035,13 +1050,31 @@ fn format_lyric_time(ms: u64) -> String {
     }
 }
 
-fn lyric_focus_transition() -> Transition {
-    Transition::new(Duration::from_millis(180))
-        .ease(Easing::OutCubic)
-        .properties([
+fn lyric_depth_transition_bound(
+    index: usize,
+    active: usize,
+    focus_from_index: Option<usize>,
+    reading_mode: bool,
+) -> bool {
+    if reading_mode {
+        return false;
+    }
+
+    index.abs_diff(active) <= LYRIC_DEPTH_TRANSITION_RADIUS
+        || focus_from_index
+            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_DEPTH_TRANSITION_RADIUS)
+}
+
+fn lyric_focus_transition(animate_depth: bool) -> Transition {
+    let transition = Transition::new(Duration::from_millis(180)).ease(Easing::OutCubic);
+    if animate_depth {
+        transition.properties([
             TransitionProperty::Opacity,
             TransitionProperty::Blur,
         ])
+    } else {
+        transition.properties([TransitionProperty::Opacity])
+    }
 }
 
 #[cfg(test)]
@@ -1058,11 +1091,20 @@ mod tests {
     #[test]
     fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
         assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 0.65));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.65));
+        assert_eq!(lyric_focus_profile(1, false, true), (0.56, 1.00));
+        assert_eq!(lyric_focus_profile(3, false, true), (0.32, 1.70));
         assert_eq!(lyric_focus_profile(5, false, true), (0.26, 2.20));
         assert_eq!(lyric_focus_profile(2, false, false), (0.42, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
+    }
+
+    #[test]
+    fn lyric_depth_transition_is_bound_to_old_and_new_focus_neighborhoods() {
+        assert!(lyric_depth_transition_bound(12, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(7, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(6, 12, Some(11), false));
+        assert!(!lyric_depth_transition_bound(0, 12, Some(11), false));
+        assert!(!lyric_depth_transition_bound(12, 12, Some(11), true));
     }
 
     #[test]
