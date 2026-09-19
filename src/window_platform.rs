@@ -154,6 +154,10 @@ pub(crate) fn set_always_on_top(window: &gpui::Window, enabled: bool) -> bool {
     let Some(hwnd) = native_hwnd(window) else {
         return false;
     };
+    // Reassert widget semantics together with z-order. Some shell transitions can recompute the
+    // visible frame after a topmost change; keeping TOOLWINDOW/NOACTIVATE here prevents taskbar
+    // regrouping without recreating the HWND.
+    apply_desktop_lyrics_widget_style(hwnd);
     remove_overlay_non_client_chrome(hwnd);
     apply_topmost(hwnd, enabled)
 }
