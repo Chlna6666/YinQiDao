@@ -284,6 +284,10 @@ impl StageLyricsView {
         }
         if stage_active_changed {
             self.stage_active = stage_active;
+            // Stage removal drops retained scene state. Do not keep an old focus source around:
+            // otherwise reopening can recreate an already-finished hand-off from a stale line.
+            self.focus_from_index = None;
+            self.focus_epoch = self.focus_epoch.wrapping_add(1);
             if stage_active {
                 // Re-entering Stage must not reuse an old retained word timeline that may have kept
                 // aging while its scene subtree was absent.
