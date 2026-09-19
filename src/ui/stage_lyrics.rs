@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, BorrowAppContext as _,
-    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
+    Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
@@ -22,7 +22,11 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 120.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(380);
+const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
+const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(420);
+const LYRIC_ROW_STAGGER: f32 = 0.035;
+const LYRIC_ROW_STAGGER_MAX: f32 = 0.14;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 4;
@@ -522,9 +526,19 @@ impl StageLyricsView {
             return;
         };
 
+        let viewport_top = f32::from(viewport.origin.y);
+        let viewport_height = f32::from(viewport.size.height);
+        let usable_height =
+            (viewport_height - LYRIC_LIST_PADDING_TOP - LYRIC_LIST_PADDING_BOTTOM).max(1.0);
         let anchor_y =
-            f32::from(viewport.origin.y) + f32::from(viewport.size.height) * LYRIC_ANCHOR_RATIO;
-        let diff = f32::from(line_bounds.center().y) - anchor_y;
+            viewport_top + LYRIC_LIST_PADDING_TOP + usable_height * LYRIC_ANCHOR_RATIO;
+
+        // GPUI ListState::bounds_for_item currently reports coordinates from the list bounds but
+        // omits style padding.top, while prepaint_items actually starts every row after padding.top.
+        // Compensate here so the active lyric's *painted* center lands on the visual anchor.
+        let painted_line_center =
+            f32::from(line_bounds.center().y) + LYRIC_LIST_PADDING_TOP;
+        let diff = painted_line_center - anchor_y;
         let now = window.animation_time();
         if diff.abs() <= SCROLL_SETTLE_PX {
             self.scroll_target = None;
@@ -609,6 +623,8 @@ impl Render for StageLyricsView {
             && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
+        let scroll_progress = scroll_animation.map(|scroll| scroll.progress_at(frame_now));
+        let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
         let focus_progress = self.focus_handoff_progress(frame_now);
         let focus_animating = focus_progress.is_some_and(|progress| progress < 1.0);
         if scroll_animating || focus_animating {
@@ -634,6 +650,8 @@ impl Render for StageLyricsView {
                 active,
                 focus_from_index,
                 focus_progress,
+                scroll_progress,
+                scroll_from_y,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -648,24 +666,11 @@ impl Render for StageLyricsView {
             )
         })
         .size_full()
-        .pt(px(96.0))
-        .pb(px(112.0))
+        .pt(px(LYRIC_LIST_PADDING_TOP))
+        .pb(px(LYRIC_LIST_PADDING_BOTTOM))
         .pr(px(8.0));
 
-        let lyrics = if let Some(scroll) = scroll_animation {
-            lyrics
-                .composite_layer()
-                .with_sampled_animation(
-                    AnimationProperty::translation(
-                        point(px(0.0), px(scroll.from_y)),
-                        point(px(0.0), px(0.0)),
-                    ),
-                    scroll.progress_at(frame_now),
-                )
-                .into_any_element()
-        } else {
-            lyrics.into_any_element()
-        };
+        let lyrics = lyrics.into_any_element();
 
         div()
             .id("stage-lyrics-view")
@@ -692,6 +697,8 @@ fn render_lyric_row(
     active: usize,
     focus_from_index: Option<usize>,
     focus_progress: Option<f32>,
+    scroll_progress: Option<f32>,
+    scroll_from_y: f32,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -715,16 +722,18 @@ fn render_lyric_row(
         let previous_distance = index.abs_diff(previous);
         lyric_focus_profile(previous_distance, reading_mode, depth_blur_active)
     });
+    let handoff_pending = previous_active.is_some();
     let animate_focus = !reading_mode
         && !hovered
         && lyric_depth_transition_bound(index, active, previous_active, reading_mode)
-        && focus_progress.is_some()
         && transition_profile.is_some_and(|(alpha, blur)| {
             (alpha - target_alpha).abs() > 0.001 || (blur - target_blur).abs() > 0.001
         });
 
+    // If the active index changed before ListState has measured the target row, hold the exact old
+    // depth state at progress=0. This removes the one-frame "all sharp / blur disappeared" flash.
     let base_progress = if animate_focus {
-        focus_progress.unwrap_or(1.0).clamp(0.0, 1.0)
+        focus_progress.unwrap_or(if handoff_pending { 0.0 } else { 1.0 }).clamp(0.0, 1.0)
     } else {
         1.0
     };
@@ -835,11 +844,24 @@ fn render_lyric_row(
     }
 
     if !interactive {
+        if let Some(base_scroll_progress) = scroll_progress {
+            let row_progress =
+                lyric_row_scroll_progress(index, active, base_scroll_progress, scroll_from_y);
+            return row
+                .with_sampled_animation(
+                    AnimationProperty::translation(
+                        point(px(0.0), px(scroll_from_y)),
+                        point(px(0.0), px(0.0)),
+                    ),
+                    row_progress,
+                )
+                .into_any_element();
+        }
         return row.into_any_element();
     }
 
     let local = view;
-    row.on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+    let row = row.on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
         cx.stop_propagation();
         let _ = local.update(cx, |this, cx| {
             this.reading_until = None;
@@ -857,8 +879,22 @@ fn render_lyric_row(
             app.seek_to_ms(timestamp, cx);
             app.wake_stage_controls_immediately(cx);
         });
-    })
-    .into_any_element()
+    });
+
+    if let Some(base_scroll_progress) = scroll_progress {
+        let row_progress =
+            lyric_row_scroll_progress(index, active, base_scroll_progress, scroll_from_y);
+        row.with_sampled_animation(
+            AnimationProperty::translation(
+                point(px(0.0), px(scroll_from_y)),
+                point(px(0.0), px(0.0)),
+            ),
+            row_progress,
+        )
+        .into_any_element()
+    } else {
+        row.into_any_element()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1172,6 +1208,26 @@ fn format_lyric_time(ms: u64) -> String {
     }
 }
 
+#[inline]
+fn lyric_row_scroll_progress(
+    index: usize,
+    active: usize,
+    progress: f32,
+    from_y: f32,
+) -> f32 {
+    // When lyrics advance (positive compensation -> rows visually travel upward), the focus area
+    // leads and rows below it follow with a very small stagger. Reverse the cascade when seeking
+    // backwards. The cap keeps distant virtualized rows from visibly lagging behind.
+    let trailing_distance = if from_y >= 0.0 {
+        index.saturating_sub(active)
+    } else {
+        active.saturating_sub(index)
+    };
+    let delay =
+        (trailing_distance as f32 * LYRIC_ROW_STAGGER).min(LYRIC_ROW_STAGGER_MAX);
+    lyric_phase_progress(progress, delay, 1.0)
+}
+
 fn lyric_depth_transition_bound(
     index: usize,
     active: usize,
@@ -1206,6 +1262,16 @@ mod tests {
         assert_eq!(lyric_focus_profile(5, false, true), (0.28, 2.10));
         assert_eq!(lyric_focus_profile(2, false, false), (0.48, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
+    }
+
+    #[test]
+    fn row_scroll_stagger_makes_lower_rows_follow_the_focus() {
+        let p = 0.35;
+        let active = lyric_row_scroll_progress(10, 10, p, 80.0);
+        let next = lyric_row_scroll_progress(11, 10, p, 80.0);
+        let third = lyric_row_scroll_progress(13, 10, p, 80.0);
+        assert!(active > next);
+        assert!(next > third);
     }
 
     #[test]
