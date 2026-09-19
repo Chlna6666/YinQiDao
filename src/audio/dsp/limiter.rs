@@ -24,8 +24,8 @@ impl StereoPeakLimiter {
     fn with_parameters(sample_rate: u32, ceiling_dbfs: f32, release_ms: f32) -> Self {
         let sample_rate = sample_rate.max(1) as f32;
         let ceiling_dbfs = finite_or(ceiling_dbfs, DEFAULT_CEILING_DBFS).clamp(-6.0, -0.01);
-        let release_ms = finite_or(release_ms, DEFAULT_RELEASE_MS)
-            .clamp(MIN_RELEASE_MS, MAX_RELEASE_MS);
+        let release_ms =
+            finite_or(release_ms, DEFAULT_RELEASE_MS).clamp(MIN_RELEASE_MS, MAX_RELEASE_MS);
         let ceiling = 10.0_f32.powf(ceiling_dbfs / 20.0);
         let release_seconds = release_ms * 0.001;
         let release_alpha = 1.0 - (-1.0 / (release_seconds * sample_rate)).exp();

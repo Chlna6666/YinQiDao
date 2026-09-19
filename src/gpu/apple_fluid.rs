@@ -120,14 +120,13 @@ impl Render for AppleFluidView {
             Ok(program) => {
                 self.shader_available = true;
                 let now = window.animation_time();
-                let animate = self.stage_visible && self.playing;
+                let animate = self.stage_visible && self.playing && !window.is_minimized();
                 if animate {
                     let delta = now
                         .saturating_duration_since(self.last_frame_at)
                         .as_secs_f32()
                         .min(0.05);
-                    self.animation_seconds =
-                        (self.animation_seconds + delta).rem_euclid(21_600.0);
+                    self.animation_seconds = (self.animation_seconds + delta).rem_euclid(21_600.0);
                     // Prewarm/drawer frames keep the full procedural field but do not schedule RAF.
                     // Once the Stage settles, animation resumes from the exact frozen field already
                     // on screen, so enabling motion does not change shader branches or color layout.

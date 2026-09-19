@@ -123,20 +123,10 @@ pub fn read_local(path: &Path) -> Option<LyricsDocument> {
             continue;
         }
         if !parse_synced_lyrics(&text).is_empty() {
-            return Some(LyricsDocument::from_sources(
-                None,
-                Some(text),
-                None,
-                source,
-            ));
+            return Some(LyricsDocument::from_sources(None, Some(text), None, source));
         }
         if extension == "lrc" {
-            return Some(LyricsDocument::from_sources(
-                Some(text),
-                None,
-                None,
-                source,
-            ));
+            return Some(LyricsDocument::from_sources(Some(text), None, None, source));
         }
     }
 
@@ -364,8 +354,7 @@ fn parse_timestamp(value: &str) -> Option<u64> {
         let p1 = second.parse::<u64>().ok()?;
         if third.contains('.') {
             let (sec, ms) = parse_seconds_and_fraction(third)?;
-            (p1 < 60 && sec < 60)
-                .then(|| p0 * 3_600_000 + p1 * 60_000 + sec * 1_000 + ms)
+            (p1 < 60 && sec < 60).then(|| p0 * 3_600_000 + p1 * 60_000 + sec * 1_000 + ms)
         } else {
             let frac = third.parse::<u64>().ok()?;
             let ms = if third.len() == 2 {
@@ -486,9 +475,15 @@ mod tests {
         );
         assert_eq!(document.timed_lines().len(), 2);
         assert_eq!(document.timed_lines()[0].text, "Hello");
-        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
         assert_eq!(document.timed_lines()[1].text, "Goodbye");
-        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("再见"));
+        assert_eq!(
+            document.timed_lines()[1].translation.as_deref(),
+            Some("再见")
+        );
         assert!(document.has_translation());
     }
 
@@ -501,8 +496,14 @@ mod tests {
             "测试",
         );
         assert_eq!(document.timed_lines().len(), 2);
-        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
-        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("再见"));
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
+        assert_eq!(
+            document.timed_lines()[1].translation.as_deref(),
+            Some("再见")
+        );
         assert!(document.has_translation());
     }
 
@@ -515,8 +516,14 @@ mod tests {
             "测试",
         );
         assert_eq!(document.timed_lines().len(), 2);
-        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("第一"));
-        assert_eq!(document.timed_lines()[1].translation.as_deref(), Some("第二"));
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("第一")
+        );
+        assert_eq!(
+            document.timed_lines()[1].translation.as_deref(),
+            Some("第二")
+        );
     }
 
     #[test]
@@ -529,7 +536,10 @@ mod tests {
         );
         assert_eq!(document.timed_lines().len(), 1);
         assert_eq!(document.timed_lines()[0].text, "Hello");
-        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
     }
 
     #[test]
@@ -542,6 +552,9 @@ mod tests {
         );
         assert_eq!(document.timed_lines().len(), 1);
         assert_eq!(document.timed_lines()[0].text, "Hello");
-        assert_eq!(document.timed_lines()[0].translation.as_deref(), Some("你好"));
+        assert_eq!(
+            document.timed_lines()[0].translation.as_deref(),
+            Some("你好")
+        );
     }
 }

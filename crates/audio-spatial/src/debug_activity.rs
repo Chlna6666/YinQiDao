@@ -86,10 +86,7 @@ mod tests {
     #[test]
     fn separates_interleaved_channel_activity_without_allocation() {
         let input = [
-            0.5, 0.25, 0.0,
-            -0.5, 0.25, 1.0,
-            0.25, -0.25, -1.0,
-            -0.25, -0.25, 0.5,
+            0.5, 0.25, 0.0, -0.5, 0.25, 1.0, 0.25, -0.25, -1.0, -0.25, -0.25, 0.5,
         ];
         let mut activity = [SourceActivity::default(); 3];
         assert_eq!(analyze_interleaved_activity(&input, 3, &mut activity), 3);
@@ -113,7 +110,10 @@ mod tests {
 
     #[test]
     fn malformed_layout_clears_output() {
-        let mut activity = [SourceActivity { peak: 1.0, rms: 1.0 }; 2];
+        let mut activity = [SourceActivity {
+            peak: 1.0,
+            rms: 1.0,
+        }; 2];
         assert_eq!(analyze_interleaved_activity(&[0.0; 3], 2, &mut activity), 0);
         assert_eq!(activity, [SourceActivity::default(); 2]);
     }
@@ -128,17 +128,30 @@ mod tests {
             analyze_interleaved_activity(&input, channels, &mut activity),
             MAX_ACTIVITY_CHANNELS
         );
-        assert!(activity[..MAX_ACTIVITY_CHANNELS]
-            .iter()
-            .all(|value| (value.peak - 0.25).abs() < f32::EPSILON));
-        assert!(activity[MAX_ACTIVITY_CHANNELS..]
-            .iter()
-            .all(|value| *value == SourceActivity::default()));
+        assert!(
+            activity[..MAX_ACTIVITY_CHANNELS]
+                .iter()
+                .all(|value| (value.peak - 0.25).abs() < f32::EPSILON)
+        );
+        assert!(
+            activity[MAX_ACTIVITY_CHANNELS..]
+                .iter()
+                .all(|value| *value == SourceActivity::default())
+        );
     }
 
     #[test]
     fn dbfs_floor_is_finite() {
         assert_eq!(SourceActivity::default().peak_dbfs(), -180.0);
-        assert!((SourceActivity { peak: 1.0, rms: 0.5 }.rms_dbfs() + 6.020_6).abs() < 1.0e-3);
+        assert!(
+            (SourceActivity {
+                peak: 1.0,
+                rms: 0.5
+            }
+            .rms_dbfs()
+                + 6.020_6)
+                .abs()
+                < 1.0e-3
+        );
     }
 }

@@ -65,7 +65,8 @@ pub(crate) fn fingerprint_file_payload(path: &Path) -> Result<AudioFingerprint> 
     if fingerprinter.fingerprint().is_empty() {
         bail!("音频过短，无法生成 AcoustID 指纹");
     }
-    let compressed = FingerprintCompressor::from(&configuration).compress(fingerprinter.fingerprint());
+    let compressed =
+        FingerprintCompressor::from(&configuration).compress(fingerprinter.fingerprint());
     let acoustid = URL_SAFE_NO_PAD.encode(&compressed);
     Ok(AudioFingerprint {
         compressed,

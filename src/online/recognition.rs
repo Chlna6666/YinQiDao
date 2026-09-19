@@ -302,10 +302,7 @@ fn lyric_quality(lyrics: &LyricsDocument) -> u8 {
         + u8::from(!lyrics.timed_lines().is_empty())
 }
 
-fn attach_raw_translation(
-    target: LyricsDocument,
-    translation: Option<String>,
-) -> LyricsDocument {
+fn attach_raw_translation(target: LyricsDocument, translation: Option<String>) -> LyricsDocument {
     if target.has_translation() {
         return target;
     }

@@ -147,11 +147,7 @@ impl MusicApp {
     }
 
     /// Select the synthesized speaker bed used only for mono/stereo programme.
-    pub(crate) fn set_virtual_bed_mode(
-        &mut self,
-        mode: VirtualBedMode,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_virtual_bed_mode(&mut self, mode: VirtualBedMode, cx: &mut Context<Self>) {
         self.disable_smart_audio_for_manual_tuning();
         self.config.spatial.virtual_bed = mode;
         if mode != VirtualBedMode::Off {

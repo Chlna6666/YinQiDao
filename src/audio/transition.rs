@@ -82,11 +82,10 @@ pub(crate) fn analyze_smart_cue(
             };
             current_rate = sample_rate.max(1);
             current_channels = channels.max(1);
-            let samples_per_window = ((u64::from(current_rate)
-                * u64::from(current_channels)
-                * ANALYSIS_WINDOW_MS)
-                / 1_000)
-                .max(1);
+            let samples_per_window =
+                ((u64::from(current_rate) * u64::from(current_channels) * ANALYSIS_WINDOW_MS)
+                    / 1_000)
+                    .max(1);
 
             for sample in chunk_samples.iter() {
                 let value = f64::from(*sample);
@@ -126,10 +125,7 @@ pub(crate) fn analyze_smart_cue(
             let stable = &windows[index..index + STABLE_WINDOWS];
             let active_count = stable.iter().filter(|(_, rms)| *rms >= FLOOR_RMS).count();
             let max_rms = stable.iter().map(|(_, rms)| *rms).fold(0.0_f64, f64::max);
-            if stable[0].1 < ACTIVE_RMS
-                || active_count < STABLE_WINDOWS - 1
-                || max_rms < PEAK_RMS
-            {
+            if stable[0].1 < ACTIVE_RMS || active_count < STABLE_WINDOWS - 1 || max_rms < PEAK_RMS {
                 continue;
             }
 

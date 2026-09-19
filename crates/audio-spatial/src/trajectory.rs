@@ -68,7 +68,11 @@ impl Trajectory {
         let position = self.position_at(sample_clock);
         let next_clock = sample_clock.saturating_add(1);
         let velocity = if sample_clock == 0 {
-            velocity_between(position, self.position_at(next_clock), self.sample_rate as f32)
+            velocity_between(
+                position,
+                self.position_at(next_clock),
+                self.sample_rate as f32,
+            )
         } else {
             let previous = self.position_at(sample_clock - 1);
             let next = self.position_at(next_clock);

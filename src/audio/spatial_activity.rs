@@ -82,7 +82,11 @@ pub fn spatial_source_activity_latest_snapshot() -> Option<SpatialSourceActivity
 
 #[inline]
 fn store_f32(slot: &AtomicU32, value: f32) {
-    let value = if value.is_finite() { value.max(0.0) } else { 0.0 };
+    let value = if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    };
     slot.store(value.to_bits(), Ordering::Relaxed);
 }
 
@@ -98,8 +102,14 @@ mod tests {
     #[test]
     fn activity_bank_round_trips_fixed_source_slots() {
         let mut activity = [SourceActivity::default(); MAX_DEBUG_SOURCES];
-        activity[0] = SourceActivity { peak: 0.9, rms: 0.3 };
-        activity[1] = SourceActivity { peak: 0.4, rms: 0.1 };
+        activity[0] = SourceActivity {
+            peak: 0.9,
+            rms: 0.3,
+        };
+        activity[1] = SourceActivity {
+            peak: 0.4,
+            rms: 0.1,
+        };
         publish_spatial_source_activity(2, activity);
         let snapshot = spatial_source_activity_latest_snapshot().expect("activity snapshot");
         assert_eq!(snapshot.source_count, 2);

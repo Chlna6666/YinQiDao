@@ -219,7 +219,9 @@ impl StereoPinnaState {
         let left = self.left_notch.process(left, coefficients.left);
         let right = self.right_notch.process(right, coefficients.right);
         let left = self.left_shoulder.process(left, coefficients.left_shoulder);
-        let right = self.right_shoulder.process(right, coefficients.right_shoulder);
+        let right = self
+            .right_shoulder
+            .process(right, coefficients.right_shoulder);
         (
             self.left_ridge.process(left, coefficients.left_ridge),
             self.right_ridge.process(right, coefficients.right_ridge),
@@ -290,11 +292,7 @@ pub(crate) fn coefficients_for_direction(
     elevation_radians: f32,
     spread: f32,
 ) -> StereoPinnaCoefficients {
-    let cue = telemetry_from_shape(cue_shape(
-        azimuth_radians,
-        elevation_radians,
-        spread,
-    ));
+    let cue = telemetry_from_shape(cue_shape(azimuth_radians, elevation_radians, spread));
 
     StereoPinnaCoefficients {
         left: peaking_coefficients(sample_rate, cue.left_center_hz, cue.q, -cue.left_depth_db),
@@ -336,11 +334,7 @@ pub(crate) fn reflection_coefficients_for_direction(
     spread: f32,
 ) -> StereoPinnaCoefficients {
     const REFLECTION_DEPTH_SCALE: f32 = 0.38;
-    let cue = telemetry_from_shape(cue_shape(
-        azimuth_radians,
-        elevation_radians,
-        spread,
-    ));
+    let cue = telemetry_from_shape(cue_shape(azimuth_radians, elevation_radians, spread));
     StereoPinnaCoefficients {
         left: peaking_coefficients(
             sample_rate,
@@ -426,8 +420,7 @@ fn cue_shape(azimuth_radians: f32, elevation_radians: f32, spread: f32) -> Pinna
         // Elevation is encoded primarily as a moving high-frequency notch. Widening the signed
         // frequency excursion makes +Y/-Y materially different without adding another realtime
         // filter stage or changing the authored speaker geometry.
-        center_hz: (9_800.0 + elevation_sin * 3_400.0 - rear * 2_700.0)
-            .clamp(4_800.0, 13_200.0),
+        center_hz: (9_800.0 + elevation_sin * 3_400.0 - rear * 2_700.0).clamp(4_800.0, 13_200.0),
         q: (1.12 + rear * 0.68 + elevation_abs * 0.52).clamp(0.90, 2.45),
         depth_db: ((0.50 + rear * 3.85 + elevation_abs * 2.90 + elevation_down * 0.60)
             * sagittal_weight
@@ -446,8 +439,7 @@ fn cue_shape(azimuth_radians: f32, elevation_radians: f32, spread: f32) -> Pinna
         // The lower ridge supplies an independent signed landmark so a listener does not need to
         // infer elevation from treble brightness alone. It remains modest enough to avoid becoming
         // an obvious EQ sweep on music programme.
-        ridge_center_hz: (2_800.0 + elevation_sin * 1_150.0 - rear * 500.0)
-            .clamp(1_300.0, 4_200.0),
+        ridge_center_hz: (2_800.0 + elevation_sin * 1_150.0 - rear * 500.0).clamp(1_300.0, 4_200.0),
         ridge_q: (0.62 + rear * 0.18 + elevation_abs * 0.24).clamp(0.55, 1.20),
         ridge_gain_db: ((elevation_up * 2.20 - elevation_down * 1.85 - rear * 1.35)
             * sagittal_weight
@@ -649,8 +641,7 @@ mod tests {
     #[test]
     fn low_sample_rate_keeps_all_biquad_stages_finite() {
         let coefficients = coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
-        let reflection =
-            reflection_coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
+        let reflection = reflection_coefficients_for_direction(4_000.0, PI * 0.75, PI * 0.25, 0.0);
         assert!(coefficients_finite(coefficients.left));
         assert!(coefficients_finite(coefficients.right));
         assert!(coefficients_finite(coefficients.left_shoulder));

@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Mutex, OnceLock,
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Sender},
     },
     thread::{self, JoinHandle},
 };
@@ -118,9 +118,7 @@ impl HotkeyEventBridge {
 
 pub(crate) fn event_bridge(cx: &mut App) -> Option<Entity<HotkeyEventBridge>> {
     let (app_actions, lyrics_actions) = take_event_receivers()?;
-    Some(cx.new(move |cx| {
-        HotkeyEventBridge::new(app_actions, lyrics_actions, cx)
-    }))
+    Some(cx.new(move |cx| HotkeyEventBridge::new(app_actions, lyrics_actions, cx)))
 }
 
 fn take_event_receivers() -> Option<(
@@ -134,7 +132,10 @@ fn take_event_receivers() -> Option<(
         return None;
     }
     Some((
-        service.app_event_rx.take().expect("checked app hotkey receiver"),
+        service
+            .app_event_rx
+            .take()
+            .expect("checked app hotkey receiver"),
         service
             .lyrics_event_rx
             .take()
@@ -427,9 +428,7 @@ mod platform {
 mod platform {
     use std::sync::mpsc::Receiver;
 
-    use super::{
-        AppHotkeyAction, LyricsHotkeyAction, ServiceCommand, UnboundedSender,
-    };
+    use super::{AppHotkeyAction, LyricsHotkeyAction, ServiceCommand, UnboundedSender};
 
     pub(super) fn run(
         command_rx: Receiver<ServiceCommand>,

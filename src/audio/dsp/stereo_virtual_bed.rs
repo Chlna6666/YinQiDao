@@ -102,17 +102,16 @@ impl VirtualBedMixProfile {
         // gaining loudness merely because more virtual sources exist.
         let reference_auxiliary_power = auxiliary_effective_power(reference);
         let layout_auxiliary_power = auxiliary_effective_power(layout);
-        let auxiliary_pre_gain = if reference_auxiliary_power > 1.0e-12
-            && layout_auxiliary_power > 1.0e-12
-        {
-            safe_ratio(
-                reference_auxiliary_power.sqrt(),
-                layout_auxiliary_power.sqrt(),
-            )
-            .clamp(0.0, MAX_AUXILIARY_PRE_GAIN)
-        } else {
-            1.0
-        };
+        let auxiliary_pre_gain =
+            if reference_auxiliary_power > 1.0e-12 && layout_auxiliary_power > 1.0e-12 {
+                safe_ratio(
+                    reference_auxiliary_power.sqrt(),
+                    layout_auxiliary_power.sqrt(),
+                )
+                .clamp(0.0, MAX_AUXILIARY_PRE_GAIN)
+            } else {
+                1.0
+            };
 
         Self {
             roles: VirtualBedRoleMap::for_layout(layout),
@@ -220,8 +219,7 @@ impl StereoVirtualBed {
             // directionality while allowing centre-heavy material to exist behind/above the listener.
             let side_surround = side_mid * SIDE_SURROUND_MID + side_high * SIDE_SURROUND_HIGH;
             let side_rear = side_low * SIDE_REAR_LOW + side_mid * SIDE_REAR_MID;
-            let side_top_front =
-                side_high * SIDE_TOP_FRONT_HIGH + side_mid * SIDE_TOP_FRONT_MID;
+            let side_top_front = side_high * SIDE_TOP_FRONT_HIGH + side_mid * SIDE_TOP_FRONT_MID;
             let side_top_rear = side_high * SIDE_TOP_REAR_HIGH + side_mid * SIDE_TOP_REAR_MID;
 
             let mid_surround = mid_low * MID_SURROUND_LOW
@@ -285,11 +283,7 @@ fn write_channel(frame: &mut [f32], index: Option<usize>, value: f32) {
 #[inline]
 fn auxiliary_effective_power(layout: SpeakerLayout) -> f32 {
     let mut source_power = 0.0;
-    for (speaker, role) in layout
-        .speakers()
-        .iter()
-        .zip(layout.roles().iter().copied())
-    {
+    for (speaker, role) in layout.speakers().iter().zip(layout.roles().iter().copied()) {
         let band_power = auxiliary_band_power(role);
         source_power += speaker.gain * speaker.gain * band_power;
     }
@@ -441,14 +435,14 @@ mod tests {
             upmixer.render(&input, ChannelLayout::Surround7_1_4, &mut output),
             Some(128)
         );
-        let last = &output[(127 * layout.channels())..];
+        let frame = &output[..layout.channels()];
         let role_value = |role| {
             let index = layout
                 .roles()
                 .iter()
                 .position(|candidate| *candidate == role)
                 .expect("role");
-            last[index]
+            frame[index]
         };
         assert_eq!(role_value(ChannelRole::Lfe), 0.0);
         assert!(role_value(ChannelRole::SurroundLeft).abs() > 1.0e-3);
@@ -477,9 +471,8 @@ mod tests {
 
     #[test]
     fn seven_one_four_role_map_matches_the_native_channel_contract() {
-        let roles = VirtualBedRoleMap::for_layout(SpeakerLayout::for_layout(
-            ChannelLayout::Surround7_1_4,
-        ));
+        let roles =
+            VirtualBedRoleMap::for_layout(SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4));
         assert_eq!(roles.front_left, Some(0));
         assert_eq!(roles.front_right, Some(1));
         assert_eq!(roles.center, Some(2));
@@ -510,10 +503,8 @@ mod tests {
 
     #[test]
     fn spherical_support_power_matches_five_one_reference_across_layouts() {
-        let reference = auxiliary_effective_power(SpeakerLayout::for_layout(
-            ChannelLayout::Surround5_1,
-        ))
-        .sqrt();
+        let reference =
+            auxiliary_effective_power(SpeakerLayout::for_layout(ChannelLayout::Surround5_1)).sqrt();
         for layout_kind in VIRTUAL_LAYOUTS {
             let layout = SpeakerLayout::for_layout(layout_kind);
             let profile = VirtualBedMixProfile::for_layout(layout_kind);

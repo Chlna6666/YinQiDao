@@ -393,8 +393,9 @@ impl DecoderStream {
         // in particular) may turn an encoded channel order into Symphonia's canonical positioned
         // order during construction. A second opportunity exists on every decoded frame below,
         // because some codecs only publish their final channel map in the decoded SignalSpec.
-        let spatial_layout_hint = symphonia_spatial_layout_hint(decoder.codec_params().channels.as_ref())
-            .or_else(|| symphonia_spatial_layout_hint(codec_params.channels.as_ref()));
+        let spatial_layout_hint =
+            symphonia_spatial_layout_hint(decoder.codec_params().channels.as_ref())
+                .or_else(|| symphonia_spatial_layout_hint(codec_params.channels.as_ref()));
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -609,10 +610,8 @@ fn symphonia_spatial_layout_hint(channels: Option<&Channels>) -> Option<ChannelL
         return None;
     };
 
-    let front = Position::FRONT_LEFT
-        | Position::FRONT_RIGHT
-        | Position::FRONT_CENTER
-        | Position::LFE1;
+    let front =
+        Position::FRONT_LEFT | Position::FRONT_RIGHT | Position::FRONT_CENTER | Position::LFE1;
     let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
     let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
     let top_front = Position::TOP_FRONT_LEFT | Position::TOP_FRONT_RIGHT;
@@ -827,10 +826,8 @@ mod tests {
 
     #[test]
     fn symphonia_positioned_surround_layouts_are_preserved() {
-        let front = Position::FRONT_LEFT
-            | Position::FRONT_RIGHT
-            | Position::FRONT_CENTER
-            | Position::LFE1;
+        let front =
+            Position::FRONT_LEFT | Position::FRONT_RIGHT | Position::FRONT_CENTER | Position::LFE1;
         let rear = Position::REAR_LEFT | Position::REAR_RIGHT;
         let side = Position::SIDE_LEFT | Position::SIDE_RIGHT;
         let top_front = Position::TOP_FRONT_LEFT | Position::TOP_FRONT_RIGHT;

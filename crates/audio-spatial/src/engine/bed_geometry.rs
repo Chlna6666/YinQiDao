@@ -29,9 +29,7 @@ impl SpeakerBedGeometry {
     #[inline]
     fn sanitized(self) -> Self {
         Self {
-            front_elevation_offset_degrees: sanitize_offset(
-                self.front_elevation_offset_degrees,
-            ),
+            front_elevation_offset_degrees: sanitize_offset(self.front_elevation_offset_degrees),
             surround_elevation_offset_degrees: sanitize_offset(
                 self.surround_elevation_offset_degrees,
             ),
@@ -91,7 +89,12 @@ impl SpeakerBedGeometry {
                 | ChannelRole::RearLeft
                 | ChannelRole::RearRight,
             ) => 1.0 + STATIC_LOWER_ENERGY_BOOST * focus,
-            Some(ChannelRole::FrontLeft | ChannelRole::FrontRight | ChannelRole::Center | ChannelRole::Lfe)
+            Some(
+                ChannelRole::FrontLeft
+                | ChannelRole::FrontRight
+                | ChannelRole::Center
+                | ChannelRole::Lfe,
+            )
             | None => 1.0,
         }
     }
@@ -263,8 +266,11 @@ impl SpatialEngine {
             self.debug_snapshot.set_layout(Some(debug_layout));
             for source_index in 0..channels {
                 let speaker = base_speakers[source_index];
-                self.debug_snapshot
-                    .record_source(source_index, speaker.kind, latest_poses[source_index]);
+                self.debug_snapshot.record_source(
+                    source_index,
+                    speaker.kind,
+                    latest_poses[source_index],
+                );
                 self.debug_snapshot
                     .set_source_activity(source_index, self.debug_activity[source_index]);
             }
@@ -297,9 +303,7 @@ fn prepare_virtual_bed_speakers(
         output[source_index] = transformed;
     }
 
-    if focus <= 1.0e-5
-        || original_auxiliary_power <= 1.0e-12
-        || weighted_auxiliary_power <= 1.0e-12
+    if focus <= 1.0e-5 || original_auxiliary_power <= 1.0e-12 || weighted_auxiliary_power <= 1.0e-12
     {
         return;
     }
@@ -442,7 +446,10 @@ mod tests {
         assert!(snapshot.sources[2].position.y.abs() < 1.0e-6);
         assert_eq!(snapshot.sources[3].kind, crate::SpatialDebugSourceKind::Lfe);
         assert_eq!(snapshot.sources[3].position, Vec3::FORWARD);
-        assert!(snapshot.sources[8].gain > SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4).speakers()[8].gain);
+        assert!(
+            snapshot.sources[8].gain
+                > SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4).speakers()[8].gain
+        );
     }
 
     #[test]

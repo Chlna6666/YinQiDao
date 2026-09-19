@@ -38,23 +38,17 @@ impl HeadTrackingEulerPose {
     /// Convert yaw/pitch/roll to an orthogonal forward/up pair without allocating.
     pub fn listener_pose(self) -> ListenerPose {
         let yaw = finite_or(self.yaw_radians, 0.0).rem_euclid(PI * 2.0);
-        let pitch = finite_or(self.pitch_radians, 0.0)
-            .clamp(-FRAC_PI_2 + 1.0e-4, FRAC_PI_2 - 1.0e-4);
+        let pitch =
+            finite_or(self.pitch_radians, 0.0).clamp(-FRAC_PI_2 + 1.0e-4, FRAC_PI_2 - 1.0e-4);
         let roll = finite_or(self.roll_radians, 0.0).rem_euclid(PI * 2.0);
         let (yaw_sin, yaw_cos) = yaw.sin_cos();
         let (pitch_sin, pitch_cos) = pitch.sin_cos();
         let (roll_sin, roll_cos) = roll.sin_cos();
 
-        let forward = Vec3::new(
-            yaw_sin * pitch_cos,
-            pitch_sin,
-            yaw_cos * pitch_cos,
-        )
-        .normalized_or(Vec3::FORWARD);
+        let forward = Vec3::new(yaw_sin * pitch_cos, pitch_sin, yaw_cos * pitch_cos)
+            .normalized_or(Vec3::FORWARD);
         let right_without_roll = Vec3::new(yaw_cos, 0.0, -yaw_sin).normalized_or(Vec3::RIGHT);
-        let up_without_roll = forward
-            .cross(right_without_roll)
-            .normalized_or(Vec3::UP);
+        let up_without_roll = forward.cross(right_without_roll).normalized_or(Vec3::UP);
         let up = (up_without_roll * roll_cos - right_without_roll * roll_sin)
             .normalized_or(up_without_roll);
 

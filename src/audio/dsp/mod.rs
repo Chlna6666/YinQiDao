@@ -10,8 +10,8 @@ use std::cell::Cell;
 
 use crate::model::{EqSettings, SourceLayoutOverride, SpatialSettings, VirtualBedMode};
 use yinqidao_audio_spatial::{
-    ChannelLayout, EngineConfig as NativeSpatialConfig, EnvironmentSettings, SpeakerLayout,
-    SpatialDebugSnapshot, SpatialEngine,
+    ChannelLayout, EngineConfig as NativeSpatialConfig, EnvironmentSettings, SpatialDebugSnapshot,
+    SpatialEngine, SpeakerLayout,
 };
 
 use super::debug::{
@@ -283,11 +283,8 @@ impl AudioProcessor {
         let authored_multichannel = input_channels > 2;
         let debug_enabled = audio_debug_enabled();
         let spatial_settings = self.spatial.settings().clone();
-        let native_layout = resolved_native_spatial_layout(
-            input_channels,
-            spatial_layout_hint,
-            &spatial_settings,
-        );
+        let native_layout =
+            resolved_native_spatial_layout(input_channels, spatial_layout_hint, &spatial_settings);
         if let Some(renderer) = self.stereo_spatial.as_mut() {
             renderer.set_debug_enabled(debug_enabled);
         }
@@ -890,12 +887,8 @@ mod tests {
         settings.source_layout_override = SourceLayoutOverride::Surround5_1_4;
         let input = vec![0.04_f32; 12 * 128];
         let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
-        let output = processor.process_with_layout(
-            &input,
-            48_000,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let output =
+            processor.process_with_layout(&input, 48_000, 12, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(output.len(), 256);
         assert!(processor.native_spatial.is_some());
         assert_eq!(
@@ -938,12 +931,8 @@ mod tests {
             SpatialSettings::default(),
             1.0,
         );
-        let output = processor.process_with_layout(
-            &input,
-            48_000,
-            6,
-            Some(ChannelLayout::Surround5_1),
-        );
+        let output =
+            processor.process_with_layout(&input, 48_000, 6, Some(ChannelLayout::Surround5_1));
         assert_eq!(output.len(), 128);
         assert_eq!(processor.native_spatial_rate, 48_000);
         assert!(processor.native_spatial.is_some());
@@ -968,12 +957,8 @@ mod tests {
             SpatialSettings::default(),
             1.0,
         );
-        let output = processor.process_with_layout(
-            &input,
-            48_000,
-            10,
-            Some(ChannelLayout::Surround7_1_2),
-        );
+        let output =
+            processor.process_with_layout(&input, 48_000, 10, Some(ChannelLayout::Surround7_1_2));
         assert_eq!(output.len(), 128);
         assert_eq!(processor.native_spatial_rate, 48_000);
         assert!(processor.native_spatial.is_some());
@@ -998,12 +983,8 @@ mod tests {
             SpatialSettings::default(),
             1.0,
         );
-        let output = processor.process_with_layout(
-            &input,
-            48_000,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let output =
+            processor.process_with_layout(&input, 48_000, 12, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(output.len(), 128);
         assert_eq!(processor.native_spatial_rate, 48_000);
         assert!(processor.native_spatial.is_some());
@@ -1013,23 +994,21 @@ mod tests {
     #[test]
     fn native_spatial_scratch_is_bounded_by_engine_block_size() {
         let settings = SpatialPreset::Orbit360.settings();
-        let mut processor =
-            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let scratch_ptr = processor.native_spatial_scratch.as_ptr();
         let scratch_len = processor.native_spatial_scratch.len();
         let scratch_capacity = processor.native_spatial_scratch.capacity();
         let input = vec![0.03_f32; 12 * 8_192];
-        let output = processor.process_with_layout(
-            &input,
-            44_100,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let output =
+            processor.process_with_layout(&input, 44_100, 12, Some(ChannelLayout::Surround7_1_4));
 
         assert!(!output.is_empty());
         assert_eq!(processor.native_spatial_scratch.as_ptr(), scratch_ptr);
         assert_eq!(processor.native_spatial_scratch.len(), scratch_len);
-        assert_eq!(processor.native_spatial_scratch.capacity(), scratch_capacity);
+        assert_eq!(
+            processor.native_spatial_scratch.capacity(),
+            scratch_capacity
+        );
         assert_eq!(
             processor
                 .native_spatial
@@ -1051,8 +1030,7 @@ mod tests {
             let mut processor =
                 AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
             let input = vec![0.05_f32; usize::from(channels) * 128];
-            let output =
-                processor.process_with_layout(&input, 48_000, channels, Some(layout));
+            let output = processor.process_with_layout(&input, 48_000, channels, Some(layout));
             assert_eq!(output.len(), 256);
             assert_eq!(
                 processor
@@ -1100,15 +1078,12 @@ mod tests {
 
         let immersive = SpatialPreset::Immersive3d.settings();
         let expected_environment = spatial_environment_settings(&immersive);
-        let mut enabled =
-            AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
-        let _ = enabled.process_with_layout(
-            &input,
-            48_000,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
+        let mut enabled = AudioProcessor::new(48_000, EqPreset::Flat.settings(), immersive, 1.0);
+        let _ = enabled.process_with_layout(&input, 48_000, 12, Some(ChannelLayout::Surround7_1_4));
+        assert_eq!(
+            enabled.native_spatial_environment,
+            Some(expected_environment)
         );
-        assert_eq!(enabled.native_spatial_environment, Some(expected_environment));
         assert_eq!(
             enabled
                 .native_spatial
@@ -1131,12 +1106,8 @@ mod tests {
         disabled_settings.enabled = false;
         let mut disabled =
             AudioProcessor::new(48_000, EqPreset::Flat.settings(), disabled_settings, 1.0);
-        let _ = disabled.process_with_layout(
-            &input,
-            48_000,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let _ =
+            disabled.process_with_layout(&input, 48_000, 12, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(
             disabled
                 .native_spatial_environment
@@ -1150,8 +1121,7 @@ mod tests {
     fn stereo_motion_uses_self_owned_audio_clock_renderer() {
         let settings = SpatialPreset::Orbit360.settings();
         let input = vec![0.2_f32; 128 * 2];
-        let mut processor =
-            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
+        let mut processor = AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings, 1.0);
         let output = processor.process(&input, 48_000, 2);
         assert_eq!(output.len(), input.len());
         assert_eq!(
@@ -1185,27 +1155,15 @@ mod tests {
         };
 
         let mut reused = make_processor();
-        let _dirty = reused.process_with_layout(
-            &input,
-            44_100,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let _dirty =
+            reused.process_with_layout(&input, 44_100, 12, Some(ChannelLayout::Surround7_1_4));
         reused.reset_transport();
-        let actual = reused.process_with_layout(
-            &input,
-            44_100,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let actual =
+            reused.process_with_layout(&input, 44_100, 12, Some(ChannelLayout::Surround7_1_4));
 
         let mut fresh = make_processor();
-        let expected = fresh.process_with_layout(
-            &input,
-            44_100,
-            12,
-            Some(ChannelLayout::Surround7_1_4),
-        );
+        let expected =
+            fresh.process_with_layout(&input, 44_100, 12, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(actual.len(), expected.len());
         assert!(
             actual
@@ -1224,9 +1182,8 @@ mod tests {
                 [phase.sin() * 0.25, phase.cos() * 0.20]
             })
             .collect::<Vec<_>>();
-        let make_processor = || {
-            AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings.clone(), 1.0)
-        };
+        let make_processor =
+            || AudioProcessor::new(48_000, EqPreset::Flat.settings(), settings.clone(), 1.0);
 
         let mut reused = make_processor();
         let _dirty = reused.process(&input, 48_000, 2);
@@ -1258,7 +1215,10 @@ mod tests {
         request_transport_reset();
         assert_ne!(transport_reset_generation(), before);
         let _ = processor.process(&input, 48_000, 2);
-        assert_eq!(processor.transport_reset_generation, transport_reset_generation());
+        assert_eq!(
+            processor.transport_reset_generation,
+            transport_reset_generation()
+        );
     }
 
     #[test]

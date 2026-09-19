@@ -15,10 +15,8 @@ pub(crate) fn spatial_environment_settings(settings: &SpatialSettings) -> Enviro
     // room-size slope pushed Concert/Immersive scenes toward an obviously closed-in top end.
     // Room size should primarily control geometry/decay. Keep a smaller distance-dependent air
     // loss while preserving enough upper-mid/high-frequency energy for binaural externalization.
-    let damping = (0.20
-        + room_size * 0.18
-        + settings.distance.clamp(0.0, 1.0) * 0.10)
-        .clamp(0.0, 1.0);
+    let damping =
+        (0.20 + room_size * 0.18 + settings.distance.clamp(0.0, 1.0) * 0.10).clamp(0.0, 1.0);
     let mix = if settings.enabled {
         (settings.depth.clamp(0.0, 1.0) * 0.085
             + room_size * 0.072

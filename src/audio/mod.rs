@@ -20,15 +20,19 @@ pub use debug::{
     audio_debug_latest_snapshot, set_audio_debug_enabled, set_audio_debug_monitor_mode,
 };
 pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
+#[allow(unused_imports)]
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::{AudioEngine, AudioUiEvent};
+#[allow(unused_imports)]
 pub(crate) use fingerprint::{
     AudioFingerprint, CHROMAPRINT_ALGORITHM, fingerprint_file, fingerprint_file_payload,
 };
+#[allow(unused_imports)]
 pub use head_tracking::{
     HeadTrackingBridge, HeadTrackingCalibration, HeadTrackingEulerPose, HeadTrackingProvider,
     ManualHeadTrackingProvider,
 };
+#[allow(unused_imports)]
 pub use head_tracking_opentrack::{
     OpenTrackHeadTrackingService, OpenTrackUdpConfig, OpenTrackUdpProvider, OpenTrackUdpTransform,
     opentrack_head_tracking_running, recenter_opentrack_head_tracking,

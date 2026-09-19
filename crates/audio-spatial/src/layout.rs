@@ -349,7 +349,11 @@ mod tests {
             ]
         );
         assert_eq!(layout.channels(), 8);
-        assert!(layout.speakers()[6..8].iter().all(|speaker| speaker.direction.y > 0.0));
+        assert!(
+            layout.speakers()[6..8]
+                .iter()
+                .all(|speaker| speaker.direction.y > 0.0)
+        );
     }
 
     #[test]
@@ -392,7 +396,11 @@ mod tests {
             ]
         );
         assert_eq!(layout.channels(), 10);
-        assert!(layout.speakers()[8..10].iter().all(|speaker| speaker.direction.y > 0.0));
+        assert!(
+            layout.speakers()[8..10]
+                .iter()
+                .all(|speaker| speaker.direction.y > 0.0)
+        );
     }
 
     #[test]
@@ -421,7 +429,11 @@ mod tests {
         assert!(layout.speakers()[5].direction.z < 0.0);
         assert_eq!(layout.speakers()[6].direction.z, 0.0);
         assert_eq!(layout.speakers()[7].direction.z, 0.0);
-        assert!(layout.speakers()[8..12].iter().all(|speaker| speaker.direction.y > 0.0));
+        assert!(
+            layout.speakers()[8..12]
+                .iter()
+                .all(|speaker| speaker.direction.y > 0.0)
+        );
     }
 
     #[test]

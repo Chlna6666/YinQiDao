@@ -111,8 +111,7 @@ impl LateDiffuseField {
 
     pub(crate) fn set_environment(&mut self, settings: EnvironmentSettings) {
         let parameters = derive_parameters(self.sample_rate, settings);
-        let room_changed =
-            (parameters.settings.room_size - self.settings.room_size).abs() > 1.0e-4;
+        let room_changed = (parameters.settings.room_size - self.settings.room_size).abs() > 1.0e-4;
         let disabled = parameters.settings.mix <= LATE_FIELD_EPSILON;
         self.settings = parameters.settings;
 
@@ -146,11 +145,11 @@ impl LateDiffuseField {
             let dry_right = finite_or_zero(right[frame]);
 
             let mut delayed = [0.0_f32; FDN_LINES];
-            for line in 0..FDN_LINES {
+            for (line, out) in delayed.iter_mut().enumerate().take(FDN_LINES) {
                 let raw = self.lines[line].read(self.delay_samples[line]);
                 self.lines[line].damping_state +=
                     self.damping_alpha * (raw - self.lines[line].damping_state);
-                delayed[line] = finite_or_zero(self.lines[line].damping_state);
+                *out = finite_or_zero(self.lines[line].damping_state);
             }
 
             let mut feedback = delayed;
@@ -159,8 +158,7 @@ impl LateDiffuseField {
                 let injection = (dry_left * LEFT_INPUT_SIGNS[line]
                     + dry_right * RIGHT_INPUT_SIGNS[line])
                     * STEREO_INJECTION_NORMALIZATION;
-                self.lines[line]
-                    .write_advance(injection + feedback[line] * self.feedback_gain);
+                self.lines[line].write_advance(injection + feedback[line] * self.feedback_gain);
             }
 
             let late_left = signed_sum(&delayed, &LEFT_SIGNS) * HADAMARD_NORMALIZATION;
@@ -178,10 +176,7 @@ impl LateDiffuseField {
 }
 
 /// Read-only projection of the exact environment-derived parameters used by LateDiffuseField.
-pub fn late_field_telemetry(
-    sample_rate: u32,
-    settings: EnvironmentSettings,
-) -> LateFieldTelemetry {
+pub fn late_field_telemetry(sample_rate: u32, settings: EnvironmentSettings) -> LateFieldTelemetry {
     let sample_rate = sample_rate.max(1) as f32;
     let parameters = derive_parameters(sample_rate, settings);
     let minimum_delay_ms = DELAY_SECONDS[0] * parameters.room_scale * 1_000.0;
@@ -205,8 +200,8 @@ fn derive_parameters(sample_rate: f32, settings: EnvironmentSettings) -> LateFie
     let room_scale = 0.72 + settings.room_size * 0.45;
     let max_cutoff_hz = (sample_rate * 0.45).max(120.0);
     let min_cutoff_hz = 3_800.0_f32.min(max_cutoff_hz * 0.80);
-    let damping_cutoff_hz = (13_500.0 - settings.damping * 9_000.0)
-        .clamp(min_cutoff_hz, max_cutoff_hz);
+    let damping_cutoff_hz =
+        (13_500.0 - settings.damping * 9_000.0).clamp(min_cutoff_hz, max_cutoff_hz);
     let damping_alpha = 1.0 - (-2.0 * PI * damping_cutoff_hz / sample_rate).exp();
     let feedback_gain = (0.56 + settings.room_size * 0.23).clamp(0.50, 0.82);
     let wet_gain = settings.mix * 0.38;

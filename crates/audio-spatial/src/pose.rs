@@ -231,11 +231,7 @@ impl RoomPose {
     pub fn world_to_local(self, point: Vec3) -> Vec3 {
         let relative = point - self.position;
         let (right, up, forward) = self.basis();
-        Vec3::new(
-            relative.dot(right),
-            relative.dot(up),
-            relative.dot(forward),
-        )
+        Vec3::new(relative.dot(right), relative.dot(up), relative.dot(forward))
     }
 
     #[inline]

@@ -142,10 +142,8 @@ impl SourceState {
             cached_reflection_pose: None,
             cached_reflection_listener: None,
             cached_reflection_environment: None,
-            cached_reflection_parameters: [
-                ReflectionRenderParameters::default();
-                EARLY_REFLECTION_TAP_COUNT
-            ],
+            cached_reflection_parameters: [ReflectionRenderParameters::default();
+                EARLY_REFLECTION_TAP_COUNT],
         }
     }
 
@@ -292,10 +290,8 @@ impl SourceState {
         self.cached_reflection_pose = None;
         self.cached_reflection_listener = None;
         self.cached_reflection_environment = None;
-        self.cached_reflection_parameters = [
-            ReflectionRenderParameters::default();
-            EARLY_REFLECTION_TAP_COUNT
-        ];
+        self.cached_reflection_parameters =
+            [ReflectionRenderParameters::default(); EARLY_REFLECTION_TAP_COUNT];
     }
 
     fn reset(&mut self) {
@@ -450,12 +446,10 @@ impl CpuRenderer {
                     )
                 };
                 let mut reflection_parameters = reflection_start;
-                let reflection_steps: [
-                    ReflectionRenderParameterStep;
-                    EARLY_REFLECTION_TAP_COUNT
-                ] = std::array::from_fn(|index| {
-                    reflection_start[index].step_to(reflection_end[index], frames)
-                });
+                let reflection_steps: [ReflectionRenderParameterStep; EARLY_REFLECTION_TAP_COUNT] =
+                    std::array::from_fn(|index| {
+                        reflection_start[index].step_to(reflection_end[index], frames)
+                    });
 
                 let mut input_index = input_channel;
                 for frame in 0..frames {
@@ -473,7 +467,9 @@ impl CpuRenderer {
                     let direct_left = state.filter_left * parameters.left_gain;
                     let direct_right = state.filter_right * parameters.right_gain;
                     let (mut output_left, mut output_right) =
-                        state.pinna.process(direct_left, direct_right, pinna_coefficients);
+                        state
+                            .pinna
+                            .process(direct_left, direct_right, pinna_coefficients);
 
                     if reflections_enabled {
                         // Left/Right wall images rely on ITD/ILD and wall filtering only. Keeping
@@ -507,16 +503,11 @@ impl CpuRenderer {
                                 * (reflected_left - state.reflection_filter_left[tap]);
                             state.reflection_filter_right[tap] += path.right_filter_alpha
                                 * (reflected_right - state.reflection_filter_right[tap]);
-                            let reflected_left =
-                                state.reflection_filter_left[tap] * path.left_gain;
+                            let reflected_left = state.reflection_filter_left[tap] * path.left_gain;
                             let reflected_right =
                                 state.reflection_filter_right[tap] * path.right_gain;
                             let (reflected_left, reflected_right) = state.reflection_pinna[tap]
-                                .process_primary(
-                                    reflected_left,
-                                    reflected_right,
-                                    reflection.pinna,
-                                );
+                                .process_primary(reflected_left, reflected_right, reflection.pinna);
                             output_left += reflected_left;
                             output_right += reflected_right;
                             reflection_parameters[tap]
@@ -617,8 +608,7 @@ fn reflection_control_displacement_budget(sample_rate: f32) -> f32 {
     // The excess image-source path is |image-listener| - |source-listener|. Both distances are
     // 1-Lipschitz under source/listener translation, so bounding their combined displacement by
     // error*c/(2*Fs) keeps the worst-case excess-delay error strictly below one sample.
-    REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES * SPEED_OF_SOUND_M_S
-        / (2.0 * sample_rate.max(1.0))
+    REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES * SPEED_OF_SOUND_M_S / (2.0 * sample_rate.max(1.0))
 }
 
 #[inline]
@@ -702,11 +692,10 @@ fn parameters_for_pose(
         (left_ear_distance - right_ear_distance).abs() / SPEED_OF_SOUND_M_S * sample_rate;
     let near_field_amount = 1.0
         - smoothstep01(
-            (distance - NEAR_FIELD_FULL_METERS)
-                / (NEAR_FIELD_FADE_METERS - NEAR_FIELD_FULL_METERS),
+            (distance - NEAR_FIELD_FULL_METERS) / (NEAR_FIELD_FADE_METERS - NEAR_FIELD_FULL_METERS),
         );
-    let itd_samples = far_itd_samples
-        + (geometric_itd_samples - far_itd_samples) * (near_field_amount * 0.35);
+    let itd_samples =
+        far_itd_samples + (geometric_itd_samples - far_itd_samples) * (near_field_amount * 0.35);
     let (left_delay, right_delay) = if azimuth >= 0.0 {
         (
             COMMON_CAUSAL_DELAY_SAMPLES + itd_samples,
@@ -726,11 +715,11 @@ fn parameters_for_pose(
     } else {
         (left_ear_distance, right_ear_distance)
     };
-    let geometric_far_ear_attenuation =
-        (near_ear_distance / far_ear_distance).clamp(0.30, 1.0).sqrt();
+    let geometric_far_ear_attenuation = (near_ear_distance / far_ear_distance)
+        .clamp(0.30, 1.0)
+        .sqrt();
     let far_ear_attenuation = base_far_ear_attenuation
-        * (1.0
-            + (geometric_far_ear_attenuation - 1.0) * (near_field_amount * 0.55));
+        * (1.0 + (geometric_far_ear_attenuation - 1.0) * (near_field_amount * 0.55));
 
     let distance_gain = if distance <= 1.0 {
         1.0
@@ -743,10 +732,8 @@ fn parameters_for_pose(
     );
     let rear_gain = 1.0 - rear * 0.06;
     let elevation_gain = 1.0 - elevation_down * 0.025;
-    let common_gain = finite_or_zero(pose.gain).clamp(0.0, 4.0)
-        * distance_gain
-        * rear_gain
-        * elevation_gain;
+    let common_gain =
+        finite_or_zero(pose.gain).clamp(0.0, 4.0) * distance_gain * rear_gain * elevation_gain;
 
     let near_cutoff = (20_000.0
         - rear * 4_200.0
@@ -926,7 +913,10 @@ mod tests {
                 ..EnvironmentSettings::default()
             },
         );
-        assert!(dry.iter().all(|reflection| reflection.path.left_gain == 0.0));
+        assert!(
+            dry.iter()
+                .all(|reflection| reflection.path.left_gain == 0.0)
+        );
         let wet = state.reflection_parameters_for(
             48_000.0,
             pose,
@@ -972,8 +962,7 @@ mod tests {
     fn reflection_control_budget_is_strictly_sub_sample() {
         let sample_rate = 48_000.0;
         let budget = reflection_control_displacement_budget(sample_rate);
-        let worst_case_path_error_samples =
-            budget * 2.0 / SPEED_OF_SOUND_M_S * sample_rate;
+        let worst_case_path_error_samples = budget * 2.0 / SPEED_OF_SOUND_M_S * sample_rate;
         assert!(worst_case_path_error_samples < 1.0);
         assert!(
             (worst_case_path_error_samples - REFLECTION_CONTROL_MAX_PATH_ERROR_SAMPLES).abs()
@@ -1035,20 +1024,25 @@ mod tests {
         let pinna = state.pinna_for(48_000.0, pose, listener);
         state.reflection_filter_left[0] = 0.5;
         state.reflection_filter_right[0] = -0.25;
-        state.reflection_parameters_for(
-            48_000.0,
-            pose,
-            listener,
-            EnvironmentSettings::default(),
-        );
+        state.reflection_parameters_for(48_000.0, pose, listener, EnvironmentSettings::default());
 
         state.set_early_reflections_allowed(false);
 
         assert_eq!(state.cached_pose, Some(pose));
         assert_eq!(state.cached_parameters.left_gain, direct.left_gain);
         assert_eq!(state.cached_pinna_coefficients, pinna);
-        assert!(state.reflection_filter_left.iter().all(|sample| *sample == 0.0));
-        assert!(state.reflection_filter_right.iter().all(|sample| *sample == 0.0));
+        assert!(
+            state
+                .reflection_filter_left
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        assert!(
+            state
+                .reflection_filter_right
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
         assert!(state.cached_reflection_pose.is_none());
     }
 

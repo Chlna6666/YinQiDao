@@ -226,7 +226,9 @@ fn load_source(index: usize) -> SpatialDebugSource {
     let value = |offset: usize| load_f32(&SOURCES[base + offset]);
     SpatialDebugSource {
         active: SOURCES[base].load(Ordering::Relaxed) != 0,
-        source_index: SOURCES[base + 1].load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16,
+        source_index: SOURCES[base + 1]
+            .load(Ordering::Relaxed)
+            .min(u32::from(u16::MAX)) as u16,
         kind: if SOURCES[base + 2].load(Ordering::Relaxed) == 1 {
             SpatialDebugSourceKind::Lfe
         } else {
@@ -404,8 +406,14 @@ mod tests {
         assert!((read.sources[1].input_peak - 0.75).abs() < f32::EPSILON);
         assert!((read.sources[1].input_rms - 0.25).abs() < f32::EPSILON);
         assert_eq!(read.reflection_count, 12);
-        assert_eq!(read.reflections[11].wall, SpatialDebugReflectionWall::Ceiling);
-        assert_eq!(read.reflections[11].bounce_position, Vec3::new(0.25, 1.5, 0.5));
+        assert_eq!(
+            read.reflections[11].wall,
+            SpatialDebugReflectionWall::Ceiling
+        );
+        assert_eq!(
+            read.reflections[11].bounce_position,
+            Vec3::new(0.25, 1.5, 0.5)
+        );
         assert!((read.reflections[11].arrival_elevation_degrees - 58.0).abs() < f32::EPSILON);
 
         clear_spatial_debug_snapshot();

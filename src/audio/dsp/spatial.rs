@@ -1,8 +1,6 @@
 use std::f32::consts::PI;
 
-use crate::model::{
-    SourceLayoutOverride, SpatialMotionMode, SpatialSettings, VirtualBedMode,
-};
+use crate::model::{SourceLayoutOverride, SpatialMotionMode, SpatialSettings, VirtualBedMode};
 
 const MAX_SPATIAL_DELAY_SECONDS: f32 = 0.040;
 const MAX_ITD_SECONDS: f32 = 0.00068;

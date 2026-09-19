@@ -10,8 +10,8 @@ mod stereo_virtual_bed;
 use crate::model::{SpatialMotionMode, SpatialSettings, VirtualBedMode};
 use stereo_virtual_bed::StereoVirtualBed;
 use yinqidao_audio_spatial::{
-    ChannelLayout, EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity, SourcePose,
-    SpeakerBedGeometry, SpatialDebugSnapshot, SpatialEngine, SpeakerLayout, Trajectory,
+    ChannelLayout, EngineConfig, EnvironmentSettings, MAX_DEBUG_SOURCES, SourceActivity,
+    SourcePose, SpatialDebugSnapshot, SpatialEngine, SpeakerBedGeometry, SpeakerLayout, Trajectory,
     TrajectoryKind, Vec3,
 };
 
@@ -84,10 +84,7 @@ impl TrajectorySignature {
 /// Apply the user-facing trajectory to a native authored speaker bed. The spatial crate owns the
 /// sample clock once configured, so 5.1/7.1/.2/.4 beds and stereo-derived virtual beds use the same
 /// spherical scene-motion semantics without a second UI-clock oscillator.
-pub(crate) fn apply_scene_motion_settings(
-    engine: &mut SpatialEngine,
-    settings: &SpatialSettings,
-) {
+pub(crate) fn apply_scene_motion_settings(engine: &mut SpatialEngine, settings: &SpatialSettings) {
     if let Some(signature) = TrajectorySignature::from_settings(settings) {
         engine.set_scene_motion(
             Some(signature.kind),
@@ -138,8 +135,7 @@ impl StereoField {
         let width = settings.width.clamp(0.0, 1.0);
         let depth = settings.depth.clamp(0.0, 1.0);
         let immersive = settings.immersive_3d.clamp(0.0, 1.0);
-        let effective_width =
-            width * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
+        let effective_width = width * (1.0 - settings.crossfeed.clamp(0.0, 1.0) * 0.24);
 
         // The authored stereo pair lives on a listener-centric spherical shell rather than a
         // horizontal ring. Strong Immersive settings are allowed well into the rear hemisphere so
@@ -165,10 +161,8 @@ impl StereoField {
             + depth * 0.24;
         // `spread` intentionally stays conservative. Large spread values weaken the directional
         // pinna cue, which made the previous strong presets paradoxically sound less localized.
-        let spread = (0.035
-            + immersive * 0.14
-            + settings.crossfeed.clamp(0.0, 1.0) * 0.07)
-            .clamp(0.0, 0.25);
+        let spread =
+            (0.035 + immersive * 0.14 + settings.crossfeed.clamp(0.0, 1.0) * 0.07).clamp(0.0, 0.25);
         Self {
             half_angle_sin,
             half_angle_cos,
@@ -206,10 +200,7 @@ impl EnvironmentSignature {
 /// their standard +45° geometry. The centre channel remains at 0° in the spatial crate. These are
 /// virtual-source positions only; they do not redefine 5.1.4/7.1.4 as having floor speakers.
 #[inline]
-fn static_virtual_bed_geometry(
-    settings: &SpatialSettings,
-    dynamic: bool,
-) -> SpeakerBedGeometry {
+fn static_virtual_bed_geometry(settings: &SpatialSettings, dynamic: bool) -> SpeakerBedGeometry {
     if dynamic || !settings.enabled {
         return SpeakerBedGeometry::IDENTITY;
     }
@@ -265,11 +256,7 @@ impl StereoTonalTarget {
         let distance = settings.distance.clamp(0.0, 1.0);
         let mix = settings.mix.clamp(0.0, 1.0);
         let bass_amount = (immersive * 0.58 + depth * 0.22 + mix * 0.20).clamp(0.0, 1.0);
-        let air_amount = (0.08
-            + width * 0.18
-            + immersive * 0.34
-            + depth * 0.10
-            + room * 0.12
+        let air_amount = (0.08 + width * 0.18 + immersive * 0.34 + depth * 0.10 + room * 0.12
             - distance * 0.12)
             .clamp(0.0, 1.0);
         let wet_weight = wet_mix.clamp(0.0, 1.0).sqrt();
@@ -357,8 +344,7 @@ impl StereoTonalAnchor {
         self.sub_gain += self.control_alpha * (target.sub_gain - self.sub_gain);
         self.punch_gain += self.control_alpha * (target.punch_gain - self.punch_gain);
         self.air_gain += self.control_alpha * (target.air_gain - self.air_gain);
-        self.sub_mono_blend +=
-            self.control_alpha * (target.sub_mono_blend - self.sub_mono_blend);
+        self.sub_mono_blend += self.control_alpha * (target.sub_mono_blend - self.sub_mono_blend);
 
         self.infra_left += self.infra_alpha * (dry_left - self.infra_left);
         self.infra_right += self.infra_alpha * (dry_right - self.infra_right);
@@ -439,10 +425,7 @@ impl StereoSpatializer {
             environment_signature: None,
             virtual_bed: StereoVirtualBed::new(sample_rate),
             virtual_bed_layout: None,
-            virtual_bed_scratch: vec![
-                0.0;
-                block_frames.saturating_mul(MAX_VIRTUAL_BED_CHANNELS)
-            ],
+            virtual_bed_scratch: vec![0.0; block_frames.saturating_mul(MAX_VIRTUAL_BED_CHANNELS)],
             wet_scratch: vec![0.0; block_frames.saturating_mul(2)],
             tonal_anchor: StereoTonalAnchor::new(sample_rate),
         })
@@ -465,9 +448,7 @@ impl StereoSpatializer {
         self.engine.debug_snapshot()
     }
 
-    pub(crate) fn debug_source_activity(
-        &self,
-    ) -> Option<[SourceActivity; MAX_DEBUG_SOURCES]> {
+    pub(crate) fn debug_source_activity(&self) -> Option<[SourceActivity; MAX_DEBUG_SOURCES]> {
         self.engine.debug_source_activity()
     }
 
@@ -519,11 +500,8 @@ impl StereoSpatializer {
 
         self.engine.set_scene_motion(None, 0.10, 1.0, 0.0, true);
         self.ensure_trajectory(trajectory_signature);
-        let segment_frames = trajectory_segment_frames(
-            self.sample_rate,
-            self.block_frames,
-            trajectory_signature,
-        );
+        let segment_frames =
+            trajectory_segment_frames(self.sample_rate, self.block_frames, trajectory_signature);
         let pair_field = stereo_field_for_render(self.field, dynamic);
 
         let dry_mix = 1.0 - wet_mix;
@@ -749,10 +727,10 @@ fn trajectory_segment_frames(
     } else {
         0.10
     };
-    let frames_for_limit =
-        (sample_rate.max(1) as f32 * MAX_TRAJECTORY_SEGMENT_DEGREES / (speed_hz * 360.0))
-            .floor()
-            .max(1.0) as usize;
+    let frames_for_limit = (sample_rate.max(1) as f32 * MAX_TRAJECTORY_SEGMENT_DEGREES
+        / (speed_hz * 360.0))
+        .floor()
+        .max(1.0) as usize;
     block_frames.min(frames_for_limit.max(1))
 }
 
@@ -961,8 +939,8 @@ mod tests {
         let (left, right) = stereo_pair(center, field);
         assert!(left.position.x < 0.0);
         assert!(right.position.x > 0.0);
-        assert!(left.position.y > 0.0);
-        assert!(right.position.y < 0.0);
+        assert!(left.position.y < 0.0);
+        assert!(right.position.y > 0.0);
         assert!((left.position.length() - right.position.length()).abs() < 1.0e-5);
         assert!((left.position.length() - field.distance_meters).abs() < 1.0e-5);
     }
@@ -1005,7 +983,11 @@ mod tests {
         assert!(static_geometry.rear_elevation_offset_degrees < -22.0);
         assert!(static_geometry.top_elevation_offset_degrees > 10.0);
 
-        for preset in [SpatialPreset::Orbit8d, SpatialPreset::Orbit360, SpatialPreset::HelixSphere] {
+        for preset in [
+            SpatialPreset::Orbit8d,
+            SpatialPreset::Orbit360,
+            SpatialPreset::HelixSphere,
+        ] {
             assert_eq!(
                 static_virtual_bed_geometry(&preset.settings(), true),
                 SpeakerBedGeometry::IDENTITY
@@ -1027,7 +1009,10 @@ mod tests {
         assert!(snapshot.sources[8].position.y > 0.75);
         assert!(snapshot.sources[10].position.y > 0.75);
         assert!(snapshot.sources[2].position.y.abs() < 1.0e-5);
-        assert_eq!(snapshot.sources[3].kind, yinqidao_audio_spatial::SpatialDebugSourceKind::Lfe);
+        assert_eq!(
+            snapshot.sources[3].kind,
+            yinqidao_audio_spatial::SpatialDebugSourceKind::Lfe
+        );
         assert_eq!(snapshot.sources[3].position, Vec3::FORWARD);
     }
 
@@ -1161,7 +1146,7 @@ mod tests {
         assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(snapshot.source_count, 12);
         assert_eq!(snapshot.rendered_frames, 64);
-        assert!((activity[0].peak - 0.096).abs() < 1.0e-5);
+        assert!((activity[0].peak - (0.096 * (0.62 / 0.42))).abs() < 1.0e-4);
         assert_eq!(activity[3].peak, 0.0);
     }
 

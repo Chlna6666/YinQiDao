@@ -329,10 +329,15 @@ fn decode_opentrack_packet(packet: &[u8]) -> Option<[f64; OPENTRACK_PACKET_VALUE
 
     let values = std::array::from_fn(|index| {
         let start = index * std::mem::size_of::<f64>();
-        let bytes: [u8; 8] = packet[start..start + 8].try_into().expect("fixed packet slice");
+        let bytes: [u8; 8] = packet[start..start + 8]
+            .try_into()
+            .expect("fixed packet slice");
         f64::from_ne_bytes(bytes)
     });
-    values.iter().all(|value| value.is_finite()).then_some(values)
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(values)
 }
 
 #[inline]
@@ -389,8 +394,7 @@ mod tests {
 
     #[test]
     fn default_transform_maps_centimeters_and_degrees() {
-        let pose = OpenTrackUdpTransform::default()
-            .map_raw([25.0, -10.0, 50.0, 90.0, 30.0, 0.0]);
+        let pose = OpenTrackUdpTransform::default().map_raw([25.0, -10.0, 50.0, 90.0, 30.0, 0.0]);
         assert!((pose.position_meters.x - 0.25).abs() < 1.0e-6);
         assert!((pose.position_meters.y + 0.10).abs() < 1.0e-6);
         assert!((pose.position_meters.z - 0.50).abs() < 1.0e-6);

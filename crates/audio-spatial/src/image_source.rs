@@ -70,6 +70,7 @@ pub(crate) fn source_reflection_descriptors(
 /// The source and listener are projected into `room_pose`, while binaural direction remains a
 /// separate listener-space concern in the renderer. Direct programme audio intentionally omits
 /// absolute propagation latency, therefore each reflection contributes only its excess path delay.
+#[allow(dead_code)]
 pub(crate) fn source_reflection_descriptors_in_room(
     sample_rate: f32,
     source: SourcePose,
@@ -132,9 +133,7 @@ fn solve_local_reflections(
         let wall = REFLECTION_WALLS[index];
         let image_local = image_source_for_wall(source_local, room, wall);
         let bounce_local = bounce_point(listener_local, image_local, room, wall);
-        let path_length_meters = (image_local - listener_local)
-            .length()
-            .max(direct_distance);
+        let path_length_meters = (image_local - listener_local).length().max(direct_distance);
         let excess_path_meters = (path_length_meters - direct_distance).max(0.0);
         let excess_delay_samples =
             (excess_path_meters * samples_per_meter).clamp(0.0, max_delay_samples);
@@ -154,6 +153,7 @@ fn solve_local_reflections(
 }
 
 #[inline]
+#[allow(dead_code)]
 fn world_to_room_local(
     point: Vec3,
     room_position: Vec3,
@@ -162,14 +162,11 @@ fn world_to_room_local(
     forward: Vec3,
 ) -> Vec3 {
     let relative = point - room_position;
-    Vec3::new(
-        relative.dot(right),
-        relative.dot(up),
-        relative.dot(forward),
-    )
+    Vec3::new(relative.dot(right), relative.dot(up), relative.dot(forward))
 }
 
 #[inline]
+#[allow(dead_code)]
 fn room_local_to_world(
     point: Vec3,
     room_position: Vec3,
@@ -199,11 +196,7 @@ fn clamp_inside_room(point: Vec3, room: RoomHalfExtents) -> Vec3 {
 }
 
 #[inline]
-fn image_source_for_wall(
-    source: Vec3,
-    room: RoomHalfExtents,
-    wall: ReflectionWall,
-) -> Vec3 {
+fn image_source_for_wall(source: Vec3, room: RoomHalfExtents, wall: ReflectionWall) -> Vec3 {
     match wall {
         ReflectionWall::Left => Vec3::new(-2.0 * room.width - source.x, source.y, source.z),
         ReflectionWall::Right => Vec3::new(2.0 * room.width - source.x, source.y, source.z),
@@ -215,12 +208,7 @@ fn image_source_for_wall(
 }
 
 #[inline]
-fn bounce_point(
-    listener: Vec3,
-    image: Vec3,
-    room: RoomHalfExtents,
-    wall: ReflectionWall,
-) -> Vec3 {
+fn bounce_point(listener: Vec3, image: Vec3, room: RoomHalfExtents, wall: ReflectionWall) -> Vec3 {
     let delta = image - listener;
     let (plane, origin, direction) = match wall {
         ReflectionWall::Left => (-room.width, listener.x, delta.x),
@@ -345,7 +333,11 @@ mod tests {
         );
         assert!((reflections[0].bounce_position.x + room.width).abs() < 1.0e-4);
         assert!((reflections[5].bounce_position.y - room.height).abs() < 1.0e-4);
-        assert!(reflections.iter().all(|reflection| reflection.path_length_meters > 0.0));
+        assert!(
+            reflections
+                .iter()
+                .all(|reflection| reflection.path_length_meters > 0.0)
+        );
     }
 
     #[test]

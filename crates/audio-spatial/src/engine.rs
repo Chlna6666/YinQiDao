@@ -1,7 +1,7 @@
 use crate::{
-    ChannelLayout, ChannelRole, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES, SourceActivity,
-    SourcePose, SpatialDebugSnapshot, SpatialError, Speaker, SpeakerLayout, Trajectory,
-    TrajectoryKind, Vec3, analyze_interleaved_activity, late_field::LateDiffuseField,
+    ChannelLayout, ChannelRole, EnvironmentSettings, ListenerPose, MAX_DEBUG_SOURCES,
+    SourceActivity, SourcePose, SpatialDebugSnapshot, SpatialError, Speaker, SpeakerLayout,
+    Trajectory, TrajectoryKind, Vec3, analyze_interleaved_activity, late_field::LateDiffuseField,
     listener_control::latest_runtime_listener_pose, renderer::CpuRenderer,
 };
 
@@ -71,11 +71,8 @@ impl SpatialEngine {
         if config.max_sources == 0 {
             return Err(SpatialError::InvalidSourceCapacity);
         }
-        let mut renderer = CpuRenderer::new(
-            config.sample_rate,
-            config.block_frames,
-            config.max_sources,
-        )?;
+        let mut renderer =
+            CpuRenderer::new(config.sample_rate, config.block_frames, config.max_sources)?;
         renderer.set_environment(config.environment);
         let late_field = LateDiffuseField::new(config.sample_rate, config.environment);
         Ok(Self {
@@ -357,8 +354,11 @@ impl SpatialEngine {
                 .begin_capture(self.listener, self.config.environment);
             self.debug_snapshot.set_layout(Some(debug_layout));
             for (source_index, speaker) in layout.speakers().iter().copied().enumerate() {
-                self.debug_snapshot
-                    .record_source(source_index, speaker.kind, latest_poses[source_index]);
+                self.debug_snapshot.record_source(
+                    source_index,
+                    speaker.kind,
+                    latest_poses[source_index],
+                );
                 self.debug_snapshot
                     .set_source_activity(source_index, self.debug_activity[source_index]);
             }
@@ -372,8 +372,7 @@ impl SpatialEngine {
         let Some(motion) = self.scene_motion else {
             return block_frames;
         };
-        let frames_for_limit = (self.config.sample_rate.max(1) as f32
-            * MAX_SCENE_SEGMENT_DEGREES
+        let frames_for_limit = (self.config.sample_rate.max(1) as f32 * MAX_SCENE_SEGMENT_DEGREES
             / (motion.speed_hz * 360.0))
             .floor()
             .max(1.0) as usize;
@@ -531,7 +530,9 @@ impl SpatialEngine {
             }
             frame_offset += block_frames;
         }
-        if self.debug_enabled && let Some(pose) = latest_pose {
+        if self.debug_enabled
+            && let Some(pose) = latest_pose
+        {
             analyze_interleaved_activity(input, 1, &mut self.debug_activity);
             self.debug_snapshot
                 .begin_capture(self.listener, self.config.environment);
@@ -715,13 +716,7 @@ mod tests {
         config.environment.mix = 0.0;
         let mut engine = SpatialEngine::new(config).unwrap();
         engine.set_debug_enabled(true);
-        engine.set_scene_motion(
-            Some(TrajectoryKind::FigureEight),
-            0.5,
-            1.2,
-            1.0,
-            true,
-        );
+        engine.set_scene_motion(Some(TrajectoryKind::FigureEight), 0.5, 1.2, 1.0, true);
 
         let frames = 4_800;
         let input = vec![0.05_f32; frames * 12];
@@ -735,9 +730,8 @@ mod tests {
         assert_eq!(snapshot.layout, Some(ChannelLayout::Surround7_1_4));
         assert_eq!(snapshot.source_count, 12);
         assert!(
-            (snapshot.sources[0].position - SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4)
-                .speakers()[0]
-                .direction)
+            (snapshot.sources[0].position
+                - SpeakerLayout::for_layout(ChannelLayout::Surround7_1_4).speakers()[0].direction)
                 .length()
                 > 0.01
         );
@@ -764,13 +758,7 @@ mod tests {
     #[test]
     fn reset_rewinds_scene_motion_clock_without_disabling_motion() {
         let mut engine = SpatialEngine::new(EngineConfig::new(48_000)).unwrap();
-        engine.set_scene_motion(
-            Some(TrajectoryKind::Orbit360),
-            0.5,
-            1.0,
-            0.8,
-            false,
-        );
+        engine.set_scene_motion(Some(TrajectoryKind::Orbit360), 0.5, 1.0, 0.8, false);
         let input = vec![0.0_f32; 64 * 8];
         let mut output = vec![0.0_f32; 64 * 2];
         engine
@@ -846,10 +834,14 @@ mod tests {
         assert_eq!(snapshot.rendered_frames, frames as u64);
         assert_eq!(snapshot.sequence, 1);
         assert!((snapshot.environment_contribution - 0.12).abs() < 1.0e-6);
-        assert!(snapshot.sources[..snapshot.source_count].iter().all(|source| {
-            source.active
-                && (source.input_peak - 0.1).abs() < 1.0e-6
-                && (source.input_rms - 0.1).abs() < 1.0e-6
-        }));
+        assert!(
+            snapshot.sources[..snapshot.source_count]
+                .iter()
+                .all(|source| {
+                    source.active
+                        && (source.input_peak - 0.1).abs() < 1.0e-6
+                        && (source.input_rms - 0.1).abs() < 1.0e-6
+                })
+        );
     }
 }

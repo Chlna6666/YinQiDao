@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use super::{LyricLine, LyricWord, parse_lrc};
 
@@ -54,9 +54,7 @@ fn looks_like_ttml(input: &str) -> bool {
 }
 
 fn looks_like_qrc_xml(input: &str) -> bool {
-    input.contains("<QrcInfos")
-        || input.contains("<LyricInfo")
-        || input.contains("LyricContent=")
+    input.contains("<QrcInfos") || input.contains("<LyricInfo") || input.contains("LyricContent=")
 }
 
 fn parse_qrc(input: &str) -> Vec<LyricLine> {
@@ -230,7 +228,10 @@ fn parse_ttml(input: &str) -> Vec<LyricLine> {
         let text = if words.is_empty() {
             xml_text_excluding_auxiliary(inner)
         } else {
-            words.iter().map(|word| word.text.as_str()).collect::<String>()
+            words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<String>()
         };
         if text.trim().is_empty() {
             cursor = close.end;
@@ -511,9 +512,7 @@ fn xml_text_excluding_auxiliary(input: &str) -> String {
                 let ruby = xml_attr(attrs, "ruby").unwrap_or_default();
                 let skip = matches!(role, "x-translation" | "x-roman" | "x-bg")
                     || matches!(ruby, "text" | "textContainer");
-                if skip
-                    && let Some(matching) = find_matching_close(input, tag_end + 1, "span")
-                {
+                if skip && let Some(matching) = find_matching_close(input, tag_end + 1, "span") {
                     cursor = matching.end;
                     continue;
                 }
@@ -566,10 +565,9 @@ fn append_decoded_xml_entities(output: &mut String, input: &str) {
             _ if entity.starts_with("#x") => u32::from_str_radix(&entity[2..], 16)
                 .ok()
                 .and_then(char::from_u32),
-            _ if entity.starts_with('#') => entity[1..]
-                .parse::<u32>()
-                .ok()
-                .and_then(char::from_u32),
+            _ if entity.starts_with('#') => {
+                entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
             _ => None,
         };
         if let Some(ch) = decoded {

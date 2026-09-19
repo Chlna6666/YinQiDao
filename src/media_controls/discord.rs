@@ -91,7 +91,7 @@ impl IpcStream {
                 let mut available = 0_u32;
                 let ok = unsafe {
                     PeekNamedPipe(
-                        self.0.as_raw_handle() as *mut c_void,
+                        self.0.as_raw_handle(),
                         null_mut(),
                         0,
                         null_mut(),
@@ -254,9 +254,8 @@ impl DiscordPresence {
             return;
         }
 
-        let mut state_text = String::with_capacity(
-            track.artist.len() + track.album.len() + " ·  · 缓冲中".len(),
-        );
+        let mut state_text =
+            String::with_capacity(track.artist.len() + track.album.len() + " ·  · 缓冲中".len());
         state_text.push_str(&track.artist);
         if !track.album.trim().is_empty() {
             state_text.push_str(" · ");
@@ -325,7 +324,10 @@ impl DiscordPresence {
         };
         self.stream = Some(stream);
         let handshake = json!({ "v": 1, "client_id": self.client_id.as_str() });
-        if self.write_json_frame(IPC_OPCODE_HANDSHAKE, &handshake).is_err() {
+        if self
+            .write_json_frame(IPC_OPCODE_HANDSHAKE, &handshake)
+            .is_err()
+        {
             self.disconnect_with_backoff();
             return false;
         }

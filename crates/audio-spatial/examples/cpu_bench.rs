@@ -117,8 +117,20 @@ const CASES: &[BenchCase] = &[
         BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
         128,
     ),
-    room("stereo-room10/64", BenchWorkload::StereoStatic, 64, 0.10, false),
-    room("stereo-room30/64", BenchWorkload::StereoStatic, 64, 0.30, false),
+    room(
+        "stereo-room10/64",
+        BenchWorkload::StereoStatic,
+        64,
+        0.10,
+        false,
+    ),
+    room(
+        "stereo-room30/64",
+        BenchWorkload::StereoStatic,
+        64,
+        0.30,
+        false,
+    ),
     room(
         "orbit-room10/64",
         BenchWorkload::StereoTrajectory(TrajectoryKind::Orbit360),
@@ -140,7 +152,13 @@ const CASES: &[BenchCase] = &[
         0.30,
         false,
     ),
-    room("stereo-debug/64", BenchWorkload::StereoStatic, 64, 0.10, true),
+    room(
+        "stereo-debug/64",
+        BenchWorkload::StereoStatic,
+        64,
+        0.10,
+        true,
+    ),
     room(
         "7.1.4-debug/64",
         BenchWorkload::Layout(ChannelLayout::Surround7_1_4),
@@ -153,7 +171,9 @@ const CASES: &[BenchCase] = &[
 fn main() {
     println!("YinQiDao CPU spatial serial baseline");
     println!("sample_rate={SAMPLE_RATE}Hz warmup={WARMUP_BLOCKS} measured={MEASURED_BLOCKS}");
-    println!("Direct-path pinna is part of every FullRange case. Room cases add six-wall reflections + global 8-line FDN.");
+    println!(
+        "Direct-path pinna is part of every FullRange case. Room cases add six-wall reflections + global 8-line FDN."
+    );
     println!("Run this example with --release and without other heavy workloads.\n");
 
     for case in CASES {
@@ -294,13 +314,21 @@ fn trajectory_for(workload: BenchWorkload) -> Option<Trajectory> {
 fn stereo_pair(center: SourcePose) -> (SourcePose, SourcePose) {
     (
         SourcePose {
-            position: rotate_y(center.position, -STEREO_HALF_ANGLE_SIN, STEREO_HALF_ANGLE_COS),
+            position: rotate_y(
+                center.position,
+                -STEREO_HALF_ANGLE_SIN,
+                STEREO_HALF_ANGLE_COS,
+            ),
             velocity: center.velocity,
             gain: FRAC_1_SQRT_2,
             spread: 0.1,
         },
         SourcePose {
-            position: rotate_y(center.position, STEREO_HALF_ANGLE_SIN, STEREO_HALF_ANGLE_COS),
+            position: rotate_y(
+                center.position,
+                STEREO_HALF_ANGLE_SIN,
+                STEREO_HALF_ANGLE_COS,
+            ),
             velocity: center.velocity,
             gain: FRAC_1_SQRT_2,
             spread: 0.1,

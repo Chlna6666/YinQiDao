@@ -23,13 +23,13 @@ mod renderer;
 mod trajectory;
 
 pub use debug::{
-    MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES, SpatialDebugReflection,
-    SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
+    MAX_DEBUG_REFLECTIONS, MAX_DEBUG_SOURCES, SpatialDebugReflection, SpatialDebugReflectionWall,
+    SpatialDebugSnapshot, SpatialDebugSource, SpatialDebugSourceKind,
 };
 pub use debug_activity::{SourceActivity, analyze_interleaved_activity};
 pub use debug_room::debug_room_half_extents;
 pub use engine::{
-    DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpeakerBedGeometry, SpatialEngine,
+    DEFAULT_BLOCK_FRAMES, DEFAULT_MAX_SOURCES, EngineConfig, SpatialEngine, SpeakerBedGeometry,
 };
 pub use environment::EnvironmentSettings;
 pub use error::SpatialError;

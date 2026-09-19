@@ -73,24 +73,19 @@ pub(crate) fn install_event_bridge(main_window: WindowHandle<MusicApp>, cx: &mut
     };
 
     let app_window = main_window.clone();
-    let app_subscription = cx.subscribe(
-        &bridge,
-        move |_bridge, action: &AppHotkeyAction, cx| {
-            let _ = app_window.update(cx, |app, window, app_cx| {
-                app.apply_app_hotkey(*action, window, app_cx);
-            });
-        },
-    );
+    let app_subscription = cx.subscribe(&bridge, move |_bridge, action: &AppHotkeyAction, cx| {
+        let _ = app_window.update(cx, |app, window, app_cx| {
+            app.apply_app_hotkey(*action, window, app_cx);
+        });
+    });
 
     let lyrics_window = main_window;
-    let lyrics_subscription = cx.subscribe(
-        &bridge,
-        move |_bridge, action: &LyricsHotkeyAction, cx| {
+    let lyrics_subscription =
+        cx.subscribe(&bridge, move |_bridge, action: &LyricsHotkeyAction, cx| {
             let _ = lyrics_window.update(cx, |app, _window, app_cx| {
                 app.apply_lyrics_hotkey(*action, app_cx);
             });
-        },
-    );
+        });
 
     cx.set_global(HotkeyUiBindings {
         _bridge: bridge,

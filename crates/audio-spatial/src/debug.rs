@@ -19,16 +19,11 @@ const NEAR_FIELD_FULL_METERS: f32 = 0.25;
 const NEAR_FIELD_FADE_METERS: f32 = 1.20;
 const AIR_ABSORPTION_START_METERS: f32 = 1.0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SpatialDebugSourceKind {
+    #[default]
     FullRange,
     Lfe,
-}
-
-impl Default for SpatialDebugSourceKind {
-    fn default() -> Self {
-        Self::FullRange
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -60,20 +55,15 @@ pub struct SpatialDebugSource {
     pub input_rms: f32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SpatialDebugReflectionWall {
     Left,
     Right,
+    #[default]
     Front,
     Rear,
     Floor,
     Ceiling,
-}
-
-impl Default for SpatialDebugReflectionWall {
-    fn default() -> Self {
-        Self::Front
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -421,11 +411,10 @@ fn analyze_source(
         (left_ear_distance - right_ear_distance).abs() / SPEED_OF_SOUND_M_S * sample_rate;
     let near_field_amount = 1.0
         - smoothstep01(
-            (distance - NEAR_FIELD_FULL_METERS)
-                / (NEAR_FIELD_FADE_METERS - NEAR_FIELD_FULL_METERS),
+            (distance - NEAR_FIELD_FULL_METERS) / (NEAR_FIELD_FADE_METERS - NEAR_FIELD_FULL_METERS),
         );
-    let itd_samples = far_itd_samples
-        + (geometric_itd_samples - far_itd_samples) * (near_field_amount * 0.35);
+    let itd_samples =
+        far_itd_samples + (geometric_itd_samples - far_itd_samples) * (near_field_amount * 0.35);
     let (left_delay_samples, right_delay_samples) = if azimuth >= 0.0 {
         (
             COMMON_CAUSAL_DELAY_SAMPLES + itd_samples,
@@ -445,11 +434,11 @@ fn analyze_source(
     } else {
         (left_ear_distance, right_ear_distance)
     };
-    let geometric_far_ear_attenuation =
-        (near_ear_distance / far_ear_distance).clamp(0.30, 1.0).sqrt();
+    let geometric_far_ear_attenuation = (near_ear_distance / far_ear_distance)
+        .clamp(0.30, 1.0)
+        .sqrt();
     let far_ear_attenuation = base_far_ear_attenuation
-        * (1.0
-            + (geometric_far_ear_attenuation - 1.0) * (near_field_amount * 0.55));
+        * (1.0 + (geometric_far_ear_attenuation - 1.0) * (near_field_amount * 0.55));
     let distance_gain = if distance <= 1.0 {
         1.0
     } else {
@@ -523,7 +512,13 @@ mod tests {
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
         snapshot.set_layout(Some(ChannelLayout::Surround5_1_2));
         snapshot.record_source(0, SourceKind::FullRange, SourcePose::new(Vec3::FORWARD));
-        snapshot.set_source_activity(0, SourceActivity { peak: 0.75, rms: 0.25 });
+        snapshot.set_source_activity(
+            0,
+            SourceActivity {
+                peak: 0.75,
+                rms: 0.25,
+            },
+        );
         assert_eq!(snapshot.layout, Some(ChannelLayout::Surround5_1_2));
         assert!((snapshot.sources[0].input_peak - 0.75).abs() < f32::EPSILON);
         assert!((snapshot.sources[0].input_rms - 0.25).abs() < f32::EPSILON);
@@ -556,8 +551,14 @@ mod tests {
         assert_eq!(snapshot.reflection_count, 12);
         assert_eq!(snapshot.reflections[0].source_index, 0);
         assert_eq!(snapshot.reflections[6].source_index, 1);
-        assert_eq!(snapshot.reflections[4].wall, SpatialDebugReflectionWall::Floor);
-        assert_eq!(snapshot.reflections[5].wall, SpatialDebugReflectionWall::Ceiling);
+        assert_eq!(
+            snapshot.reflections[4].wall,
+            SpatialDebugReflectionWall::Floor
+        );
+        assert_eq!(
+            snapshot.reflections[5].wall,
+            SpatialDebugReflectionWall::Ceiling
+        );
         assert!(snapshot.reflections[0].active);
         assert!(snapshot.reflections[5].arrival_elevation_degrees.abs() > 10.0);
     }
@@ -568,9 +569,11 @@ mod tests {
         snapshot.begin_capture(ListenerPose::identity(), EnvironmentSettings::default());
         snapshot.record_source(3, SourceKind::Lfe, SourcePose::default());
         assert_eq!(snapshot.reflection_count, 24);
-        assert!(snapshot.reflections[18..24]
-            .iter()
-            .all(|reflection| !reflection.active));
+        assert!(
+            snapshot.reflections[18..24]
+                .iter()
+                .all(|reflection| !reflection.active)
+        );
     }
 
     #[test]

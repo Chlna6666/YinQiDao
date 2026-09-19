@@ -2187,8 +2187,7 @@ fn fill_u16(
             } else {
                 right
             };
-            let quantized =
-                ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            let quantized = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
             *sample = if gain == 1.0 {
                 quantized
             } else {
