@@ -730,10 +730,10 @@ fn render_lyric_row(
     };
     let progress = if previous_active == Some(index) {
         // The old focus gives up emphasis first.
-        lyric_phase_progress(base_progress, 0.0, 0.58)
+        lyric_phase_progress(base_progress, 0.0, 0.48)
     } else if index == active && previous_active.is_some() {
-        // The new focus starts later, after motion has visibly separated the two rows.
-        lyric_phase_progress(base_progress, 0.18, 1.0)
+        // The new focus starts only after the old row has mostly returned to background depth.
+        lyric_phase_progress(base_progress, 0.32, 1.0)
     } else {
         base_progress
     };
