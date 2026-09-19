@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat, IntoElement,
-    ObjectFit, Render, SharedString, StatefulInteractiveElement as _, WeakEntity, Window, div, hsla,
-    img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    ObjectFit, Render, SharedString, StatefulInteractiveElement as _, WeakEntity, Window, div,
+    hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -315,7 +315,11 @@ impl Render for MiniPlayerView {
                                             .transition(press_transition())
                                             .active(|style| style.scale(0.94))
                                             .child(themed_icon(
-                                                if is_playing { icon!(pause) } else { icon!(play) },
+                                                if is_playing {
+                                                    icon!(pause)
+                                                } else {
+                                                    icon!(play)
+                                                },
                                                 18.0,
                                                 hsla(0.0, 0.0, 1.0, 1.0),
                                             ))

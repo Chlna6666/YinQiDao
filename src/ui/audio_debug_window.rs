@@ -7,8 +7,8 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
-    ChannelLayout, SpeakerLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot,
-    SpatialDebugSourceKind, late_field_telemetry, pinna_cue_telemetry,
+    ChannelLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind,
+    SpeakerLayout, late_field_telemetry, pinna_cue_telemetry,
 };
 
 use crate::audio::{
@@ -163,7 +163,10 @@ impl AudioDebugView {
                     let spatial = spatial_debug_latest_snapshot();
                     let audio_changed = audio.sequence != view.snapshot.sequence;
                     let spatial_changed = spatial.as_ref().map(|snapshot| snapshot.sequence)
-                        != view.spatial_snapshot.as_ref().map(|snapshot| snapshot.sequence);
+                        != view
+                            .spatial_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.sequence);
                     if spatial_changed {
                         view.gpu_scene.update(spatial);
                         view.spatial_snapshot = spatial;
@@ -187,12 +190,14 @@ impl AudioDebugView {
     }
 
     fn publish_debug_head_pose(&mut self) {
-        self.head_tracking.provider_mut().push_euler(HeadTrackingEulerPose {
-            position_meters: Vec3::ZERO,
-            yaw_radians: self.head_yaw,
-            pitch_radians: self.head_pitch,
-            roll_radians: 0.0,
-        });
+        self.head_tracking
+            .provider_mut()
+            .push_euler(HeadTrackingEulerPose {
+                position_meters: Vec3::ZERO,
+                yaw_radians: self.head_yaw,
+                pitch_radians: self.head_pitch,
+                roll_radians: 0.0,
+            });
         let _ = self.head_tracking.poll_and_publish();
     }
 
@@ -534,11 +539,12 @@ fn action_button(label: &'static str) -> gpui::Stateful<gpui::Div> {
 }
 
 fn panel(title: &'static str, subtitle: Option<String>, content: impl IntoElement) -> gpui::Div {
-    let mut header = div()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).child(title));
+    let mut header = div().flex().flex_col().gap_0p5().child(
+        div()
+            .text_sm()
+            .font_weight(gpui::FontWeight::BOLD)
+            .child(title),
+    );
     if let Some(subtitle) = subtitle {
         header = header.child(div().text_xs().text_color(rgb(0x77828f)).child(subtitle));
     }
@@ -572,7 +578,12 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
     let mut body = div().flex().flex_col().gap_2();
     let Some(snapshot) = snapshot else {
         return body
-            .child(div().text_sm().text_color(rgb(0x77828f)).child("等待 scene"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x77828f))
+                    .child("等待 scene"),
+            )
             .into_any_element();
     };
     let late = late_field_telemetry(snapshot.sample_rate, snapshot.environment);
@@ -584,9 +595,18 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                 .flex_wrap()
                 .child(metric("Bed", layout_name(snapshot.layout).to_string()))
                 .child(metric("Sources", snapshot.source_count.to_string()))
-                .child(metric("Room", format!("{:.0}%", snapshot.environment.room_size * 100.0)))
-                .child(metric("Early Wet", format!("{:.0}%", snapshot.environment.mix * 100.0)))
-                .child(metric("Damp", format!("{:.0}%", snapshot.environment.damping * 100.0))),
+                .child(metric(
+                    "Room",
+                    format!("{:.0}%", snapshot.environment.room_size * 100.0),
+                ))
+                .child(metric(
+                    "Early Wet",
+                    format!("{:.0}%", snapshot.environment.mix * 100.0),
+                ))
+                .child(metric(
+                    "Damp",
+                    format!("{:.0}%", snapshot.environment.damping * 100.0),
+                )),
         )
         .child(
             div()
@@ -595,8 +615,17 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                 .flex_wrap()
                 .child(metric("FDN Wet", format!("{:.1}%", late.wet_gain * 100.0)))
                 .child(metric("Feedback", format!("{:.3}", late.feedback_gain)))
-                .child(metric("Cutoff", format!("{:.0} Hz", late.damping_cutoff_hz)))
-                .child(metric("Late Delay", format!("{:.1}–{:.1} ms", late.minimum_delay_ms, late.maximum_delay_ms))),
+                .child(metric(
+                    "Cutoff",
+                    format!("{:.0} Hz", late.damping_cutoff_hz),
+                ))
+                .child(metric(
+                    "Late Delay",
+                    format!(
+                        "{:.1}–{:.1} ms",
+                        late.minimum_delay_ms, late.maximum_delay_ms
+                    ),
+                )),
         );
     let visible = snapshot.source_count.min(SOURCE_ROWS);
     for (index, source) in snapshot.sources[..visible].iter().copied().enumerate() {
@@ -627,69 +656,42 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                             .font_weight(gpui::FontWeight::BOLD)
                             .child(format!("#{:02} {channel} · {kind}", source.source_index)),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x9aa4af))
-                            .child(format!(
-                                "az {:+.1}° / el {:+.1}° / {:.2}m",
-                                source.azimuth_degrees,
-                                source.elevation_degrees,
-                                source.distance_meters
-                            )),
-                    ),
+                    .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!(
+                        "az {:+.1}° / el {:+.1}° / {:.2}m",
+                        source.azimuth_degrees, source.elevation_degrees, source.distance_meters
+                    ))),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x76a8c8))
-                    .child(format!(
-                        "input Peak {:+.1} dBFS · RMS {:+.1} dBFS",
-                        linear_dbfs(source.input_peak),
-                        linear_dbfs(source.input_rms),
-                    )),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x77828f))
-                    .child(format!(
-                        "ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}",
-                        source.itd_samples, source.ild_db, source.left_gain, source.right_gain
-                    )),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x68737f))
-                    .child(format!(
-                        "near {:.0}% · shadow {:.0}% · air {:.0}% · direct {:.3}",
-                        source.near_field_amount * 100.0,
-                        source.head_shadow_amount * 100.0,
-                        source.air_absorption_amount * 100.0,
-                        source.direct_contribution,
-                    )),
-            );
+            .child(div().text_xs().text_color(rgb(0x76a8c8)).child(format!(
+                "input Peak {:+.1} dBFS · RMS {:+.1} dBFS",
+                linear_dbfs(source.input_peak),
+                linear_dbfs(source.input_rms),
+            )))
+            .child(div().text_xs().text_color(rgb(0x77828f)).child(format!(
+                "ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}",
+                source.itd_samples, source.ild_db, source.left_gain, source.right_gain
+            )))
+            .child(div().text_xs().text_color(rgb(0x68737f)).child(format!(
+                "near {:.0}% · shadow {:.0}% · air {:.0}% · direct {:.3}",
+                source.near_field_amount * 100.0,
+                source.head_shadow_amount * 100.0,
+                source.air_absorption_amount * 100.0,
+                source.direct_contribution,
+            )));
         if matches!(source.kind, SpatialDebugSourceKind::FullRange) {
             let pinna = pinna_cue_telemetry(
                 source.azimuth_degrees,
                 source.elevation_degrees,
                 source.spread,
             );
-            row = row.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x8f86c9))
-                    .child(format!(
-                        "pinna {:.0}Hz · Q {:.2} · depth {:.2}dB · cue {:.0}% · L/R notch {:.0}/{:.0}Hz",
-                        pinna.center_hz,
-                        pinna.q,
-                        pinna.depth_db,
-                        pinna.cue_strength * 100.0,
-                        pinna.left_center_hz,
-                        pinna.right_center_hz,
-                    )),
-            );
+            row = row.child(div().text_xs().text_color(rgb(0x8f86c9)).child(format!(
+                "pinna {:.0}Hz · Q {:.2} · depth {:.2}dB · cue {:.0}% · L/R notch {:.0}/{:.0}Hz",
+                pinna.center_hz,
+                pinna.q,
+                pinna.depth_db,
+                pinna.cue_strength * 100.0,
+                pinna.left_center_hz,
+                pinna.right_center_hz,
+            )));
         }
         body = body.child(row);
     }
@@ -700,11 +702,17 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
     let mut body = div().flex().flex_col().gap_1();
     let Some(snapshot) = snapshot else {
         return body
-            .child(div().text_sm().text_color(rgb(0x77828f)).child("等待 reflection matrix"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x77828f))
+                    .child("等待 reflection matrix"),
+            )
             .into_any_element();
     };
     let mut shown = 0usize;
-    for reflection in snapshot.reflections[..snapshot.reflection_count.min(snapshot.reflections.len())]
+    for reflection in snapshot.reflections
+        [..snapshot.reflection_count.min(snapshot.reflections.len())]
         .iter()
         .copied()
     {
@@ -747,36 +755,31 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
                                 .child(format!("{:.2} ms", reflection.delay_milliseconds)),
                         ),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x77828f))
-                        .child(format!(
-                            "path {:.2}m (+{:.2}m) · wet {:.3} · reflect {:.3}",
-                            reflection.path_length_meters,
-                            reflection.excess_path_meters,
-                            reflection.wet_contribution,
-                            reflection.wall_reflectance
-                        )),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x68737f))
-                        .child(format!(
-                            "arrival az {:+.1}° / el {:+.1}° · L/R delay {:.2}/{:.2} · gain {:.3}/{:.3}",
-                            reflection.arrival_azimuth_degrees,
-                            reflection.arrival_elevation_degrees,
-                            reflection.left_delay_samples,
-                            reflection.right_delay_samples,
-                            reflection.left_gain,
-                            reflection.right_gain
-                        )),
-                ),
+                .child(div().text_xs().text_color(rgb(0x77828f)).child(format!(
+                    "path {:.2}m (+{:.2}m) · wet {:.3} · reflect {:.3}",
+                    reflection.path_length_meters,
+                    reflection.excess_path_meters,
+                    reflection.wet_contribution,
+                    reflection.wall_reflectance
+                )))
+                .child(div().text_xs().text_color(rgb(0x68737f)).child(format!(
+                    "arrival az {:+.1}° / el {:+.1}° · L/R delay {:.2}/{:.2} · gain {:.3}/{:.3}",
+                    reflection.arrival_azimuth_degrees,
+                    reflection.arrival_elevation_degrees,
+                    reflection.left_delay_samples,
+                    reflection.right_delay_samples,
+                    reflection.left_gain,
+                    reflection.right_gain
+                ))),
         );
     }
     if shown == 0 {
-        body = body.child(div().text_sm().text_color(rgb(0x77828f)).child("当前没有 active reflection"));
+        body = body.child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x77828f))
+                .child("当前没有 active reflection"),
+        );
     }
     body.into_any_element()
 }

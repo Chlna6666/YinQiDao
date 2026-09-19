@@ -1,8 +1,7 @@
 use gpui::{Context, Entity, IntoElement, div, hsla, prelude::*, px};
 
 use super::{
-    app_runtime_events,
-    mini_player_view,
+    app_runtime_events, mini_player_view,
     player_stage::{PlaybackProgress, PlaybackTime},
     shell::MusicApp,
     theme,

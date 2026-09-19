@@ -25,9 +25,8 @@ fn unit_segments() -> &'static [UnitSegment] {
     static SEGMENTS: OnceLock<Box<[UnitSegment]>> = OnceLock::new();
     SEGMENTS
         .get_or_init(|| {
-            let mut segments = Vec::with_capacity(
-                (LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS,
-            );
+            let mut segments =
+                Vec::with_capacity((LATITUDE_DEGREES.len() + MERIDIAN_COUNT) * RING_SEGMENTS);
 
             for latitude_degrees in LATITUDE_DEGREES {
                 let latitude = latitude_degrees.to_radians();

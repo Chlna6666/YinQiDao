@@ -8,12 +8,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
-    CompositeLayerExt as _, Context, Easing, ElementId, Entity, IntoElement, KeyDownEvent, Render,
-    SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowOptions, div, hsla,
-    point, prelude::*, px, rgb, size,
+    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
+    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -42,6 +42,24 @@ const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 pub enum DragTarget {
     Progress,
     Volume,
+}
+
+#[derive(Clone, Debug)]
+pub struct OnlinePlaylistViewData {
+    pub title: String,
+    pub subtitle: String,
+    pub cover_url: Option<String>,
+    pub tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub loading: bool,
+    pub route: crate::plugin::abi::PluginRoute,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OnlinePlaylistQueue {
+    pub route: crate::plugin::abi::PluginRoute,
+    pub playlist_title: String,
+    pub tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub current_index: usize,
 }
 
 pub struct MusicApp {
@@ -122,8 +140,49 @@ pub struct MusicApp {
     config_save_dirty: bool,
     last_config_save_at: std::time::Instant,
     ui_content_revision: u64,
+    sessions_restored: bool,
+    pub(crate) has_online_plugins: bool,
+    pub(crate) online_authenticated: bool,
+    pub(crate) online_daily_tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub(crate) online_playlists: Vec<crate::plugin::abi::CollectionRecommendationItem>,
+    pub(crate) online_user_playlists: Vec<(
+        crate::plugin::abi::PluginRoute,
+        crate::plugin::abi::PlaylistDescriptor,
+    )>,
+    pub(crate) online_new_tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub(crate) online_route: Option<crate::plugin::abi::PluginRoute>,
+    pub(crate) online_recommendations_loading: bool,
+    pub(crate) online_search_results: Vec<crate::plugin::abi::RemoteTrack>,
+    pub(crate) online_search_loading: bool,
+    pub(crate) online_search_route: Option<crate::plugin::abi::PluginRoute>,
+    pub(crate) recent_plays: Vec<TrackId>,
+    pub(crate) online_playback_meta: HashMap<
+        TrackId,
+        (
+            crate::plugin::abi::PluginRoute,
+            crate::plugin::abi::SourceTrackRef,
+            Option<String>,
+        ),
+    >,
+    pub(crate) online_track_buffering: Option<String>,
+    pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
+    pub(crate) online_track_cache: HashMap<TrackId, Track>,
+    pub(crate) online_remote_tracks: HashMap<
+        TrackId,
+        (
+            crate::plugin::abi::PluginRoute,
+            crate::plugin::abi::RemoteTrack,
+        ),
+    >,
     home_page: Option<Entity<HomePage>>,
     library_page: Option<Entity<LibraryPage>>,
+    online_playlist_page: Option<Entity<OnlinePlaylistPage>>,
+    pub(crate) active_modal: Option<super::components::modal::GlobalModal>,
+    pub(crate) active_online_playlist: Option<OnlinePlaylistViewData>,
+    pub(crate) online_playlist_queue: Option<OnlinePlaylistQueue>,
+    pub(crate) sidebar_created_playlists_collapsed: bool,
+    pub(crate) sidebar_collected_playlists_collapsed: bool,
+    pub(crate) search_input: Option<Entity<crate::ui::components::input::HostTextInput>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +191,8 @@ struct HomePageRenderKey {
     content_revision: u64,
     plugin_ui_revision: u64,
     scan_in_progress: bool,
+    has_online_plugins: bool,
+    online_authenticated: bool,
     current_track: Option<TrackId>,
     playback_state: PlaybackState,
 }
@@ -142,6 +203,8 @@ fn home_page_render_key(app: &MusicApp) -> HomePageRenderKey {
         content_revision: app.ui_content_revision,
         plugin_ui_revision: crate::plugin::management::ui_observable_revision(),
         scan_in_progress: app.scan_in_progress,
+        has_online_plugins: app.has_online_plugins,
+        online_authenticated: app.online_authenticated,
         current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
         playback_state: app.snapshot.state,
     }
@@ -252,7 +315,8 @@ impl HomePage {
                 Ok(Some(_)) => continue,
                 Ok(None) => {}
                 Err(error) => {
-                    self.plugin_home_failed.insert(qualified_id.clone(), generation);
+                    self.plugin_home_failed
+                        .insert(qualified_id.clone(), generation);
                     tracing::warn!(section = %qualified_id, %error, "读取插件 Home Section 快照失败");
                     continue;
                 }
@@ -263,7 +327,8 @@ impl HomePage {
                 continue;
             }
 
-            self.plugin_home_loading.insert(qualified_id.clone(), generation);
+            self.plugin_home_loading
+                .insert(qualified_id.clone(), generation);
             let task_id = qualified_id.clone();
             let parent = self.parent.clone();
             let task = Tokio::spawn_result(cx, async move {
@@ -284,7 +349,8 @@ impl HomePage {
                         this.plugin_home_loading.remove(&qualified_id);
                     }
                     if !succeeded && this.last_key.plugin_ui_revision == generation {
-                        this.plugin_home_failed.insert(qualified_id.clone(), generation);
+                        this.plugin_home_failed
+                            .insert(qualified_id.clone(), generation);
                     }
                     cx.notify();
                 })?;
@@ -361,6 +427,87 @@ impl Render for LibraryPage {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OnlinePlaylistRenderKey {
+    active: bool,
+    playlist_title: Option<String>,
+    tracks_count: usize,
+    loading: bool,
+    buffering_track: Option<String>,
+    current_track: Option<TrackId>,
+    playback_state: PlaybackState,
+}
+
+fn online_playlist_render_key(app: &MusicApp) -> OnlinePlaylistRenderKey {
+    OnlinePlaylistRenderKey {
+        active: app.page == AppPage::OnlinePlaylist,
+        playlist_title: app.active_online_playlist.as_ref().map(|p| p.title.clone()),
+        tracks_count: app
+            .active_online_playlist
+            .as_ref()
+            .map_or(0, |p| p.tracks.len()),
+        loading: app
+            .active_online_playlist
+            .as_ref()
+            .is_some_and(|p| p.loading),
+        buffering_track: app.online_track_buffering.clone(),
+        current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
+        playback_state: app.snapshot.state,
+    }
+}
+
+struct OnlinePlaylistPage {
+    parent: WeakEntity<MusicApp>,
+    last_key: OnlinePlaylistRenderKey,
+    refresh_pending: bool,
+    _subscription: Subscription,
+}
+
+impl OnlinePlaylistPage {
+    fn new(
+        parent: Entity<MusicApp>,
+        initial_key: OnlinePlaylistRenderKey,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscription = cx.observe(&parent, |this, parent, cx| {
+            if this.refresh_pending {
+                return;
+            }
+            this.refresh_pending = true;
+            let this_entity = cx.weak_entity();
+            cx.defer(move |cx| {
+                let next_key = online_playlist_render_key(parent.read(cx));
+                let _ = this_entity.update(cx, |this, cx| {
+                    this.refresh_pending = false;
+                    if next_key != this.last_key {
+                        let is_active = next_key.active;
+                        this.last_key = next_key;
+                        if is_active {
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        });
+        Self {
+            parent: parent.downgrade(),
+            last_key: initial_key,
+            refresh_pending: false,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for OnlinePlaylistPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let app = parent.read(cx);
+        super::online_playlist::render(app, &self.parent)
+    }
+}
+
 pub(super) fn app_listener<E: ?Sized>(
     view: &WeakEntity<MusicApp>,
     listener: impl Fn(&mut MusicApp, &E, &mut Window, &mut Context<MusicApp>) + 'static,
@@ -403,9 +550,21 @@ impl MusicApp {
         .ok()
         .map(Arc::new);
 
-        let initial_track = config
+        let mut initial_track = config
             .current_track
             .and_then(|id| tracks.iter().find(|t| t.id == id).cloned());
+        if initial_track.is_none() {
+            if let Some(saved) = &config.last_played_track {
+                initial_track = Some(Track::from(saved.clone()));
+            }
+        }
+        let mut initial_online_cache = HashMap::new();
+        if let Some(track) = &initial_track {
+            if track.id < 0 {
+                initial_online_cache.insert(track.id, track.clone());
+            }
+        }
+
         let initial_duration = initial_track.as_ref().map_or(0, |t| t.duration_ms);
         let initial_position = if initial_duration > 0 {
             config.position_ms.min(initial_duration)
@@ -437,11 +596,17 @@ impl MusicApp {
             engine.try_send(PlayerCommand::SetRepeat(config.repeat));
             engine.try_send(PlayerCommand::SetShuffle(config.shuffle));
             if let Some(track) = &initial_track {
-                engine.try_send(PlayerCommand::RestoreTrack {
-                    track_id: track.id,
-                    position: Duration::from_millis(initial_position),
-                    play: false,
-                });
+                if track.id < 0 {
+                    engine.try_play_transient_track(track.clone());
+                    engine.try_send(PlayerCommand::Pause);
+                    engine.try_send(PlayerCommand::Seek(Duration::from_millis(initial_position)));
+                } else {
+                    engine.try_send(PlayerCommand::RestoreTrack {
+                        track_id: track.id,
+                        position: Duration::from_millis(initial_position),
+                        play: false,
+                    });
+                }
             }
         }
         Self {
@@ -526,13 +691,102 @@ impl MusicApp {
             config_save_dirty: false,
             last_config_save_at: std::time::Instant::now() - Duration::from_secs(1),
             ui_content_revision: 0,
+            sessions_restored: false,
+            has_online_plugins: false,
+            online_authenticated: false,
+            online_daily_tracks: Vec::new(),
+            online_playlists: Vec::new(),
+            online_user_playlists: Vec::new(),
+            online_new_tracks: Vec::new(),
+            online_route: None,
+            online_recommendations_loading: false,
+            online_search_results: Vec::new(),
+            online_search_loading: false,
+            online_search_route: None,
+            recent_plays: Vec::new(),
+            online_playback_meta: HashMap::new(),
+            online_track_buffering: None,
+            online_playlist_cache: HashMap::new(),
+            online_track_cache: initial_online_cache,
+            online_remote_tracks: HashMap::new(),
             home_page: None,
             library_page: None,
+            online_playlist_page: None,
+            active_modal: None,
+            active_online_playlist: None,
+            online_playlist_queue: None,
+            sidebar_created_playlists_collapsed: false,
+            sidebar_collected_playlists_collapsed: false,
+            search_input: None,
         }
     }
 
+    pub(crate) fn has_enabled_online_plugins(&self) -> bool {
+        if let Ok(services) = crate::plugin::accounts::service_summaries() {
+            services
+                .iter()
+                .any(|s| s.enabled && !s.providers.is_empty())
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn check_online_authenticated(&self) -> bool {
+        if let Ok(services) = crate::plugin::accounts::service_summaries() {
+            services.iter().any(|s| {
+                s.enabled
+                    && s.providers.iter().any(|p| {
+                        p.accounts
+                            .iter()
+                            .any(|a| a.state == crate::plugin::accounts::PluginAccountSessionStatus::Authenticated)
+                    })
+            })
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn sync_online_service_state(&mut self, cx: &mut Context<Self>) {
+        let has_plugins = self.has_enabled_online_plugins();
+        let is_auth = if has_plugins {
+            self.check_online_authenticated()
+        } else {
+            false
+        };
+        self.has_online_plugins = has_plugins;
+        self.online_authenticated = is_auth;
+
+        if !has_plugins {
+            self.online_daily_tracks.clear();
+            self.online_playlists.clear();
+            self.online_user_playlists.clear();
+            self.online_new_tracks.clear();
+            self.online_route = None;
+            self.online_playlist_queue = None;
+            if self.page == AppPage::OnlinePlaylist {
+                self.show_page(AppPage::Library, cx);
+            }
+        }
+        self.bump_ui_content_revision();
+        cx.notify();
+    }
+
+    pub fn open_modal(
+        &mut self,
+        modal: super::components::modal::GlobalModal,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_modal = Some(modal);
+        cx.notify();
+    }
+
+    pub fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.active_modal = None;
+        cx.notify();
+    }
+
     #[inline]
-    fn bump_ui_content_revision(&mut self) {
+    pub(crate) fn bump_ui_content_revision(&mut self) {
         self.ui_content_revision = self.ui_content_revision.wrapping_add(1);
     }
 
@@ -558,6 +812,20 @@ impl MusicApp {
         page
     }
 
+    fn ensure_online_playlist_page(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<OnlinePlaylistPage> {
+        if let Some(page) = &self.online_playlist_page {
+            return page.clone();
+        }
+        let initial_key = online_playlist_render_key(self);
+        let parent = cx.entity();
+        let page = cx.new(move |cx| OnlinePlaylistPage::new(parent, initial_key, cx));
+        self.online_playlist_page = Some(page.clone());
+        page
+    }
+
     fn ensure_fluid_background(
         &mut self,
         cx: &mut Context<Self>,
@@ -580,13 +848,10 @@ impl MusicApp {
         if self.stage_transition_duration.is_zero() {
             return self.stage_transition_to;
         }
-        let linear = now
-            .saturating_duration_since(started_at)
-            .as_secs_f32()
+        let linear = now.saturating_duration_since(started_at).as_secs_f32()
             / self.stage_transition_duration.as_secs_f32();
         let eased = stage_ease_in_out_cubic(linear);
-        self.stage_transition_from
-            + (self.stage_transition_to - self.stage_transition_from) * eased
+        self.stage_transition_from + (self.stage_transition_to - self.stage_transition_from) * eased
     }
 
     fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -670,7 +935,7 @@ impl MusicApp {
             // renderer animation short because a cold frame took longer than expected.
             let finish_entity = entity.clone();
             window.on_next_frame(move |_window, cx| {
-                let _ = finish_entity.update(cx, |this, cx| {
+                finish_entity.update(cx, |this, cx| {
                     if this.stage_transition_epoch != epoch || !this.stage_animating {
                         return;
                     }
@@ -930,58 +1195,213 @@ impl MusicApp {
         self.config.position_ms = 0;
     }
 
-    pub(crate) fn next(&mut self, cx: &mut Context<Self>) {
-        self.ensure_queue();
-        let is_at_end = if let (Some(curr), false) =
-            (self.config.current_track, self.config.queue.is_empty())
-        {
-            self.config.queue.last().copied() == Some(curr)
-        } else {
-            false
-        };
+    pub(crate) fn record_recent_play(&mut self, track: &Track) {
+        let track_id = track.id;
+        let title_lower = track.title.trim().to_lowercase();
+        let artist_lower = track.artist.trim().to_lowercase();
+        self.recent_plays.retain(|id| {
+            if *id == track_id {
+                return false;
+            }
+            if let Some(t) = self
+                .tracks
+                .iter()
+                .find(|t| t.id == *id)
+                .or_else(|| self.online_track_cache.get(id))
+            {
+                if !title_lower.is_empty()
+                    && t.title.trim().to_lowercase() == title_lower
+                    && t.artist.trim().to_lowercase() == artist_lower
+                {
+                    return false;
+                }
+            }
+            true
+        });
+        self.recent_plays.insert(0, track_id);
+        self.recent_plays.truncate(100);
+    }
 
-        if is_at_end
-            && self.config.repeat == RepeatMode::Off
-            && let Some(first) = self.config.queue.first().copied()
-        {
-            self.play_track(first, cx);
+    pub(crate) fn handle_track_ended(&mut self, cx: &mut Context<Self>) {
+        if let Some(queue) = &mut self.online_playlist_queue {
+            if !queue.tracks.is_empty() {
+                let next_idx = match self.config.repeat {
+                    RepeatMode::One => Some(queue.current_index),
+                    RepeatMode::All => Some((queue.current_index + 1) % queue.tracks.len()),
+                    RepeatMode::Off => {
+                        if queue.current_index + 1 < queue.tracks.len() {
+                            Some(queue.current_index + 1)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(idx) = next_idx {
+                    queue.current_index = idx;
+                    let track = queue.tracks[idx].clone();
+                    let route = queue.route.clone();
+                    self.play_online_remote_track(route, track, cx);
+                    return;
+                }
+            }
+        }
+
+        self.next(cx);
+    }
+
+    pub(crate) fn next(&mut self, cx: &mut Context<Self>) {
+        if let Some(queue) = &mut self.online_playlist_queue {
+            if !queue.tracks.is_empty() {
+                let next_idx = match self.config.repeat {
+                    RepeatMode::One => queue.current_index,
+                    RepeatMode::All => (queue.current_index + 1) % queue.tracks.len(),
+                    RepeatMode::Off => {
+                        if queue.current_index + 1 < queue.tracks.len() {
+                            queue.current_index + 1
+                        } else {
+                            self.send(PlayerCommand::Stop);
+                            return;
+                        }
+                    }
+                };
+                queue.current_index = next_idx;
+                let next_track = queue.tracks[next_idx].clone();
+                let route = queue.route.clone();
+                self.play_online_remote_track(route, next_track, cx);
+                return;
+            }
+        }
+
+        self.ensure_queue();
+        let queue = self.config.queue.clone();
+        if queue.is_empty() {
             return;
         }
 
-        if self.send(PlayerCommand::Next) {
-            self.reset_progress_for_track_switch();
-            self.save_config();
+        let curr_idx = self
+            .config
+            .current_track
+            .and_then(|curr| queue.iter().position(|id| *id == curr));
+
+        let next_idx = match (curr_idx, self.config.repeat) {
+            (Some(pos), RepeatMode::One) => Some(pos),
+            (Some(pos), RepeatMode::All) => Some((pos + 1) % queue.len()),
+            (Some(pos), RepeatMode::Off) => {
+                if pos + 1 < queue.len() {
+                    Some(pos + 1)
+                } else {
+                    None
+                }
+            }
+            (None, _) => Some(0),
+        };
+
+        let Some(target_idx) = next_idx else {
+            self.send(PlayerCommand::Stop);
+            return;
+        };
+
+        let target_id = queue[target_idx];
+        if target_id < 0 {
+            if let Some((route, remote)) = self.online_remote_tracks.get(&target_id).cloned() {
+                self.play_online_remote_track(route, remote, cx);
+                return;
+            } else if let Some(track) = self.online_track_cache.get(&target_id).cloned() {
+                self.play_prepared_remote_track(track, cx);
+                return;
+            }
         }
-        cx.notify();
+
+        self.play_track(target_id, cx);
     }
 
     pub(crate) fn previous(&mut self, cx: &mut Context<Self>) {
-        self.ensure_queue();
-        let is_at_start = if let (Some(curr), false) =
-            (self.config.current_track, self.config.queue.is_empty())
-        {
-            self.config.queue.first().copied() == Some(curr)
-        } else {
-            false
-        };
+        if let Some(queue) = &mut self.online_playlist_queue {
+            if !queue.tracks.is_empty() {
+                if self.snapshot.position_ms >= 3_000 {
+                    self.send(PlayerCommand::Seek(Duration::ZERO));
+                    return;
+                }
+                let prev_idx = match self.config.repeat {
+                    RepeatMode::One => queue.current_index,
+                    RepeatMode::All => {
+                        if queue.current_index > 0 {
+                            queue.current_index - 1
+                        } else {
+                            queue.tracks.len().saturating_sub(1)
+                        }
+                    }
+                    RepeatMode::Off => {
+                        if queue.current_index > 0 {
+                            queue.current_index - 1
+                        } else {
+                            0
+                        }
+                    }
+                };
+                queue.current_index = prev_idx;
+                let prev_track = queue.tracks[prev_idx].clone();
+                let route = queue.route.clone();
+                self.play_online_remote_track(route, prev_track, cx);
+                return;
+            }
+        }
 
-        if is_at_start
-            && self.config.repeat == RepeatMode::Off
-            && self.snapshot.position_ms < 3_000
-            && let Some(last) = self.config.queue.last().copied()
-        {
-            self.play_track(last, cx);
+        self.ensure_queue();
+        let queue = self.config.queue.clone();
+        if queue.is_empty() {
             return;
         }
 
-        if self.send(PlayerCommand::Previous) {
-            self.reset_progress_for_track_switch();
-            self.save_config();
+        if self.snapshot.position_ms >= 3_000 {
+            self.send(PlayerCommand::Seek(Duration::ZERO));
+            return;
         }
-        cx.notify();
+
+        let curr_idx = self
+            .config
+            .current_track
+            .and_then(|curr| queue.iter().position(|id| *id == curr));
+
+        let prev_idx = match (curr_idx, self.config.repeat) {
+            (Some(pos), RepeatMode::One) => Some(pos),
+            (Some(pos), RepeatMode::All) => {
+                if pos > 0 {
+                    Some(pos - 1)
+                } else {
+                    Some(queue.len().saturating_sub(1))
+                }
+            }
+            (Some(pos), RepeatMode::Off) => {
+                if pos > 0 {
+                    Some(pos - 1)
+                } else {
+                    Some(0)
+                }
+            }
+            (None, _) => Some(0),
+        };
+
+        let Some(target_idx) = prev_idx else {
+            return;
+        };
+
+        let target_id = queue[target_idx];
+        if target_id < 0 {
+            if let Some((route, remote)) = self.online_remote_tracks.get(&target_id).cloned() {
+                self.play_online_remote_track(route, remote, cx);
+                return;
+            } else if let Some(track) = self.online_track_cache.get(&target_id).cloned() {
+                self.play_prepared_remote_track(track, cx);
+                return;
+            }
+        }
+
+        self.play_track(target_id, cx);
     }
 
     pub(crate) fn play_track(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
+        self.online_playlist_queue = None;
         let Some(engine) = self.engine.clone() else {
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
@@ -1003,6 +1423,14 @@ impl MusicApp {
         if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
             self.reset_progress_for_track_switch();
             self.config.current_track = Some(track_id);
+            if let Some(track) = self.tracks.iter().find(|t| t.id == track_id).cloned() {
+                self.record_recent_play(&track);
+            } else {
+                self.recent_plays.retain(|id| *id != track_id);
+                self.recent_plays.insert(0, track_id);
+                self.recent_plays.truncate(100);
+            }
+            self.bump_ui_content_revision();
             self.status = "正在准备播放".into();
             if !self.stage_open && !self.stage_animating {
                 self.stage_prepared = false;
@@ -1024,6 +1452,91 @@ impl MusicApp {
             self.status = "已加入播放队列".into();
         }
         cx.notify();
+    }
+
+    pub(crate) fn insert_next_in_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
+        let queue = Arc::make_mut(&mut self.config.queue);
+        queue.retain(|id| *id != track_id);
+        let insert_pos = if let Some(curr) = self.config.current_track {
+            queue
+                .iter()
+                .position(|id| *id == curr)
+                .map(|idx| idx + 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if insert_pos <= queue.len() {
+            queue.insert(insert_pos, track_id);
+        } else {
+            queue.push(track_id);
+        }
+        self.bump_ui_content_revision();
+        self.queue_matches_tracks = false;
+        self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
+        self.save_config();
+        cx.notify();
+    }
+
+    pub(crate) fn ensure_track_for_remote(
+        &mut self,
+        route: &crate::plugin::abi::PluginRoute,
+        remote: &crate::plugin::abi::RemoteTrack,
+    ) -> Track {
+        for (id, (r, s, _)) in &self.online_playback_meta {
+            if r.provider_id == route.provider_id && s.source_id == remote.source.source_id {
+                if let Some(track) = self.online_track_cache.get(id).cloned() {
+                    self.online_remote_tracks
+                        .insert(*id, (route.clone(), remote.clone()));
+                    return track;
+                }
+            }
+        }
+
+        let track_id = crate::plugin::streaming::allocate_remote_track_id().unwrap_or(-100_000);
+        let track = Track::new(crate::model::TrackData {
+            id: track_id,
+            path: std::path::PathBuf::from(format!(
+                "remote://{}/{}",
+                route.provider_id, remote.source.source_id
+            )),
+            title: remote.title.clone(),
+            artist: if remote.artists.is_empty() {
+                "未知艺术家".into()
+            } else {
+                remote.artists.join("/")
+            },
+            album: if remote.album.is_empty() {
+                "未知专辑".into()
+            } else {
+                remote.album.clone()
+            },
+            year: None,
+            genre: None,
+            duration_ms: remote.duration_ms.unwrap_or(0),
+            codec: "remote".into(),
+            sample_rate: 44_100,
+            channels: 2,
+            artwork_key: None,
+        });
+
+        self.online_playback_meta.insert(
+            track_id,
+            (
+                route.clone(),
+                remote.source.clone(),
+                remote.cover_url.clone(),
+            ),
+        );
+        self.online_track_cache.insert(track_id, track.clone());
+        self.online_remote_tracks
+            .insert(track_id, (route.clone(), remote.clone()));
+
+        if let Some(url) = &remote.cover_url {
+            crate::ui::image_cache::fetch_detached(url);
+        }
+
+        track
     }
 
     pub(crate) fn remove_from_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
@@ -1292,6 +1805,8 @@ impl MusicApp {
         } else if key.len() == 1 && !key.chars().next().is_some_and(char::is_control) {
             self.search.push_str(key);
         }
+        let query = self.search.clone();
+        self.trigger_online_search(query, cx);
         cx.notify();
     }
 
@@ -1384,6 +1899,7 @@ impl MusicApp {
         config.position_ms = self.position_ms;
         if let Some(track) = &self.snapshot.current_track {
             config.current_track = Some(track.id);
+            config.last_played_track = Some(crate::settings::SavedTrackInfo::from(track));
         }
         self.config_save_dirty = false;
         self.last_config_save_at = std::time::Instant::now();
@@ -1405,6 +1921,1092 @@ impl MusicApp {
         app_runtime_events::attach_root_sources(self, library_events, media_events, cx);
         self.ensure_system_media_async(cx);
         self.update_system_media_async(cx);
+    }
+
+    fn ensure_plugin_sessions_restored(&mut self, cx: &mut Context<Self>) {
+        if self.sessions_restored {
+            return;
+        }
+        self.sessions_restored = true;
+        let task = Tokio::spawn_result(cx, async move {
+            if let Some(frontend) = crate::plugin::frontend::global() {
+                let results = frontend.restore_all_pending_accounts().await;
+                let restored = results
+                    .iter()
+                    .filter(|(_, res)| matches!(res, Ok(true)))
+                    .count();
+                Ok(restored)
+            } else {
+                Ok(0)
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = task.await;
+            let _ = this.update(cx, |app, cx| {
+                app.sync_online_service_state(cx);
+                if app.online_authenticated {
+                    app.refresh_online_recommendations(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn play_prepared_remote_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        let track_id = track.id;
+        self.online_track_cache.insert(track_id, track.clone());
+        if let Some(engine) = &self.engine {
+            engine.try_play_transient_track(track.clone());
+        }
+        self.reset_progress_for_track_switch();
+        self.config.current_track = Some(track_id);
+        self.record_recent_play(&track);
+        self.bump_ui_content_revision();
+        self.status = "正在准备播放".into();
+        if !self.stage_open && !self.stage_animating {
+            self.stage_prepared = false;
+        }
+        self.save_config();
+        cx.notify();
+    }
+
+    pub(crate) fn play_online_remote_track(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        remote: crate::plugin::abi::RemoteTrack,
+        cx: &mut Context<Self>,
+    ) {
+        let title = remote.title.clone();
+        let artist = remote.artists.join("/");
+        let cover_url = remote.cover_url.clone();
+        let source = remote.source.clone();
+        let route_for_prep = route.clone();
+        let remote_for_prep = remote.clone();
+        let remote_for_cache = remote.clone();
+
+        self.online_track_buffering = Some(source.source_id.clone());
+        self.status = format!("正在缓冲在线音频：{title} · {artist}");
+        cx.notify();
+
+        if let Some(cover_url) = &cover_url {
+            crate::ui::image_cache::fetch_detached(cover_url);
+        }
+
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let res = frontend
+                .prepare_remote_track_for_route(&route_for_prep, &remote_for_prep, None)
+                .await?;
+            res.value
+                .map(|p| p.into_track())
+                .ok_or_else(|| anyhow!("物化在线音频流失败"))
+        });
+
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(track) => {
+                let _ = this.update(cx, |app, cx| {
+                    app.online_track_buffering = None;
+                    let track_id = track.id;
+                    app.online_playback_meta
+                        .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
+                    app.online_track_cache.insert(track_id, track.clone());
+                    app.online_remote_tracks
+                        .insert(track_id, (route.clone(), remote_for_cache.clone()));
+                    app.status = format!("正在播放在线音频：{title} · {artist}");
+                    app.play_prepared_remote_track(track, cx);
+
+                    if let Some(url) = cover_url {
+                        app.fetch_online_artwork_for_track(track_id, url, cx);
+                    }
+                    app.fetch_online_lyrics_for_track(track_id, route, source, cx);
+                });
+            }
+            Err(err) => {
+                let _ = this.update(cx, |app, cx| {
+                    app.online_track_buffering = None;
+                    app.status = format!("播放失败：{err:#}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn fetch_online_artwork_for_track(
+        &mut self,
+        track_id: TrackId,
+        url: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.artworks.contains_key(&track_id) {
+            return;
+        }
+        let artwork_cache = self.artwork_cache.clone();
+        let target_url = url.clone();
+        let task = Tokio::spawn_result(cx, async move {
+            if let Some(bytes) = crate::ui::image_cache::get_cached(&target_url) {
+                if let Some(cache) = &artwork_cache {
+                    if let Ok(art) = cache.store(&target_url, &bytes) {
+                        return Ok((art.png, art.blurred_png, art.palette));
+                    }
+                }
+            }
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()?;
+            let resp = client.get(&target_url).send().await?;
+            let bytes = resp.bytes().await?;
+            if let Some(cache) = &artwork_cache {
+                let art = cache.store(&target_url, &bytes)?;
+                Ok((art.png, art.blurred_png, art.palette))
+            } else {
+                let img = image::load_from_memory(&bytes)?;
+                let small = img.thumbnail(img.width().min(768), img.height().min(768));
+                let mut png_buf = Vec::new();
+                small.write_to(
+                    &mut std::io::Cursor::new(&mut png_buf),
+                    image::ImageFormat::Png,
+                )?;
+                let blurred = crate::artwork::generate_blurred_artwork(&small)
+                    .unwrap_or_else(|_| png_buf.clone());
+                let pal = crate::artwork::extract_palette(&small);
+                Ok((png_buf, blurred, pal))
+            }
+        });
+
+        cx.spawn(async move |this, cx| -> Result<()> {
+            if let Ok((png, blurred, pal)) = task.await {
+                let _ = this.update(cx, |app, cx| {
+                    app.set_artwork_parts(track_id, png, Some(blurred), Some(pal));
+                    cx.notify();
+                });
+            }
+            Ok(())
+        })
+        .detach();
+    }
+
+    pub(crate) fn fetch_online_lyrics_for_track(
+        &mut self,
+        track_id: TrackId,
+        route: crate::plugin::abi::PluginRoute,
+        source: crate::plugin::abi::SourceTrackRef,
+        cx: &mut Context<Self>,
+    ) {
+        if self.lyrics.contains_key(&track_id) {
+            return;
+        }
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let res = frontend.lyrics_for_route(&route, &source).await?;
+            if let Some(doc) = res.value {
+                let player_doc =
+                    crate::plugin::frontend::plugin_lyrics_to_player(doc, &route.provider_id)?;
+                return Ok(player_doc);
+            }
+            Ok(None)
+        });
+
+        cx.spawn(async move |this, cx| -> Result<()> {
+            if let Ok(Some(doc)) = task.await {
+                let _ = this.update(cx, |app, cx| {
+                    app.cache_lyrics(track_id, doc);
+                    cx.notify();
+                });
+            }
+            Ok(())
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_and_play_online_playlist(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        collection: crate::plugin::abi::MediaCollectionRef,
+        cx: &mut Context<Self>,
+    ) {
+        self.status = "正在加载歌单歌曲...".into();
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let tracks = frontend
+                .collection_tracks(&route, &collection, 0, 50)
+                .await?;
+            Ok((route, tracks))
+        });
+
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((route, tracks)) => {
+                if let Some(first) = tracks.first() {
+                    let first_remote = first.clone();
+                    let _ = this.update(cx, |app, cx| {
+                        app.status = format!("正在播放歌单，首曲：{}", first_remote.title);
+                        app.play_online_remote_track(route, first_remote, cx);
+                    });
+                }
+            }
+            Err(err) => {
+                let _ = this.update(cx, |app, cx| {
+                    app.status = format!("加载歌单失败：{err:#}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn show_online_playlist_detail(
+        &mut self,
+        data: OnlinePlaylistViewData,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_online_playlist = Some(data);
+        self.page = AppPage::OnlinePlaylist;
+        cx.notify();
+    }
+
+    pub(crate) fn load_and_show_online_playlist(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        collection: crate::plugin::abi::MediaCollectionRef,
+        title: String,
+        subtitle: String,
+        cover_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let cache_key = collection.source_id.clone();
+        if let Some(cached) = self.online_playlist_cache.get(&cache_key).cloned() {
+            self.show_online_playlist_detail(cached, cx);
+            return;
+        }
+
+        self.show_online_playlist_detail(
+            OnlinePlaylistViewData {
+                title: title.clone(),
+                subtitle: subtitle.clone(),
+                cover_url: cover_url.clone(),
+                tracks: Vec::new(),
+                loading: true,
+                route: route.clone(),
+            },
+            cx,
+        );
+
+        let c_key = cache_key.clone();
+        let c_title = title.clone();
+        let c_subtitle = subtitle.clone();
+        let c_cover = cover_url.clone();
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let tracks = frontend
+                .collection_tracks(&route, &collection, 0, 100)
+                .await?;
+            Ok((route, tracks))
+        });
+
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((route, tracks)) => {
+                let _ = this.update(cx, |app, cx| {
+                    let view_data = OnlinePlaylistViewData {
+                        title: c_title,
+                        subtitle: c_subtitle,
+                        cover_url: c_cover,
+                        tracks,
+                        loading: false,
+                        route,
+                    };
+                    app.online_playlist_cache.insert(c_key, view_data.clone());
+                    if let Some(data) = &mut app.active_online_playlist {
+                        if data.title == view_data.title {
+                            *data = view_data;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+            Err(err) => {
+                let _ = this.update(cx, |app, cx| {
+                    if let Some(data) = &mut app.active_online_playlist {
+                        data.loading = false;
+                    }
+                    app.status = format!("加载歌单失败：{err:#}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn show_daily_recommendations_playlist(&mut self, cx: &mut Context<Self>) {
+        let route = self
+            .online_route
+            .clone()
+            .unwrap_or_else(crate::ui::home::default_netease_route);
+        let tracks = self.online_daily_tracks.clone();
+        let cover_url = tracks.first().and_then(|t| t.cover_url.clone());
+        let loading =
+            self.online_recommendations_loading || (tracks.is_empty() && self.online_authenticated);
+        self.show_online_playlist_detail(
+            OnlinePlaylistViewData {
+                title: "每日歌曲推荐".into(),
+                subtitle: "根据你的音乐口味生成，每日 6:00 更新".into(),
+                cover_url,
+                tracks,
+                loading,
+                route,
+            },
+            cx,
+        );
+        if self.online_daily_tracks.is_empty() && self.online_authenticated {
+            self.refresh_online_recommendations(cx);
+        }
+    }
+
+    pub(crate) fn load_and_show_user_favorite_playlist(&mut self, cx: &mut Context<Self>) {
+        if !self.online_authenticated {
+            self.status = "请先登录网易云音乐以查看我喜欢的音乐".into();
+            self.open_modal(super::components::modal::GlobalModal::ServiceAuth, cx);
+            return;
+        }
+
+        if let Some(cached) = self.online_playlist_cache.get("user_favorite").cloned() {
+            self.show_online_playlist_detail(cached, cx);
+            return;
+        }
+
+        let route = self
+            .online_route
+            .clone()
+            .unwrap_or_else(crate::ui::home::default_netease_route);
+        self.show_online_playlist_detail(
+            OnlinePlaylistViewData {
+                title: "我喜欢的音乐".into(),
+                subtitle: "云端红心收藏歌曲".into(),
+                cover_url: None,
+                tracks: Vec::new(),
+                loading: true,
+                route: route.clone(),
+            },
+            cx,
+        );
+
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let fanout = frontend
+                .playlists(&crate::plugin::abi::RoutingPolicy::default())
+                .await?;
+            for batch in fanout.batches {
+                if let Some(first_pl) = batch.playlists.first() {
+                    let col = crate::plugin::abi::MediaCollectionRef {
+                        provider_id: batch.route.provider_id.clone(),
+                        kind: crate::plugin::abi::MediaCollectionKind::Playlist,
+                        source_id: first_pl.source_id.clone(),
+                    };
+                    let tracks = frontend
+                        .collection_tracks(&batch.route, &col, 0, 100)
+                        .await?;
+                    return Ok((
+                        batch.route,
+                        first_pl.name.clone(),
+                        first_pl.cover_url.clone(),
+                        tracks,
+                    ));
+                }
+            }
+            Err(anyhow!("未找到用户我喜欢的音乐歌单"))
+        });
+
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((route, name, cover_url, tracks)) => {
+                let _ = this.update(cx, |app, cx| {
+                    let view_data = OnlinePlaylistViewData {
+                        title: name,
+                        subtitle: format!("共 {} 首歌曲", tracks.len()),
+                        cover_url,
+                        tracks,
+                        loading: false,
+                        route,
+                    };
+                    app.online_playlist_cache
+                        .insert("user_favorite".to_string(), view_data.clone());
+                    if let Some(data) = &mut app.active_online_playlist {
+                        if data.title == "我喜欢的音乐" || data.title == view_data.title {
+                            *data = view_data;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+            Err(err) => {
+                let _ = this.update(cx, |app, cx| {
+                    if let Some(data) = &mut app.active_online_playlist {
+                        data.loading = false;
+                    }
+                    app.status = format!("获取我喜欢的音乐失败：{err:#}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_and_show_cloud_library(&mut self, cx: &mut Context<Self>) {
+        if !self.online_authenticated {
+            self.status = "请先登录网易云音乐以查看云盘".into();
+            self.open_modal(super::components::modal::GlobalModal::ServiceAuth, cx);
+            return;
+        }
+
+        let cache_key = "netease_cloud_library".to_string();
+        if let Some(cached) = self.online_playlist_cache.get(&cache_key).cloned() {
+            self.show_online_playlist_detail(cached, cx);
+            return;
+        }
+
+        let route = self
+            .online_route
+            .clone()
+            .unwrap_or_else(crate::ui::home::default_netease_route);
+
+        self.show_online_playlist_detail(
+            OnlinePlaylistViewData {
+                title: "我的音乐网盘".into(),
+                subtitle: "网易云音乐云盘曲目".into(),
+                cover_url: None,
+                tracks: Vec::new(),
+                loading: true,
+                route: route.clone(),
+            },
+            cx,
+        );
+
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+            let fanout = frontend
+                .cloud_library(0, 100, &crate::plugin::abi::RoutingPolicy::default())
+                .await?;
+            let mut all_tracks = Vec::new();
+            let mut final_route = route;
+            for batch in fanout.batches {
+                final_route = batch.route;
+                all_tracks.extend(batch.tracks);
+            }
+            Ok((final_route, all_tracks))
+        });
+
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((route, tracks)) => {
+                let _ = this.update(cx, |app, cx| {
+                    let view_data = OnlinePlaylistViewData {
+                        title: "我的音乐网盘".into(),
+                        subtitle: format!("共收录 {} 首云盘曲目", tracks.len()),
+                        cover_url: None,
+                        tracks,
+                        loading: false,
+                        route,
+                    };
+                    app.online_playlist_cache
+                        .insert("netease_cloud_library".to_string(), view_data.clone());
+                    if let Some(data) = &mut app.active_online_playlist {
+                        if data.title == "我的音乐网盘" {
+                            *data = view_data;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+            Err(err) => {
+                let _ = this.update(cx, |app, cx| {
+                    if let Some(data) = &mut app.active_online_playlist {
+                        data.loading = false;
+                    }
+                    app.status = format!("加载云盘失败：{err:#}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn play_online_playlist_track(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        playlist_title: String,
+        tracks: Vec<crate::plugin::abi::RemoteTrack>,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(track) = tracks.get(index).cloned() {
+            self.online_playlist_queue = Some(OnlinePlaylistQueue {
+                route: route.clone(),
+                playlist_title,
+                tracks,
+                current_index: index,
+            });
+            self.play_online_remote_track(route, track, cx);
+        }
+    }
+
+    pub(crate) fn play_online_playlist_all(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        playlist_title: String,
+        tracks: Vec<crate::plugin::abi::RemoteTrack>,
+        first: crate::plugin::abi::RemoteTrack,
+        cx: &mut Context<Self>,
+    ) {
+        let index = tracks
+            .iter()
+            .position(|t| t.source.source_id == first.source.source_id)
+            .unwrap_or(0);
+        self.play_online_playlist_track(route, playlist_title, tracks, index, cx);
+    }
+
+    pub(crate) fn open_context_menu(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        title: String,
+        target: super::components::modal::ContextMenuTarget,
+        cx: &mut Context<Self>,
+    ) {
+        use super::components::modal::{
+            ContextMenuAction, ContextMenuData, ContextMenuItem, ContextMenuTarget,
+        };
+        let items = match &target {
+            ContextMenuTarget::DailyRecommendations | ContextMenuTarget::OnlinePlaylist { .. } => {
+                vec![
+                    ContextMenuItem {
+                        label: "查看列表".into(),
+                        icon: icon!(eye),
+                        action: ContextMenuAction::ViewList,
+                    },
+                    ContextMenuItem {
+                        label: "播放".into(),
+                        icon: icon!(play),
+                        action: ContextMenuAction::Play,
+                    },
+                    ContextMenuItem {
+                        label: "下一首播放".into(),
+                        icon: icon!(list_plus),
+                        action: ContextMenuAction::PlayNext,
+                    },
+                    ContextMenuItem {
+                        label: "添加到播放清单".into(),
+                        icon: icon!(list_music),
+                        action: ContextMenuAction::AddToQueue,
+                    },
+                    ContextMenuItem {
+                        label: "下载全部".into(),
+                        icon: icon!(download),
+                        action: ContextMenuAction::DownloadAll,
+                    },
+                ]
+            }
+            ContextMenuTarget::OnlineTrack { .. } => vec![
+                ContextMenuItem {
+                    label: "播放".into(),
+                    icon: icon!(play),
+                    action: ContextMenuAction::Play,
+                },
+                ContextMenuItem {
+                    label: "下一首播放".into(),
+                    icon: icon!(list_plus),
+                    action: ContextMenuAction::PlayNext,
+                },
+                ContextMenuItem {
+                    label: "添加到播放清单".into(),
+                    icon: icon!(list_music),
+                    action: ContextMenuAction::AddToQueue,
+                },
+                ContextMenuItem {
+                    label: "下载".into(),
+                    icon: icon!(download),
+                    action: ContextMenuAction::DownloadAll,
+                },
+            ],
+        };
+
+        self.open_modal(
+            super::components::modal::GlobalModal::ContextMenu(Box::new(ContextMenuData {
+                position: pos,
+                title,
+                items,
+                target,
+            })),
+            cx,
+        );
+    }
+
+    pub(crate) fn execute_context_menu_action(
+        &mut self,
+        action: &super::components::modal::ContextMenuAction,
+        target: &super::components::modal::ContextMenuTarget,
+        cx: &mut Context<Self>,
+    ) {
+        use super::components::modal::{ContextMenuAction, ContextMenuTarget};
+        match (action, target) {
+            (ContextMenuAction::ViewList, ContextMenuTarget::DailyRecommendations) => {
+                self.show_daily_recommendations_playlist(cx);
+            }
+            (
+                ContextMenuAction::ViewList,
+                ContextMenuTarget::OnlinePlaylist {
+                    route,
+                    collection,
+                    title,
+                    subtitle,
+                    cover_url,
+                },
+            ) => {
+                self.load_and_show_online_playlist(
+                    route.clone(),
+                    collection.clone(),
+                    title.clone(),
+                    subtitle.clone(),
+                    cover_url.clone(),
+                    cx,
+                );
+            }
+            (ContextMenuAction::Play, ContextMenuTarget::DailyRecommendations) => {
+                if let Some(first) = self.online_daily_tracks.first().cloned() {
+                    let route = self
+                        .online_route
+                        .clone()
+                        .unwrap_or_else(crate::ui::home::default_netease_route);
+                    self.play_online_remote_track(route, first, cx);
+                } else {
+                    self.refresh_online_recommendations(cx);
+                }
+            }
+            (
+                ContextMenuAction::Play,
+                ContextMenuTarget::OnlinePlaylist {
+                    route, collection, ..
+                },
+            ) => {
+                self.load_and_play_online_playlist(route.clone(), collection.clone(), cx);
+            }
+            (ContextMenuAction::Play, ContextMenuTarget::OnlineTrack { route, track }) => {
+                self.play_online_remote_track(route.clone(), track.clone(), cx);
+            }
+            (ContextMenuAction::PlayNext, ContextMenuTarget::DailyRecommendations) => {
+                let route = self
+                    .online_route
+                    .clone()
+                    .unwrap_or_else(crate::ui::home::default_netease_route);
+                let daily_tracks = self.online_daily_tracks.clone();
+                let mut added_ids = Vec::new();
+                for t in &daily_tracks {
+                    let prepared = self.ensure_track_for_remote(&route, t);
+                    added_ids.push(prepared.id);
+                }
+                for id in added_ids.into_iter().rev() {
+                    self.insert_next_in_queue(id, cx);
+                }
+                self.status = "已将每日推荐添加到下一首播放".into();
+                cx.notify();
+            }
+            (ContextMenuAction::AddToQueue, ContextMenuTarget::DailyRecommendations) => {
+                let route = self
+                    .online_route
+                    .clone()
+                    .unwrap_or_else(crate::ui::home::default_netease_route);
+                let daily_tracks = self.online_daily_tracks.clone();
+                for t in &daily_tracks {
+                    let prepared = self.ensure_track_for_remote(&route, t);
+                    self.add_to_queue(prepared.id, cx);
+                }
+                self.status = "已将每日推荐添加到播放清单".into();
+                cx.notify();
+            }
+            (
+                ContextMenuAction::PlayNext,
+                ContextMenuTarget::OnlinePlaylist {
+                    route,
+                    collection,
+                    title,
+                    ..
+                },
+            ) => {
+                let c_title = title.clone();
+                let c_route = route.clone();
+                let c_col = collection.clone();
+                let task = Tokio::spawn_result(cx, async move {
+                    let frontend = crate::plugin::frontend::global()
+                        .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+                    let tracks = frontend.collection_tracks(&c_route, &c_col, 0, 100).await?;
+                    Ok((c_route, tracks))
+                });
+                cx.spawn(async move |this, cx| {
+                    if let Ok((r, tracks)) = task.await {
+                        let _ = this.update(cx, |app, cx| {
+                            let mut added_ids = Vec::new();
+                            for t in &tracks {
+                                let prep = app.ensure_track_for_remote(&r, t);
+                                added_ids.push(prep.id);
+                            }
+                            for id in added_ids.into_iter().rev() {
+                                app.insert_next_in_queue(id, cx);
+                            }
+                            app.status = format!("已将歌单《{c_title}》添加到下一首播放");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            (
+                ContextMenuAction::AddToQueue,
+                ContextMenuTarget::OnlinePlaylist {
+                    route,
+                    collection,
+                    title,
+                    ..
+                },
+            ) => {
+                let c_title = title.clone();
+                let c_route = route.clone();
+                let c_col = collection.clone();
+                let task = Tokio::spawn_result(cx, async move {
+                    let frontend = crate::plugin::frontend::global()
+                        .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+                    let tracks = frontend.collection_tracks(&c_route, &c_col, 0, 100).await?;
+                    Ok((c_route, tracks))
+                });
+                cx.spawn(async move |this, cx| {
+                    if let Ok((r, tracks)) = task.await {
+                        let _ = this.update(cx, |app, cx| {
+                            for t in &tracks {
+                                let prep = app.ensure_track_for_remote(&r, t);
+                                app.add_to_queue(prep.id, cx);
+                            }
+                            app.status = format!("已将歌单《{c_title}》添加到播放清单");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            (ContextMenuAction::PlayNext, ContextMenuTarget::OnlineTrack { route, track }) => {
+                let prepared = self.ensure_track_for_remote(route, track);
+                self.insert_next_in_queue(prepared.id, cx);
+                self.status = format!("已将《{}》添加到下一首播放", track.title);
+                cx.notify();
+            }
+            (ContextMenuAction::AddToQueue, ContextMenuTarget::OnlineTrack { route, track }) => {
+                let prepared = self.ensure_track_for_remote(route, track);
+                self.add_to_queue(prepared.id, cx);
+                self.status = format!("已将《{}》添加到播放清单", track.title);
+                cx.notify();
+            }
+            (ContextMenuAction::DownloadAll, ContextMenuTarget::DailyRecommendations) => {
+                self.status = "每日推荐已加入离线下载队列".into();
+                cx.notify();
+            }
+            (ContextMenuAction::DownloadAll, ContextMenuTarget::OnlinePlaylist { title, .. }) => {
+                self.status = format!("歌单《{title}》已加入离线下载队列");
+                cx.notify();
+            }
+            (ContextMenuAction::DownloadAll, ContextMenuTarget::OnlineTrack { track, .. }) => {
+                self.status = format!("《{}》已加入离线下载队列", track.title);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn ensure_search_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::ui::components::input::HostTextInput> {
+        if let Some(input) = &self.search_input {
+            return input.clone();
+        }
+        crate::ui::components::input::ensure_initialized(cx);
+        let parent = cx.entity().downgrade();
+        let parent_commit = parent.clone();
+        let commit: crate::ui::components::input::HostTextInputCommitHandler =
+            std::rc::Rc::new(move |val: String, _window, cx| {
+                if let Some(parent) = parent_commit.upgrade() {
+                    parent.update(cx, |this, cx| {
+                        this.search = val.clone();
+                        this.trigger_online_search(val, cx);
+                        if this.page != AppPage::Library {
+                            this.page = AppPage::Library;
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        let on_change: crate::ui::components::input::HostTextInputCommitHandler =
+            std::rc::Rc::new(move |val: String, _window, cx| {
+                if let Some(parent) = parent.upgrade() {
+                    parent.update(cx, |this, cx| {
+                        this.search = val.clone();
+                        this.trigger_online_search(val, cx);
+                        if !this.search.trim().is_empty() && this.page != AppPage::Library {
+                            this.page = AppPage::Library;
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        let initial_val = self.search.clone();
+        let input = cx.new(move |cx| {
+            crate::ui::components::input::HostTextInput::new(
+                cx,
+                initial_val,
+                "搜索音乐、艺术家、专辑...",
+                false,
+                commit,
+            )
+            .with_on_change(on_change)
+        });
+        self.search_input = Some(input.clone());
+        input
+    }
+
+    pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search.clear();
+        self.search_active = false;
+        self.online_search_results.clear();
+        self.online_search_loading = false;
+        if let Some(input) = &self.search_input {
+            input.update(cx, |this, cx| {
+                this.set_value("", cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_online_recommendations(&mut self, cx: &mut Context<Self>) {
+        if !self.online_authenticated {
+            self.online_daily_tracks.clear();
+            self.online_playlists.clear();
+            self.online_user_playlists.clear();
+            self.online_new_tracks.clear();
+            self.online_route = None;
+            self.online_recommendations_loading = false;
+            cx.notify();
+            return;
+        }
+        if self.online_recommendations_loading {
+            return;
+        }
+        self.online_recommendations_loading = true;
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move {
+            let Some(frontend) = crate::plugin::frontend::global() else {
+                return Ok(None);
+            };
+            let plan = frontend.plan(
+                crate::plugin::abi::ServiceKind::Recommendations,
+                &crate::plugin::abi::RoutingPolicy::default(),
+            )?;
+            if plan.eligible_routes.is_empty() {
+                return Ok(None);
+            }
+            let route = plan.eligible_routes[0].clone();
+
+            // 1. 每日推荐歌曲
+            let daily_mix_res = frontend
+                .recommendations(
+                    &crate::plugin::abi::RecommendationRequest {
+                        surface: crate::plugin::abi::RecommendationSurface::DailyMix,
+                        limit: 30,
+                        seed: None,
+                        exclude: vec![],
+                    },
+                    &crate::plugin::abi::RoutingPolicy::default(),
+                )
+                .await;
+            let daily_tracks = daily_mix_res
+                .ok()
+                .and_then(|f| f.batches.into_iter().next())
+                .map(|b| b.items.into_iter().map(|i| i.track).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            // 2. 每日推荐歌单
+            let playlists_res = frontend
+                .collection_recommendations(
+                    &route,
+                    &crate::plugin::abi::CollectionRecommendationRequest {
+                        kind: crate::plugin::abi::MediaCollectionKind::Playlist,
+                        surface: crate::plugin::abi::CollectionRecommendationSurface::Daily,
+                        limit: 8,
+                        seed: None,
+                        exclude: vec![],
+                    },
+                )
+                .await;
+            let playlists = playlists_res.unwrap_or_default();
+
+            // 3. 个性推荐新歌
+            let home_rec_res = frontend
+                .recommendations(
+                    &crate::plugin::abi::RecommendationRequest {
+                        surface: crate::plugin::abi::RecommendationSurface::Home,
+                        limit: 12,
+                        seed: None,
+                        exclude: vec![],
+                    },
+                    &crate::plugin::abi::RoutingPolicy::default(),
+                )
+                .await;
+            let new_tracks = home_rec_res
+                .ok()
+                .and_then(|f| f.batches.into_iter().next())
+                .map(|b| b.items.into_iter().map(|i| i.track).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            // 4. 用户自建与收藏歌单（用于侧边栏渲染）
+            let user_pl_res = frontend
+                .playlists(&crate::plugin::abi::RoutingPolicy::default())
+                .await;
+            let mut user_playlists = Vec::new();
+            if let Ok(fanout) = user_pl_res {
+                for batch in fanout.batches {
+                    for pl in batch.playlists {
+                        user_playlists.push((batch.route.clone(), pl));
+                    }
+                }
+            }
+
+            Ok(Some((
+                route,
+                daily_tracks,
+                playlists,
+                new_tracks,
+                user_playlists,
+            )))
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some((route, daily_tracks, playlists, new_tracks, user_playlists))) =
+                task.await
+            {
+                let _ = this.update(cx, |app, cx| {
+                    let mut urls = Vec::new();
+                    for t in &daily_tracks {
+                        if let Some(u) = &t.cover_url {
+                            urls.push(u.clone());
+                        }
+                    }
+                    for p in &playlists {
+                        if let Some(u) = &p.collection.artwork_url {
+                            urls.push(u.clone());
+                        }
+                    }
+                    for t in &new_tracks {
+                        if let Some(u) = &t.cover_url {
+                            urls.push(u.clone());
+                        }
+                    }
+                    for (_, pl) in &user_playlists {
+                        if let Some(u) = &pl.cover_url {
+                            urls.push(u.clone());
+                        }
+                    }
+                    crate::ui::image_cache::prefetch_urls(urls, cx);
+
+                    app.online_route = Some(route);
+                    app.online_daily_tracks = daily_tracks;
+                    app.online_playlists = playlists;
+                    app.online_new_tracks = new_tracks;
+                    app.online_user_playlists = user_playlists;
+                    app.online_recommendations_loading = false;
+                    if let Some(active_pl) = &mut app.active_online_playlist {
+                        if active_pl.title == "每日歌曲推荐" {
+                            active_pl.tracks = app.online_daily_tracks.clone();
+                            active_pl.cover_url =
+                                active_pl.tracks.first().and_then(|t| t.cover_url.clone());
+                            active_pl.loading = false;
+                        }
+                    }
+                    app.bump_ui_content_revision();
+                    cx.notify();
+                });
+            } else {
+                let _ = this.update(cx, |app, cx| {
+                    app.online_recommendations_loading = false;
+                    if let Some(active_pl) = &mut app.active_online_playlist {
+                        active_pl.loading = false;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn trigger_online_search(&mut self, query: String, cx: &mut Context<Self>) {
+        if !self.has_online_plugins {
+            self.online_search_results.clear();
+            self.online_search_loading = false;
+            cx.notify();
+            return;
+        }
+        let trimmed = query.trim().to_string();
+        if trimmed.is_empty() {
+            self.online_search_results.clear();
+            self.online_search_loading = false;
+            cx.notify();
+            return;
+        }
+        self.online_search_loading = true;
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move {
+            let Some(frontend) = crate::plugin::frontend::global() else {
+                return Ok(None);
+            };
+            let plan = frontend.plan(
+                crate::plugin::abi::ServiceKind::Search,
+                &crate::plugin::abi::RoutingPolicy::default(),
+            )?;
+            if plan.eligible_routes.is_empty() {
+                return Ok(None);
+            }
+            let route = plan.eligible_routes[0].clone();
+            let search_res = frontend
+                .search(&trimmed, 30, &crate::plugin::abi::RoutingPolicy::default())
+                .await?;
+            let tracks = search_res
+                .batches
+                .into_iter()
+                .flat_map(|b| b.tracks)
+                .collect::<Vec<_>>();
+            Ok(Some((route, tracks)))
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some((route, tracks))) = task.await {
+                let _ = this.update(cx, |app, cx| {
+                    let urls = tracks.iter().filter_map(|t| t.cover_url.clone()).collect();
+                    crate::ui::image_cache::prefetch_urls(urls, cx);
+
+                    app.online_search_route = Some(route);
+                    app.online_search_results = tracks;
+                    app.online_search_loading = false;
+                    app.bump_ui_content_revision();
+                    cx.notify();
+                });
+            } else {
+                let _ = this.update(cx, |app, cx| {
+                    app.online_search_loading = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn start_background_work(&mut self, cx: &mut Context<Self>) {
@@ -1564,21 +3166,34 @@ impl MusicApp {
             let track_id = track.id;
             let track_path = track.path.clone();
             if !self.lyrics.contains_key(&track_id) && self.lyrics_checked.insert(track_id) {
-                let task = Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || crate::lyrics::read_local(&track_path))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))
-                });
-                cx.spawn(async move |this, cx| -> Result<()> {
-                    if let Ok(Some(lrc)) = task.await {
-                        this.update(cx, |this, cx| {
-                            this.cache_lyrics(track_id, lrc);
-                            cx.notify();
-                        })?;
-                    }
-                    Ok(())
-                })
-                .detach();
+                if let Some((route, source, _)) = self.online_playback_meta.get(&track_id).cloned()
+                {
+                    self.fetch_online_lyrics_for_track(track_id, route, source, cx);
+                } else {
+                    let task = Tokio::spawn_result(cx, async move {
+                        tokio::task::spawn_blocking(move || crate::lyrics::read_local(&track_path))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                    });
+                    cx.spawn(async move |this, cx| -> Result<()> {
+                        if let Ok(Some(lrc)) = task.await {
+                            this.update(cx, |this, cx| {
+                                this.cache_lyrics(track_id, lrc);
+                                cx.notify();
+                            })?;
+                        }
+                        Ok(())
+                    })
+                    .detach();
+                }
+            }
+
+            if !self.artworks.contains_key(&track_id) {
+                if let Some((_, _, Some(cover_url))) =
+                    self.online_playback_meta.get(&track_id).cloned()
+                {
+                    self.fetch_online_artwork_for_track(track_id, cover_url, cx);
+                }
             }
         }
 
@@ -1704,9 +3319,10 @@ impl MusicApp {
                     Ok((bridge, sync_ok)) => {
                         let current_track_id =
                             this.snapshot.current_track.as_ref().map(|track| track.id);
-                        let current_metadata_fingerprint = crate::media_controls::metadata_fingerprint(
-                            this.snapshot.current_track.as_ref(),
-                        );
+                        let current_metadata_fingerprint =
+                            crate::media_controls::metadata_fingerprint(
+                                this.snapshot.current_track.as_ref(),
+                            );
                         let current_position_sec = this.snapshot.position_ms / 1000;
                         this.system_media_sync_dirty = this.system_media_sync_dirty
                             || !sync_ok
@@ -2185,6 +3801,7 @@ impl Render for MusicApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_background_work(cx);
         self.start_runtime_events(cx);
+        self.ensure_plugin_sessions_restored(cx);
         let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
 
         let now = std::time::Instant::now();
@@ -2255,6 +3872,8 @@ impl Render for MusicApp {
 
         let home_page = self.ensure_home_page(cx);
         let library_page = self.ensure_library_page(cx);
+        let online_playlist_page = self.ensure_online_playlist_page(cx);
+        let search_input = self.ensure_search_input(cx);
 
         let content = if self.stage_open && self.stage_progress >= 0.999 && !self.stage_animating {
             div().into_any_element()
@@ -2264,6 +3883,7 @@ impl Render for MusicApp {
                 AppPage::Library => library_page.into_any_element(),
                 AppPage::Player => home_page.into_any_element(),
                 AppPage::Settings => settings_page::render(self, cx),
+                AppPage::OnlinePlaylist => online_playlist_page.into_any_element(),
             }
         };
 
@@ -2290,11 +3910,11 @@ impl Render for MusicApp {
                 .overflow_hidden()
                 .bg(rgb(0x0e0f16))
                 .text_color(theme::TEXT_WHITE)
-                .on_mouse_move(cx.listener(
-                    |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                .on_mouse_move(
+                    cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
                         this.handle_stage_mouse_move(event.position, cx);
-                    },
-                ))
+                    }),
+                )
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _window, cx| {
@@ -2371,7 +3991,9 @@ impl Render for MusicApp {
                         )
                         .into_any_element()
                 } else {
-                    stage_layer.with_sampled_animation(motion, 0.0).into_any_element()
+                    stage_layer
+                        .with_sampled_animation(motion, 0.0)
+                        .into_any_element()
                 }
             } else {
                 stage_layer.into_any_element()
@@ -2380,6 +4002,8 @@ impl Render for MusicApp {
         } else {
             None
         };
+
+        let global_modal = super::components::modal::render(self, cx);
 
         div()
             .size_full()
@@ -2400,14 +4024,17 @@ impl Render for MusicApp {
                     .flex_col()
                     .bg(theme::BG_CANVAS)
                     .text_color(theme::TEXT_PRIMARY)
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         let key = event.keystroke.key.as_str();
                         let modifiers = event.keystroke.modifiers;
                         if this.acoustid_key_active {
                             this.update_acoustid_key(key, cx);
                         } else if modifiers.control && key.eq_ignore_ascii_case("f") {
                             this.search_active = true;
-                            this.page = AppPage::Library;
+                            if let Some(input) = &this.search_input {
+                                let handle = input.read(cx).focus_handle(cx);
+                                window.focus(&handle);
+                            }
                             cx.notify();
                         } else if key == "space" {
                             this.toggle_play(cx);
@@ -2415,10 +4042,6 @@ impl Render for MusicApp {
                             this.seek_relative(-10_000, cx);
                         } else if key == "right" {
                             this.seek_relative(10_000, cx);
-                        } else if this.search_active
-                            && (key == "backspace" || (key.len() == 1 && !modifiers.modified()))
-                        {
-                            this.update_search(key, cx);
                         }
                     }))
                     .child(self.custom_titlebar(window, cx))
@@ -2427,7 +4050,7 @@ impl Render for MusicApp {
                             .flex()
                             .flex_1()
                             .min_h(px(0.0))
-                            .child(sidebar(self, cx))
+                            .child(sidebar(self, search_input, cx))
                             .child(
                                 div()
                                     .flex_1()
@@ -2445,10 +4068,15 @@ impl Render for MusicApp {
                     )),
             )
             .children(stage_drawer)
+            .children(global_modal)
     }
 }
 
-fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
+fn sidebar(
+    app: &MusicApp,
+    search_input: Entity<crate::ui::components::input::HostTextInput>,
+    cx: &mut Context<MusicApp>,
+) -> impl IntoElement {
     let track_count = app.tracks.len();
     let active_plugin_route = super::plugin_navigation::current(cx).ok().flatten();
     let sidebar_routes = super::plugin_navigation::sidebar_routes().unwrap_or_default();
@@ -2462,185 +4090,660 @@ fn sidebar(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
         let active = active_plugin_route
             .as_ref()
             .is_some_and(|current| current.pathname == target.pathname);
-        plugin_section = plugin_section.child(super::plugin_navigation::sidebar_entry(
-            target, active, cx,
-        ));
+        plugin_section =
+            plugin_section.child(super::plugin_navigation::sidebar_entry(target, active, cx));
     }
+
+    let (my_section, created_section, collected_section, music_library_section) = if app
+        .has_online_plugins
+        && app.online_authenticated
+    {
+        let mut created_playlists = Vec::new();
+        let mut collected_playlists = Vec::new();
+        for (route, pl) in &app.online_user_playlists {
+            if pl.editable {
+                created_playlists.push((route.clone(), pl.clone()));
+            } else {
+                collected_playlists.push((route.clone(), pl.clone()));
+            }
+        }
+
+        let created_section = if created_playlists.is_empty() {
+            None
+        } else {
+            let count = created_playlists.len();
+            let collapsed = app.sidebar_created_playlists_collapsed;
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(render_playlist_group_header(
+                    "创建的歌单",
+                    count,
+                    collapsed,
+                    cx.listener(|this, _, _, cx| {
+                        this.sidebar_created_playlists_collapsed =
+                            !this.sidebar_created_playlists_collapsed;
+                        cx.notify();
+                    }),
+                ));
+            if !collapsed {
+                for (route, pl) in created_playlists {
+                    let is_active = app.page == AppPage::OnlinePlaylist
+                        && app
+                            .active_online_playlist
+                            .as_ref()
+                            .is_some_and(|p| p.title == pl.name);
+                    group = group.child(render_playlist_sidebar_item(route, pl, is_active, cx));
+                }
+            }
+            Some(group)
+        };
+
+        let collected_section = if collected_playlists.is_empty() {
+            None
+        } else {
+            let count = collected_playlists.len();
+            let collapsed = app.sidebar_collected_playlists_collapsed;
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(render_playlist_group_header(
+                    "收藏的歌单",
+                    count,
+                    collapsed,
+                    cx.listener(|this, _, _, cx| {
+                        this.sidebar_collected_playlists_collapsed =
+                            !this.sidebar_collected_playlists_collapsed;
+                        cx.notify();
+                    }),
+                ));
+            if !collapsed {
+                for (route, pl) in collected_playlists {
+                    let is_active = app.page == AppPage::OnlinePlaylist
+                        && app
+                            .active_online_playlist
+                            .as_ref()
+                            .is_some_and(|p| p.title == pl.name);
+                    group = group.child(render_playlist_sidebar_item(route, pl, is_active, cx));
+                }
+            }
+            Some(group)
+        };
+
+        let my_sec = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(sidebar_section_header("我的"))
+            .child(sidebar_item(
+                "我喜欢的音乐",
+                icon!(heart),
+                app.page == AppPage::OnlinePlaylist
+                    && app
+                        .active_online_playlist
+                        .as_ref()
+                        .is_some_and(|p| p.title == "我喜欢的音乐"),
+                cx.listener(|this, _, _, cx| {
+                    this.load_and_show_user_favorite_playlist(cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "最近播放",
+                icon!(history),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Recent,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Recent, cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "本地音乐",
+                icon!(music),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Songs,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Songs, cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "我的音乐网盘",
+                icon!(cloud),
+                app.page == AppPage::OnlinePlaylist
+                    && app
+                        .active_online_playlist
+                        .as_ref()
+                        .is_some_and(|p| p.title == "我的音乐网盘"),
+                cx.listener(|this, _, _, cx| {
+                    this.load_and_show_cloud_library(cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "我的收藏",
+                icon!(bookmark),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Playlists, cx);
+                }),
+            ));
+
+        let lib_sec = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(sidebar_section_header("音乐库"))
+            .child(sidebar_item(
+                "专辑",
+                icon!(disc_3),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Albums,
+                cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Albums, cx)),
+            ))
+            .child(sidebar_item(
+                "艺术家",
+                icon!(users_round),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Artists,
+                cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Artists, cx)),
+            ))
+            .child(sidebar_item(
+                "播放队列",
+                icon!(list_music),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Playlists, cx);
+                }),
+            ));
+
+        (
+            Some(my_sec),
+            created_section,
+            collected_section,
+            Some(lib_sec),
+        )
+    } else {
+        // Pure local music mode or unauthenticated: clean, focused navigation
+        let local_sec = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(sidebar_section_header("音乐库"))
+            .child(sidebar_item(
+                "本地音乐",
+                icon!(music),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Songs,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Songs, cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "最近播放",
+                icon!(history),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Recent,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Recent, cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "专辑",
+                icon!(disc_3),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Albums,
+                cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Albums, cx)),
+            ))
+            .child(sidebar_item(
+                "艺术家",
+                icon!(users_round),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Artists,
+                cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Artists, cx)),
+            ))
+            .child(sidebar_item(
+                "播放队列",
+                icon!(list_music),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Playlists, cx);
+                }),
+            ));
+
+        (None, None, None, Some(local_sec))
+    };
 
     div()
         .w(px(236.0))
+        .h_full()
         .flex_none()
         .flex()
         .flex_col()
-        .gap_4()
-        .px_4()
-        .py_5()
         .bg(theme::BG_SIDEBAR)
         .border_r_1()
         .border_color(theme::BORDER_HAIRLINE)
         .child(
             div()
+                .flex_none()
+                .px_4()
+                .pt_5()
+                .pb_3()
                 .flex()
-                .items_center()
-                .gap_3()
-                .px_2()
-                .py_1()
+                .flex_col()
+                .gap_4()
                 .child(
                     div()
-                        .size(px(32.0))
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .rounded_lg()
-                        .bg(theme::ACCENT_RED)
-                        .child(theme::themed_icon(
-                            icon!(audio_waveform),
-                            18.0,
-                            hsla(0.0, 0.0, 1.0, 1.0),
-                        )),
+                        .gap_3()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .size(px(32.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_lg()
+                                .bg(theme::ACCENT_RED)
+                                .child(theme::themed_icon(
+                                    icon!(audio_waveform),
+                                    18.0,
+                                    hsla(0.0, 0.0, 1.0, 1.0),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::TEXT_PRIMARY)
+                                        .child("音栖岛"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::TEXT_TERTIARY)
+                                        .child("让声音有归处"),
+                                ),
+                        ),
                 )
+                .child(
+                    div()
+                        .id("sidebar-search-container")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(div().flex_1().min_w(px(0.0)).child(search_input))
+                        .children(if !app.search.is_empty() {
+                            Some(
+                                div()
+                                    .id("sidebar-search-clear-btn")
+                                    .size(px(24.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::bg_hover()))
+                                    .transition(theme::press_transition())
+                                    .child(theme::themed_icon(
+                                        icon!(x),
+                                        12.0,
+                                        theme::TEXT_SECONDARY.into(),
+                                    ))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.clear_search(cx);
+                                        }),
+                                    ),
+                            )
+                        } else {
+                            None
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id("sidebar-nav-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .px_4()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_4()
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(1.0))
+                        .gap_1()
+                        .child(sidebar_section_header("探索"))
+                        .child(sidebar_item(
+                            "发现",
+                            icon!(compass),
+                            app.page == AppPage::Home,
+                            cx.listener(|this, _, _, cx| this.show_page(AppPage::Home, cx)),
+                        )),
+                )
+                .children(my_section)
+                .children(created_section)
+                .children(collected_section)
+                .children(music_library_section)
+                .children(has_sidebar_routes.then_some(plugin_section))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(sidebar_section_header("服务与系统"))
+                        .child(sidebar_item(
+                            "插件中心",
+                            icon!(plug),
+                            active_plugin_route.is_none()
+                                && app.page == AppPage::Settings
+                                && settings_page::workspace()
+                                    == settings_page::SettingsWorkspace::Plugins,
+                            cx.listener(|this, _, _, cx| {
+                                settings_page::select_workspace(
+                                    settings_page::SettingsWorkspace::Plugins,
+                                    cx,
+                                );
+                                this.show_page(AppPage::Settings, cx);
+                            }),
+                        ))
+                        .children(app.has_online_plugins.then(|| {
+                            sidebar_item(
+                                "音乐服务",
+                                icon!(cloud),
+                                active_plugin_route.is_none()
+                                    && app.page == AppPage::Settings
+                                    && (settings_page::workspace()
+                                        == settings_page::SettingsWorkspace::Authentication
+                                        || settings_page::workspace()
+                                            == settings_page::SettingsWorkspace::Services),
+                                cx.listener(|this, _, _, cx| {
+                                    settings_page::select_workspace(
+                                        settings_page::SettingsWorkspace::Authentication,
+                                        cx,
+                                    );
+                                    this.show_page(AppPage::Settings, cx);
+                                }),
+                            )
+                        }))
+                        .child(sidebar_item(
+                            "偏好设置",
+                            icon!(settings),
+                            active_plugin_route.is_none()
+                                && app.page == AppPage::Settings
+                                && settings_page::workspace()
+                                    == settings_page::SettingsWorkspace::Preferences,
+                            cx.listener(|this, _, _, cx| {
+                                settings_page::select_workspace(
+                                    settings_page::SettingsWorkspace::Preferences,
+                                    cx,
+                                );
+                                this.show_page(AppPage::Settings, cx);
+                            }),
+                        )),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.02))
                         .child(
                             div()
-                                .text_base()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::TEXT_PRIMARY)
-                                .child("音栖岛"),
+                                .size(px(7.0))
+                                .rounded_full()
+                                .bg(if app.scan_in_progress {
+                                    rgb(0xff_9f_0a)
+                                } else {
+                                    rgb(0x34_c7_59)
+                                }),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_TERTIARY)
-                                .child("让声音有归处"),
-                        ),
+                        .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
+                            if app.scan_in_progress {
+                                "正在扫描同步...".to_string()
+                            } else {
+                                format!("已收录 {track_count} 首音乐")
+                            },
+                        )),
                 ),
         )
+}
+
+fn render_playlist_group_header<F>(
+    title: &str,
+    count: usize,
+    collapsed: bool,
+    on_toggle: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_3()
+        .py_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::bg_hover()))
+        .transition(theme::hover_transition())
+        .on_mouse_down(gpui::MouseButton::Left, on_toggle)
         .child(
             div()
-                .id("sidebar-search-btn")
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .bg(theme::BG_CARD)
-                .border_1()
-                .border_color(theme::BORDER_CARD)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::bg_hover()))
-                .transition(theme::press_transition())
-                .active(|s| s.scale(0.98))
-                .child(theme::themed_icon(
-                    icon!(search),
-                    14.0,
-                    hsla(220.0, 0.07, 0.50, 1.0),
-                ))
                 .child(
                     div()
                         .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::TEXT_SECONDARY)
-                        .child("搜索音乐 (Ctrl+F)"),
+                        .child(title.to_string()),
                 )
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.search_active = true;
-                        this.page = AppPage::Library;
-                        cx.notify();
-                    }),
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme::TEXT_TERTIARY)
+                        .child(format!("{count}")),
                 ),
         )
+        .child(theme::themed_icon(
+            if collapsed {
+                icon!(chevron_down)
+            } else {
+                icon!(chevron_up)
+            },
+            13.0,
+            theme::TEXT_TERTIARY.into(),
+        ))
+        .into_any_element()
+}
+
+fn render_playlist_sidebar_item(
+    route: crate::plugin::abi::PluginRoute,
+    pl: crate::plugin::abi::PlaylistDescriptor,
+    active: bool,
+    cx: &mut Context<MusicApp>,
+) -> gpui::AnyElement {
+    let pl_name = pl.name.clone();
+    let pl_source_id = pl.source_id.clone();
+    let pl_track_count = pl.track_count.unwrap_or(0);
+    let pl_cover = pl.cover_url.clone();
+    let click_route = route.clone();
+    let click_source_id = pl_source_id.clone();
+    let click_name = pl_name.clone();
+    let click_cover = pl_cover.clone();
+
+    let bg_color = if active {
+        theme::accent_red_muted()
+    } else {
+        hsla(0.0, 0.0, 0.0, 0.0)
+    };
+
+    div()
+        .id(SharedString::from(format!("side-pl-{}", pl_source_id)))
+        .flex()
+        .items_center()
+        .gap_2p5()
+        .px_3()
+        .py_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(bg_color)
+        .hover(move |s| {
+            s.bg(if active {
+                theme::accent_red_muted()
+            } else {
+                theme::bg_hover()
+            })
+        })
+        .transition(theme::hover_transition())
+        .active(|s| s.scale(0.98))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(sidebar_section_header("探索"))
-                .child(sidebar_item(
-                    "发现",
-                    icon!(compass),
-                    app.page == AppPage::Home,
-                    cx.listener(|this, _, _, cx| this.show_page(AppPage::Home, cx)),
-                ))
-                .child(sidebar_item(
-                    "歌曲",
-                    icon!(music),
-                    app.page == AppPage::Library && app.library_tab == LibraryTab::Songs,
-                    cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Songs, cx)),
+                .size(px(32.0))
+                .flex_none()
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme::BORDER_CARD)
+                .child(crate::ui::image_cache::render_remote_cover(
+                    pl_cover.as_deref(),
+                    32.0,
+                    32.0,
+                    4.0,
                 )),
         )
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(sidebar_section_header("音乐库"))
-                .child(sidebar_item(
-                    "专辑",
-                    icon!(disc_3),
-                    app.page == AppPage::Library && app.library_tab == LibraryTab::Albums,
-                    cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Albums, cx)),
-                ))
-                .child(sidebar_item(
-                    "艺术家",
-                    icon!(users_round),
-                    app.page == AppPage::Library && app.library_tab == LibraryTab::Artists,
-                    cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Artists, cx)),
-                ))
-                .child(sidebar_item(
-                    "播放队列",
-                    icon!(list_music),
-                    app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
-                    cx.listener(|this, _, _, cx| this.show_library_tab(LibraryTab::Playlists, cx)),
-                )),
+                .flex_1()
+                .min_w(px(0.0))
+                .text_xs()
+                .font_weight(if active {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if active {
+                    theme::ACCENT_RED
+                } else {
+                    theme::TEXT_PRIMARY
+                })
+                .truncate()
+                .child(pl_name),
         )
-        .children(has_sidebar_routes.then_some(plugin_section))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(sidebar_section_header("系统"))
-                .child(sidebar_item(
-                    "偏好设置",
-                    icon!(settings),
-                    active_plugin_route.is_none() && app.page == AppPage::Settings,
-                    cx.listener(|this, _, _, cx| this.show_page(AppPage::Settings, cx)),
-                )),
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.load_and_show_online_playlist(
+                    click_route.clone(),
+                    crate::plugin::abi::MediaCollectionRef {
+                        provider_id: click_route.provider_id.clone(),
+                        kind: crate::plugin::abi::MediaCollectionKind::Playlist,
+                        source_id: click_source_id.clone(),
+                    },
+                    click_name.clone(),
+                    format!("共 {pl_track_count} 首歌曲"),
+                    click_cover.clone(),
+                    cx,
+                );
+            }),
         )
-        .child(div().flex_1())
+        .into_any_element()
+}
+
+fn sidebar_sub_item<F>(
+    id_str: &str,
+    title: &str,
+    subtitle: Option<&str>,
+    active: bool,
+    on_press: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    let text_color = if active {
+        theme::ACCENT_RED
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let bg_color = if active {
+        theme::accent_red_muted()
+    } else {
+        hsla(0.0, 0.0, 0.0, 0.0)
+    };
+
+    div()
+        .id(SharedString::from(format!("side-sub-{id_str}")))
+        .flex()
+        .items_center()
+        .justify_between()
+        .pl_6()
+        .pr_2()
+        .py_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(bg_color)
+        .hover(move |s| {
+            s.bg(if active {
+                theme::accent_red_muted()
+            } else {
+                theme::bg_hover()
+            })
+        })
+        .transition(theme::hover_transition())
+        .active(|s| s.scale(0.98))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_2()
-                .py_2()
-                .rounded_md()
-                .bg(hsla(0.0, 0.0, 0.0, 0.02))
+                .min_w(px(0.0))
+                .flex_1()
                 .child(
                     div()
-                        .size(px(7.0))
+                        .size(px(4.0))
                         .rounded_full()
-                        .bg(if app.scan_in_progress {
-                            rgb(0xff_9f_0a)
+                        .flex_none()
+                        .bg(if active {
+                            theme::ACCENT_RED.into()
                         } else {
-                            rgb(0x34_c7_59)
+                            hsla(220.0, 0.08, 0.60, 1.0)
                         }),
                 )
-                .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
-                    if app.scan_in_progress {
-                        "正在扫描同步...".to_string()
-                    } else {
-                        format!("已收录 {track_count} 首音乐")
-                    },
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_color)
+                        .font_weight(if active {
+                            gpui::FontWeight::SEMIBOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .truncate()
+                        .child(title.to_string()),
+                ),
         )
+        .children(subtitle.map(|sub| {
+            div()
+                .text_xs()
+                .text_color(theme::TEXT_TERTIARY)
+                .flex_none()
+                .child(sub.to_string())
+        }))
+        .on_mouse_down(gpui::MouseButton::Left, on_press)
+        .into_any_element()
 }
 
 fn sidebar_section_header(title: &str) -> impl IntoElement {
@@ -2860,5 +4963,75 @@ mod tests {
     fn manual_immersive_requires_meaningful_pointer_motion() {
         assert!(STAGE_MANUAL_WAKE_THRESHOLD_PX > 2.0);
         assert_eq!(STAGE_MANUAL_WAKE_THRESHOLD_PX, 8.0);
+    }
+
+    #[test]
+    fn recent_plays_deduplicates_by_title_and_artist() {
+        let mut app = MusicApp::new(false);
+        let make_track = |id: TrackId, title: &str, artist: &str, path: &str| {
+            Track::new(crate::model::TrackData {
+                id,
+                path: PathBuf::from(path),
+                title: title.into(),
+                artist: artist.into(),
+                album: "Album".into(),
+                year: None,
+                genre: None,
+                duration_ms: 10_000,
+                codec: "flac".into(),
+                sample_rate: 48_000,
+                channels: 2,
+                artwork_key: None,
+            })
+        };
+
+        let track1 = make_track(-1, "Senbonzakura", "Lindsey Stirling", "stream://1");
+        let track2 = make_track(-2, "Celestial", "Ed Sheeran", "stream://2");
+        let track1_replayed = make_track(-3, "Senbonzakura", "Lindsey Stirling", "stream://3");
+
+        app.online_track_cache.insert(-1, track1.clone());
+        app.online_track_cache.insert(-2, track2.clone());
+        app.online_track_cache.insert(-3, track1_replayed.clone());
+
+        app.record_recent_play(&track1);
+        assert_eq!(app.recent_plays, vec![-1]);
+
+        app.record_recent_play(&track2);
+        assert_eq!(app.recent_plays, vec![-2, -1]);
+
+        // When replaying track 1 with new ID -3, -1 must be removed and -3 moved to head
+        app.record_recent_play(&track1_replayed);
+        assert_eq!(app.recent_plays, vec![-3, -2]);
+        assert_eq!(app.recent_plays.len(), 2);
+    }
+
+    #[test]
+    fn sidebar_playlist_collapse_state_defaults_expanded() {
+        let mut app = MusicApp::new(false);
+        assert!(!app.sidebar_created_playlists_collapsed);
+        assert!(!app.sidebar_collected_playlists_collapsed);
+
+        app.sidebar_created_playlists_collapsed = true;
+        assert!(app.sidebar_created_playlists_collapsed);
+    }
+
+    #[test]
+    fn home_render_key_tracks_plugin_and_auth_state() {
+        let mut app = MusicApp::new(false);
+        app.page = AppPage::Home;
+        let key_pure_local = home_page_render_key(&app);
+        assert!(!key_pure_local.has_online_plugins);
+        assert!(!key_pure_local.online_authenticated);
+
+        app.has_online_plugins = true;
+        let key_with_plugin = home_page_render_key(&app);
+        assert_ne!(key_pure_local, key_with_plugin);
+        assert!(key_with_plugin.has_online_plugins);
+        assert!(!key_with_plugin.online_authenticated);
+
+        app.online_authenticated = true;
+        let key_authenticated = home_page_render_key(&app);
+        assert_ne!(key_with_plugin, key_authenticated);
+        assert!(key_authenticated.online_authenticated);
     }
 }

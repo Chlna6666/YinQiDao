@@ -65,12 +65,15 @@ impl StageLyricLine {
                 // QRC/YRC/TTML provide an authored duration. Enhanced LRC only provides starts, in
                 // which case the next authored segment gives a precise upper bound without inventing
                 // timing from character count. The last LRC segment stays duration-less.
-                let duration_ms = word.duration_ms.filter(|duration| *duration > 0).or_else(|| {
-                    line.words.get(index + 1).and_then(|next| {
-                        let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
-                        (duration > 0).then_some(duration)
-                    })
-                });
+                let duration_ms = word
+                    .duration_ms
+                    .filter(|duration| *duration > 0)
+                    .or_else(|| {
+                        line.words.get(index + 1).and_then(|next| {
+                            let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
+                            (duration > 0).then_some(duration)
+                        })
+                    });
                 StageLyricWord {
                     timestamp_ms: word.timestamp_ms,
                     duration_ms,
@@ -109,20 +112,14 @@ impl LyricScrollAnimation {
         if duration <= f32::EPSILON {
             return 0.0;
         }
-        let progress = (now
-            .saturating_duration_since(self.started_at)
-            .as_secs_f32()
-            / duration)
+        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32() / duration)
             .clamp(0.0, 1.0);
         let remaining = 1.0 - progress;
         self.from_y * remaining * remaining * remaining
     }
 }
 
-pub(super) fn view(
-    app: &MusicApp,
-    cx: &mut Context<MusicApp>,
-) -> Entity<StageLyricsView> {
+pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageLyricsView> {
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageLyricsViewCache, cx| {
@@ -193,12 +190,7 @@ impl StageLyricsView {
         }
     }
 
-    fn sync_from_app(
-        &mut self,
-        app: &MusicApp,
-        stage_active: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn sync_from_app(&mut self, app: &MusicApp, stage_active: bool, cx: &mut Context<Self>) {
         let engine_changed = match (&self.engine, &app.engine) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
             (None, None) => false,
@@ -302,10 +294,8 @@ impl StageLyricsView {
 
         let active_changed = self.update_active_index();
         let next_word = self.compute_active_word_index();
-        let word_changed = position_changed
-            && !source_changed
-            && !active_changed
-            && previous_word != next_word;
+        let word_changed =
+            position_changed && !source_changed && !active_changed && previous_word != next_word;
         self.active_word_index = next_word;
         if word_changed {
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -314,9 +304,7 @@ impl StageLyricsView {
             changed = true;
         }
 
-        if source_changed
-            && let Some(active) = self.active_index
-        {
+        if source_changed && let Some(active) = self.active_index {
             self.list_state.scroll_to(ListOffset {
                 item_ix: active.saturating_sub(2),
                 offset_in_item: px(0.0),
@@ -379,9 +367,8 @@ impl StageLyricsView {
             && let Some(line) = active.and_then(|index| self.lines.get(index))
             && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
         {
-            next_timestamp = Some(next_timestamp.map_or(word_timestamp, |current| {
-                current.min(word_timestamp)
-            }));
+            next_timestamp =
+                Some(next_timestamp.map_or(word_timestamp, |current| current.min(word_timestamp)));
         }
 
         let timestamp = next_timestamp?;
@@ -415,7 +402,8 @@ impl StageLyricsView {
 
     #[inline]
     fn is_reading(&self) -> bool {
-        self.reading_until.is_some_and(|until| until > Instant::now())
+        self.reading_until
+            .is_some_and(|until| until > Instant::now())
     }
 
     fn cancel_scroll_animation(&mut self) {
@@ -495,8 +483,7 @@ impl StageLyricsView {
         };
 
         let viewport = self.list_state.viewport_bounds();
-        if f32::from(viewport.size.height) <= 0.5 {
-            window.request_animation_frame();
+        if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
             return;
         }
 
@@ -511,12 +498,14 @@ impl StageLyricsView {
                 self.list_state.scroll_to_reveal_item(target);
             }
             self.cancel_scroll_animation();
-            window.request_animation_frame();
+            if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
+                window.request_animation_frame();
+            }
             return;
         };
 
-        let anchor_y = f32::from(viewport.origin.y)
-            + f32::from(viewport.size.height) * LYRIC_ANCHOR_RATIO;
+        let anchor_y =
+            f32::from(viewport.origin.y) + f32::from(viewport.size.height) * LYRIC_ANCHOR_RATIO;
         let diff = f32::from(line_bounds.center().y) - anchor_y;
         if diff.abs() <= SCROLL_SETTLE_PX {
             self.scroll_target = None;
@@ -547,6 +536,8 @@ impl Render for StageLyricsView {
         self.refresh_transport();
 
         if self.lines.is_empty() {
+            let parent_left = self.parent.clone();
+            let parent_right = self.parent.clone();
             return div()
                 .id("stage-lyrics-view")
                 .flex_1()
@@ -558,11 +549,17 @@ impl Render for StageLyricsView {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(themed_icon(
-                    icon!(music),
-                    36.0,
-                    hsla(0.0, 0.0, 1.0, 0.25),
-                ))
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    let _ = parent_left.update(cx, |app, cx| {
+                        app.wake_stage_controls_immediately(cx);
+                    });
+                })
+                .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                    let _ = parent_right.update(cx, |app, cx| {
+                        app.wake_stage_controls_immediately(cx);
+                    });
+                })
+                .child(themed_icon(icon!(music), 36.0, hsla(0.0, 0.0, 1.0, 0.25)))
                 .child(
                     div()
                         .text_lg()
@@ -667,7 +664,9 @@ impl Render for StageLyricsView {
             })
             .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _, cx| {
                 this.begin_reading_mode(cx);
-                let _ = this.parent.update(cx, |app, cx| app.wake_stage_controls(cx));
+                let _ = this
+                    .parent
+                    .update(cx, |app, cx| app.wake_stage_controls(cx));
             }))
             .child(lyrics)
     }
@@ -853,11 +852,7 @@ fn render_lyric_row(
     .into_any_element()
 }
 
-fn lyric_focus_profile(
-    distance: usize,
-    reading_mode: bool,
-    depth_blur_active: bool,
-) -> (f32, f32) {
+fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
     if reading_mode {
         return (1.0, 0.0);
     }
@@ -898,13 +893,20 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
         return None;
     }
     line.words
-        .get(line.words.partition_point(|word| word.timestamp_ms <= position_ms))
+        .get(
+            line.words
+                .partition_point(|word| word.timestamp_ms <= position_ms),
+        )
         .map(|word| word.timestamp_ms)
 }
 
 fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
-        return if position_ms >= word.timestamp_ms { 1.0 } else { 0.0 };
+        return if position_ms >= word.timestamp_ms {
+            1.0
+        } else {
+            0.0
+        };
     };
     let elapsed = position_ms
         .saturating_sub(word.timestamp_ms)
@@ -981,10 +983,7 @@ fn karaoke_word(
             .wrapping_add(index as u64);
         overlay
             .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("lyric-word-sweep"),
-                    key,
-                ),
+                ElementId::NamedInteger(SharedString::new_static("lyric-word-sweep"), key),
                 Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
                     HorizontalRevealEdge::Left,
                     progress,

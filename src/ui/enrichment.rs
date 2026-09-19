@@ -29,6 +29,10 @@ impl MusicApp {
         let Some(track) = self.snapshot.current_track.clone() else {
             return;
         };
+        // 在线流媒体曲目（ID <= 0）由插件直接提供元数据与歌词，不参与本地 SQLite 持久化识别
+        if track.id <= 0 {
+            return;
+        }
         let pending_artwork_fallback = self.artwork_online_fallback_requested.contains(&track.id);
         if (self.enrichment_done.contains(&track.id) && !pending_artwork_fallback)
             || !self.enrichment_loading.insert(track.id)
@@ -119,7 +123,8 @@ impl MusicApp {
                         }
                     }
                 } else if needs_translation_upgrade {
-                    let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await else {
+                    let Some(lyrics) = services.fetch_translated_lyrics_for_track(&track).await
+                    else {
                         return Ok(EnrichmentOutcome {
                             result: EnrichmentResult::default(),
                             artwork_key: None,

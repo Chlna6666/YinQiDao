@@ -1,8 +1,8 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    IntoElement, ObjectFit, Render, SharedString, StyleRefinement,
     WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
@@ -13,12 +13,12 @@ use crate::{
 };
 
 use super::{
-    player_legacy, stage_chrome, stage_controls, stage_lyrics,
+    player_legacy, stage_controls, stage_lyrics,
     shell::MusicApp,
     theme::{TEXT_WHITE, elegant_gradient_for, themed_icon},
 };
 
-pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime, mini_player};
+pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 
 #[derive(Default)]
 struct StagePlayerViewCache {
@@ -160,6 +160,7 @@ impl Render for StagePlayerView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let parent_move = self.parent.clone();
         let parent_down = self.parent.clone();
+        let parent_down_right = self.parent.clone();
         let lyrics = AnyView::from(self.lyrics.clone()).cached(
             StyleRefinement::default()
                 .flex_1()
@@ -175,30 +176,18 @@ impl Render for StagePlayerView {
             .bg(rgb(0x0e0f16))
             .text_color(TEXT_WHITE)
             .on_mouse_move(move |event: &gpui::MouseMoveEvent, _, cx| {
-                cx.stop_propagation();
-                let _ = parent_move.update(cx, |app, _cx| {
-                    let moved = app.stage_last_mouse_pos.is_none_or(|last| {
-                        let dx = f32::from(event.position.x - last.x).abs();
-                        let dy = f32::from(event.position.y - last.y).abs();
-                        dx >= 2.0 || dy >= 2.0
-                    });
-                    if !moved {
-                        return;
-                    }
-                    app.stage_last_mouse_pos = Some(event.position);
-                    if stage_chrome::needs_wake_surface(app) {
-                        return;
-                    }
-                    app.stage_last_user_activity = Instant::now();
+                let _ = parent_move.update(cx, |app, app_cx| {
+                    app.handle_stage_mouse_move(event.position, app_cx);
                 });
             })
             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                 let _ = parent_down.update(cx, |app, app_cx| {
-                    if stage_chrome::needs_wake_surface(app) {
-                        app.wake_stage_controls_immediately(app_cx);
-                    } else {
-                        app.stage_last_user_activity = Instant::now();
-                    }
+                    app.wake_stage_controls_immediately(app_cx);
+                });
+            })
+            .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                let _ = parent_down_right.update(cx, |app, app_cx| {
+                    app.wake_stage_controls_immediately(app_cx);
                 });
             })
             .child(ambient_background(self.fluid_background.clone()))

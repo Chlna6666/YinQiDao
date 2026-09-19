@@ -306,6 +306,7 @@ impl Default for TrackTransitionSettings {
 pub enum LibraryTab {
     #[default]
     Songs,
+    Recent,
     Albums,
     Artists,
     Playlists,
@@ -318,6 +319,7 @@ pub enum AppPage {
     Library,
     Player,
     Settings,
+    OnlinePlaylist,
 }
 
 impl AppPage {
@@ -327,6 +329,7 @@ impl AppPage {
             Self::Library => "/library",
             Self::Player => "/player",
             Self::Settings => "/settings",
+            Self::OnlinePlaylist => "/online-playlist",
         }
     }
 
@@ -335,6 +338,7 @@ impl AppPage {
             "/player" => Self::Player,
             "/library" => Self::Library,
             "/settings" => Self::Settings,
+            "/online-playlist" => Self::OnlinePlaylist,
             _ => Self::Home,
         }
     }

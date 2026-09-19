@@ -6,11 +6,13 @@ pub(crate) mod audio_spatial_debug_3d;
 pub mod components;
 mod enrichment;
 mod home;
+pub(crate) mod image_cache;
 #[rustfmt::skip]
 mod library;
 pub(crate) mod lyrics_overlay;
 mod mini_player_lyrics;
 mod mini_player_view;
+mod online_playlist;
 mod player_facade;
 #[allow(dead_code)]
 mod player_legacy;
@@ -27,7 +29,7 @@ mod plugin_navigation;
 #[path = "plugin/page_renderer.rs"]
 mod plugin_page_renderer;
 #[path = "plugin/settings.rs"]
-mod plugin_settings;
+pub(crate) mod plugin_settings;
 #[path = "plugin/theme.rs"]
 mod plugin_theme;
 mod stage_chrome;
@@ -36,7 +38,7 @@ mod stage_lyrics;
 use player_facade as player;
 pub mod route;
 #[path = "settings_with_plugins.rs"]
-mod settings;
+pub(crate) mod settings;
 mod shell;
 pub mod theme;
 

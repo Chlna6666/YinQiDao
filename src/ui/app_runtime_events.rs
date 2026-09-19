@@ -10,11 +10,7 @@ use gpui::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-use crate::{
-    audio::AudioUiEvent,
-    media_controls::SystemMediaEvent,
-    model::PlaybackState,
-};
+use crate::{audio::AudioUiEvent, media_controls::SystemMediaEvent, model::PlaybackState};
 
 use super::shell::MusicApp;
 
@@ -149,11 +145,7 @@ impl AppRuntimeEventBridge {
         .detach();
     }
 
-    fn start_maintenance(
-        &mut self,
-        parent: gpui::WeakEntity<MusicApp>,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_maintenance(&mut self, parent: gpui::WeakEntity<MusicApp>, cx: &mut Context<Self>) {
         if self.maintenance_started {
             return;
         }
@@ -251,14 +243,13 @@ pub(crate) fn ensure_audio_runtime(app: &MusicApp, cx: &mut Context<MusicApp>) {
     });
 }
 
-fn apply_runtime_event(
-    app: &mut MusicApp,
-    event: &AppRuntimeEvent,
-    cx: &mut Context<MusicApp>,
-) {
+fn apply_runtime_event(app: &mut MusicApp, event: &AppRuntimeEvent, cx: &mut Context<MusicApp>) {
     match event {
         AppRuntimeEvent::Audio(AudioUiEvent::SnapshotChanged) => {
             app.sync_audio_snapshot_event(cx);
+        }
+        AppRuntimeEvent::Audio(AudioUiEvent::TrackEnded) => {
+            app.handle_track_ended(cx);
         }
         AppRuntimeEvent::Audio(AudioUiEvent::Error(error)) => {
             app.status.clone_from(error);

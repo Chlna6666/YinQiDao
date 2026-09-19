@@ -1,14 +1,16 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{
-    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity, Window, div,
-    hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list,
+    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity,
+    Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list,
 };
 use lucide_gpui::icon;
 
 use crate::{
     library::LocalPlaylistSummary,
     model::{LibraryTab, Track, TrackId},
+    plugin::abi::PluginRoute,
+    ui::image_cache,
 };
 
 #[path = "plugin/context_menu.rs"]
@@ -25,23 +27,30 @@ use super::{
     },
 };
 
-pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
+pub(super) fn render(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+) -> gpui::AnyElement {
     let query = normalized_query(&app.search);
 
     let content = match app.library_tab {
         LibraryTab::Songs => songs_view(app, &query, view).into_any_element(),
+        LibraryTab::Recent => recent_view(app, &query, view).into_any_element(),
         LibraryTab::Albums => albums_view(&app.tracks, &query, app, view).into_any_element(),
         LibraryTab::Artists => artists_view(&app.tracks, &query, app, view).into_any_element(),
         LibraryTab::Playlists => queue_view(app, view).into_any_element(),
     };
 
-    let virtualized_tab = matches!(app.library_tab, LibraryTab::Songs | LibraryTab::Playlists);
+    let virtualized_tab = matches!(
+        app.library_tab,
+        LibraryTab::Songs | LibraryTab::Recent | LibraryTab::Playlists
+    );
     if virtualized_tab {
         div()
-            .id(if app.library_tab == LibraryTab::Songs {
-                "library-songs-container"
-            } else {
-                "library-queue-container"
+            .id(match app.library_tab {
+                LibraryTab::Songs => "library-songs-container",
+                LibraryTab::Recent => "library-recent-container",
+                _ => "library-queue-container",
             })
             .size_full()
             .relative()
@@ -79,10 +88,16 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
 
 fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
     let tab_title = match app.library_tab {
-        LibraryTab::Songs => "所有歌曲",
+        LibraryTab::Songs => "本地音乐",
+        LibraryTab::Recent => "最近播放",
         LibraryTab::Albums => "专辑资料库",
         LibraryTab::Artists => "艺术家",
         LibraryTab::Playlists => "播放列表与队列",
+    };
+
+    let subtitle = match app.library_tab {
+        LibraryTab::Recent => format!("收录最近播放的 {} 首曲目", app.recent_plays.len()),
+        _ => format!("共收录 {} 首曲目 · 状态: {}", app.tracks.len(), app.status),
     };
 
     div()
@@ -106,11 +121,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .text_color(TEXT_PRIMARY)
                                 .child(tab_title),
                         )
-                        .child(div().text_sm().text_color(TEXT_SECONDARY).child(format!(
-                            "共收录 {} 首曲目 · 状态: {}",
-                            app.tracks.len(),
-                            app.status
-                        ))),
+                        .child(div().text_sm().text_color(TEXT_SECONDARY).child(subtitle)),
                 )
                 .child(
                     div()
@@ -182,38 +193,107 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
                                     this.search_active = true;
                                     cx.notify();
-                                })),
+                                }))
                         )
-                        .child(
-                            div()
-                                .id("library-add-dir-btn")
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_4()
-                                .py_2()
-                                .rounded_full()
-                                .cursor_pointer()
-                                .bg(theme::accent_red_muted())
-                                .text_color(ACCENT_RED)
-                                .hover(|s| s.bg(theme::accent_red_active()))
-                                .transition(press_transition())
-                                .active(|s| s.scale(0.96))
-                                .child(themed_icon(
-                                    icon!(folder_plus),
-                                    15.0,
-                                    ACCENT_RED.into(),
-                                ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child("导入目录"),
-                                )
-                                .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
-                                    this.choose_folder(cx)
-                                })),
-                        ),
+                        .children(if app.library_tab == LibraryTab::Songs {
+                            Some(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("library-add-dir-btn")
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_full()
+                                            .cursor_pointer()
+                                            .bg(theme::accent_red_muted())
+                                            .text_color(ACCENT_RED)
+                                            .hover(|s| s.bg(theme::accent_red_active()))
+                                            .transition(press_transition())
+                                            .active(|s| s.scale(0.96))
+                                            .child(themed_icon(
+                                                icon!(folder_plus),
+                                                15.0,
+                                                ACCENT_RED.into(),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .child("导入目录"),
+                                            )
+                                            .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
+                                                this.choose_folder(cx)
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("library-rescan-btn")
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_full()
+                                            .cursor_pointer()
+                                            .bg(theme::BG_CARD)
+                                            .border_1()
+                                            .border_color(BORDER_CARD)
+                                            .text_color(TEXT_PRIMARY)
+                                            .hover(|s| s.bg(theme::bg_hover()))
+                                            .transition(press_transition())
+                                            .active(|s| s.scale(0.96))
+                                            .child(themed_icon(
+                                                icon!(refresh_cw),
+                                                14.0,
+                                                TEXT_SECONDARY.into(),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .child("重新扫描"),
+                                            )
+                                            .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
+                                                this.rescan_library(cx)
+                                            })),
+                                    )
+                                    .into_any_element(),
+                            )
+                        } else if app.library_tab == LibraryTab::Recent {
+                            Some(
+                                div()
+                                    .id("clear-recent-plays-btn")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .px_3p5()
+                                    .py_2()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .bg(theme::BG_CARD)
+                                    .border_1()
+                                    .border_color(BORDER_CARD)
+                                    .text_color(TEXT_SECONDARY)
+                                    .hover(|s| s.bg(theme::bg_hover()).text_color(TEXT_PRIMARY))
+                                    .transition(press_transition())
+                                    .active(|s| s.scale(0.96))
+                                    .child(themed_icon(icon!(trash_2), 14.0, TEXT_SECONDARY.into()))
+                                    .child(div().text_xs().child("清空记录"))
+                                    .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
+                                        this.recent_plays.clear();
+                                        cx.notify();
+                                    }))
+                                    .into_any_element(),
+                            )
+                        } else {
+                            None
+                        }),
                 ),
         )
         .child(
@@ -225,11 +305,19 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 .rounded_full()
                 .bg(rgb(0xec_ee_f2))
                 .child(segmented_tab_item(
-                    "歌曲",
+                    "本地歌曲",
                     icon!(music),
                     app.library_tab == LibraryTab::Songs,
                     app_listener(view, |this, _, _, cx| {
                         this.show_library_tab(LibraryTab::Songs, cx)
+                    }),
+                ))
+                .child(segmented_tab_item(
+                    "最近播放",
+                    icon!(history),
+                    app.library_tab == LibraryTab::Recent,
+                    app_listener(view, |this, _, _, cx| {
+                        this.show_library_tab(LibraryTab::Recent, cx)
                     }),
                 ))
                 .child(segmented_tab_item(
@@ -308,17 +396,385 @@ where
         .on_mouse_down(gpui::MouseButton::Left, on_click)
 }
 
-fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl IntoElement {
+fn song_table_header() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .px_4()
+        .py_2()
+        .border_b_1()
+        .border_color(BORDER_HAIRLINE)
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(TEXT_TERTIARY)
+        .child(div().w(px(36.0)).child("#"))
+        .child(div().flex_1().min_w(px(0.0)).child("标题"))
+        .child(div().w(px(200.0)).child("艺人"))
+        .child(div().w(px(220.0)).child("专辑"))
+        .child(div().w(px(80.0)).child("时长"))
+        .child(div().w(px(60.0)).child("操作"))
+}
+
+fn online_table_header() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .px_4()
+        .py_2()
+        .border_b_1()
+        .border_color(BORDER_HAIRLINE)
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(TEXT_TERTIARY)
+        .child(div().w(px(36.0)).child("#"))
+        .child(div().flex_1().min_w(px(0.0)).child("单曲标题"))
+        .child(div().w(px(200.0)).child("歌手"))
+        .child(div().w(px(220.0)).child("专辑"))
+        .child(div().w(px(80.0)).child("时长"))
+        .child(div().w(px(60.0)).child("操作"))
+}
+
+fn online_search_row(
+    index: usize,
+    track: &crate::plugin::abi::RemoteTrack,
+    route: PluginRoute,
+    view: &WeakEntity<MusicApp>,
+) -> impl IntoElement {
+    let remote_track = track.clone();
+    let play_track = track.clone();
+    let route_clone = route.clone();
+    let cover_url = track.cover_url.as_deref();
+    let title = track.title.clone();
+    let artists = track.artists.join("/");
+    let album = if track.album.is_empty() {
+        "—".to_string()
+    } else {
+        track.album.clone()
+    };
+    let duration = format_time(track.duration_ms.unwrap_or(0));
+
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .px_4()
+        .py_2()
+        .rounded_lg()
+        .hover(|s| s.bg(theme::bg_hover()))
+        .transition(press_transition())
+        .cursor_pointer()
+        .child(
+            div()
+                .w(px(36.0))
+                .text_xs()
+                .text_color(TEXT_TERTIARY)
+                .child(format!("{index:02}")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(image_cache::render_remote_cover(
+                    cover_url, 36.0, 36.0, 6.0,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(TEXT_PRIMARY)
+                                .truncate()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .px_1()
+                                .py_0p5()
+                                .rounded(px(3.0))
+                                .bg(hsla(348.0, 0.90, 0.95, 1.0))
+                                .border_1()
+                                .border_color(hsla(348.0, 0.90, 0.60, 0.3))
+                                .text_color(ACCENT_RED)
+                                .text_xs()
+                                .child("SQ"),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .w(px(200.0))
+                .text_xs()
+                .text_color(TEXT_SECONDARY)
+                .truncate()
+                .child(artists),
+        )
+        .child(
+            div()
+                .w(px(220.0))
+                .text_xs()
+                .text_color(TEXT_TERTIARY)
+                .truncate()
+                .child(album),
+        )
+        .child(
+            div()
+                .w(px(80.0))
+                .text_xs()
+                .text_color(TEXT_TERTIARY)
+                .child(duration),
+        )
+        .child(
+            div()
+                .w(px(60.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .px_2p5()
+                        .py_1()
+                        .rounded_full()
+                        .bg(theme::accent_red_muted())
+                        .text_color(ACCENT_RED)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::accent_red_active()))
+                        .transition(press_transition())
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("播放"),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, move |this, _, _, cx| {
+                                this.play_online_remote_track(route.clone(), remote_track.clone(), cx);
+                            }),
+                        ),
+                ),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            app_listener(view, move |this, _, _, cx| {
+                this.play_online_remote_track(route_clone.clone(), play_track.clone(), cx);
+            }),
+        )
+}
+
+fn songs_view(
+    app: &MusicApp,
+    query: &str,
+    view: &WeakEntity<MusicApp>,
+) -> impl IntoElement {
     let matching_indices = matching_track_indices(&app.tracks, query);
     let count = matching_indices
         .as_ref()
         .map_or(app.tracks.len(), |indices| indices.len());
-    if count == 0 {
+
+    let has_search = !query.is_empty();
+    let has_online_results = !app.online_search_results.is_empty();
+    let online_loading = app.online_search_loading;
+
+    if count == 0 && !has_search {
         return empty_filter_state().into_any_element();
     }
 
+    if count == 0 && !has_online_results && !online_loading {
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(48.0))
+                    .rounded_full()
+                    .bg(theme::BG_CANVAS)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(themed_icon(icon!(search), 22.0, TEXT_TERTIARY.into())),
+            )
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(TEXT_PRIMARY)
+                    .child("本地与网易云均未找到匹配歌曲"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(TEXT_TERTIARY)
+                    .child("尝试更换关键词重新搜索"),
+            )
+            .into_any_element();
+    }
+
     let matching_indices_for_rows = matching_indices.clone();
-    let view = view.clone();
+    let view_clone = view.clone();
+
+    let route = app
+        .online_search_route
+        .clone()
+        .or_else(|| app.online_route.clone())
+        .unwrap_or_else(|| PluginRoute {
+            plugin_id: "netease".to_string(),
+            provider_id: "netease-music".to_string(),
+            account_id: String::new(),
+            priority: 0,
+            is_default: true,
+        });
+
+    if has_search {
+        let mut search_view = div()
+            .id("library-search-results")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_6();
+
+        // 1. Local results section (if any)
+        if count > 0 {
+            let mut local_list = div().flex().flex_col().gap_1();
+            let limit = count.min(15);
+            for idx in 0..limit {
+                let track_index = matching_indices_for_rows
+                    .as_ref()
+                    .map_or(idx, |indices| indices[idx]);
+                if let Some(track) = app.tracks.get(track_index) {
+                    let track_id = track.id;
+                    let is_current = app
+                        .snapshot
+                        .current_track
+                        .as_ref()
+                        .is_some_and(|t| t.id == track_id);
+                    let is_playing = is_current
+                        && app.snapshot.state == crate::model::PlaybackState::Playing;
+                    let artwork = app.artworks.get(&track_id).cloned();
+                    local_list = local_list.child(song_table_row(
+                        idx + 1,
+                        track,
+                        is_current,
+                        is_playing,
+                        artwork,
+                        view,
+                    ));
+                }
+            }
+
+            search_view = search_view.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child(format!("本地曲库匹配结果 ({count})")),
+                    )
+                    .child(song_table_header())
+                    .child(local_list),
+            );
+        }
+
+        // 2. Online search results section
+        let mut online_list = div().flex().flex_col().gap_1();
+
+        if online_loading && !has_online_results {
+            online_list = online_list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .p_4()
+                    .rounded_xl()
+                    .bg(theme::BG_CANVAS)
+                    .border_1()
+                    .border_color(BORDER_CARD)
+                    .child(themed_icon(icon!(refresh_cw), 16.0, ACCENT_RED.into()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(TEXT_SECONDARY)
+                            .child("正在网易云音乐曲库中全力搜索…"),
+                    ),
+            );
+        } else {
+            for (idx, remote_track) in app.online_search_results.iter().enumerate() {
+                online_list = online_list.child(online_search_row(
+                    idx + 1,
+                    remote_track,
+                    route.clone(),
+                    view,
+                ));
+            }
+        }
+
+        search_view = search_view.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(TEXT_PRIMARY)
+                                        .child("网易云音乐 在线曲库"),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(theme::accent_red_muted())
+                                        .text_color(ACCENT_RED)
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(format!("{} 首", app.online_search_results.len())),
+                                ),
+                        )
+                        .child_if(online_loading, || {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(TEXT_TERTIARY)
+                                .child(themed_icon(icon!(refresh_cw), 12.0, TEXT_TERTIARY.into()))
+                                .child("正在更新搜索结果…")
+                        }),
+                )
+                .child(online_table_header())
+                .child(online_list),
+        );
+
+        return search_view.into_any_element();
+    }
 
     div()
         .size_full()
@@ -326,63 +782,178 @@ fn songs_view(app: &MusicApp, query: &str, view: &WeakEntity<MusicApp>) -> impl 
         .flex_col()
         .gap_2()
         .overflow_hidden()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(BORDER_HAIRLINE)
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(TEXT_TERTIARY)
-                .child(div().w(px(36.0)).child("#"))
-                .child(div().flex_1().min_w(px(0.0)).child("标题"))
-                .child(div().w(px(200.0)).child("艺人"))
-                .child(div().w(px(220.0)).child("专辑"))
-                .child(div().w(px(80.0)).child("时长"))
-                .child(div().w(px(60.0)).child("操作")),
-        )
+        .child(song_table_header())
         .child(
             div().flex_1().min_h(px(0.0)).overflow_hidden().child(
                 uniform_list(
                     "library-song-table-vlist",
                     count,
                     move |range: Range<usize>, _window, cx| {
-                        view.update(cx, |this, _cx| {
-                            let mut items = Vec::with_capacity(range.end - range.start);
-                            for idx in range {
-                                let track_index = matching_indices_for_rows
-                                    .as_ref()
-                                    .map_or(idx, |indices| indices[idx]);
-                                if let Some(track) = this.tracks.get(track_index) {
-                                    let track_id = track.id;
-                                    let is_current = this
-                                        .snapshot
-                                        .current_track
+                        view_clone
+                            .update(cx, |this, _cx| {
+                                let mut items = Vec::with_capacity(range.end - range.start);
+                                for idx in range {
+                                    let track_index = matching_indices_for_rows
                                         .as_ref()
-                                        .is_some_and(|t| t.id == track_id);
-                                    let is_playing = is_current
-                                        && this.snapshot.state
-                                            == crate::model::PlaybackState::Playing;
-                                    let artwork = this.artworks.get(&track_id).cloned();
-                                    items.push(song_table_row(
-                                        idx + 1,
-                                        track,
-                                        is_current,
-                                        is_playing,
-                                        artwork,
-                                        &view,
-                                    ));
+                                        .map_or(idx, |indices| indices[idx]);
+                                    if let Some(track) = this.tracks.get(track_index) {
+                                        let track_id = track.id;
+                                        let is_current = this
+                                            .snapshot
+                                            .current_track
+                                            .as_ref()
+                                            .is_some_and(|t| t.id == track_id);
+                                        let is_playing = is_current
+                                            && this.snapshot.state
+                                                == crate::model::PlaybackState::Playing;
+                                        let artwork = this.artworks.get(&track_id).cloned();
+                                        items.push(song_table_row(
+                                            idx + 1,
+                                            track,
+                                            is_current,
+                                            is_playing,
+                                            artwork,
+                                            &view_clone,
+                                        ));
+                                    }
                                 }
-                            }
-                            items
-                        })
-                        .unwrap_or_default()
+                                items
+                            })
+                            .unwrap_or_default()
                     },
                 )
                 .track_scroll(app.library_scroll_handle.clone())
+                .size_full(),
+            ),
+        )
+        .into_any_element()
+}
+
+fn recent_view(
+    app: &MusicApp,
+    query: &str,
+    view: &WeakEntity<MusicApp>,
+) -> impl IntoElement {
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut recent_tracks: Vec<Track> = Vec::new();
+    for id in &app.recent_plays {
+        let track = app
+            .tracks
+            .iter()
+            .find(|t| t.id == *id)
+            .cloned()
+            .or_else(|| app.online_track_cache.get(id).cloned());
+        if let Some(track) = track {
+            let key = (
+                track.title.trim().to_lowercase(),
+                track.artist.trim().to_lowercase(),
+            );
+            if seen_keys.insert(key) {
+                recent_tracks.push(track);
+            }
+        }
+    }
+
+    let filtered_tracks: Vec<Track> = if query.is_empty() {
+        recent_tracks
+    } else {
+        recent_tracks
+            .into_iter()
+            .filter(|track| track_matches_query(track, query))
+            .collect()
+    };
+
+    let count = filtered_tracks.len();
+
+    if count == 0 {
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(48.0))
+                    .rounded_full()
+                    .bg(theme::BG_CANVAS)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(themed_icon(icon!(history), 22.0, TEXT_TERTIARY.into())),
+            )
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(TEXT_PRIMARY)
+                    .child(if query.is_empty() {
+                        "暂无最近播放记录"
+                    } else {
+                        "未找到匹配的播放历史"
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(TEXT_TERTIARY)
+                    .child(if query.is_empty() {
+                        "播放歌曲后将自动沉淀足迹，方便随时重温"
+                    } else {
+                        "尝试更换关键词重新搜索"
+                    }),
+            )
+            .into_any_element();
+    }
+
+    let tracks_arc = std::sync::Arc::new(filtered_tracks);
+    let view_clone = view.clone();
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .overflow_hidden()
+        .child(song_table_header())
+        .child(
+            div().flex_1().min_h(px(0.0)).overflow_hidden().child(
+                uniform_list(
+                    "library-recent-table-vlist",
+                    count,
+                    move |range: Range<usize>, _window, cx| {
+                        let tracks = tracks_arc.clone();
+                        view_clone
+                            .update(cx, |this, _cx| {
+                                let mut items = Vec::with_capacity(range.end - range.start);
+                                for idx in range {
+                                    if let Some(track) = tracks.get(idx) {
+                                        let track_id = track.id;
+                                        let is_current = this
+                                            .snapshot
+                                            .current_track
+                                            .as_ref()
+                                            .is_some_and(|t| t.id == track_id);
+                                        let is_playing = is_current
+                                            && this.snapshot.state
+                                                == crate::model::PlaybackState::Playing;
+                                        let artwork = this.artworks.get(&track_id).cloned();
+                                        items.push(song_table_row(
+                                            idx + 1,
+                                            track,
+                                            is_current,
+                                            is_playing,
+                                            artwork,
+                                            &view_clone,
+                                        ));
+                                    }
+                                }
+                                items
+                            })
+                            .unwrap_or_default()
+                    },
+                )
                 .size_full(),
             ),
         )
@@ -872,22 +1443,23 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                     let Some(&track_id) = queue_ids_for_rows.get(queue_index) else {
                                         continue;
                                     };
-                                    let Some(&track_index) = track_indices_for_rows.get(&track_id)
-                                    else {
-                                        continue;
-                                    };
-                                    let Some(track) = this
-                                        .tracks
-                                        .get(track_index)
-                                        .filter(|track| track.id == track_id)
-                                    else {
+                                    let track = track_indices_for_rows
+                                        .get(&track_id)
+                                        .and_then(|&track_index| {
+                                            this.tracks
+                                                .get(track_index)
+                                                .filter(|track| track.id == track_id)
+                                        })
+                                        .cloned()
+                                        .or_else(|| this.online_track_cache.get(&track_id).cloned());
+                                    let Some(track) = track else {
                                         continue;
                                     };
                                     items.push(
                                         div()
                                             .h(px(64.0))
                                             .child(queue_item_row(
-                                                track,
+                                                &track,
                                                 this,
                                                 &view_for_rows,
                                                 queue_index,
@@ -1161,8 +1733,29 @@ fn queue_item_row(
         } else {
             rgb(0xff_ff_ff).into()
         })
+        .hover(|s| s.bg(theme::bg_hover()))
+        .transition(theme::press_transition())
+        .cursor_pointer()
         .border_1()
         .border_color(BORDER_CARD)
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            app_listener(view, move |this, event: &gpui::MouseDownEvent, _, cx| {
+                if event.click_count >= 2 {
+                    if track_id < 0 {
+                        if let Some((route, remote)) =
+                            this.online_remote_tracks.get(&track_id).cloned()
+                        {
+                            this.play_online_remote_track(route, remote, cx);
+                        } else if let Some(t) = this.online_track_cache.get(&track_id).cloned() {
+                            this.play_prepared_remote_track(t, cx);
+                        }
+                    } else {
+                        this.play_track(track_id, cx);
+                    }
+                }
+            }),
+        )
         .child(
             div()
                 .flex()
@@ -1230,6 +1823,7 @@ fn queue_item_row(
                             TEXT_TERTIARY.into(),
                         ))
                         .on_mouse_down(gpui::MouseButton::Left, app_listener(view, move |this, _, _, cx| {
+                            cx.stop_propagation();
                             this.remove_from_queue(track_id, cx);
                         })),
                 ),

@@ -63,8 +63,8 @@ impl StageChromeFade {
         if self.duration.is_zero() {
             return self.to;
         }
-        let linear = now.saturating_duration_since(started_at).as_secs_f32()
-            / self.duration.as_secs_f32();
+        let linear =
+            now.saturating_duration_since(started_at).as_secs_f32() / self.duration.as_secs_f32();
         let eased = Self::ease(linear);
         self.from + (self.to - self.from) * eased
     }
@@ -154,10 +154,7 @@ struct StageTitlebarViewCache {
 
 impl Global for StageTitlebarViewCache {}
 
-pub(super) fn view(
-    app: &MusicApp,
-    cx: &mut Context<MusicApp>,
-) -> Entity<StageControlsView> {
+pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageControlsView> {
     let transport = transport_view(app, cx);
     let parent = cx.entity().downgrade();
     let view = cx.update_default_global(|cache: &mut StageControlsViewCache, cx| {
@@ -191,10 +188,7 @@ pub(super) fn titlebar_view(
     view
 }
 
-fn transport_view(
-    app: &MusicApp,
-    cx: &mut Context<MusicApp>,
-) -> Entity<StageTransportView> {
+fn transport_view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageTransportView> {
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageTransportViewCache, cx| {
@@ -274,12 +268,7 @@ impl StageControlsView {
         }
     }
 
-    fn sync_from_app(
-        &mut self,
-        app: &MusicApp,
-        stage_active: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn sync_from_app(&mut self, app: &MusicApp, stage_active: bool, cx: &mut Context<Self>) {
         let target_visible = stage_chrome::target_visible(app);
         let playback_state = app.snapshot.state;
         let volume = app.displayed_volume_ratio();
@@ -302,9 +291,7 @@ impl Render for StageControlsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
         let animating = self.fade.advance(now);
-        if animating
-            && let Some(deadline) = self.fade.deadline()
-        {
+        if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }
         let visibility = if animating {
@@ -500,9 +487,7 @@ impl Render for StageTitlebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
         let animating = self.fade.advance(now);
-        if animating
-            && let Some(deadline) = self.fade.deadline()
-        {
+        if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }
         let visibility = if animating {
@@ -510,7 +495,7 @@ impl Render for StageTitlebarView {
         } else {
             self.fade.value()
         };
-        if visibility <= 0.001 && !animating {
+        if visibility <= 0.001 {
             return div().w_full().h(px(38.0)).into_any_element();
         }
 
@@ -567,10 +552,9 @@ impl Render for StageTitlebarView {
                                 },
                             )),
                     )
-                    .child(
-                        div()
+                    .child({
+                        let drag_region = div()
                             .id("stage-drag-region")
-                            .window_control_area(gpui::WindowControlArea::Drag)
                             .flex_1()
                             .h_full()
                             .flex()
@@ -592,8 +576,13 @@ impl Render for StageTitlebarView {
                                         window.titlebar_double_click();
                                     }
                                 },
-                            ),
-                    )
+                            );
+                        if visibility >= 0.1 {
+                            drag_region.window_control_area(gpui::WindowControlArea::Drag)
+                        } else {
+                            drag_region
+                        }
+                    })
                     .child(
                         div()
                             .flex()
@@ -656,15 +645,12 @@ impl Render for StageTitlebarView {
                                     .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.22)))
                                     .transition(theme::press_transition())
                                     .active(|style| style.scale(0.95))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            let _ = collapse_parent.update(cx, |app, app_cx| {
-                                                app.close_stage(app_cx);
-                                            });
-                                        },
-                                    )
+                                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = collapse_parent.update(cx, |app, app_cx| {
+                                            app.close_stage(app_cx);
+                                        });
+                                    })
                                     .child(themed_icon(
                                         icon!(chevron_down),
                                         14.0,
@@ -820,18 +806,18 @@ impl StageTransportView {
 impl Render for StageTransportView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let progress = self.ensure_progress(cx);
-        let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
-            (PlaybackState::Stopped, 0, 0),
-            |engine| engine.progress(),
-        );
+        let (_, live_position_ms, duration_ms) = self
+            .engine
+            .as_ref()
+            .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
         let position = self.drag_progress_ratio.map_or(live_position_ms, |ratio| {
             (duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
         });
 
         if self.clock_should_run() {
             let remainder = live_position_ms % 1_000;
-            let delay_ms = (1_000 - remainder)
-                .clamp(TRANSPORT_MIN_SLEEP_MS, TRANSPORT_MAX_SLEEP_MS);
+            let delay_ms =
+                (1_000 - remainder).clamp(TRANSPORT_MIN_SLEEP_MS, TRANSPORT_MAX_SLEEP_MS);
             window.request_invalidation_at(Instant::now() + Duration::from_millis(delay_ms), cx);
         }
 
@@ -995,16 +981,17 @@ impl Render for StageProgressView {
             && self.playback_state == PlaybackState::Playing
             && self.drag_progress_ratio.is_none()
             && self.engine.is_some()
+            && !window.is_minimized()
         {
             // The pinned GPUI fork targets request_animation_frame() at this Entity. Only the
             // progress rail follows display vsync; StageTransport/StageControls/MusicApp stay clean.
             window.request_animation_frame();
         }
 
-        let (_, live_position_ms, duration_ms) = self.engine.as_ref().map_or(
-            (PlaybackState::Stopped, 0, 0),
-            |engine| engine.progress(),
-        );
+        let (_, live_position_ms, duration_ms) = self
+            .engine
+            .as_ref()
+            .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
         let drag_progress_ratio = self.drag_progress_ratio;
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
@@ -1048,11 +1035,7 @@ fn control_button(
         .cursor_pointer()
         .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.15)))
         .active(|style| style.scale(0.92))
-        .child(themed_icon(
-            icon,
-            20.0,
-            hsla(0.0, 0.0, 1.0, 0.85),
-        ))
+        .child(themed_icon(icon, 20.0, hsla(0.0, 0.0, 1.0, 0.85)))
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 

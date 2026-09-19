@@ -1,6 +1,4 @@
-use yinqidao_audio_spatial::{
-    EnvironmentSettings, ListenerPose, Vec3, debug_room_half_extents,
-};
+use yinqidao_audio_spatial::{EnvironmentSettings, ListenerPose, Vec3, debug_room_half_extents};
 
 const ROOM_GRID_DIVISIONS: usize = 4;
 
@@ -36,11 +34,7 @@ impl ProjectedRoomReference {
         let mut corners = [[0.0_f32; 3]; 8];
         for (destination, world) in corners.iter_mut().zip(world_corners) {
             let relative = world - listener.position;
-            *destination = [
-                relative.dot(right),
-                relative.dot(up),
-                relative.dot(forward),
-            ];
+            *destination = [relative.dot(right), relative.dot(up), relative.dot(forward)];
         }
         Self { corners }
     }
@@ -74,7 +68,11 @@ impl ProjectedRoomReference {
             (3, 7),
         ];
         for (start, end) in EDGES {
-            visit(self.corners[start], self.corners[end], RoomSegmentKind::Edge);
+            visit(
+                self.corners[start],
+                self.corners[end],
+                RoomSegmentKind::Edge,
+            );
         }
 
         self.for_each_plane_grid([0, 1, 2, 3], RoomSegmentKind::FloorGrid, &mut visit);
@@ -126,10 +124,8 @@ mod tests {
 
     #[test]
     fn identity_listener_keeps_world_room_axes() {
-        let room = ProjectedRoomReference::from_fixed_world_room(
-            ListenerPose::identity(),
-            environment(),
-        );
+        let room =
+            ProjectedRoomReference::from_fixed_world_room(ListenerPose::identity(), environment());
         let half = debug_room_half_extents(environment());
         assert_eq!(room.corners[0], [-half.x, -half.y, -half.z]);
         assert_eq!(room.corners[6], [half.x, half.y, half.z]);
@@ -151,10 +147,8 @@ mod tests {
 
     #[test]
     fn room_reference_has_edges_and_sparse_floor_ceiling_grids() {
-        let room = ProjectedRoomReference::from_fixed_world_room(
-            ListenerPose::identity(),
-            environment(),
-        );
+        let room =
+            ProjectedRoomReference::from_fixed_world_room(ListenerPose::identity(), environment());
         let mut edges = 0usize;
         let mut floor = 0usize;
         let mut ceiling = 0usize;

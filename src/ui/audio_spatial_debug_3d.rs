@@ -181,11 +181,9 @@ fn spatial_debug_shader() -> Result<Arc<GpuMesh3dShader>, String> {
     static SHADER: OnceLock<Result<Arc<GpuMesh3dShader>, String>> = OnceLock::new();
     SHADER
         .get_or_init(|| {
-            let source = WgslShaderSource::from_source(
-                "src/ui/audio_spatial_debug_3d.wgsl",
-                SHADER_SOURCE,
-            )
-            .map_err(|error| error.to_string())?;
+            let source =
+                WgslShaderSource::from_source("src/ui/audio_spatial_debug_3d.wgsl", SHADER_SOURCE)
+                    .map_err(|error| error.to_string())?;
             Ok(Arc::new(GpuMesh3dShader::new(
                 Arc::new(source),
                 "vs_spatial_debug",
@@ -210,9 +208,8 @@ fn build_scene_mesh(
     let (left_ear_world, right_ear_world) = listener.ear_positions();
     let left_ear = to_local(left_ear_world);
     let right_ear = to_local(right_ear_world);
-    let room_reference = (snapshot.environment.mix > 1.0e-5).then(|| {
-        ProjectedRoomReference::from_fixed_world_room(listener, snapshot.environment)
-    });
+    let room_reference = (snapshot.environment.mix > 1.0e-5)
+        .then(|| ProjectedRoomReference::from_fixed_world_room(listener, snapshot.environment));
 
     let source_count = snapshot.source_count.min(snapshot.sources.len());
     let mut source_positions = [[0.0_f32; 3]; MAX_DEBUG_SOURCES];
@@ -246,7 +243,8 @@ fn build_scene_mesh(
         if !source.active {
             continue;
         }
-        let position = source_positions[usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
+        let position =
+            source_positions[usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
         let activity = source_activity_visual(source.input_peak, source.input_rms);
         let color = source_color(
             source.kind,
@@ -276,22 +274,17 @@ fn build_scene_mesh(
     builder.push_spherical_field(field_radius);
     builder.push_axis_guides(field_radius);
     if let Some(room) = room_reference {
-        let room_alpha = (0.035 + snapshot.environment_contribution.clamp(0.0, 1.0) * 0.13)
-            .clamp(0.035, 0.085);
+        let room_alpha =
+            (0.035 + snapshot.environment_contribution.clamp(0.0, 1.0) * 0.13).clamp(0.035, 0.085);
         room.for_each_segment(|start, end, kind| {
             let (width, color) = match kind {
-                RoomSegmentKind::Edge => (
-                    ROOM_EDGE_WIDTH,
-                    [0.54, 0.64, 0.76, room_alpha],
-                ),
-                RoomSegmentKind::FloorGrid => (
-                    ROOM_GRID_WIDTH,
-                    [0.96, 0.74, 0.30, room_alpha * 0.68],
-                ),
-                RoomSegmentKind::CeilingGrid => (
-                    ROOM_GRID_WIDTH,
-                    [0.44, 0.86, 0.96, room_alpha * 0.62],
-                ),
+                RoomSegmentKind::Edge => (ROOM_EDGE_WIDTH, [0.54, 0.64, 0.76, room_alpha]),
+                RoomSegmentKind::FloorGrid => {
+                    (ROOM_GRID_WIDTH, [0.96, 0.74, 0.30, room_alpha * 0.68])
+                }
+                RoomSegmentKind::CeilingGrid => {
+                    (ROOM_GRID_WIDTH, [0.44, 0.86, 0.96, room_alpha * 0.62])
+                }
             };
             builder.push_segment(start, end, width, color);
         });
@@ -302,8 +295,8 @@ fn build_scene_mesh(
         if !source.active {
             continue;
         }
-        let source_position = source_positions
-            [usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
+        let source_position =
+            source_positions[usize::from(source.source_index).min(MAX_DEBUG_SOURCES - 1)];
         let activity = source_activity_visual(source.input_peak, source.input_rms);
         let activity_alpha = 0.16 + activity * 0.84;
         let (left_alpha, right_alpha) = binaural_path_alpha(source.left_gain, source.right_gain);
@@ -315,7 +308,12 @@ fn build_scene_mesh(
             source_position,
             left_ear,
             left_width,
-            [LEFT_EAR_COLOR[0], LEFT_EAR_COLOR[1], LEFT_EAR_COLOR[2], left_alpha],
+            [
+                LEFT_EAR_COLOR[0],
+                LEFT_EAR_COLOR[1],
+                LEFT_EAR_COLOR[2],
+                left_alpha,
+            ],
         );
         builder.push_segment(
             source_position,
@@ -520,10 +518,7 @@ fn source_color(
     ]
 }
 
-fn wall_color(
-    wall: yinqidao_audio_spatial::SpatialDebugReflectionWall,
-    alpha: f32,
-) -> [f32; 4] {
+fn wall_color(wall: yinqidao_audio_spatial::SpatialDebugReflectionWall, alpha: f32) -> [f32; 4] {
     use yinqidao_audio_spatial::SpatialDebugReflectionWall;
     match wall {
         SpatialDebugReflectionWall::Left => [0.38, 0.72, 1.0, alpha],
@@ -563,11 +558,8 @@ impl MeshBuilder {
         let vertex_count = vertices.len().min(u32::MAX as usize) as u32;
         for triangle in indices.chunks_exact(3) {
             if triangle.iter().all(|index| *index < vertex_count) {
-                self.indices.extend([
-                    base + triangle[0],
-                    base + triangle[1],
-                    base + triangle[2],
-                ]);
+                self.indices
+                    .extend([base + triangle[0], base + triangle[1], base + triangle[2]]);
             }
         }
     }
@@ -669,10 +661,7 @@ impl MeshBuilder {
     ) {
         let longitude_segments = longitude_segments.max(3);
         let latitude_segments = latitude_segments.max(2);
-        let top = self.push_vertex(
-            [center[0], center[1] + radii[1], center[2]],
-            color,
-        );
+        let top = self.push_vertex([center[0], center[1] + radii[1], center[2]], color);
         let first_ring = self.vertices.len().min(u32::MAX as usize) as u32;
 
         for latitude in 1..latitude_segments {
@@ -693,15 +682,13 @@ impl MeshBuilder {
             }
         }
 
-        let bottom = self.push_vertex(
-            [center[0], center[1] - radii[1], center[2]],
-            color,
-        );
+        let bottom = self.push_vertex([center[0], center[1] - radii[1], center[2]], color);
         let longitude_u32 = longitude_segments.min(u32::MAX as usize) as u32;
         for longitude in 0..longitude_segments {
             let current = longitude.min(u32::MAX as usize) as u32;
             let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
-            self.indices.extend([top, first_ring + current, first_ring + next]);
+            self.indices
+                .extend([top, first_ring + current, first_ring + next]);
         }
 
         let ring_count = latitude_segments - 1;
@@ -719,22 +706,17 @@ impl MeshBuilder {
             }
         }
 
-        let last_ring = first_ring
-            + ring_count.saturating_sub(1).min(u32::MAX as usize) as u32 * longitude_u32;
+        let last_ring =
+            first_ring + ring_count.saturating_sub(1).min(u32::MAX as usize) as u32 * longitude_u32;
         for longitude in 0..longitude_segments {
             let current = longitude.min(u32::MAX as usize) as u32;
             let next = ((longitude + 1) % longitude_segments).min(u32::MAX as usize) as u32;
-            self.indices.extend([last_ring + next, last_ring + current, bottom]);
+            self.indices
+                .extend([last_ring + next, last_ring + current, bottom]);
         }
     }
 
-    fn push_virtual_speaker(
-        &mut self,
-        position: [f32; 3],
-        scale: f32,
-        color: [f32; 4],
-        lfe: bool,
-    ) {
+    fn push_virtual_speaker(&mut self, position: [f32; 3], scale: f32, color: [f32; 4], lfe: bool) {
         let radius = SOURCE_RADIUS * scale;
         self.push_octahedron(position, radius, color);
         let toward_listener = normalize3(mul3(position, -1.0));
@@ -750,11 +732,7 @@ impl MeshBuilder {
         );
         if !lfe {
             let halo = add3(position, mul3(toward_listener, -radius * 0.48));
-            self.push_octahedron(
-                halo,
-                radius * 0.42,
-                [color[0], color[1], color[2], 0.72],
-            );
+            self.push_octahedron(halo, radius * 0.42, [color[0], color[1], color[2], 0.72]);
         }
     }
 
@@ -786,13 +764,7 @@ impl MeshBuilder {
         }
     }
 
-    fn push_segment(
-        &mut self,
-        start: [f32; 3],
-        end: [f32; 3],
-        half_width: f32,
-        color: [f32; 4],
-    ) {
+    fn push_segment(&mut self, start: [f32; 3], end: [f32; 3], half_width: f32, color: [f32; 4]) {
         let direction = sub3(end, start);
         let length = length3(direction);
         if length <= 1.0e-5 {

@@ -235,9 +235,33 @@ fn spectrum_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
         move |bounds, _prepaint, window, _cx| {
             window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
             paint_db_grid(window, bounds);
-            paint_series(window, bounds, &snapshot.source.spectrum_dbfs, color(0x8f_a3_ba), px(1.2), DB_FLOOR, 6.0);
-            paint_series(window, bounds, &snapshot.eq.spectrum_dbfs, color(0xff_a6_3d), px(1.5), DB_FLOOR, 6.0);
-            paint_series(window, bounds, &snapshot.spatial.spectrum_dbfs, color(0x56_d3_8f), px(1.8), DB_FLOOR, 6.0);
+            paint_series(
+                window,
+                bounds,
+                &snapshot.source.spectrum_dbfs,
+                color(0x8f_a3_ba),
+                px(1.2),
+                DB_FLOOR,
+                6.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.eq.spectrum_dbfs,
+                color(0xff_a6_3d),
+                px(1.5),
+                DB_FLOOR,
+                6.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.spatial.spectrum_dbfs,
+                color(0x56_d3_8f),
+                px(1.8),
+                DB_FLOOR,
+                6.0,
+            );
         },
     )
 }
@@ -248,8 +272,24 @@ fn transfer_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
         move |bounds, _prepaint, window, _cx| {
             window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
             paint_zero_line(window, bounds, -18.0, 18.0);
-            paint_series(window, bounds, &snapshot.eq_transfer_db, color(0xff_a6_3d), px(1.5), -18.0, 18.0);
-            paint_series(window, bounds, &snapshot.spatial_transfer_db, color(0x56_d3_8f), px(1.5), -18.0, 18.0);
+            paint_series(
+                window,
+                bounds,
+                &snapshot.eq_transfer_db,
+                color(0xff_a6_3d),
+                px(1.5),
+                -18.0,
+                18.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.spatial_transfer_db,
+                color(0x56_d3_8f),
+                px(1.5),
+                -18.0,
+                18.0,
+            );
         },
     )
 }
@@ -260,8 +300,24 @@ fn ms_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
         move |bounds, _prepaint, window, _cx| {
             window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
             paint_db_grid(window, bounds);
-            paint_series(window, bounds, &snapshot.spatial.mid_spectrum_dbfs, color(0x7d_b8_ff), px(1.5), DB_FLOOR, 6.0);
-            paint_series(window, bounds, &snapshot.spatial.side_spectrum_dbfs, color(0xd0_82_ff), px(1.5), DB_FLOOR, 6.0);
+            paint_series(
+                window,
+                bounds,
+                &snapshot.spatial.mid_spectrum_dbfs,
+                color(0x7d_b8_ff),
+                px(1.5),
+                DB_FLOOR,
+                6.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.spatial.side_spectrum_dbfs,
+                color(0xd0_82_ff),
+                px(1.5),
+                DB_FLOOR,
+                6.0,
+            );
         },
     )
 }
@@ -300,7 +356,10 @@ fn spectrogram_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
                     let cell_color = hsla(0.66 - level * 0.58, 0.72, 0.10 + level * 0.52, 0.90);
                     window.paint_quad(fill(
                         Bounds {
-                            origin: point(px(left + bin_index as f32 * cell_w), px(top + row_index as f32 * cell_h)),
+                            origin: point(
+                                px(left + bin_index as f32 * cell_w),
+                                px(top + row_index as f32 * cell_h),
+                            ),
                             size: size(px(cell_w + 0.5), px(cell_h + 0.5)),
                         },
                         cell_color,
@@ -317,9 +376,33 @@ fn waveform_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
         move |bounds, _prepaint, window, _cx| {
             window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
             paint_zero_line(window, bounds, -1.0, 1.0);
-            paint_series(window, bounds, &snapshot.source.waveform_left, color(0x6f_7f_92), px(1.0), -1.0, 1.0);
-            paint_series(window, bounds, &snapshot.eq.waveform_left, color(0xff_a6_3d), px(1.2), -1.0, 1.0);
-            paint_series(window, bounds, &snapshot.spatial.waveform_left, color(0x56_d3_8f), px(1.4), -1.0, 1.0);
+            paint_series(
+                window,
+                bounds,
+                &snapshot.source.waveform_left,
+                color(0x6f_7f_92),
+                px(1.0),
+                -1.0,
+                1.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.eq.waveform_left,
+                color(0xff_a6_3d),
+                px(1.2),
+                -1.0,
+                1.0,
+            );
+            paint_series(
+                window,
+                bounds,
+                &snapshot.spatial.waveform_left,
+                color(0x56_d3_8f),
+                px(1.4),
+                -1.0,
+                1.0,
+            );
         },
     )
 }
@@ -330,8 +413,22 @@ fn vectorscope_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
         move |bounds, _prepaint, window, _cx| {
             window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
             paint_vectorscope_axes(window, bounds);
-            paint_vectorscope(window, bounds, &snapshot.source.waveform_left, &snapshot.source.waveform_right, color(0x6f_7f_92), px(1.0));
-            paint_vectorscope(window, bounds, &snapshot.spatial.waveform_left, &snapshot.spatial.waveform_right, color(0x56_d3_8f), px(1.5));
+            paint_vectorscope(
+                window,
+                bounds,
+                &snapshot.source.waveform_left,
+                &snapshot.source.waveform_right,
+                color(0x6f_7f_92),
+                px(1.0),
+            );
+            paint_vectorscope(
+                window,
+                bounds,
+                &snapshot.spatial.waveform_left,
+                &snapshot.spatial.waveform_right,
+                color(0x56_d3_8f),
+                px(1.5),
+            );
         },
     )
 }
@@ -404,8 +501,14 @@ fn paint_vectorscope_axes(window: &mut Window, bounds: Bounds<gpui::Pixels>) {
     let center_x = f32::from(bounds.left()) + f32::from(bounds.size.width) * 0.5;
     let center_y = f32::from(bounds.top()) + f32::from(bounds.size.height) * 0.5;
     for (from, to) in [
-        (point(bounds.left(), px(center_y)), point(bounds.right(), px(center_y))),
-        (point(px(center_x), bounds.top()), point(px(center_x), bounds.bottom())),
+        (
+            point(bounds.left(), px(center_y)),
+            point(bounds.right(), px(center_y)),
+        ),
+        (
+            point(px(center_x), bounds.top()),
+            point(px(center_x), bounds.bottom()),
+        ),
     ] {
         let mut builder = PathBuilder::stroke(px(1.0));
         builder.move_to(from);
