@@ -884,14 +884,14 @@ fn desktop_lyrics_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl Into
     let config = &app.config.desktop_lyrics;
     card(
         "桌面歌词",
-        "桌面歌词通过底部播放器“词”按钮显示/隐藏；这里仅配置窗口行为和样式",
+        "桌面歌词通过底部播放器“词”按钮显示/隐藏；这里配置桌面小组件的交互与样式",
         div()
             .flex()
             .flex_col()
             .gap_4()
             .child(toggle_row(
-                "锁定歌词窗口",
-                "锁定后禁止拖动位置，仍可通过快捷键解锁",
+                "锁定桌面歌词",
+                "锁定后禁止拖动组件位置，仍可通过快捷键解锁",
                 "desktop-lyrics-lock",
                 config.locked,
                 cx.listener(|this, _, _, cx| this.toggle_desktop_lyrics_lock(cx)),
@@ -899,7 +899,7 @@ fn desktop_lyrics_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl Into
             .child(div().h(px(1.0)).bg(BORDER_HAIRLINE))
             .child(toggle_row(
                 "始终置顶",
-                "Windows 使用原生 HWND_TOPMOST，不依赖普通弹窗层级",
+                "Windows 使用非激活 TOOLWINDOW 小组件 + HWND_TOPMOST，不进入普通窗口层级",
                 "desktop-lyrics-topmost",
                 config.always_on_top,
                 cx.listener(|this, _, _, cx| this.toggle_desktop_lyrics_topmost(cx)),
@@ -951,7 +951,7 @@ fn desktop_lyrics_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl Into
             ))
             .child(div().flex().justify_end().child(action_button(
                 "desktop-lyrics-reset-bounds",
-                "重置歌词窗口位置",
+                "重置桌面歌词位置",
                 cx.listener(|this, _, _, cx| this.reset_desktop_lyrics_bounds(cx)),
             ))),
     )
