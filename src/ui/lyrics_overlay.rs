@@ -6,8 +6,8 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
-    IntoElement, Subscription, Task, Timer, WeakEntity, WgslShaderSource, Window,
-    WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
+    IntoElement, Subscription, Task, Timer, VerticalRevealEdge, WeakEntity, WgslShaderSource,
+    Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
-const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(280);
+const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(320);
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -189,12 +189,14 @@ impl gpui::Render for DesktopLyricsView {
         let lyrics = if let Some(previous) = self.previous_display.as_ref()
             && let Some(progress) = line_transition_progress
         {
-            // Do not cross-fade two readable sentences in the same place. The outgoing sentence
-            // leaves first; only after it has visibly separated does the incoming sentence become
-            // readable. The travel distance scales with the configured lyric size.
-            let travel = (config.font_size * 0.72).clamp(18.0, 46.0);
-            let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.42);
-            let incoming_progress = desktop_transition_phase(progress, 0.34, 1.0);
+            // Treat the desktop lyric area as one fixed viewport. The previous *current* sentence
+            // exits upward; the new stack is born below the viewport and is revealed upward from
+            // the bottom edge. Crucially we do not render the previous "next" preview here, because
+            // that same semantic line is already the incoming current line.
+            let travel = (config.font_size * 0.92).clamp(24.0, 56.0);
+            let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.46);
+            let incoming_progress = desktop_transition_phase(progress, 0.16, 1.0);
+            let incoming_opacity = desktop_transition_phase(progress, 0.26, 0.78);
 
             let incoming = div()
                 .w_full()
@@ -208,8 +210,16 @@ impl gpui::Render for DesktopLyricsView {
                     incoming_progress,
                 )
                 .with_sampled_animation(
-                    AnimationProperty::opacity(0.0, 1.0),
+                    AnimationProperty::vertical_reveal(
+                        VerticalRevealEdge::Bottom,
+                        0.0,
+                        1.0,
+                    ),
                     incoming_progress,
+                )
+                .with_sampled_animation(
+                    AnimationProperty::opacity(0.0, 1.0),
+                    incoming_opacity,
                 )
                 .into_any_element();
 
@@ -219,11 +229,19 @@ impl gpui::Render for DesktopLyricsView {
                 .absolute()
                 .inset_0()
                 .flex()
-                .child(desktop_lyrics_stack(&previous_complete, &config))
+                .child(desktop_current_group(&previous_complete, &config))
                 .with_sampled_animation(
                     AnimationProperty::translation(
                         point(px(0.0), px(0.0)),
-                        point(px(0.0), px(-travel * 0.72)),
+                        point(px(0.0), px(-travel * 0.78)),
+                    ),
+                    outgoing_progress,
+                )
+                .with_sampled_animation(
+                    AnimationProperty::vertical_reveal(
+                        VerticalRevealEdge::Top,
+                        1.0,
+                        0.0,
                     ),
                     outgoing_progress,
                 )
@@ -362,43 +380,9 @@ fn desktop_lyrics_stack(
     display: &LyricsDisplay,
     config: &crate::settings::DesktopLyricsConfig,
 ) -> gpui::AnyElement {
-    let mut lyrics = div()
-        .w_full()
-        .min_w(px(0.0))
-        .flex_1()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .gap(px(3.0));
+    let mut lyrics = desktop_stack_shell(config)
+        .child(desktop_current_group(display, config));
 
-    lyrics = match config.alignment {
-        DesktopLyricsAlignment::Left => lyrics.items_start(),
-        DesktopLyricsAlignment::Center => lyrics.items_center(),
-        DesktopLyricsAlignment::Right => lyrics.items_end(),
-    };
-
-    lyrics = lyrics.child(animated_current_line(
-        display,
-        config.alignment,
-        config.font_size,
-        config.active_color,
-    ));
-
-    if config.show_translation
-        && let Some(translation) = display
-            .translation
-            .as_ref()
-            .filter(|text| !text.trim().is_empty())
-    {
-        lyrics = lyrics.child(aligned_line(
-            translation.clone(),
-            config.alignment,
-            (config.font_size * 0.52).max(13.0),
-            config.translation_color,
-            gpui::FontWeight::MEDIUM,
-            0.90,
-        ));
-    }
     if config.two_line
         && let Some(next) = display.next.as_ref().filter(|text| !text.trim().is_empty())
     {
@@ -429,6 +413,60 @@ fn desktop_lyrics_stack(
     }
 
     lyrics.into_any_element()
+}
+
+fn desktop_stack_shell(
+    config: &crate::settings::DesktopLyricsConfig,
+) -> gpui::Div {
+    let lyrics = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex_1()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(3.0));
+    match config.alignment {
+        DesktopLyricsAlignment::Left => lyrics.items_start(),
+        DesktopLyricsAlignment::Center => lyrics.items_center(),
+        DesktopLyricsAlignment::Right => lyrics.items_end(),
+    }
+}
+
+fn desktop_current_group(
+    display: &LyricsDisplay,
+    config: &crate::settings::DesktopLyricsConfig,
+) -> gpui::AnyElement {
+    let mut group = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(animated_current_line(
+            display,
+            config.alignment,
+            config.font_size,
+            config.active_color,
+        ));
+
+    if config.show_translation
+        && let Some(translation) = display
+            .translation
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+    {
+        group = group.child(aligned_line(
+            translation.clone(),
+            config.alignment,
+            (config.font_size * 0.52).max(13.0),
+            config.translation_color,
+            gpui::FontWeight::MEDIUM,
+            0.90,
+        ));
+    }
+
+    group.into_any_element()
 }
 
 fn animated_current_line(
