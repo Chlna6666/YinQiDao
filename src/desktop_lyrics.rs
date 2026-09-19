@@ -201,6 +201,10 @@ impl MusicApp {
                             always_on_top,
                         );
                         window.show_window();
+                        // First presentation must not depend on pointer input. This widget is
+                        // NOACTIVATE, so explicitly dirty and request one presentation frame.
+                        window.refresh();
+                        window.request_animation_frame();
                         applied
                     })
                     .unwrap_or(false);
