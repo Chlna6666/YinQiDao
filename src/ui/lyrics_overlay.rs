@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
-    IntoElement, Subscription, Task, Timer, WeakEntity, WgslShaderSource, Window,
+    IntoElement, Subscription, Task, Timer, TransformOrigin, WeakEntity, WgslShaderSource, Window,
     WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
@@ -21,7 +21,7 @@ use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
-const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
+const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(360);
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -150,15 +150,14 @@ impl gpui::Render for DesktopLyricsView {
             .line_transition_started_at
             .map(|started_at| lyric_line_transition_progress(started_at, now))
             .filter(|progress| *progress < 1.0);
-        let karaoke_animating = display
-            .as_ref()
-            .is_some_and(|display| desktop_karaoke_is_animating(display, karaoke_running));
 
-        // WS_EX_NOACTIVATE makes this widget inactive from GPUI's point of view. Engine-owned
-        // visual timelines intentionally pause for inactive windows, so this small widget drives
-        // its sampled compositor state with GPUI's inactive-safe presentation frame request.
-        if line_transition_progress.is_some() || karaoke_animating {
-            window.request_animation_frame();
+        // WS_EX_NOACTIVATE keeps the widget out of foreground focus, but it also means GPUI treats
+        // it as inactive even when HWND_TOPMOST is visible. During playback we deliberately keep
+        // this tiny window dirty and let GPUI's platform/VSync request own cadence. refresh() is
+        // paired with the presentation request so inactive-frame deferral cannot turn karaoke into
+        // one repaint per authored word/line boundary.
+        if karaoke_running || line_transition_progress.is_some() {
+            request_realtime_lyrics_frame(window);
         }
 
         let interacting = self.hovered || self.settings_open;
@@ -195,11 +194,19 @@ impl gpui::Render for DesktopLyricsView {
                 .min_w(px(0.0))
                 .child(lyrics)
                 .with_sampled_animation(
-                    AnimationProperty::translation_opacity(
-                        point(px(0.0), px(8.0)),
+                    AnimationProperty::translation(
+                        point(px(0.0), px(9.0)),
                         point(px(0.0), px(0.0)),
+                    ),
+                    progress,
+                )
+                .with_sampled_animation(
+                    AnimationProperty::scale_opacity(
+                        0.985,
+                        1.0,
                         0.0,
                         1.0,
+                        TransformOrigin::new(0.5, 0.5),
                     ),
                     progress,
                 )
@@ -213,11 +220,19 @@ impl gpui::Render for DesktopLyricsView {
                 .flex()
                 .child(desktop_lyrics_stack(&previous_complete, &config))
                 .with_sampled_animation(
-                    AnimationProperty::translation_opacity(
+                    AnimationProperty::translation(
                         point(px(0.0), px(0.0)),
-                        point(px(0.0), px(-6.0)),
+                        point(px(0.0), px(-7.0)),
+                    ),
+                    progress,
+                )
+                .with_sampled_animation(
+                    AnimationProperty::scale_opacity(
+                        1.0,
+                        0.985,
                         1.0,
                         0.0,
+                        TransformOrigin::new(0.5, 0.5),
                     ),
                     progress,
                 )
@@ -595,27 +610,19 @@ fn lyric_line_transition_progress(started_at: Instant, now: Instant) -> f32 {
     let duration = LYRIC_LINE_TRANSITION_DURATION.as_secs_f32().max(f32::EPSILON);
     let raw = (now.saturating_duration_since(started_at).as_secs_f32() / duration)
         .clamp(0.0, 1.0);
-    1.0 - (1.0 - raw).powi(3)
+    // Symmetric smootherstep makes the line hand-off visibly continuous instead of consuming most
+    // opacity/translation in the first few frames.
+    raw * raw * raw * (raw * (raw * 6.0 - 15.0) + 10.0)
 }
 
-fn desktop_karaoke_is_animating(display: &LyricsDisplay, playing: bool) -> bool {
-    if !playing || display.current_words.is_empty() {
-        return false;
+fn request_realtime_lyrics_frame(window: &mut Window) {
+    if window.is_minimized() {
+        return;
     }
-    let Some(index) = display
-        .current_words
-        .partition_point(|word| word.timestamp_ms <= display.position_ms)
-        .checked_sub(1)
-    else {
-        return false;
-    };
-    let Some(word) = display.current_words.get(index) else {
-        return false;
-    };
-    let Some(duration_ms) = authored_or_inferred_word_duration(&display.current_words, index) else {
-        return false;
-    };
-    display.position_ms < word.timestamp_ms.saturating_add(duration_ms)
+    // Request cadence first so refresh sees a pending frame callback and is not classified as
+    // ordinary inactive/background dirtiness. The platform VSync scheduler still owns timing.
+    window.request_animation_frame();
+    window.refresh();
 }
 
 fn aligned_line(
