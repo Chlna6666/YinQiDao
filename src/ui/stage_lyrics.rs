@@ -438,6 +438,10 @@ impl StageLyricsView {
 
     fn begin_reading_mode(&mut self, cx: &mut Context<Self>) {
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
+        // Reading mode deliberately flattens the depth field. Drop any in-flight automatic
+        // hand-off so returning to playback never replays a stale old->new focus animation.
+        self.focus_from_index = None;
+        self.focus_epoch = self.focus_epoch.wrapping_add(1);
         self.active_word_index = None;
         self.scroll_target = None;
         self.hovered_index = None;
@@ -448,6 +452,8 @@ impl StageLyricsView {
     fn expire_deadlines(&mut self, now: Instant) {
         if self.reading_until.is_some_and(|until| until <= now) {
             self.reading_until = None;
+            self.focus_from_index = None;
+            self.focus_epoch = self.focus_epoch.wrapping_add(1);
             self.active_word_index = self.compute_active_word_index();
             self.scroll_target = self.active_index;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -753,7 +759,7 @@ fn render_lyric_row(
             false,
             karaoke_epoch,
             previous_blur,
-            text_id,
+            "lyric-text-out",
             index,
         )
         .absolute()
