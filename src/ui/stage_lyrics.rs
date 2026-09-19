@@ -761,10 +761,7 @@ fn render_lyric_row(
         text_id,
         index,
     )
-    .with_sampled_animation(
-        AnimationProperty::opacity(current_alpha, current_alpha),
-        1.0,
-    )
+    .opacity(current_alpha)
     .into_any_element();
 
     let mut row = div()
@@ -1100,7 +1097,7 @@ fn stage_primary_lyric(
     animate: bool,
     karaoke_epoch: u64,
 ) -> gpui::AnyElement {
-    if !karaoke_active || !line.enhanced_complete {
+    if !line.enhanced_complete {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -1110,10 +1107,9 @@ fn stage_primary_lyric(
             .into_any_element();
     }
 
-    // Keep authored words as independent nowrap fragments so wrapping still occurs only at semantic
-    // word/syllable boundaries. The bright overlay always keeps its final geometry; GPUI's retained
-    // ClipReveal changes only the renderer content mask, so the active word is shaped and laid out
-    // once while its left-to-right highlight advances at compositor cadence.
+    // Keep exactly the same word-fragment layout whether this line is focused or not. Previously a
+    // line changed from one shaped text run to many flex fragments at the active boundary, causing
+    // rewrap/reflow on the same frame as the scroll hand-off.
     let mut row = div()
         .w_full()
         .min_w(px(0.0))
@@ -1123,14 +1119,24 @@ fn stage_primary_lyric(
         .text_size(px(28.0))
         .font_weight(gpui::FontWeight::SEMIBOLD);
     for (index, word) in line.words.iter().enumerate() {
-        row = row.child(karaoke_word(
-            word,
-            index,
-            current_word,
-            position_ms,
-            animate,
-            karaoke_epoch,
-        ));
+        row = if karaoke_active {
+            row.child(karaoke_word(
+                word,
+                index,
+                current_word,
+                position_ms,
+                animate,
+                karaoke_epoch,
+            ))
+        } else {
+            row.child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                    .child(word.text.clone()),
+            )
+        };
     }
     row.into_any_element()
 }
