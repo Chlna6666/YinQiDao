@@ -96,6 +96,11 @@ impl MusicApp {
                         always_on_top,
                     );
                     window.show_window();
+                    // A hidden NOACTIVATE popup does not automatically get an input-driven first
+                    // frame. Force GPUI to build/present immediately instead of waiting for the
+                    // first mouse move to wake the inactive widget.
+                    window.refresh();
+                    window.request_animation_frame();
                     applied
                 })
                 .is_ok()
@@ -131,6 +136,11 @@ impl MusicApp {
                         always_on_top,
                     );
                     window.show_window();
+                    // A hidden NOACTIVATE popup does not automatically get an input-driven first
+                    // frame. Force GPUI to build/present immediately instead of waiting for the
+                    // first mouse move to wake the inactive widget.
+                    window.refresh();
+                    window.request_animation_frame();
                     applied
                 })
                 .is_ok()
