@@ -21,6 +21,10 @@ const DESKTOP_LYRICS_MIN_WAKE_MS: u64 = 8;
 #[derive(Default)]
 struct DesktopLyricsWindowState {
     window: Option<WindowHandle<DesktopLyricsView>>,
+    /// A hidden HWND is still owned by GPUI until the platform close callback fires.
+    closing: bool,
+    /// A fast off->on toggle while closing is coalesced into one reopen after destruction.
+    reopen_after_close: bool,
 }
 
 impl Global for DesktopLyricsWindowState {}
@@ -49,12 +53,21 @@ impl MusicApp {
         ensure_window_state(cx);
 
         if !self.config.desktop_lyrics.visible {
-            let existing =
-                cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
-            if let Some(window) = existing {
-                let _ = window.update(cx, |_view, window, _cx| window.remove_window());
+            request_overlay_close(cx, false);
+            return;
+        }
+
+        // Never create a second HWND while the previous GPUI window is still in its deferred
+        // destruction phase. A rapid second click merely records one reopen request.
+        let closing = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            if state.closing {
+                state.reopen_after_close = true;
+                true
+            } else {
+                false
             }
-            remove_untracked_overlay_windows(cx);
+        });
+        if closing {
             return;
         }
 
@@ -64,8 +77,14 @@ impl MusicApp {
             let always_on_top = self.config.desktop_lyrics.always_on_top;
             if window
                 .update(cx, |_view, window, _cx| {
+                    // Style first, show second. On Windows this prevents the shell from ever seeing
+                    // the lyric surface as a normal app/taskbar window.
+                    let applied = crate::window_platform::configure_desktop_lyrics_window(
+                        window,
+                        always_on_top,
+                    );
                     window.show_window();
-                    crate::window_platform::configure_desktop_lyrics_window(window, always_on_top)
+                    applied
                 })
                 .is_ok()
             {
@@ -76,7 +95,40 @@ impl MusicApp {
             });
         }
 
-        remove_untracked_overlay_windows(cx);
+        // Recover from old builds that could leave more than one DesktopLyricsView alive. Adopt one
+        // as the canonical widget and synchronously hide/remove every extra surface.
+        let mut overlays = desktop_lyrics_windows(cx).into_iter();
+        if let Some(primary) = overlays.next() {
+            for extra in overlays {
+                let _ = extra.update(cx, |_view, window, _cx| {
+                    window.hide_window();
+                    window.remove_window();
+                });
+            }
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                state.window = Some(primary.clone());
+                state.closing = false;
+                state.reopen_after_close = false;
+            });
+
+            let always_on_top = self.config.desktop_lyrics.always_on_top;
+            if primary
+                .update(cx, |_view, window, _cx| {
+                    let applied = crate::window_platform::configure_desktop_lyrics_window(
+                        window,
+                        always_on_top,
+                    );
+                    window.show_window();
+                    applied
+                })
+                .is_ok()
+            {
+                return;
+            }
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                state.window = None;
+            });
+        }
 
         let config = self.config.desktop_lyrics.clone();
         let width = config.width.clamp(MIN_OVERLAY_WIDTH, 1_600.0);
@@ -98,6 +150,9 @@ impl MusicApp {
             // Desktop lyrics are a widget/panel on every platform, not a document window.
             kind: WindowKind::PopUp,
             focus: false,
+            // Keep the native surface hidden until TOOLWINDOW/NOACTIVATE/POPUP styles have been
+            // applied. Showing first lets Explorer briefly register a taskbar/Alt-Tab entry.
+            show: false,
             is_movable: true,
             // Windows resizing frames opt the HWND back into Snap Layouts. Keep widget geometry
             // application-owned there; other platforms retain their existing resize behavior.
@@ -113,22 +168,31 @@ impl MusicApp {
             Ok(window) => {
                 cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
                     state.window = Some(window.clone());
+                    state.closing = false;
+                    state.reopen_after_close = false;
                 });
                 let always_on_top = config.always_on_top;
                 let applied = window
                     .update(cx, |_view, window, _cx| {
-                        crate::window_platform::configure_desktop_lyrics_window(
+                        let applied = crate::window_platform::configure_desktop_lyrics_window(
                             window,
                             always_on_top,
-                        )
+                        );
+                        window.show_window();
+                        applied
                     })
                     .unwrap_or(false);
                 #[cfg(windows)]
                 if !applied {
-                    tracing::warn!("桌面歌词 HWND 独立窗口样式应用失败");
+                    tracing::warn!("桌面歌词 HWND 小组件样式应用失败");
                 }
             }
             Err(error) => {
+                cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+                    state.window = None;
+                    state.closing = false;
+                    state.reopen_after_close = false;
+                });
                 self.status = format!("打开桌面歌词失败：{error:#}");
                 self.config.desktop_lyrics.visible = false;
                 self.save_config();
@@ -138,13 +202,13 @@ impl MusicApp {
 
     fn recreate_desktop_lyrics_window(&mut self, cx: &mut Context<Self>) {
         ensure_window_state(cx);
-        let existing =
-            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
-        if let Some(window) = existing {
-            let _ = window.update(cx, |_view, window, _cx| window.remove_window());
+        if !self.config.desktop_lyrics.visible {
+            request_overlay_close(cx, false);
+            return;
         }
-        remove_untracked_overlay_windows(cx);
-        if self.config.desktop_lyrics.visible {
+
+        // Recreate only after GPUI confirms that the old native window is gone.
+        if !request_overlay_close(cx, true) {
             self.sync_desktop_lyrics_window(cx);
         }
     }
@@ -160,9 +224,8 @@ impl MusicApp {
         self.config.desktop_lyrics.visible = false;
         self.save_config();
         ensure_window_state(cx);
-        cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
-            state.window = None;
-        });
+        // Hide first so the surface disappears immediately; GPUI owns the actual HWND destruction.
+        request_overlay_close(cx, false);
         cx.notify();
     }
 
@@ -445,6 +508,33 @@ impl MusicApp {
 
 pub(crate) fn initialize(main_window: WindowHandle<MusicApp>, cx: &mut App) {
     ensure_window_state(cx);
+
+    // Window removal is asynchronous with respect to the render/event turn. Keep the closing state
+    // until GPUI tells us the final DesktopLyricsView is actually inaccessible, then perform at most
+    // one coalesced reopen.
+    let reopen_window = main_window.clone();
+    cx.on_window_closed(move |cx| {
+        if !desktop_lyrics_windows(cx).is_empty() {
+            return;
+        }
+
+        let reopen = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            state.window = None;
+            state.closing = false;
+            let reopen = state.reopen_after_close;
+            state.reopen_after_close = false;
+            reopen
+        });
+        if reopen {
+            let _ = reopen_window.update(cx, |app, _window, app_cx| {
+                if app.config.desktop_lyrics.visible {
+                    app.sync_desktop_lyrics_window(app_cx);
+                }
+            });
+        }
+    })
+    .detach();
+
     let _ = main_window.update(cx, |app, _window, app_cx| {
         app.sync_desktop_lyrics_window(app_cx);
     });
@@ -452,11 +542,10 @@ pub(crate) fn initialize(main_window: WindowHandle<MusicApp>, cx: &mut App) {
 
 pub(crate) fn shutdown(cx: &mut App) {
     ensure_window_state(cx);
-    let tracked = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.take());
-    if let Some(window) = tracked {
-        let _ = window.update(cx, |_view, window, _cx| window.remove_window());
-    }
-    remove_untracked_overlay_windows(cx);
+    cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+        state.reopen_after_close = false;
+    });
+    request_overlay_close(cx, false);
 }
 
 fn ensure_window_state(cx: &mut App) {
@@ -465,13 +554,36 @@ fn ensure_window_state(cx: &mut App) {
     }
 }
 
-fn remove_untracked_overlay_windows(cx: &mut App) {
-    let overlays: Vec<_> = cx
-        .windows()
+fn desktop_lyrics_windows(cx: &App) -> Vec<WindowHandle<DesktopLyricsView>> {
+    cx.windows()
         .into_iter()
         .filter_map(|window| window.downcast::<DesktopLyricsView>())
-        .collect();
-    for overlay in overlays {
-        let _ = overlay.update(cx, |_view, window, _cx| window.remove_window());
+        .collect()
+}
+
+fn request_overlay_close(cx: &mut App, reopen_after_close: bool) -> bool {
+    let overlays = desktop_lyrics_windows(cx);
+    if overlays.is_empty() {
+        cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            state.window = None;
+            state.closing = false;
+            state.reopen_after_close = false;
+        });
+        return false;
     }
+
+    cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+        state.closing = true;
+        state.reopen_after_close = reopen_after_close;
+    });
+
+    for overlay in overlays {
+        let _ = overlay.update(cx, |_view, window, _cx| {
+            // Hiding is immediate at the platform level and removes stale taskbar thumbnails /
+            // DirectComposition pixels before the deferred GPUI destruction completes.
+            window.hide_window();
+            window.remove_window();
+        });
+    }
+    true
 }
