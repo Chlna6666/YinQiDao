@@ -20,7 +20,7 @@ use crate::{
 use super::{shell::MusicApp, theme::themed_icon};
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
-const LIST_OVERDRAW_PX: f32 = 120.0;
+const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
 const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
@@ -510,16 +510,22 @@ impl StageLyricsView {
         }
 
         let Some(line_bounds) = self.list_state.bounds_for_item(target) else {
-            let top = self.list_state.logical_scroll_top().item_ix;
-            if target < top || target > top.saturating_add(8) {
+            let adjacent_handoff = self
+                .focus_from_index
+                .is_some_and(|previous| previous.abs_diff(target) <= 2);
+
+            if !adjacent_handoff {
+                // Large seeks may legitimately jump the virtual list close to the destination.
                 self.list_state.scroll_to(ListOffset {
                     item_ix: target.saturating_sub(2),
                     offset_in_item: px(0.0),
                 });
-            } else {
-                self.list_state.scroll_to_reveal_item(target);
+                self.cancel_scroll_animation();
             }
-            self.cancel_scroll_animation();
+
+            // Normal playback must never call scroll_to_reveal_item here. That mutates logical
+            // scroll immediately and causes the whole lyric field to jump before the hand-off
+            // animation starts. Keep the old focus/depth and wait one frame for the overdraw row.
             if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
                 window.request_animation_frame();
             }
@@ -711,16 +717,14 @@ fn render_lyric_row(
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
-    let distance = index.abs_diff(active);
     let (target_alpha, target_blur) =
-        lyric_focus_profile(distance, reading_mode, depth_blur_active);
+        lyric_visual_profile(index, active, reading_mode, depth_blur_active);
     let timestamp = line.timestamp_ms;
     let karaoke_active = index == active && !reading_mode;
 
     let previous_active = focus_from_index.filter(|previous| *previous != active);
     let transition_profile = previous_active.map(|previous| {
-        let previous_distance = index.abs_diff(previous);
-        lyric_focus_profile(previous_distance, reading_mode, depth_blur_active)
+        lyric_visual_profile(index, previous, reading_mode, depth_blur_active)
     });
     let handoff_pending = previous_active.is_some();
     let animate_focus = !reading_mode
@@ -965,6 +969,57 @@ fn lyric_phase_progress(progress: f32, start: f32, end: f32) -> f32 {
 #[inline]
 fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
     from + (to - from) * progress.clamp(0.0, 1.0)
+}
+
+fn lyric_visual_profile(
+    index: usize,
+    active: usize,
+    reading_mode: bool,
+    depth_blur_active: bool,
+) -> (f32, f32) {
+    let distance = index.abs_diff(active);
+    let (mut alpha, mut blur) =
+        lyric_focus_profile(distance, reading_mode, depth_blur_active);
+
+    if reading_mode {
+        return (alpha, blur);
+    }
+
+    let (edge_alpha, edge_blur) = lyric_edge_envelope(index, active);
+    alpha *= edge_alpha;
+    if depth_blur_active {
+        blur += edge_blur;
+    }
+
+    (alpha.clamp(0.0, 1.0), blur)
+}
+
+fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
+    if index == active {
+        return (1.0, 0.0);
+    }
+
+    if index < active {
+        // The focus anchor is above vertical center, so top-edge falloff begins sooner.
+        match active - index {
+            1 | 2 => (1.0, 0.0),
+            3 => (0.88, 0.20),
+            4 => (0.62, 0.55),
+            5 => (0.34, 1.05),
+            6 => (0.14, 1.65),
+            _ => (0.04, 2.20),
+        }
+    } else {
+        // The lower half has more visual room; fade one row later.
+        match index - active {
+            1 | 2 | 3 => (1.0, 0.0),
+            4 => (0.84, 0.20),
+            5 => (0.58, 0.55),
+            6 => (0.30, 1.05),
+            7 => (0.12, 1.65),
+            _ => (0.04, 2.20),
+        }
+    }
 }
 
 fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
@@ -1262,6 +1317,19 @@ mod tests {
         assert_eq!(lyric_focus_profile(5, false, true), (0.28, 2.10));
         assert_eq!(lyric_focus_profile(2, false, false), (0.48, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
+    }
+
+    #[test]
+    fn edge_envelope_fades_before_rows_hit_viewport_boundaries() {
+        assert_eq!(lyric_edge_envelope(10, 10), (1.0, 0.0));
+
+        let upper = lyric_edge_envelope(5, 10);
+        let lower = lyric_edge_envelope(16, 10);
+        assert!(upper.0 < 0.5 && upper.1 > 1.0);
+        assert!(lower.0 < 0.5 && lower.1 > 1.0);
+
+        let far_upper = lyric_edge_envelope(1, 10);
+        assert!(far_upper.0 <= 0.04 && far_upper.1 >= 2.0);
     }
 
     #[test]
