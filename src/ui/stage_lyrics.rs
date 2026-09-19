@@ -149,7 +149,6 @@ pub(super) struct StageLyricsView {
     active_index: Option<usize>,
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
-    motion_epoch: u64,
     karaoke_epoch: u64,
     transport_generation: u64,
     reading_until: Option<Instant>,
@@ -178,7 +177,6 @@ impl StageLyricsView {
             active_index: None,
             active_word_index: None,
             hovered_index: None,
-            motion_epoch: 0,
             karaoke_epoch: 0,
             transport_generation,
             reading_until: None,
@@ -236,7 +234,6 @@ impl StageLyricsView {
             self.active_index = None;
             self.active_word_index = None;
             self.hovered_index = None;
-            self.motion_epoch = self.motion_epoch.wrapping_add(1);
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             self.reading_until = None;
             self.scroll_target = None;
@@ -328,7 +325,6 @@ impl StageLyricsView {
         }
         self.active_index = active;
         self.hovered_index = None;
-        self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
             self.scroll_target = active;
@@ -592,7 +588,6 @@ impl Render for StageLyricsView {
         // compete with the list translation that previously caused low-FPS lyric motion.
         let depth_blur_active = !reading_mode && !scroll_animating;
         let text_id = "lyric-text";
-        let motion_epoch = self.motion_epoch;
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
         let lines = self.lines.clone();
@@ -612,7 +607,6 @@ impl Render for StageLyricsView {
                 text_id,
                 hovered_index == Some(index),
                 !scroll_animating,
-                motion_epoch,
                 karaoke_epoch,
                 view.clone(),
                 parent.clone(),
@@ -685,7 +679,6 @@ fn render_lyric_row(
     text_id: &'static str,
     hovered: bool,
     interactive: bool,
-    motion_epoch: u64,
     karaoke_epoch: u64,
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
@@ -733,30 +726,10 @@ fn render_lyric_row(
         .opacity(if hovered { 1.0 } else { alpha })
         .transition(lyric_focus_transition());
 
-    let text = if index == active && !reading_mode {
-        // Vertical motion already belongs to the retained list's compositor translation. Scaling
-        // the newly active row around its center at the same time creates a second apparent Y
-        // motion, especially for translated/two-line lyrics, which reads as a bounce at every line
-        // hand-off. Keep focus paint-only so row geometry and its visual center stay stable.
-        let active_focus = Animation::from_spec(
-            AnimationSpec::new(Duration::from_millis(150)).ease(Easing::OutCubic),
-        )
-        .with_property(AnimationProperty::opacity(0.80, 1.0));
-        let animation_key = motion_epoch
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(index as u64);
-        text.with_animation(
-            ElementId::NamedInteger(
-                SharedString::new_static("lyric-active-focus"),
-                animation_key,
-            ),
-            active_focus,
-            |element, _| element,
-        )
-        .into_any_element()
-    } else {
-        text.into_any_element()
-    };
+    // The distance-based opacity transition above is the only active-line focus animation. Keeping
+    // one paint transition avoids a second animation timeline restarting on the exact frame where
+    // the retained list begins its vertical hand-off.
+    let text = text.into_any_element();
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -837,7 +810,6 @@ fn render_lyric_row(
             this.position_ms = timestamp;
             this.active_index = Some(index);
             this.active_word_index = this.compute_active_word_index();
-            this.motion_epoch = this.motion_epoch.wrapping_add(1);
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
             cx.notify();
