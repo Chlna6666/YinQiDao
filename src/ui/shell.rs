@@ -68,6 +68,8 @@ pub struct MusicApp {
     pub(crate) library: Option<Library>,
     pub(crate) engine: Option<Arc<AudioEngine>>,
     pub(crate) tracks: Vec<Track>,
+    library_track_ids: Arc<Vec<TrackId>>,
+    track_index_by_id: HashMap<TrackId, usize>,
     pub(crate) output_devices: Vec<crate::audio::OutputDeviceInfo>,
     pub(crate) page: AppPage,
     pub(crate) library_tab: LibraryTab,
@@ -536,6 +538,12 @@ impl MusicApp {
             .as_ref()
             .and_then(|library| library.tracks(None).ok())
             .unwrap_or_default();
+        let library_track_ids = Arc::new(tracks.iter().map(|track| track.id).collect::<Vec<_>>());
+        let track_index_by_id = tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect::<HashMap<_, _>>();
         let output_devices = AudioEngine::output_devices().unwrap_or_default();
         let (library_update_tx, library_update_rx) = std::sync::mpsc::channel();
         let (media_event_tx, media_event_rx) = std::sync::mpsc::channel();
@@ -571,12 +579,12 @@ impl MusicApp {
         } else {
             config.position_ms
         };
-        let queue_matches_tracks = config.queue.len() == tracks.len()
+        let queue_matches_tracks = config.queue.len() == library_track_ids.len()
             && config
                 .queue
                 .iter()
                 .copied()
-                .eq(tracks.iter().map(|track| track.id));
+                .eq(library_track_ids.iter().copied());
 
         let initial_snapshot = PlayerSnapshot {
             state: PlaybackState::Paused,
@@ -615,6 +623,8 @@ impl MusicApp {
             library,
             engine,
             tracks,
+            library_track_ids,
+            track_index_by_id,
             output_devices,
             page: AppPage::Home,
             library_tab: LibraryTab::Songs,
@@ -1080,8 +1090,10 @@ impl MusicApp {
     }
 
     pub(crate) fn ensure_queue(&mut self) {
-        if self.config.queue.is_empty() && !self.tracks.is_empty() {
-            let queue = Arc::new(self.tracks.iter().map(|track| track.id).collect::<Vec<_>>());
+        if self.config.queue.is_empty() && !self.library_track_ids.is_empty() {
+            // The projection is prepared when the library is loaded/refreshed. Playback controls
+            // only clone the Arc, so a click never walks the full library.
+            let queue = self.library_track_ids.clone();
             self.config.queue = queue.clone();
             self.bump_ui_content_revision();
             self.send(PlayerCommand::SetQueue(queue));
@@ -1134,23 +1146,27 @@ impl MusicApp {
     }
 
     pub(crate) fn toggle_play(&mut self, cx: &mut Context<Self>) {
-        self.ensure_queue();
-        if self.snapshot.current_track.is_none()
-            && let Some(first_id) = self
+        // Pause/resume is an O(1) UI command path. Do not rebuild/sync the queue merely because the
+        // transport button was pressed; decoder open, file/network I/O and command execution live
+        // on the audio bridge/worker.
+        if self.snapshot.current_track.is_none() {
+            self.ensure_queue();
+            if let Some(first_id) = self
                 .config
                 .queue
                 .first()
                 .copied()
-                .or_else(|| self.tracks.first().map(|t| t.id))
-        {
-            self.play_track(first_id, cx);
-            return;
+                .or_else(|| self.library_track_ids.first().copied())
+            {
+                self.play_track(first_id, cx);
+                return;
+            }
         }
 
         let state = self
             .engine
             .as_ref()
-            .map_or(self.snapshot.state, |engine| engine.snapshot().state);
+            .map_or(self.snapshot.state, |engine| engine.progress().0);
         let next_state = match state {
             PlaybackState::Playing => PlaybackState::Paused,
             PlaybackState::Paused | PlaybackState::Stopped => PlaybackState::Playing,
@@ -1199,22 +1215,22 @@ impl MusicApp {
         let track_id = track.id;
         let title_lower = track.title.trim().to_lowercase();
         let artist_lower = track.artist.trim().to_lowercase();
+        let tracks = &self.tracks;
+        let track_index_by_id = &self.track_index_by_id;
+        let online_track_cache = &self.online_track_cache;
         self.recent_plays.retain(|id| {
             if *id == track_id {
                 return false;
             }
-            if let Some(t) = self
-                .tracks
-                .iter()
-                .find(|t| t.id == *id)
-                .or_else(|| self.online_track_cache.get(id))
+            let local = track_index_by_id
+                .get(id)
+                .and_then(|index| tracks.get(*index));
+            if let Some(t) = local.or_else(|| online_track_cache.get(id))
+                && !title_lower.is_empty()
+                && t.title.trim().to_lowercase() == title_lower
+                && t.artist.trim().to_lowercase() == artist_lower
             {
-                if !title_lower.is_empty()
-                    && t.title.trim().to_lowercase() == title_lower
-                    && t.artist.trim().to_lowercase() == artist_lower
-                {
-                    return false;
-                }
+                return false;
             }
             true
         });
@@ -1409,7 +1425,7 @@ impl MusicApp {
         };
 
         if !self.queue_matches_tracks {
-            let queue = Arc::new(self.tracks.iter().map(|track| track.id).collect::<Vec<_>>());
+            let queue = self.library_track_ids.clone();
             if !engine.try_send(PlayerCommand::SetQueue(queue.clone())) {
                 self.status = "音频命令队列繁忙，请稍后重试".into();
                 cx.notify();
@@ -1423,7 +1439,12 @@ impl MusicApp {
         if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
             self.reset_progress_for_track_switch();
             self.config.current_track = Some(track_id);
-            if let Some(track) = self.tracks.iter().find(|t| t.id == track_id).cloned() {
+            if let Some(track) = self
+                .track_index_by_id
+                .get(&track_id)
+                .and_then(|index| self.tracks.get(*index))
+                .cloned()
+            {
                 self.record_recent_play(&track);
             } else {
                 self.recent_plays.retain(|id| *id != track_id);
@@ -1841,9 +1862,32 @@ impl MusicApp {
         self.library_refresh_request = self.library_refresh_request.wrapping_add(1);
         let request = self.library_refresh_request;
         let task = Tokio::spawn_result(cx, async move {
-            let tracks = tokio::task::spawn_blocking(move || library.tracks(None)).await??;
-            let engine_tracks = tracks.clone();
-            Ok::<_, anyhow::Error>((tracks, engine_tracks))
+            let (tracks, engine_tracks, library_track_ids, track_index_by_id) =
+                tokio::task::spawn_blocking(move || {
+                    let tracks = library.tracks(None)?;
+                    let library_track_ids =
+                        Arc::new(tracks.iter().map(|track| track.id).collect::<Vec<_>>());
+                    let track_index_by_id = tracks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, track)| (track.id, index))
+                        .collect::<HashMap<_, _>>();
+                    let engine_tracks = tracks.clone();
+                    Ok::<_, anyhow::Error>((
+                        tracks,
+                        engine_tracks,
+                        library_track_ids,
+                        track_index_by_id,
+                    ))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))??;
+            Ok::<_, anyhow::Error>((
+                tracks,
+                engine_tracks,
+                library_track_ids,
+                track_index_by_id,
+            ))
         });
         cx.spawn(async move |this, cx| -> Result<()> {
             let query_result = task.await;
@@ -1852,8 +1896,10 @@ impl MusicApp {
                     return;
                 }
                 match query_result {
-                    Ok((tracks, engine_tracks)) => {
+                    Ok((tracks, engine_tracks, library_track_ids, track_index_by_id)) => {
                         this.tracks = tracks;
+                        this.library_track_ids = library_track_ids;
+                        this.track_index_by_id = track_index_by_id;
                         this.bump_ui_content_revision();
                         this.queue_matches_tracks = false;
                         if let Some(engine) = &this.engine {

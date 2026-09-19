@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
@@ -10,10 +10,6 @@ use crate::artwork::ArtworkPalette;
 use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
 
 const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
-/// Keep the procedural background smooth without turning one retained full-screen GPU view into an
-/// unbounded force-render loop. 60 Hz is above the source video's cadence and leaves the platform
-/// event queue a concrete scheduling boundary between expensive shader frames.
-const FLUID_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
     static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
@@ -119,7 +115,7 @@ impl AppleFluidView {
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match apple_fluid_program() {
             Ok(program) => {
                 self.shader_available = true;
@@ -131,12 +127,10 @@ impl Render for AppleFluidView {
                         .as_secs_f32()
                         .min(0.05);
                     self.animation_seconds = (self.animation_seconds + delta).rem_euclid(21_600.0);
-                    // Do not use request_animation_frame() as a self-sustaining loop here. In the
-                    // pinned GPUI it requests a force-render frame; a full-screen shader doing that
-                    // continuously can monopolize the Windows frame pump while playback is active.
-                    // A deadline invalidation dirties only this retained view and gives input/window
-                    // messages a scheduling boundary between frames.
-                    window.request_invalidation_at(now + FLUID_FRAME_INTERVAL, cx);
+                    // Prewarm/drawer frames keep the full procedural field but do not schedule RAF.
+                    // Once the Stage settles, animation resumes from the exact frozen field already
+                    // on screen, so enabling motion does not change shader branches or color layout.
+                    window.request_animation_frame();
                 }
                 self.last_frame_at = now;
 
