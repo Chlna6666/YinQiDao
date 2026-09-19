@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
-    IntoElement, Subscription, Task, Timer, TransformOrigin, WeakEntity, WgslShaderSource, Window,
+    IntoElement, Subscription, Task, Timer, WeakEntity, WgslShaderSource, Window,
     WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
@@ -21,7 +21,7 @@ use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
-const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(360);
+const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(280);
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -189,26 +189,27 @@ impl gpui::Render for DesktopLyricsView {
         let lyrics = if let Some(previous) = self.previous_display.as_ref()
             && let Some(progress) = line_transition_progress
         {
+            // Do not cross-fade two readable sentences in the same place. The outgoing sentence
+            // leaves first; only after it has visibly separated does the incoming sentence become
+            // readable. The travel distance scales with the configured lyric size.
+            let travel = (config.font_size * 0.72).clamp(18.0, 46.0);
+            let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.48);
+            let incoming_progress = desktop_transition_phase(progress, 0.24, 1.0);
+
             let incoming = div()
                 .w_full()
                 .min_w(px(0.0))
                 .child(lyrics)
                 .with_sampled_animation(
                     AnimationProperty::translation(
-                        point(px(0.0), px(9.0)),
+                        point(px(0.0), px(travel)),
                         point(px(0.0), px(0.0)),
                     ),
-                    progress,
+                    incoming_progress,
                 )
                 .with_sampled_animation(
-                    AnimationProperty::scale_opacity(
-                        0.985,
-                        1.0,
-                        0.0,
-                        1.0,
-                        TransformOrigin::new(0.5, 0.5),
-                    ),
-                    progress,
+                    AnimationProperty::opacity(0.0, 1.0),
+                    incoming_progress,
                 )
                 .into_any_element();
 
@@ -222,19 +223,13 @@ impl gpui::Render for DesktopLyricsView {
                 .with_sampled_animation(
                     AnimationProperty::translation(
                         point(px(0.0), px(0.0)),
-                        point(px(0.0), px(-7.0)),
+                        point(px(0.0), px(-travel * 0.72)),
                     ),
-                    progress,
+                    outgoing_progress,
                 )
                 .with_sampled_animation(
-                    AnimationProperty::scale_opacity(
-                        1.0,
-                        0.985,
-                        1.0,
-                        0.0,
-                        TransformOrigin::new(0.5, 0.5),
-                    ),
-                    progress,
+                    AnimationProperty::opacity(1.0, 0.0),
+                    outgoing_progress,
                 )
                 .into_any_element();
 
@@ -242,6 +237,7 @@ impl gpui::Render for DesktopLyricsView {
                 .relative()
                 .flex_1()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(incoming)
                 .child(outgoing)
                 .into_any_element()
@@ -608,11 +604,17 @@ fn words_cover_primary_text(text: &str, words: &[LyricWord]) -> bool {
 
 fn lyric_line_transition_progress(started_at: Instant, now: Instant) -> f32 {
     let duration = LYRIC_LINE_TRANSITION_DURATION.as_secs_f32().max(f32::EPSILON);
-    let raw = (now.saturating_duration_since(started_at).as_secs_f32() / duration)
-        .clamp(0.0, 1.0);
-    // Symmetric smootherstep makes the line hand-off visibly continuous instead of consuming most
-    // opacity/translation in the first few frames.
-    raw * raw * raw * (raw * (raw * 6.0 - 15.0) + 10.0)
+    (now.saturating_duration_since(started_at).as_secs_f32() / duration).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn desktop_transition_phase(progress: f32, start: f32, end: f32) -> f32 {
+    if end <= start {
+        return 1.0;
+    }
+    let t = ((progress - start) / (end - start)).clamp(0.0, 1.0);
+    // Smootherstep: no abrupt velocity at either end of each phase.
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
 fn request_realtime_lyrics_frame(window: &mut Window) {
