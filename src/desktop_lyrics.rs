@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use gpui::{
     App, AppContext, BorrowAppContext, Bounds, Context, Global, WindowBackgroundAppearance,
@@ -7,7 +7,8 @@ use gpui::{
 
 use crate::{
     hotkeys::LyricsHotkeyAction,
-    model::PlaybackState,
+    lyrics::LyricWord,
+    model::{PlaybackState, TrackId},
     settings::DesktopLyricsAlignment,
     ui::{MusicApp, lyrics_overlay::DesktopLyricsView},
 };
@@ -26,7 +27,11 @@ impl Global for DesktopLyricsWindowState {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct LyricsDisplay {
+    pub track_id: TrackId,
+    pub line_index: usize,
+    pub position_ms: u64,
     pub current: String,
+    pub current_words: Arc<[LyricWord]>,
     pub translation: Option<String>,
     pub next: Option<String>,
     pub next_translation: Option<String>,
@@ -90,14 +95,13 @@ impl MusicApp {
             titlebar: None,
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(MIN_OVERLAY_WIDTH), px(MIN_OVERLAY_HEIGHT))),
-            kind: if cfg!(windows) || config.always_on_top {
-                WindowKind::PopUp
-            } else {
-                WindowKind::Normal
-            },
+            // Desktop lyrics are a widget/panel on every platform, not a document window.
+            kind: WindowKind::PopUp,
             focus: false,
             is_movable: true,
-            is_resizable: true,
+            // Windows resizing frames opt the HWND back into Snap Layouts. Keep widget geometry
+            // application-owned there; other platforms retain their existing resize behavior.
+            is_resizable: !cfg!(windows),
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
@@ -261,12 +265,33 @@ impl MusicApp {
     }
 
     pub(crate) fn reset_desktop_lyrics_bounds(&mut self, cx: &mut Context<Self>) {
-        self.config.desktop_lyrics.x = None;
-        self.config.desktop_lyrics.y = None;
-        self.config.desktop_lyrics.width = 760.0;
-        self.config.desktop_lyrics.height = 148.0;
+        let width = 760.0;
+        let height = 148.0;
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+        self.config.desktop_lyrics.x = Some(f32::from(bounds.origin.x));
+        self.config.desktop_lyrics.y = Some(f32::from(bounds.origin.y));
+        self.config.desktop_lyrics.width = width;
+        self.config.desktop_lyrics.height = height;
         self.save_config();
-        self.recreate_desktop_lyrics_window(cx);
+
+        ensure_window_state(cx);
+        let overlay =
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
+        let moved = overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                overlay
+                    .update(cx, |_view, window, _cx| {
+                        crate::window_platform::set_desktop_lyrics_bounds(window, bounds)
+                    })
+                    .unwrap_or(false)
+            });
+
+        // Windows keeps the same HWND, avoiding a one-frame duplicate DirectComposition surface.
+        // Platforms without direct geometry support fall back to the previous recreate path.
+        if self.config.desktop_lyrics.visible && !moved {
+            self.recreate_desktop_lyrics_window(cx);
+        }
         cx.notify();
     }
 
@@ -331,8 +356,16 @@ impl MusicApp {
                 .map(str::trim)
                 .find(|line| !line.is_empty())?
                 .to_owned();
+            let position_ms = self
+                .engine
+                .as_ref()
+                .map_or(self.snapshot.position_ms, |engine| engine.progress().1);
             return Some(LyricsDisplay {
+                track_id: track.id,
+                line_index: 0,
+                position_ms,
                 current,
+                current_words: Arc::from(Vec::<LyricWord>::new()),
                 translation: None,
                 next: None,
                 next_translation: None,
@@ -350,7 +383,11 @@ impl MusicApp {
         let current = &lines[index];
         let next = lines.get(index + 1);
         Some(LyricsDisplay {
+            track_id: track.id,
+            line_index: index,
+            position_ms,
             current: current.text.clone(),
+            current_words: current.words.clone(),
             translation: current
                 .translation
                 .as_deref()
@@ -372,7 +409,7 @@ impl MusicApp {
         }
         let track = self.snapshot.current_track.as_ref()?;
         let lines = self.lyrics.get(&track.id)?.timed_lines();
-        if lines.len() < 2 {
+        if lines.is_empty() {
             return None;
         }
         let position_ms = self
@@ -383,9 +420,23 @@ impl MusicApp {
             .iter()
             .rposition(|line| line.timestamp_ms <= position_ms)
             .unwrap_or(0);
-        let next = lines.get(index + 1)?;
+        let line = &lines[index];
+
+        // Wake only at semantic lyric boundaries. Word sweep itself is compositor-driven; the CPU
+        // wakes once for the next authored word/syllable or the next line, whichever comes first.
+        let mut next_timestamp = lines.get(index + 1).map(|line| line.timestamp_ms);
+        let next_word_index = line
+            .words
+            .partition_point(|word| word.timestamp_ms <= position_ms);
+        if let Some(word) = line.words.get(next_word_index) {
+            next_timestamp = Some(
+                next_timestamp.map_or(word.timestamp_ms, |current| current.min(word.timestamp_ms)),
+            );
+        }
+
+        let timestamp = next_timestamp?;
         Some(Duration::from_millis(
-            next.timestamp_ms
+            timestamp
                 .saturating_sub(position_ms)
                 .max(DESKTOP_LYRICS_MIN_WAKE_MS),
         ))
