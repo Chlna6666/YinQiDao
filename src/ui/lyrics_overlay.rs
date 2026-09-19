@@ -209,12 +209,17 @@ impl gpui::Render for DesktopLyricsView {
                 )
                 .into_any_element();
 
+            let mut previous_complete = previous.clone();
+            // The outgoing line represents the just-finished semantic line, not the last CPU
+            // boundary sample we happened to retain. Force its karaoke mask to the completed state
+            // before fading it away so the final syllable never freezes half-highlighted.
+            previous_complete.position_ms = u64::MAX;
             let outgoing = div()
                 .absolute()
                 .inset_0()
                 .flex()
                 .child(desktop_lyrics_stack(
-                    previous,
+                    &previous_complete,
                     &config,
                     false,
                     key.wrapping_sub(1),
@@ -952,4 +957,47 @@ fn build_lyrics_liquid_glass_mesh() -> Result<Arc<GpuMesh3d>, String> {
         shader,
     );
     Ok(Arc::new(mesh))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(timestamp_ms: u64, duration_ms: Option<u64>, text: &str) -> LyricWord {
+        LyricWord {
+            timestamp_ms,
+            duration_ms,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn desktop_karaoke_requires_exact_authored_text_coverage() {
+        let words = [
+            word(1_000, Some(300), "Hello "),
+            word(1_300, Some(400), "world"),
+        ];
+        assert!(words_cover_primary_text("Hello world", &words));
+        assert!(!words_cover_primary_text("Hello, world", &words));
+        assert!(!words_cover_primary_text("Hello world!", &words));
+    }
+
+    #[test]
+    fn desktop_karaoke_infers_enhanced_lrc_duration_from_next_word() {
+        let words = [
+            word(1_000, None, "A"),
+            word(1_450, None, "B"),
+        ];
+        assert_eq!(authored_or_inferred_word_duration(&words, 0), Some(450));
+        assert_eq!(authored_or_inferred_word_duration(&words, 1), None);
+    }
+
+    #[test]
+    fn desktop_karaoke_progress_is_continuous_for_authored_duration() {
+        let word = word(2_000, Some(400), "AB");
+        assert_eq!(word_reveal_progress(&word, Some(400), 1_999), 0.0);
+        assert_eq!(word_reveal_progress(&word, Some(400), 2_000), 0.0);
+        assert!((word_reveal_progress(&word, Some(400), 2_200) - 0.5).abs() < 0.001);
+        assert_eq!(word_reveal_progress(&word, Some(400), 2_400), 1.0);
+    }
 }
