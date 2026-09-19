@@ -292,6 +292,12 @@ impl Library {
     }
 
     pub fn enrichment(&self, track: &Track) -> Result<StoredEnrichment> {
+        if track.id <= 0 {
+            return Ok(StoredEnrichment {
+                checked_online: false,
+                lyrics: None,
+            });
+        }
         let stored = self.with_connection(|connection| {
             connection
                 .query_row(
@@ -332,6 +338,9 @@ impl Library {
         enrichment: &EnrichmentResult,
         artwork_key: Option<&str>,
     ) -> Result<()> {
+        if track_id <= 0 {
+            return Ok(());
+        }
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if let Some(metadata) = &enrichment.metadata {
@@ -464,7 +473,8 @@ fn load_playlist_summaries(connection: &mut Connection) -> Result<Vec<LocalPlayl
             track_count,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn initialize_schema(connection: &mut Connection) -> Result<()> {
@@ -656,6 +666,39 @@ mod tests {
         assert_eq!(library.roots().expect("roots"), vec![root.clone()]);
         assert!(library.playlist_summaries().is_empty());
         fs::remove_dir_all(root).expect("cleanup root");
+        fs::remove_file(path).expect("cleanup db");
+    }
+
+    #[test]
+    fn enrichment_safely_ignores_negative_online_track_ids() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("yinqidao-library-negative-id-{suffix}.db"));
+        let library = Library::new(path.clone()).expect("database");
+
+        let dummy = Track::new(crate::model::TrackData {
+            id: -1,
+            path: PathBuf::from("remote://stream"),
+            title: "Remote".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            year: None,
+            genre: None,
+            duration_ms: 0,
+            codec: "MP3".into(),
+            sample_rate: 44_100,
+            channels: 2,
+            artwork_key: None,
+        });
+        let res = library.enrichment(&dummy).expect("enrichment");
+        assert!(!res.checked_online);
+        assert!(res.lyrics.is_none());
+
+        let enrichment_res = crate::online::EnrichmentResult::default();
+        assert!(library.apply_enrichment(-1, &enrichment_res, None).is_ok());
+
         fs::remove_file(path).expect("cleanup db");
     }
 }
