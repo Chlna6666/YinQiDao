@@ -4418,7 +4418,6 @@ impl Render for MusicApp {
         self.start_background_work(cx);
         self.start_runtime_events(cx);
         self.ensure_plugin_sessions_restored(cx);
-        let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
 
         let now = std::time::Instant::now();
 
@@ -4497,32 +4496,91 @@ impl Render for MusicApp {
 
         self.arm_stage_transition_after_present(window, cx);
 
-        let main_page = match self.page {
-            AppPage::Player => {
-                if self.previous_page == AppPage::Player {
-                    AppPage::Home
-                } else {
-                    self.previous_page
-                }
-            }
-            page => page,
-        };
+        let stage_fully_covering =
+            self.stage_open && self.stage_progress >= 0.999 && !self.stage_animating;
 
-        let home_page = self.ensure_home_page(cx);
-        let library_page = self.ensure_library_page(cx);
-        let online_playlist_page = self.ensure_online_playlist_page(cx);
-        let search_input = self.ensure_search_input(cx);
-
-        let content = if self.stage_open && self.stage_progress >= 0.999 && !self.stage_animating {
-            div().into_any_element()
+        // Once the immersive Stage fully covers the window, do not even synchronize/build the
+        // hidden application shell. This removes sidebar/online-playlist/mini-player work from
+        // transport and drag frames.
+        let base_shell = if stage_fully_covering {
+            div()
+                .size_full()
+                .bg(theme::BG_CANVAS)
+                .into_any_element()
         } else {
-            match main_page {
+            let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
+            let main_page = match self.page {
+                AppPage::Player => {
+                    if self.previous_page == AppPage::Player {
+                        AppPage::Home
+                    } else {
+                        self.previous_page
+                    }
+                }
+                page => page,
+            };
+
+            let home_page = self.ensure_home_page(cx);
+            let library_page = self.ensure_library_page(cx);
+            let online_playlist_page = self.ensure_online_playlist_page(cx);
+            let search_input = self.ensure_search_input(cx);
+            let content = match main_page {
                 AppPage::Home => home_page.clone().into_any_element(),
                 AppPage::Library => library_page.into_any_element(),
                 AppPage::Player => home_page.into_any_element(),
                 AppPage::Settings => settings_page::render(self, cx),
                 AppPage::OnlinePlaylist => online_playlist_page.into_any_element(),
-            }
+            };
+
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(theme::BG_CANVAS)
+                .text_color(theme::TEXT_PRIMARY)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    let modifiers = event.keystroke.modifiers;
+                    if this.acoustid_key_active {
+                        this.update_acoustid_key(key, cx);
+                    } else if modifiers.control && key.eq_ignore_ascii_case("f") {
+                        this.search_active = true;
+                        if let Some(input) = &this.search_input {
+                            let handle = input.read(cx).focus_handle(cx);
+                            window.focus(&handle);
+                        }
+                        cx.notify();
+                    } else if key == "space" {
+                        this.toggle_play(cx);
+                    } else if key == "left" {
+                        this.seek_relative(-10_000, cx);
+                    } else if key == "right" {
+                        this.seek_relative(10_000, cx);
+                    }
+                }))
+                .child(self.custom_titlebar(window, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .child(sidebar(self, search_input, cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .h_full()
+                                .overflow_hidden()
+                                .child(content),
+                        ),
+                )
+                .child(player::mini_player(
+                    self,
+                    cx,
+                    playback_progress,
+                    playback_time,
+                ))
+                .into_any_element()
         };
 
         let stage_drawer = if stage_surface_needed {
@@ -4664,56 +4722,7 @@ impl Render for MusicApp {
                     }
                 }),
             )
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .bg(theme::BG_CANVAS)
-                    .text_color(theme::TEXT_PRIMARY)
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        let key = event.keystroke.key.as_str();
-                        let modifiers = event.keystroke.modifiers;
-                        if this.acoustid_key_active {
-                            this.update_acoustid_key(key, cx);
-                        } else if modifiers.control && key.eq_ignore_ascii_case("f") {
-                            this.search_active = true;
-                            if let Some(input) = &this.search_input {
-                                let handle = input.read(cx).focus_handle(cx);
-                                window.focus(&handle);
-                            }
-                            cx.notify();
-                        } else if key == "space" {
-                            this.toggle_play(cx);
-                        } else if key == "left" {
-                            this.seek_relative(-10_000, cx);
-                        } else if key == "right" {
-                            this.seek_relative(10_000, cx);
-                        }
-                    }))
-                    .child(self.custom_titlebar(window, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .child(sidebar(self, search_input, cx))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .h_full()
-                                    .overflow_hidden()
-                                    .child(content),
-                            ),
-                    )
-                    .child(player::mini_player(
-                        self,
-                        cx,
-                        playback_progress,
-                        playback_time,
-                    )),
-            )
+            .child(base_shell)
             .children(stage_drawer)
             .children(global_modal)
     }
