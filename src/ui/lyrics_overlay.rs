@@ -6,8 +6,8 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
-    IntoElement, Subscription, Task, Timer, VerticalRevealEdge, WeakEntity, WgslShaderSource,
-    Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
+    IntoElement, Subscription, Task, Timer, TransformOrigin, WeakEntity, WgslShaderSource, Window,
+    WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use super::shell::MusicApp;
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
-const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(320);
+const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(260);
 const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
@@ -189,14 +189,12 @@ impl gpui::Render for DesktopLyricsView {
         let lyrics = if let Some(previous) = self.previous_display.as_ref()
             && let Some(progress) = line_transition_progress
         {
-            // Treat the desktop lyric area as one fixed viewport. The previous *current* sentence
-            // exits upward; the new stack is born below the viewport and is revealed upward from
-            // the bottom edge. Crucially we do not render the previous "next" preview here, because
-            // that same semantic line is already the incoming current line.
-            let travel = (config.font_size * 0.92).clamp(24.0, 56.0);
+            // Promote the already-visible next lyric into the current slot instead of replaying a
+            // long entrance animation. The new stack is readable from frame one, reaches the slot
+            // quickly, then spends the remaining time only on a small spring settle.
+            let travel = (config.font_size * 0.58).clamp(14.0, 34.0);
+            let spring_progress = desktop_spring_progress(progress);
             let outgoing_progress = desktop_transition_phase(progress, 0.0, 0.46);
-            let incoming_progress = desktop_transition_phase(progress, 0.16, 1.0);
-            let incoming_opacity = desktop_transition_phase(progress, 0.26, 0.78);
 
             let incoming = div()
                 .w_full()
@@ -207,19 +205,17 @@ impl gpui::Render for DesktopLyricsView {
                         point(px(0.0), px(travel)),
                         point(px(0.0), px(0.0)),
                     ),
-                    incoming_progress,
+                    spring_progress,
                 )
                 .with_sampled_animation(
-                    AnimationProperty::vertical_reveal(
-                        VerticalRevealEdge::Bottom,
-                        0.0,
+                    AnimationProperty::scale_opacity(
+                        0.90,
                         1.0,
+                        0.82,
+                        1.0,
+                        TransformOrigin::new(0.5, 0.5),
                     ),
-                    incoming_progress,
-                )
-                .with_sampled_animation(
-                    AnimationProperty::opacity(0.0, 1.0),
-                    incoming_opacity,
+                    spring_progress,
                 )
                 .into_any_element();
 
@@ -233,15 +229,7 @@ impl gpui::Render for DesktopLyricsView {
                 .with_sampled_animation(
                     AnimationProperty::translation(
                         point(px(0.0), px(0.0)),
-                        point(px(0.0), px(-travel * 0.78)),
-                    ),
-                    outgoing_progress,
-                )
-                .with_sampled_animation(
-                    AnimationProperty::vertical_reveal(
-                        VerticalRevealEdge::Top,
-                        1.0,
-                        0.0,
+                        point(px(0.0), px(-travel * 1.10)),
                     ),
                     outgoing_progress,
                 )
@@ -643,6 +631,15 @@ fn words_cover_primary_text(text: &str, words: &[LyricWord]) -> bool {
 fn lyric_line_transition_progress(started_at: Instant, now: Instant) -> f32 {
     let duration = LYRIC_LINE_TRANSITION_DURATION.as_secs_f32().max(f32::EPSILON);
     (now.saturating_duration_since(started_at).as_secs_f32() / duration).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn desktop_spring_progress(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    // Light under-damped spring: ~98% of the travel is complete around 40% of the timeline, with
+    // only a small overshoot/settle afterwards. This keeps lyric timing readable instead of hiding
+    // the current sentence behind a long decorative transition.
+    1.0 - (-7.5 * t).exp() * (9.5 * t).cos()
 }
 
 #[inline]
