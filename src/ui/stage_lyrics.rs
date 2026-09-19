@@ -25,12 +25,12 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
 const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(420);
-const LYRIC_ROW_STAGGER_MS: f32 = 36.0;
-const LYRIC_ROW_MOTION_MS: f32 = 250.0;
+const LYRIC_ROW_STAGGER_MS: f32 = 28.0;
+const LYRIC_ROW_MOTION_MS: f32 = 270.0;
 const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 4;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
-const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 4;
+const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 2;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -640,9 +640,9 @@ impl Render for StageLyricsView {
         let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
         let focus_progress = self.focus_handoff_progress(frame_now);
         let focus_animating = focus_progress.is_some_and(|progress| progress < 1.0);
-        if scroll_animating || focus_animating {
-            window.request_animation_frame();
-        }
+        // Frame cadence is owned by the retained lyric subtree below. Avoid whole-view animation
+        // notifications here: rebuilding every Stage sibling at 60/120 Hz made otherwise-correct
+        // row staggering look uneven under blur load.
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // 220 ms scroll made every line become equally sharp during the transition, producing the
         // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
@@ -683,7 +683,9 @@ impl Render for StageLyricsView {
         .pb(px(LYRIC_LIST_PADDING_BOTTOM))
         .pr(px(8.0));
 
-        let lyrics = lyrics.into_any_element();
+        let lyrics = lyrics
+            .with_layout_animation_target(scroll_animating || focus_animating)
+            .into_any_element();
 
         div()
             .id("stage-lyrics-view")
