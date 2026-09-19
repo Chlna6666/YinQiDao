@@ -348,11 +348,12 @@ impl gpui::Render for DesktopLyricsView {
                 .child(toolbar_button(
                     "desktop-lyrics-close",
                     "×",
-                    move |_, window, cx| {
+                    move |_, _window, cx| {
+                        // The owner serializes hide -> native close -> optional reopen. Do not call
+                        // remove_window a second time here or clear the tracked handle prematurely.
                         let _ = close_parent.update(cx, |app, app_cx| {
                             app.desktop_lyrics_window_closed(app_cx);
                         });
-                        window.remove_window();
                     },
                 ));
             root = root.child(toolbar);
