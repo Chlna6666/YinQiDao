@@ -36,8 +36,74 @@ use super::{
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
+const ONLINE_ASSET_LOOKAHEAD: usize = 2;
+const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
+
+fn online_source_key(
+    route: &crate::plugin::abi::PluginRoute,
+    source: &crate::plugin::abi::SourceTrackRef,
+) -> (String, String, String, String) {
+    (
+        route.plugin_id.clone(),
+        route.provider_id.clone(),
+        route.account_id.clone(),
+        source.source_id.clone(),
+    )
+}
+
+async fn load_online_lyrics_cached_or_remote(
+    playback_cache: Option<PlaybackAssetCache>,
+    route: crate::plugin::abi::PluginRoute,
+    source: crate::plugin::abi::SourceTrackRef,
+) -> Result<Option<LyricsDocument>> {
+    if let Some(cache) = playback_cache.clone() {
+        let source_for_cache = source.clone();
+        match tokio::task::spawn_blocking(move || cache.load_lyrics(&source_for_cache)).await {
+            Ok(Ok(Some(document))) => return Ok(Some(document)),
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(error = %error, "读取在线歌词缓存失败，回退插件请求");
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "在线歌词缓存读取任务异常，回退插件请求");
+            }
+        }
+    }
+
+    let frontend =
+        crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+    let result = frontend.lyrics_for_route(&route, &source).await?;
+    let Some(document) = result.value else {
+        return Ok(None);
+    };
+    let Some(document) =
+        crate::plugin::frontend::plugin_lyrics_to_player(document, &route.provider_id)?
+    else {
+        return Ok(None);
+    };
+
+    if let Some(cache) = playback_cache {
+        let source_for_store = source.clone();
+        let document_for_store = document.clone();
+        match tokio::task::spawn_blocking(move || {
+            cache.store_lyrics(&source_for_store, &document_for_store)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(error = %error, "写入在线歌词缓存失败");
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "在线歌词缓存写入任务异常");
+            }
+        }
+    }
+
+    Ok(Some(document))
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DragTarget {
@@ -169,6 +235,12 @@ pub struct MusicApp {
         ),
     >,
     pub(crate) online_track_buffering: Option<String>,
+    online_play_request_generation: u64,
+    online_play_task: Option<gpui::Task<()>>,
+    online_preload_generation: u64,
+    online_audio_preload_task: Option<gpui::Task<()>>,
+    online_asset_preload_task: Option<gpui::Task<()>>,
+    online_preloaded_tracks: HashMap<(String, String, String, String), Track>,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
     pub(crate) online_track_cache: HashMap<TrackId, Track>,
     pub(crate) online_remote_tracks: HashMap<
@@ -768,6 +840,12 @@ impl MusicApp {
             recent_plays: Vec::new(),
             online_playback_meta: initial_online_playback_meta,
             online_track_buffering: None,
+            online_play_request_generation: 0,
+            online_play_task: None,
+            online_preload_generation: 0,
+            online_audio_preload_task: None,
+            online_asset_preload_task: None,
+            online_preloaded_tracks: HashMap::new(),
             online_playlist_cache: HashMap::new(),
             online_track_cache: initial_online_cache,
             online_remote_tracks: initial_online_remote_tracks,
@@ -819,6 +897,9 @@ impl MusicApp {
         self.online_authenticated = is_auth;
 
         if !has_plugins {
+            self.cancel_online_play_request();
+            self.cancel_online_preload_tasks();
+            self.online_preloaded_tracks.clear();
             self.online_daily_tracks.clear();
             self.online_playlists.clear();
             self.online_user_playlists.clear();
@@ -1197,10 +1278,182 @@ impl MusicApp {
         }
     }
 
+    fn cancel_online_play_request(&mut self) {
+        self.online_play_request_generation =
+            self.online_play_request_generation.wrapping_add(1);
+        self.online_track_buffering = None;
+        // gpui_tokio::Tokio::spawn_result is cancellation-safe: dropping the owning GPUI task
+        // cancels the Tokio request as well, so superseded stream materializations do not keep
+        // consuming bandwidth in the background.
+        self.online_play_task.take();
+    }
+
+    fn cancel_online_preload_tasks(&mut self) {
+        self.online_preload_generation = self.online_preload_generation.wrapping_add(1);
+        self.online_audio_preload_task.take();
+        self.online_asset_preload_task.take();
+    }
+
+    fn online_playlist_lookahead(
+        &self,
+        max_items: usize,
+    ) -> Option<(
+        crate::plugin::abi::PluginRoute,
+        Vec<crate::plugin::abi::RemoteTrack>,
+    )> {
+        let queue = self.online_playlist_queue.as_ref()?;
+        if queue.tracks.len() <= 1 || self.config.repeat == RepeatMode::One {
+            return None;
+        }
+
+        let mut tracks = Vec::with_capacity(max_items.min(queue.tracks.len().saturating_sub(1)));
+        for step in 1..=max_items {
+            let raw_index = queue.current_index.saturating_add(step);
+            let index = if raw_index < queue.tracks.len() {
+                raw_index
+            } else if self.config.repeat == RepeatMode::All {
+                raw_index % queue.tracks.len()
+            } else {
+                break;
+            };
+            if index == queue.current_index {
+                break;
+            }
+            tracks.push(queue.tracks[index].clone());
+        }
+        (!tracks.is_empty()).then(|| (queue.route.clone(), tracks))
+    }
+
+    fn schedule_online_playlist_prefetch(&mut self, cx: &mut Context<Self>) {
+        self.cancel_online_preload_tasks();
+
+        let Some((route, candidates)) =
+            self.online_playlist_lookahead(ONLINE_ASSET_LOOKAHEAD)
+        else {
+            self.online_preloaded_tracks.clear();
+            return;
+        };
+        let generation = self.online_preload_generation;
+
+        // Artwork is tiny after image_cache normalization and already deduplicated by URL. Warm at
+        // most two covers so the next rows/stage never wait for network.
+        for remote in &candidates {
+            if let Some(url) = remote.cover_url.as_deref() {
+                crate::ui::image_cache::fetch_detached(url);
+            }
+        }
+
+        // Lyrics are also bounded to the next two tracks. Run them concurrently, persist only the
+        // canonical Host document, and never allocate future TrackIds merely to cache lyrics.
+        let asset_route = route.clone();
+        let asset_candidates = candidates.clone();
+        let playback_cache = self.playback_cache.clone();
+        let asset_task = Tokio::spawn_result(cx, async move {
+            let mut joins = tokio::task::JoinSet::new();
+
+            for remote in asset_candidates {
+                let route = asset_route.clone();
+                let cache = playback_cache.clone();
+                joins.spawn(async move {
+                    let _ = load_online_lyrics_cached_or_remote(
+                        cache,
+                        route,
+                        remote.source,
+                    )
+                    .await?;
+                    Ok::<(), anyhow::Error>(())
+                });
+            }
+
+            while let Some(result) = joins.join_next().await {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(error = %error, "在线歌词预加载失败");
+                    }
+                    Err(error) => {
+                        tracing::debug!(error = %error, "在线歌词预加载任务异常退出");
+                    }
+                }
+            }
+            Ok(())
+        });
+        self.online_asset_preload_task = Some(cx.spawn(async move |_this, _cx| {
+            let _ = asset_task.await;
+        }));
+
+        // Full stream materialization is deliberately limited to exactly one track ahead. It starts
+        // after a short dwell so rapid browsing does not download every skipped song. Once that next
+        // track becomes current the pipeline advances and warms the following track.
+        let next_remote = candidates[0].clone();
+        let next_key = online_source_key(&route, &next_remote.source);
+        self.online_preloaded_tracks
+            .retain(|key, _| key == &next_key);
+        if self.online_preloaded_tracks.contains_key(&next_key) {
+            return;
+        }
+
+        let audio_route = route;
+        self.online_audio_preload_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(ONLINE_AUDIO_PRELOAD_DELAY).await;
+            let should_start = this
+                .update(cx, |app, _| {
+                    app.online_preload_generation == generation
+                        && matches!(
+                            app.snapshot.state,
+                            PlaybackState::Loading | PlaybackState::Playing
+                        )
+                })
+                .unwrap_or(false);
+            if !should_start {
+                return;
+            }
+
+            let remote_for_prepare = next_remote.clone();
+            let route_for_prepare = audio_route.clone();
+            let task = Tokio::spawn_result(cx, async move {
+                let frontend = crate::plugin::frontend::global()
+                    .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
+                let result = frontend
+                    .prepare_remote_track_for_route(
+                        &route_for_prepare,
+                        &remote_for_prepare,
+                        None,
+                    )
+                    .await?;
+                result
+                    .value
+                    .map(|prepared| prepared.into_track())
+                    .ok_or_else(|| anyhow!("预加载下一首在线音频失败"))
+            });
+            let result = task.await;
+
+            let _ = this.update(cx, |app, _| {
+                if app.online_preload_generation != generation {
+                    return;
+                }
+                if let Ok(track) = result {
+                    app.online_preloaded_tracks.clear();
+                    app.online_preloaded_tracks.insert(next_key, track);
+                }
+            });
+        }));
+    }
+
     pub(crate) fn toggle_play(&mut self, cx: &mut Context<Self>) {
-        // Pause/resume is an O(1) UI command path. Do not rebuild/sync the queue merely because the
-        // transport button was pressed; decoder open, file/network I/O and command execution live
-        // on the audio bridge/worker.
+        // Pause/resume is an O(1) UI command path. A transport click also supersedes any unresolved
+        // online switch immediately instead of waiting for its network/materialization task.
+        let cancelled_pending_online = self.online_track_buffering.is_some();
+        if cancelled_pending_online {
+            self.cancel_online_play_request();
+            if self.snapshot.current_track.is_none() {
+                self.cancel_online_preload_tasks();
+                self.online_preloaded_tracks.clear();
+                self.snapshot.state = PlaybackState::Stopped;
+                cx.notify();
+                return;
+            }
+        }
         if self.snapshot.current_track.is_none() {
             self.ensure_queue();
             if let Some(first_id) = self
@@ -1230,10 +1483,16 @@ impl MusicApp {
             PlayerCommand::Play
         };
         self.snapshot.state = next_state;
+        if state == PlaybackState::Playing {
+            self.cancel_online_preload_tasks();
+        }
         cx.notify();
 
         if self.send(command) {
             self.save_config();
+            if next_state == PlaybackState::Playing {
+                self.schedule_online_playlist_prefetch(cx);
+            }
         } else {
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
@@ -1242,14 +1501,21 @@ impl MusicApp {
 
     #[allow(dead_code)]
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
-        if self.send(PlayerCommand::Stop) {
-            self.snapshot.state = PlaybackState::Stopped;
-            self.snapshot.position_ms = 0;
-            self.position_ms = 0;
-            self.config.position_ms = 0;
-            self.save_config();
-        }
+        self.cancel_online_play_request();
+        self.cancel_online_preload_tasks();
+        self.online_preloaded_tracks.clear();
+        self.snapshot.state = PlaybackState::Stopped;
+        self.snapshot.position_ms = 0;
+        self.position_ms = 0;
+        self.config.position_ms = 0;
         cx.notify();
+
+        if self.send(PlayerCommand::Stop) {
+            self.save_config();
+        } else {
+            self.status = "音频输出不可用，请检查默认音频设备".into();
+            cx.notify();
+        }
     }
 
     fn reset_progress_for_track_switch(&mut self) {
@@ -1318,26 +1584,34 @@ impl MusicApp {
     }
 
     pub(crate) fn next(&mut self, cx: &mut Context<Self>) {
-        if let Some(queue) = &mut self.online_playlist_queue {
-            if !queue.tracks.is_empty() {
+        if self
+            .online_playlist_queue
+            .as_ref()
+            .is_some_and(|queue| !queue.tracks.is_empty())
+        {
+            let next = {
+                let queue = self
+                    .online_playlist_queue
+                    .as_mut()
+                    .expect("online playlist queue checked above");
                 let next_idx = match self.config.repeat {
-                    RepeatMode::One => queue.current_index,
-                    RepeatMode::All => (queue.current_index + 1) % queue.tracks.len(),
-                    RepeatMode::Off => {
-                        if queue.current_index + 1 < queue.tracks.len() {
-                            queue.current_index + 1
-                        } else {
-                            self.send(PlayerCommand::Stop);
-                            return;
-                        }
-                    }
+                    RepeatMode::One => Some(queue.current_index),
+                    RepeatMode::All => Some((queue.current_index + 1) % queue.tracks.len()),
+                    RepeatMode::Off => (queue.current_index + 1 < queue.tracks.len())
+                        .then_some(queue.current_index + 1),
                 };
-                queue.current_index = next_idx;
-                let next_track = queue.tracks[next_idx].clone();
-                let route = queue.route.clone();
+                next_idx.map(|next_idx| {
+                    queue.current_index = next_idx;
+                    (queue.route.clone(), queue.tracks[next_idx].clone())
+                })
+            };
+
+            if let Some((route, next_track)) = next {
                 self.play_online_remote_track(route, next_track, cx);
-                return;
+            } else {
+                self.stop(cx);
             }
+            return;
         }
 
         self.ensure_queue();
@@ -1365,7 +1639,7 @@ impl MusicApp {
         };
 
         let Some(target_idx) = next_idx else {
-            self.send(PlayerCommand::Stop);
+            self.stop(cx);
             return;
         };
 
@@ -1469,6 +1743,9 @@ impl MusicApp {
     }
 
     pub(crate) fn play_track(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
+        self.cancel_online_play_request();
+        self.cancel_online_preload_tasks();
+        self.online_preloaded_tracks.clear();
         self.online_playlist_queue = None;
         let Some(engine) = self.engine.clone() else {
             self.status = "音频输出不可用，请检查默认音频设备".into();
@@ -2124,36 +2401,93 @@ impl MusicApp {
         let artist = remote.artists.join("/");
         let cover_url = remote.cover_url.clone();
         let source = remote.source.clone();
-        let route_for_prep = route.clone();
-        let remote_for_prep = remote.clone();
-        let remote_for_cache = remote.clone();
+        let source_key = online_source_key(&route, &source);
+
+        // Reuse the single bounded look-ahead materialization before starting any new network work.
+        let preloaded = self.online_preloaded_tracks.remove(&source_key);
+        self.online_preloaded_tracks.clear();
+        self.cancel_online_play_request();
+        self.cancel_online_preload_tasks();
+        self.online_play_request_generation =
+            self.online_play_request_generation.wrapping_add(1);
+        let generation = self.online_play_request_generation;
 
         self.online_track_buffering = Some(source.source_id.clone());
-        self.status = format!("正在缓冲在线音频：{title} · {artist}");
+        self.status = format!("正在切换在线音频：{title} · {artist}");
+        self.snapshot.state = PlaybackState::Loading;
         cx.notify();
 
         if let Some(cover_url) = &cover_url {
             crate::ui::image_cache::fetch_detached(cover_url);
         }
 
-        let task = Tokio::spawn_result(cx, async move {
+        if let Some(track) = preloaded {
+            let track_id = track.id;
+            let track_for_cache = track.clone();
+            self.online_track_buffering = None;
+            if self.play_prepared_remote_track(track, cx) {
+                self.persist_online_playback_assets(
+                    &track_for_cache,
+                    &route,
+                    &source,
+                    &remote,
+                    cover_url.as_deref(),
+                );
+                self.online_playback_meta.insert(
+                    track_id,
+                    (route.clone(), source.clone(), cover_url.clone()),
+                );
+                self.online_remote_tracks
+                    .insert(track_id, (route.clone(), remote.clone()));
+                self.status = format!("正在播放在线音频：{title} · {artist}");
+                if let Some(url) = cover_url {
+                    self.fetch_online_artwork_for_track(track_id, url, cx);
+                }
+                self.fetch_online_lyrics_for_track(track_id, route, source, cx);
+                self.schedule_online_playlist_prefetch(cx);
+            }
+            return;
+        }
+
+        let route_for_prep = route.clone();
+        let remote_for_prep = remote.clone();
+        let remote_for_cache = remote.clone();
+        let audio_task = Tokio::spawn_result(cx, async move {
             let frontend =
                 crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
-            let res = frontend
+            let result = frontend
                 .prepare_remote_track_for_route(&route_for_prep, &remote_for_prep, None)
                 .await?;
-            res.value
-                .map(|p| p.into_track())
+            result
+                .value
+                .map(|prepared| prepared.into_track())
                 .ok_or_else(|| anyhow!("物化在线音频流失败"))
         });
 
-        cx.spawn(async move |this, cx| match task.await {
-            Ok(track) => {
-                let _ = this.update(cx, |app, cx| {
-                    app.online_track_buffering = None;
-                    let track_id = track.id;
-                    let track_for_cache = track.clone();
-                    if app.play_prepared_remote_track(track, cx) {
+        // Lyrics are independent of stream materialization. Start them at the same time instead of
+        // serially waiting for a complete audio download. The task is owned by online_play_task, so
+        // replacing/stopping playback cancels both requests together.
+        let lyrics_route = route.clone();
+        let lyrics_source = source.clone();
+        let lyrics_cache = self.playback_cache.clone();
+        let lyrics_task = Tokio::spawn_result(cx, async move {
+            load_online_lyrics_cached_or_remote(lyrics_cache, lyrics_route, lyrics_source).await
+        });
+
+        self.online_play_task = Some(cx.spawn(async move |this, cx| {
+            let played_track_id = match audio_task.await {
+                Ok(track) => this
+                    .update(cx, |app, cx| {
+                        if app.online_play_request_generation != generation {
+                            return None;
+                        }
+                        app.online_track_buffering = None;
+                        let track_id = track.id;
+                        let track_for_cache = track.clone();
+                        if !app.play_prepared_remote_track(track, cx) {
+                            return None;
+                        }
+
                         app.persist_online_playback_assets(
                             &track_for_cache,
                             &route,
@@ -2169,22 +2503,49 @@ impl MusicApp {
                             .insert(track_id, (route.clone(), remote_for_cache.clone()));
                         app.status = format!("正在播放在线音频：{title} · {artist}");
 
-                        if let Some(url) = cover_url {
+                        if let Some(url) = cover_url.clone() {
                             app.fetch_online_artwork_for_track(track_id, url, cx);
                         }
-                        app.fetch_online_lyrics_for_track(track_id, route, source, cx);
+                        app.schedule_online_playlist_prefetch(cx);
+                        Some(track_id)
+                    })
+                    .ok()
+                    .flatten(),
+                Err(error) => {
+                    let _ = this.update(cx, |app, cx| {
+                        if app.online_play_request_generation != generation {
+                            return;
+                        }
+                        app.online_track_buffering = None;
+                        app.status = format!("播放失败：{error:#}");
+                        cx.notify();
+                    });
+                    None
+                }
+            };
+
+            let Some(track_id) = played_track_id else {
+                // Dropping an unfinished gpui_tokio task cancels its Tokio future.
+                drop(lyrics_task);
+                return;
+            };
+
+            if let Ok(Some(document)) = lyrics_task.await {
+                let _ = this.update(cx, |app, cx| {
+                    if app.online_play_request_generation != generation {
+                        return;
+                    }
+                    let same_source = app
+                        .online_playback_meta
+                        .get(&track_id)
+                        .is_some_and(|(_, current_source, _)| current_source == &source);
+                    if same_source {
+                        app.cache_lyrics(track_id, document);
+                        cx.notify();
                     }
                 });
             }
-            Err(err) => {
-                let _ = this.update(cx, |app, cx| {
-                    app.online_track_buffering = None;
-                    app.status = format!("播放失败：{err:#}");
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        }));
     }
 
     pub(crate) fn fetch_online_artwork_for_track(
@@ -2208,33 +2569,73 @@ impl MusicApp {
                     return Ok((art.png, art.blurred_png, art.palette));
                 }
             }
-            if let Some(bytes) = crate::ui::image_cache::get_cached(&target_url) {
-                if let Some(cache) = &artwork_cache {
-                    if let Ok(art) = cache.store(&target_url, &bytes) {
-                        return Ok((art.png, art.blurred_png, art.palette));
-                    }
+
+            let cached_url = target_url.clone();
+            let cached_bytes =
+                tokio::task::spawn_blocking(move || crate::ui::image_cache::get_cached(&cached_url))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Some(bytes) = cached_bytes {
+                let bytes = (*bytes).clone();
+                if let Some(cache) = artwork_cache.clone() {
+                    let key = target_url.clone();
+                    let art = tokio::task::spawn_blocking(move || cache.store(&key, &bytes))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))??;
+                    return Ok((art.png, art.blurred_png, art.palette));
                 }
+
+                return tokio::task::spawn_blocking(move || {
+                    let img = image::load_from_memory(&bytes)?;
+                    let small = img.thumbnail(img.width().min(768), img.height().min(768));
+                    let mut png_buf = Vec::new();
+                    small.write_to(
+                        &mut std::io::Cursor::new(&mut png_buf),
+                        image::ImageFormat::Png,
+                    )?;
+                    let blurred = crate::artwork::generate_blurred_artwork(&small)
+                        .unwrap_or_else(|_| png_buf.clone());
+                    let pal = crate::artwork::extract_palette(&small);
+                    Ok::<_, anyhow::Error>((png_buf, blurred, pal))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
+
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()?;
-            let resp = client.get(&target_url).send().await?;
-            let bytes = resp.bytes().await?;
-            if let Some(cache) = &artwork_cache {
-                let art = cache.store(&target_url, &bytes)?;
+            let bytes = client
+                .get(&target_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?
+                .to_vec();
+
+            if let Some(cache) = artwork_cache {
+                let key = target_url;
+                let art = tokio::task::spawn_blocking(move || cache.store(&key, &bytes))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))??;
                 Ok((art.png, art.blurred_png, art.palette))
             } else {
-                let img = image::load_from_memory(&bytes)?;
-                let small = img.thumbnail(img.width().min(768), img.height().min(768));
-                let mut png_buf = Vec::new();
-                small.write_to(
-                    &mut std::io::Cursor::new(&mut png_buf),
-                    image::ImageFormat::Png,
-                )?;
-                let blurred = crate::artwork::generate_blurred_artwork(&small)
-                    .unwrap_or_else(|_| png_buf.clone());
-                let pal = crate::artwork::extract_palette(&small);
-                Ok((png_buf, blurred, pal))
+                tokio::task::spawn_blocking(move || {
+                    let img = image::load_from_memory(&bytes)?;
+                    let small = img.thumbnail(img.width().min(768), img.height().min(768));
+                    let mut png_buf = Vec::new();
+                    small.write_to(
+                        &mut std::io::Cursor::new(&mut png_buf),
+                        image::ImageFormat::Png,
+                    )?;
+                    let blurred = crate::artwork::generate_blurred_artwork(&small)
+                        .unwrap_or_else(|_| png_buf.clone());
+                    let pal = crate::artwork::extract_palette(&small);
+                    Ok::<_, anyhow::Error>((png_buf, blurred, pal))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
             }
         });
 
@@ -2261,46 +2662,14 @@ impl MusicApp {
             return;
         }
         let playback_cache = self.playback_cache.clone();
-        let source_for_cache = source.clone();
-        let source_for_store = source.clone();
         let task = Tokio::spawn_result(cx, async move {
-            if let Some(cache) = playback_cache.clone() {
-                let cached_source = source_for_cache.clone();
-                let cached =
-                    tokio::task::spawn_blocking(move || cache.load_lyrics(&cached_source))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))??;
-                if let Some(doc) = cached {
-                    return Ok((Some(doc), true));
-                }
-            }
-
-            let frontend =
-                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
-            let res = frontend.lyrics_for_route(&route, &source).await?;
-            if let Some(doc) = res.value {
-                let player_doc =
-                    crate::plugin::frontend::plugin_lyrics_to_player(doc, &route.provider_id)?;
-                return Ok((Some(player_doc), false));
-            }
-            Ok((None, false))
+            load_online_lyrics_cached_or_remote(playback_cache, route, source).await
         });
 
         cx.spawn(async move |this, cx| -> Result<()> {
-            if let Ok((Some(doc), from_cache)) = task.await {
-                let doc_for_disk = (!from_cache).then(|| doc.clone());
+            if let Ok(Some(document)) = task.await {
                 let _ = this.update(cx, |app, cx| {
-                    app.cache_lyrics(track_id, doc);
-                    if let (Some(cache), Some(doc)) =
-                        (app.playback_cache.clone(), doc_for_disk.clone())
-                    {
-                        let source = source_for_store.clone();
-                        let _ = crate::runtime::spawn_blocking(move || {
-                            if let Err(error) = cache.store_lyrics(&source, &doc) {
-                                tracing::warn!(error = %error, "持久化在线歌词缓存失败");
-                            }
-                        });
-                    }
+                    app.cache_lyrics(track_id, document);
                     cx.notify();
                 });
             }
@@ -2313,6 +2682,7 @@ impl MusicApp {
         &mut self,
         route: crate::plugin::abi::PluginRoute,
         collection: crate::plugin::abi::MediaCollectionRef,
+        playlist_title: String,
         cx: &mut Context<Self>,
     ) {
         self.status = "正在加载歌单歌曲...".into();
@@ -2330,10 +2700,16 @@ impl MusicApp {
         cx.spawn(async move |this, cx| match task.await {
             Ok((route, tracks)) => {
                 if let Some(first) = tracks.first() {
-                    let first_remote = first.clone();
+                    let first_title = first.title.clone();
                     let _ = this.update(cx, |app, cx| {
-                        app.status = format!("正在播放歌单，首曲：{}", first_remote.title);
-                        app.play_online_remote_track(route, first_remote, cx);
+                        app.status = format!("正在播放歌单，首曲：{first_title}");
+                        app.play_online_playlist_track(
+                            route,
+                            playlist_title,
+                            tracks,
+                            0,
+                            cx,
+                        );
                     });
                 }
             }
@@ -2763,12 +3139,18 @@ impl MusicApp {
                 );
             }
             (ContextMenuAction::Play, ContextMenuTarget::DailyRecommendations) => {
-                if let Some(first) = self.online_daily_tracks.first().cloned() {
+                if !self.online_daily_tracks.is_empty() {
                     let route = self
                         .online_route
                         .clone()
                         .unwrap_or_else(crate::ui::home::default_netease_route);
-                    self.play_online_remote_track(route, first, cx);
+                    self.play_online_playlist_track(
+                        route,
+                        "每日歌曲推荐".into(),
+                        self.online_daily_tracks.clone(),
+                        0,
+                        cx,
+                    );
                 } else {
                     self.refresh_online_recommendations(cx);
                 }
@@ -2776,10 +3158,18 @@ impl MusicApp {
             (
                 ContextMenuAction::Play,
                 ContextMenuTarget::OnlinePlaylist {
-                    route, collection, ..
+                    route,
+                    collection,
+                    title,
+                    ..
                 },
             ) => {
-                self.load_and_play_online_playlist(route.clone(), collection.clone(), cx);
+                self.load_and_play_online_playlist(
+                    route.clone(),
+                    collection.clone(),
+                    title.clone(),
+                    cx,
+                );
             }
             (ContextMenuAction::Play, ContextMenuTarget::OnlineTrack { route, track }) => {
                 self.play_online_remote_track(route.clone(), track.clone(), cx);

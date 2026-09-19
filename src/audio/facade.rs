@@ -23,7 +23,8 @@ use super::engine::{
 
 const REQUEST_QUEUE_CAPACITY: usize = 128;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(25);
-const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(120);
+// Keep click protection, but do not make play/pause/stop feel like a delayed command.
+const TRANSPORT_FADE_DURATION: Duration = Duration::from_millis(60);
 const TRANSPORT_FADE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 const TRANSIENT_TRACK_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // The blocking player currently caps crossfade/fade transitions at 12 seconds. Keep the Host-owned

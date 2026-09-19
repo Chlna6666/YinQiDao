@@ -467,7 +467,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
         .online_daily_tracks
         .first()
         .and_then(|t| t.cover_url.as_deref());
-    let card1_track = app.online_daily_tracks.first().cloned();
+    let card1_tracks = app.online_daily_tracks.clone();
     let card1_route = route.clone();
 
     // Card 2: 心动模式
@@ -578,8 +578,14 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             (rgb(0x3a1c1c), rgb(0x6b2222)),
             view,
             move |this, cx| {
-                if let Some(track) = card1_track.clone() {
-                    this.play_online_remote_track(card1_route.clone(), track, cx);
+                if !card1_tracks.is_empty() {
+                    this.play_online_playlist_track(
+                        card1_route.clone(),
+                        "每日歌曲推荐".into(),
+                        card1_tracks.clone(),
+                        0,
+                        cx,
+                    );
                 } else {
                     this.refresh_online_recommendations(cx);
                 }
@@ -630,7 +636,12 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             view,
             move |this, cx| {
                 if let Some(col) = card3_collection.clone() {
-                    this.load_and_play_online_playlist(card3_route.clone(), col, cx);
+                    this.load_and_play_online_playlist(
+                        card3_route.clone(),
+                        col,
+                        card3_title.clone(),
+                        cx,
+                    );
                 } else {
                     this.refresh_online_recommendations(cx);
                 }
@@ -717,7 +728,12 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             view,
             move |this, cx| {
                 if let Some(col) = card6_collection.clone() {
-                    this.load_and_play_online_playlist(card6_route.clone(), col, cx);
+                    this.load_and_play_online_playlist(
+                        card6_route.clone(),
+                        col,
+                        card6_title.clone(),
+                        cx,
+                    );
                 } else {
                     this.refresh_online_recommendations(cx);
                 }
@@ -895,6 +911,7 @@ fn recommended_playlists_section(
                 .unwrap_or_else(|| "网易云音乐".to_string());
             let score_str = format_play_count(item.score);
 
+            let title_play = title.clone();
             let title_menu = title.clone();
             let sub_menu = subtitle.clone();
             let cov_menu = cover_url.map(String::from);
@@ -967,6 +984,7 @@ fn recommended_playlists_section(
                             this.load_and_play_online_playlist(
                                 route_clone.clone(),
                                 collection_ref.clone(),
+                                title_play.clone(),
                                 cx,
                             );
                         }),

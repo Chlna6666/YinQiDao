@@ -516,9 +516,8 @@ fn render_online_song_row(
         .on_mouse_down(
             gpui::MouseButton::Left,
             app_listener(view, move |this, _, _, cx| {
-                if this.online_track_buffering.is_some() {
-                    return;
-                }
+                // A newer selection supersedes/cancels the previous online prepare task in
+                // MusicApp. Never turn buffering into a global input lock for the playlist.
                 this.play_online_playlist_track(
                     track_route.clone(),
                     song_playlist_title.clone(),
