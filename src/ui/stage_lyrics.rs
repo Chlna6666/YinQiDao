@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, BorrowAppContext as _,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
@@ -24,10 +24,11 @@ const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
 const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
-const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(420);
-const LYRIC_ROW_STAGGER_MS: f32 = 28.0;
-const LYRIC_ROW_MOTION_MS: f32 = 270.0;
-const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 4;
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(430);
+const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(260);
+const LYRIC_ROW_STAGGER_MS: u64 = 32;
+const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 5;
+const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 2;
@@ -112,14 +113,11 @@ struct LyricScrollAnimation {
 }
 
 impl LyricScrollAnimation {
-    fn raw_progress_at(self, now: Instant) -> f32 {
-        let duration = LYRIC_HANDOFF_DURATION.as_secs_f32().max(f32::EPSILON);
-        (now.saturating_duration_since(self.started_at).as_secs_f32() / duration)
-            .clamp(0.0, 1.0)
-    }
-
     fn progress_at(self, now: Instant) -> f32 {
-        lyric_handoff_progress(self.started_at, now)
+        let elapsed = now.saturating_duration_since(self.started_at);
+        lyric_row_motion_spec(Duration::ZERO)
+            .sample_elapsed(elapsed)
+            .eased_progress
     }
 
     fn offset_at(self, now: Instant) -> f32 {
@@ -164,6 +162,7 @@ pub(super) struct StageLyricsView {
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
+    motion_epoch: u64,
     stage_active: bool,
     scrubbing: bool,
 }
@@ -193,6 +192,7 @@ impl StageLyricsView {
             reading_until: None,
             scroll_target: None,
             scroll_animation: None,
+            motion_epoch: 0,
             stage_active: false,
             scrubbing: false,
         }
@@ -435,6 +435,7 @@ impl StageLyricsView {
             return;
         }
 
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.scroll_animation = Some(LyricScrollAnimation {
             from_y,
             started_at,
@@ -452,11 +453,6 @@ impl StageLyricsView {
         self.hovered_index = None;
         self.cancel_scroll_animation();
         cx.notify();
-    }
-
-    fn focus_handoff_progress(&self, now: Instant) -> Option<f32> {
-        let started_at = self.focus_started_at?;
-        Some(lyric_handoff_progress(started_at, now))
     }
 
     fn expire_deadlines(&mut self, now: Instant) {
@@ -497,6 +493,12 @@ impl StageLyricsView {
         }
         if let Some(animation) = self.scroll_animation {
             let deadline = animation.started_at + LYRIC_HANDOFF_DURATION;
+            if deadline > now {
+                window.request_invalidation_at(deadline, cx);
+            }
+        }
+        if let Some(started_at) = self.focus_started_at {
+            let deadline = started_at + LYRIC_HANDOFF_DURATION;
             if deadline > now {
                 window.request_invalidation_at(deadline, cx);
             }
@@ -636,13 +638,10 @@ impl Render for StageLyricsView {
             && !reading_mode;
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
-        let scroll_progress = scroll_animation.map(|scroll| scroll.raw_progress_at(frame_now));
         let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
-        let focus_progress = self.focus_handoff_progress(frame_now);
-        let focus_animating = focus_progress.is_some_and(|progress| progress < 1.0);
-        // Frame cadence is owned by the retained lyric subtree below. Avoid whole-view animation
-        // notifications here: rebuilding every Stage sibling at 60/120 Hz made otherwise-correct
-        // row staggering look uneven under blur load.
+        let motion_epoch = self.motion_epoch;
+        let focus_started = self.focus_started_at.is_some();
+        let focus_animating = focus_started;
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // automatic scroll used to make every line equally sharp during the transition, producing
         // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
@@ -662,9 +661,10 @@ impl Render for StageLyricsView {
                 index,
                 active,
                 focus_from_index,
-                focus_progress,
-                scroll_progress,
+                focus_started,
+                scroll_animating,
                 scroll_from_y,
+                motion_epoch,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -683,9 +683,7 @@ impl Render for StageLyricsView {
         .pb(px(LYRIC_LIST_PADDING_BOTTOM))
         .pr(px(8.0));
 
-        let lyrics = lyrics
-            .with_layout_animation_target(scroll_animating || focus_animating)
-            .into_any_element();
+        let lyrics = lyrics.into_any_element();
 
         div()
             .id("stage-lyrics-view")
@@ -711,9 +709,10 @@ fn render_lyric_row(
     index: usize,
     active: usize,
     focus_from_index: Option<usize>,
-    focus_progress: Option<f32>,
-    scroll_progress: Option<f32>,
+    focus_started: bool,
+    scroll_animating: bool,
     scroll_from_y: f32,
+    motion_epoch: u64,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -732,63 +731,40 @@ fn render_lyric_row(
     let karaoke_active = index == active && !reading_mode;
 
     let previous_active = focus_from_index.filter(|previous| *previous != active);
-    let transition_profile = previous_active.map(|previous| {
+    let previous_profile = previous_active.map(|previous| {
         lyric_visual_profile(index, previous, reading_mode, depth_blur_active)
     });
-    let handoff_pending = previous_active.is_some();
-    let animate_focus = !reading_mode
+    let animate_depth = !reading_mode
         && !hovered
-        && lyric_depth_transition_bound(index, active, previous_active, reading_mode)
-        && transition_profile.is_some_and(|(alpha, blur)| {
-            (alpha - target_alpha).abs() > 0.001 || (blur - target_blur).abs() > 0.001
-        });
+        && lyric_depth_transition_bound(index, active, previous_active, reading_mode);
 
-    // If the active index changed before ListState has measured the target row, hold the exact old
-    // depth state at progress=0. This removes the one-frame "all sharp / blur disappeared" flash.
-    let base_progress = if animate_focus {
-        focus_progress.unwrap_or(if handoff_pending { 0.0 } else { 1.0 }).clamp(0.0, 1.0)
+    // Active may advance one render before the virtual list has target geometry. Keep the exact old
+    // visual target until scroll preparation starts the hand-off; this prevents the sharp flash.
+    let (resolved_alpha, resolved_blur) = if previous_active.is_some() && !focus_started {
+        previous_profile.unwrap_or((target_alpha, target_blur))
     } else {
-        1.0
+        (target_alpha, target_blur)
     };
-    let progress = if previous_active == Some(index) {
-        // The old focus gives up emphasis first.
-        lyric_phase_progress(base_progress, 0.0, 0.48)
-    } else if index == active && previous_active.is_some() {
-        // The new focus starts only after the old row has mostly returned to background depth.
-        lyric_phase_progress(base_progress, 0.32, 1.0)
-    } else {
-        base_progress
-    };
+    let resolved_alpha = if hovered { 1.0 } else { resolved_alpha };
+    let resolved_blur = if hovered { 0.0 } else { resolved_blur };
 
-    let (from_alpha, from_blur) =
-        transition_profile.unwrap_or((target_alpha, target_blur));
-    let current_alpha = if hovered {
-        1.0
-    } else {
-        lerp_f32(from_alpha, target_alpha, progress)
-    };
-    let current_blur = if hovered {
-        0.0
-    } else {
-        lerp_f32(from_blur, target_blur, progress)
-    };
-
-    // Keep line geometry stable during a hand-off. Scaling adjacent 28 px rows made their glyph
-    // boxes overlap while both were visible. Motion belongs to the list; a row only changes
-    // emphasis (opacity + depth) on the shared hand-off clock.
-    let text = lyric_text_layer(
+    let mut text = lyric_text_layer(
         line,
         karaoke_active,
         active_word_index,
         position_ms,
         karaoke_running,
         karaoke_epoch,
-        current_blur,
+        resolved_blur,
         text_id,
         index,
     )
-    .opacity(current_alpha)
-    .into_any_element();
+    .opacity(resolved_alpha);
+
+    if animate_depth && focus_started {
+        text = text.transition(lyric_focus_transition());
+    }
+    let text = text.into_any_element();
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -857,20 +833,14 @@ fn render_lyric_row(
     }
 
     if !interactive {
-        if let Some(base_scroll_progress) = scroll_progress {
-            let row_progress =
-                lyric_row_scroll_progress(index, active, base_scroll_progress, scroll_from_y);
-            return row
-                .with_sampled_animation(
-                    AnimationProperty::translation(
-                        point(px(0.0), px(scroll_from_y)),
-                        point(px(0.0), px(0.0)),
-                    ),
-                    row_progress,
-                )
-                .into_any_element();
-        }
-        return row.into_any_element();
+        return apply_lyric_row_motion(
+            row,
+            index,
+            active,
+            scroll_animating,
+            scroll_from_y,
+            motion_epoch,
+        );
     }
 
     let local = view;
@@ -894,20 +864,14 @@ fn render_lyric_row(
         });
     });
 
-    if let Some(base_scroll_progress) = scroll_progress {
-        let row_progress =
-            lyric_row_scroll_progress(index, active, base_scroll_progress, scroll_from_y);
-        row.with_sampled_animation(
-            AnimationProperty::translation(
-                point(px(0.0), px(scroll_from_y)),
-                point(px(0.0), px(0.0)),
-            ),
-            row_progress,
-        )
-        .into_any_element()
-    } else {
-        row.into_any_element()
-    }
+    apply_lyric_row_motion(
+        row,
+        index,
+        active,
+        scroll_animating,
+        scroll_from_y,
+        motion_epoch,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -950,337 +914,26 @@ fn lyric_text_layer(
         );
     }
 
-    if blur_sigma > 0.001 {
-        text = text.blur(px(blur_sigma));
-    }
-    text
+    text.blur(px(blur_sigma.max(0.0)))
 }
 
-fn lyric_handoff_progress(started_at: Instant, now: Instant) -> f32 {
-    let duration = LYRIC_HANDOFF_DURATION.as_secs_f32().max(f32::EPSILON);
-    let raw =
-        (now.saturating_duration_since(started_at).as_secs_f32() / duration).clamp(0.0, 1.0);
-    // Quintic smootherstep keeps both velocity and acceleration continuous at the hand-off edges.
-    // Unlike OutCubic it does not consume most of the blur change in the first few frames.
-    raw * raw * raw * (raw * (raw * 6.0 - 15.0) + 10.0)
+fn lyric_focus_transition() -> Transition {
+    Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
+        .ease(Easing::InOutCubic)
+        .properties([
+            TransitionProperty::Opacity,
+            TransitionProperty::Blur,
+        ])
 }
 
-#[inline]
-fn lyric_phase_progress(progress: f32, start: f32, end: f32) -> f32 {
-    if end <= start {
-        return 1.0;
-    }
-    let t = ((progress - start) / (end - start)).clamp(0.0, 1.0);
-    // Smoothstep is enough here; the global list motion already uses quintic smootherstep.
-    t * t * (3.0 - 2.0 * t)
+fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
+    AnimationSpec::new(LYRIC_ROW_MOTION_DURATION)
+        .delay(delay)
+        .ease(Easing::OutCubic)
 }
 
 #[inline]
-fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
-    from + (to - from) * progress.clamp(0.0, 1.0)
-}
-
-fn lyric_visual_profile(
-    index: usize,
-    active: usize,
-    reading_mode: bool,
-    depth_blur_active: bool,
-) -> (f32, f32) {
-    let distance = index.abs_diff(active);
-    let (mut alpha, mut blur) =
-        lyric_focus_profile(distance, reading_mode, depth_blur_active);
-
-    if reading_mode {
-        return (alpha, blur);
-    }
-
-    let (edge_alpha, edge_blur) = lyric_edge_envelope(index, active);
-    alpha *= edge_alpha;
-    if depth_blur_active {
-        blur += edge_blur;
-    }
-
-    (alpha.clamp(0.0, 1.0), blur)
-}
-
-fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
-    if index == active {
-        return (1.0, 0.0);
-    }
-
-    if index < active {
-        // The focus anchor is above vertical center, so top-edge falloff begins sooner.
-        match active - index {
-            1 | 2 => (1.0, 0.0),
-            3 => (0.88, 0.20),
-            4 => (0.62, 0.55),
-            5 => (0.34, 1.05),
-            6 => (0.14, 1.65),
-            _ => (0.04, 2.20),
-        }
-    } else {
-        // The lower half has more visual room; fade one row later.
-        match index - active {
-            1 | 2 | 3 => (1.0, 0.0),
-            4 => (0.84, 0.20),
-            5 => (0.58, 0.55),
-            6 => (0.30, 1.05),
-            7 => (0.12, 1.65),
-            _ => (0.04, 2.20),
-        }
-    }
-}
-
-fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
-    if reading_mode {
-        return (1.0, 0.0);
-    }
-
-    let alpha = match distance {
-        0 => 1.0,
-        1 => 0.66,
-        2 => 0.48,
-        3 => 0.36,
-        _ => 0.28,
-    };
-    let blur_sigma = if depth_blur_active {
-        match distance {
-            0 => 0.0,
-            // Keep the first defocused row at a real one-pixel sigma. Sub-pixel blur is visually
-            // close to identity on the retained Nova path and made the depth hand-off look absent.
-            1 => 0.80,
-            2 => 1.20,
-            3 => 1.60,
-            4 => 1.90,
-            _ => 2.10,
-        }
-    } else {
-        0.0
-    };
-    (alpha, blur_sigma)
-}
-
-fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
-    if !line.enhanced_complete {
-        return None;
-    }
-    line.words
-        .partition_point(|word| word.timestamp_ms <= position_ms)
-        .checked_sub(1)
-}
-
-fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
-    if !line.enhanced_complete {
-        return None;
-    }
-    line.words
-        .get(
-            line.words
-                .partition_point(|word| word.timestamp_ms <= position_ms),
-        )
-        .map(|word| word.timestamp_ms)
-}
-
-fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
-    let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
-        return if position_ms >= word.timestamp_ms {
-            1.0
-        } else {
-            0.0
-        };
-    };
-    let elapsed = position_ms
-        .saturating_sub(word.timestamp_ms)
-        .min(duration_ms);
-    (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
-}
-
-fn word_reveal_remaining(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
-    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
-    let end = word.timestamp_ms.saturating_add(duration_ms);
-    (position_ms < end).then(|| Duration::from_millis(end.saturating_sub(position_ms)))
-}
-
-fn karaoke_word(
-    word: &StageLyricWord,
-    index: usize,
-    current_word: Option<usize>,
-    position_ms: u64,
-    animate: bool,
-    karaoke_epoch: u64,
-) -> gpui::AnyElement {
-    const DIM_ALPHA: f32 = 0.28;
-    const DONE_ALPHA: f32 = 0.97;
-
-    let Some(current_word) = current_word else {
-        return div()
-            .flex_none()
-            .whitespace_nowrap()
-            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
-            .child(word.text.clone())
-            .into_any_element();
-    };
-    if index < current_word {
-        return div()
-            .flex_none()
-            .whitespace_nowrap()
-            .text_color(hsla(0.0, 0.0, 1.0, DONE_ALPHA))
-            .child(word.text.clone())
-            .into_any_element();
-    }
-    if index > current_word {
-        return div()
-            .flex_none()
-            .whitespace_nowrap()
-            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
-            .child(word.text.clone())
-            .into_any_element();
-    }
-
-    let progress = word_reveal_progress(word, position_ms);
-    let base = div()
-        .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
-        .child(word.text.clone());
-    let overlay = div()
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .h_full()
-        .w_full()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-        .child(word.text.clone());
-
-    let overlay = if animate
-        && progress < 1.0
-        && let Some(remaining) = word_reveal_remaining(word, position_ms)
-        && !remaining.is_zero()
-    {
-        let key = karaoke_epoch
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(word.timestamp_ms.rotate_left(17))
-            .wrapping_add(index as u64);
-        overlay
-            .with_animation(
-                ElementId::NamedInteger(SharedString::new_static("lyric-word-sweep"), key),
-                Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
-                    HorizontalRevealEdge::Left,
-                    progress,
-                    1.0,
-                )),
-                |element, _| element,
-            )
-            .into_any_element()
-    } else if progress < 1.0 {
-        overlay
-            .with_sampled_animation(
-                AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
-                progress,
-            )
-            .into_any_element()
-    } else {
-        overlay.into_any_element()
-    };
-
-    div()
-        .relative()
-        .flex_none()
-        .whitespace_nowrap()
-        .child(base)
-        .child(overlay)
-        .into_any_element()
-}
-
-fn stage_primary_lyric(
-    line: &StageLyricLine,
-    karaoke_active: bool,
-    current_word: Option<usize>,
-    position_ms: u64,
-    animate: bool,
-    karaoke_epoch: u64,
-) -> gpui::AnyElement {
-    if !line.enhanced_complete {
-        return div()
-            .w_full()
-            .min_w(px(0.0))
-            .text_size(px(28.0))
-            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-            .child(line.text.clone())
-            .into_any_element();
-    }
-
-    // Keep exactly the same word-fragment layout whether this line is focused or not. Previously a
-    // line changed from one shaped text run to many flex fragments at the active boundary, causing
-    // rewrap/reflow on the same frame as the scroll hand-off.
-    let mut row = div()
-        .w_full()
-        .min_w(px(0.0))
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .text_size(px(28.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD);
-    for (index, word) in line.words.iter().enumerate() {
-        row = if karaoke_active {
-            row.child(karaoke_word(
-                word,
-                index,
-                current_word,
-                position_ms,
-                animate,
-                karaoke_epoch,
-            ))
-        } else {
-            row.child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                    .child(word.text.clone()),
-            )
-        };
-    }
-    row.into_any_element()
-}
-
-fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
-    if line.words.is_empty() || line.text.is_empty() {
-        return false;
-    }
-    let mut remaining = line.text.as_str();
-    for word in line.words.iter() {
-        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
-            return false;
-        };
-        remaining = rest;
-    }
-    remaining.is_empty()
-}
-
-fn format_lyric_time(ms: u64) -> String {
-    let total_secs = ms / 1_000;
-    let millis = ms % 1_000;
-    let hours = total_secs / 3_600;
-    let minutes = (total_secs / 60) % 60;
-    let seconds = total_secs % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
-    } else {
-        format!("{minutes:02}:{seconds:02}.{millis:03}")
-    }
-}
-
-#[inline]
-fn lyric_row_scroll_progress(
-    index: usize,
-    active: usize,
-    raw_progress: f32,
-    from_y: f32,
-) -> f32 {
-    // Use real elapsed milliseconds, not an already-eased global progress. Each trailing row owns
-    // an actual start time, which makes the upward cascade visible at both 60 Hz and high refresh.
+fn lyric_row_stagger_delay(index: usize, active: usize, from_y: f32) -> Duration {
     let trailing_distance = if from_y >= 0.0 {
         index.saturating_sub(active)
     } else {
@@ -1288,15 +941,39 @@ fn lyric_row_scroll_progress(
     }
     .min(LYRIC_ROW_MAX_STAGGER_ROWS);
 
-    let elapsed_ms =
-        raw_progress.clamp(0.0, 1.0) * LYRIC_HANDOFF_DURATION.as_secs_f32() * 1000.0;
-    let delay_ms = trailing_distance as f32 * LYRIC_ROW_STAGGER_MS;
-    let local =
-        ((elapsed_ms - delay_ms) / LYRIC_ROW_MOTION_MS).clamp(0.0, 1.0);
+    Duration::from_millis(trailing_distance as u64 * LYRIC_ROW_STAGGER_MS)
+}
 
-    // Quintic smootherstep per row: rows remain still until their own start time, accelerate upward,
-    // then settle independently instead of snapping onto the row ahead.
-    local * local * local * (local * (local * 6.0 - 15.0) + 10.0)
+fn apply_lyric_row_motion(
+    row: gpui::Stateful<gpui::Div>,
+    index: usize,
+    active: usize,
+    animating: bool,
+    from_y: f32,
+    motion_epoch: u64,
+) -> gpui::AnyElement {
+    if !animating || from_y.abs() <= SCROLL_SETTLE_PX {
+        return row.into_any_element();
+    }
+
+    let delay = lyric_row_stagger_delay(index, active, from_y);
+    let key = motion_epoch
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(index as u64);
+    row.with_animation(
+        ElementId::NamedInteger(
+            SharedString::new_static("stage-lyric-row-motion"),
+            key,
+        ),
+        Animation::from_spec(lyric_row_motion_spec(delay)).with_property(
+            AnimationProperty::translation(
+                point(px(0.0), px(from_y)),
+                point(px(0.0), px(0.0)),
+            ),
+        ),
+        |element, _| element,
+    )
+    .into_any_element()
 }
 
 fn lyric_depth_transition_bound(
@@ -1349,21 +1026,25 @@ mod tests {
     }
 
     #[test]
-    fn row_scroll_stagger_uses_distinct_start_times() {
-        // ~21 ms into a 420 ms handoff: active row has started, row +1 is still parked.
-        let early = 0.05;
-        let active = lyric_row_scroll_progress(10, 10, early, 80.0);
-        let next = lyric_row_scroll_progress(11, 10, early, 80.0);
-        assert!(active > 0.0);
-        assert_eq!(next, 0.0);
-
-        // Later, every lower row is at a distinct phase.
-        let p = 0.45;
-        let active = lyric_row_scroll_progress(10, 10, p, 80.0);
-        let next = lyric_row_scroll_progress(11, 10, p, 80.0);
-        let third = lyric_row_scroll_progress(13, 10, p, 80.0);
-        assert!(active > next);
-        assert!(next > third);
+    fn row_scroll_stagger_uses_distinct_renderer_delays() {
+        assert_eq!(
+            lyric_row_stagger_delay(10, 10, 80.0),
+            Duration::ZERO
+        );
+        assert_eq!(
+            lyric_row_stagger_delay(11, 10, 80.0),
+            Duration::from_millis(LYRIC_ROW_STAGGER_MS)
+        );
+        assert_eq!(
+            lyric_row_stagger_delay(13, 10, 80.0),
+            Duration::from_millis(LYRIC_ROW_STAGGER_MS * 3)
+        );
+        assert_eq!(
+            lyric_row_stagger_delay(20, 10, 80.0),
+            Duration::from_millis(
+                LYRIC_ROW_STAGGER_MS * LYRIC_ROW_MAX_STAGGER_ROWS as u64
+            )
+        );
     }
 
     #[test]
@@ -1377,28 +1058,19 @@ mod tests {
     }
 
     #[test]
-    fn scroll_animation_keeps_continuity_and_settles() {
+    fn scroll_animation_leading_row_matches_renderer_timing() {
         let start = Instant::now();
         let animation = LyricScrollAnimation {
             from_y: 120.0,
             started_at: start,
         };
         assert!((animation.offset_at(start) - 120.0).abs() < 0.001);
-        let halfway = animation.offset_at(start + LYRIC_HANDOFF_DURATION / 2);
+        let halfway = animation.offset_at(start + LYRIC_ROW_MOTION_DURATION / 2);
         assert!(halfway > 0.0 && halfway < 120.0);
-        assert!(animation.offset_at(start + LYRIC_HANDOFF_DURATION).abs() < 0.001);
-        assert_eq!(animation.progress_at(start), 0.0);
-        assert_eq!(animation.progress_at(start + LYRIC_HANDOFF_DURATION), 1.0);
-    }
-
-    #[test]
-    fn depth_sigma_uses_the_same_handoff_progress_as_motion() {
-        let start = Instant::now();
-        let progress = lyric_handoff_progress(start, start + LYRIC_HANDOFF_DURATION / 2);
-        let blur = lerp_f32(0.8, 0.0, progress);
-        let alpha = lerp_f32(0.66, 1.0, progress);
-        assert!(blur > 0.0 && blur < 0.8);
-        assert!(alpha > 0.66 && alpha < 1.0);
+        assert!(animation
+            .offset_at(start + LYRIC_ROW_MOTION_DURATION)
+            .abs()
+            < 0.001);
     }
 
     #[test]
