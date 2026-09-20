@@ -4,14 +4,14 @@ use gpui::{IntoElement, WeakEntity, div, hsla, prelude::*, px, rgb, uniform_list
 use lucide_gpui::icon;
 
 use crate::{
-    model::{AppPage, PlaybackState},
+    model::AppPage,
     plugin::abi::{PluginRoute, RemoteTrack},
     ui::{
         image_cache,
         shell::{MusicApp, OnlinePlaylistViewData, app_listener},
         theme::{
             self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
-            format_time, press_transition, themed_icon, waveform_animation,
+            format_time, press_transition, themed_icon,
         },
     },
 };
@@ -296,7 +296,6 @@ fn render_songs_table(
     let view_clone = view.clone();
     let buffering_source_id = app.online_track_buffering.clone();
     let current_track_title = app.snapshot.current_track.as_ref().map(|t| t.title.clone());
-    let is_playing = app.snapshot.state == PlaybackState::Playing;
 
     div()
         .size_full()
@@ -351,7 +350,6 @@ fn render_songs_table(
                                     &view_clone,
                                     is_buffering,
                                     is_current,
-                                    is_playing,
                                 ));
                             }
                         }
@@ -374,7 +372,6 @@ fn render_online_song_row(
     view: &WeakEntity<MusicApp>,
     is_buffering: bool,
     is_current: bool,
-    is_playing: bool,
 ) -> gpui::AnyElement {
     let track_route = route.clone();
     let song_playlist_title = playlist_title.to_string();
@@ -424,8 +421,8 @@ fn render_online_song_row(
                 .items_center()
                 .child(if is_buffering {
                     themed_icon(icon!(loader_circle), 14.0, ACCENT_RED.into()).into_any_element()
-                } else if is_current && is_playing {
-                    waveform_animation(true).into_any_element()
+                } else if is_current {
+                    themed_icon(icon!(play), 13.0, ACCENT_RED.into()).into_any_element()
                 } else {
                     div()
                         .text_xs()
