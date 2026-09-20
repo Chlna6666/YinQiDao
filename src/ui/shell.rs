@@ -435,9 +435,8 @@ impl HomePage {
                     }
                     cx.notify();
                 })?;
-                let _ = parent.update(cx, |app, cx| {
+                let _ = parent.update(cx, |app, _cx| {
                     app.status = status;
-                    cx.notify();
                 });
                 Ok(())
             })
@@ -2787,6 +2786,31 @@ impl MusicApp {
         crate::ui::image_cache::prefetch_urls(urls, cx);
     }
 
+    pub(crate) fn notify_home_surface(&mut self, cx: &mut Context<Self>) {
+        if self.page == AppPage::Home
+            && let Some(page) = self.home_page.clone()
+        {
+            page.update(cx, |_, page_cx| page_cx.notify());
+        }
+    }
+
+    pub(crate) fn notify_library_surface(&mut self, cx: &mut Context<Self>) {
+        if self.page == AppPage::Library
+            && let Some(page) = self.library_page.clone()
+        {
+            page.update(cx, |_, page_cx| page_cx.notify());
+        }
+    }
+
+    fn notify_current_content_surface(&mut self, cx: &mut Context<Self>) {
+        match self.page {
+            AppPage::Home => self.notify_home_surface(cx),
+            AppPage::Library => self.notify_library_surface(cx),
+            AppPage::OnlinePlaylist => self.notify_online_playlist_surface(cx),
+            _ => {}
+        }
+    }
+
     fn notify_online_playlist_surface(&mut self, cx: &mut Context<Self>) {
         if self.page == AppPage::OnlinePlaylist
             && let Some(page) = self.online_playlist_page.clone()
@@ -2868,7 +2892,7 @@ impl MusicApp {
                             *data = view_data;
                         }
                     }
-                    cx.notify();
+                    app.notify_online_playlist_surface(cx);
                 });
             }
             Err(err) => {
@@ -2877,7 +2901,7 @@ impl MusicApp {
                         data.loading = false;
                     }
                     app.status = format!("加载歌单失败：{err:#}");
-                    cx.notify();
+                    app.notify_online_playlist_surface(cx);
                 });
             }
         })
@@ -4201,7 +4225,7 @@ impl MusicApp {
                 if has_more {
                     this.request_library_artworks(cx);
                 }
-                cx.notify();
+                this.notify_current_content_surface(cx);
             })?;
             Ok(())
         })
