@@ -1066,31 +1066,39 @@ fn lyric_visual_profile(
     }
 
     let distance = index.abs_diff(active) as f32;
-
-    // Focus falloff is deliberately continuous rather than a row-by-row lookup table. The
-    // compositor interpolates these endpoints again while the active line changes, so a lyric
-    // becomes progressively more transparent and progressively sharper as it approaches focus.
-    // The focus band must already separate adjacent rows, not wait until a line reaches the
-    // physical viewport edge. A tighter continuous curve gives the Apple-style depth stack:
-    // current line is solid, each following/preceding row becomes progressively dimmer and softer.
-    let focus = smoothstep01(distance / 3.15);
+    let (focus_alpha, focus_blur) = lyric_focus_falloff(distance);
     let edge = smoothstep01(edge_progress);
 
-    let focus_alpha = 1.0 + (0.24 - 1.0) * focus;
     // Physical viewport edge owns the final fade. Near the actual clip boundary the glyphs become
     // almost transparent instead of merely blurred, so no bright half-line appears at top/bottom.
     let edge_alpha = 1.0 + (0.035 - 1.0) * edge;
     let alpha = (focus_alpha * edge_alpha).clamp(0.012, 1.0);
 
     let blur = if depth_blur_active {
-        let focus_blur = 1.75 * focus;
         let edge_blur = 1.20 * edge;
-        (focus_blur + edge_blur).min(2.95)
+        (focus_blur + edge_blur).min(3.10)
     } else {
         0.0
     };
 
     (alpha, blur)
+}
+
+#[inline]
+fn lyric_focus_falloff(distance: f32) -> (f32, f32) {
+    let d = distance.max(0.0);
+
+    // Start fading immediately after the focused row. The previous smoothstep curve left row ±1 at
+    // almost 90% opacity, which is why several rows still read as one equally-bright block.
+    // This rational curve remains continuous but gives a clearly separated depth stack:
+    // d=1 ≈ 0.66 alpha, d=2 ≈ 0.40, d=3 ≈ 0.29.
+    let attenuation = 1.0 / (1.0 + 0.70 * d * d);
+    let alpha = 0.18 + 0.82 * attenuation;
+
+    let blur_progress = 1.0 - 1.0 / (1.0 + 0.55 * d * d);
+    let blur = 2.05 * blur_progress;
+
+    (alpha.clamp(0.0, 1.0), blur.max(0.0))
 }
 
 // Keep the standalone focus profile helper for reading-mode and regression tests. It uses the same
@@ -1104,14 +1112,8 @@ fn lyric_focus_profile(
         return (1.0, 0.0);
     }
 
-    let focus = smoothstep01(distance as f32 / 3.15);
-    let alpha = 1.0 + (0.24 - 1.0) * focus;
-    let blur = if depth_blur_active {
-        1.75 * focus
-    } else {
-        0.0
-    };
-    (alpha.clamp(0.0, 1.0), blur)
+    let (alpha, blur) = lyric_focus_falloff(distance as f32);
+    (alpha, if depth_blur_active { blur } else { 0.0 })
 }
 
 fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
@@ -1450,10 +1452,15 @@ mod tests {
         let row3 = lyric_visual_profile(13, 10, 0.0, false, true);
         let row4 = lyric_visual_profile(14, 10, 0.0, false, true);
 
+        assert!(active.0 > 0.99);
+        assert!(row1.0 < 0.70);
+        assert!(row2.0 < 0.45);
+        assert!(row3.0 < 0.33);
+        assert!(row4.0 < 0.28);
         assert!(active.0 > row1.0);
         assert!(row1.0 > row2.0);
         assert!(row2.0 > row3.0);
-        assert!(row3.0 >= row4.0);
+        assert!(row3.0 > row4.0);
         assert!(active.1 < row1.1);
         assert!(row1.1 < row2.1);
         assert!(row2.1 < row3.1);
