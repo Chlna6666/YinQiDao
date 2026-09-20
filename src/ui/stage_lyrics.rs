@@ -944,6 +944,7 @@ fn render_lyric_row(
         row,
         index,
         active,
+        focus_from_index,
         scroll_animating,
         scroll_from_y,
         motion_epoch,
@@ -1434,11 +1435,11 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_transition_is_bound_to_near_focus_rows_only() {
+    fn lyric_depth_transition_covers_visible_focus_neighborhood() {
         assert!(lyric_depth_transition_bound(12, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(10, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(9, 12, Some(11), false));
-        assert!(!lyric_depth_transition_bound(8, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(8, 12, Some(11), false));
+        assert!(lyric_depth_transition_bound(6, 12, Some(11), false));
+        assert!(!lyric_depth_transition_bound(4, 12, Some(11), false));
         assert!(!lyric_depth_transition_bound(0, 12, Some(11), false));
         assert!(!lyric_depth_transition_bound(12, 12, Some(11), true));
     }
