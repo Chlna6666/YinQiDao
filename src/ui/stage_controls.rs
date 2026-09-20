@@ -16,7 +16,10 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, slider::InteractiveSliderState},
+    components::{
+        SliderStyle,
+        slider::{InteractiveSliderState, SliderProgressAnimation},
+    },
     shell::MusicApp,
     stage_chrome,
     theme::{self, ACCENT_RED, format_remaining_time, format_time, themed_icon},
@@ -919,7 +922,8 @@ struct StageProgressView {
     controls_visible: bool,
     drag_progress_ratio: Option<f32>,
     local_dragging: bool,
-    frame_armed: bool,
+    transport_generation: u64,
+    animation_epoch: u64,
     slider: Option<InteractiveSliderState>,
 }
 
@@ -933,6 +937,9 @@ impl StageProgressView {
         controls_visible: bool,
         drag_progress_ratio: Option<f32>,
     ) -> Self {
+        let transport_generation = engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
         Self {
             parent,
             owner,
@@ -942,7 +949,8 @@ impl StageProgressView {
             controls_visible,
             drag_progress_ratio,
             local_dragging: false,
-            frame_armed: false,
+            transport_generation,
+            animation_epoch: 0,
             slider: None,
         }
     }
@@ -961,22 +969,34 @@ impl StageProgressView {
             (None, None) => false,
             _ => true,
         };
+        if engine_changed {
+            self.engine = engine;
+        }
+        let transport_generation = self
+            .engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
         let drag_progress_ratio = if self.local_dragging {
             self.drag_progress_ratio
         } else {
             drag_progress_ratio
         };
         let changed = engine_changed
+            || self.transport_generation != transport_generation
             || self.playback_state != playback_state
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
             || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
-        self.engine = engine;
+        if !engine_changed {
+            self.engine = engine;
+        }
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
         self.drag_progress_ratio = drag_progress_ratio;
         if changed {
+            self.transport_generation = transport_generation;
+            self.animation_epoch = self.animation_epoch.wrapping_add(1);
             cx.notify();
         }
     }
@@ -1052,39 +1072,7 @@ impl StageProgressView {
 
 impl Render for StageProgressView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let animate = self.stage_active
-            && self.controls_visible
-            && self.playback_state == PlaybackState::Playing
-            && self.drag_progress_ratio.is_none()
-            && self.engine.is_some()
-            && !window.is_minimized();
-        if animate {
-            // request_animation_frame() force-renders the whole window in the pinned GPUI. Follow
-            // the same DWM/vsync cadence with a next-frame callback that dirties only this retained
-            // progress entity.
-            if !self.frame_armed {
-                self.frame_armed = true;
-                let entity = cx.entity();
-                window.on_next_frame(move |window, cx| {
-                    let _ = entity.update(cx, |this, cx| {
-                        this.frame_armed = false;
-                        if this.stage_active
-                            && this.controls_visible
-                            && this.playback_state == PlaybackState::Playing
-                            && this.drag_progress_ratio.is_none()
-                            && this.engine.is_some()
-                            && !window.is_minimized()
-                        {
-                            cx.notify();
-                        }
-                    });
-                });
-            }
-        } else {
-            self.frame_armed = false;
-        }
-
-        let (_, live_position_ms, duration_ms) = self
+        let (engine_state, live_position_ms, duration_ms) = self
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
@@ -1098,10 +1086,37 @@ impl Render for StageProgressView {
         });
 
         self.ensure_slider(cx);
-        self.slider
+        let slider = self
+            .slider
             .as_ref()
-            .expect("stage progress slider must be initialized")
-            .render(progress_ratio, SliderStyle::stage_progress())
+            .expect("stage progress slider must be initialized");
+        let remaining_ms = duration_ms.saturating_sub(live_position_ms);
+        let animate = self.stage_active
+            && self.controls_visible
+            && self.playback_state == PlaybackState::Playing
+            && engine_state == PlaybackState::Playing
+            && drag_progress_ratio.is_none()
+            && duration_ms > 0
+            && remaining_ms > 0
+            && !window.is_minimized();
+
+        let progress = if animate {
+            // Stage progress used to notify this view on every VSync. That turned one tiny rail
+            // into a main-thread build/layout source. Commit one renderer-owned reveal instead;
+            // pause/seek/track/drag semantic changes retarget it through sync().
+            slider.render_animated_progress(
+                progress_ratio,
+                SliderStyle::stage_progress(),
+                SliderProgressAnimation {
+                    epoch: self.animation_epoch,
+                    duration: Duration::from_millis(remaining_ms),
+                },
+            )
+        } else {
+            slider.render(progress_ratio, SliderStyle::stage_progress())
+        };
+
+        progress
             .flex_1()
             .min_w(px(80.0))
             .into_any_element()
