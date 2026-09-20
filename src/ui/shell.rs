@@ -33,7 +33,7 @@ use super::{
     app_runtime_events, home, library as library_page, mini_player_view, player,
     player::NowPlaying,
     route::{self, AppRoute},
-    settings as settings_page, stage_chrome, stage_controls, theme,
+    settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
@@ -1290,6 +1290,26 @@ impl MusicApp {
                 continue;
             }
             self.lyrics.remove(&candidate);
+        }
+    }
+
+    pub(crate) fn sync_lyrics_surfaces(
+        &mut self,
+        track_id: TrackId,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = self
+            .snapshot
+            .current_track
+            .as_ref()
+            .is_some_and(|track| track.id == track_id);
+        if !is_current {
+            return;
+        }
+
+        stage_lyrics::sync_if_created(self, cx);
+        if self.config.desktop_lyrics.visible {
+            self.sync_desktop_lyrics_window(cx);
         }
     }
 
@@ -2565,7 +2585,7 @@ impl MusicApp {
                         .is_some_and(|(_, current_source, _)| current_source == &source);
                     if same_source {
                         app.cache_lyrics(track_id, document);
-                        cx.notify();
+                        app.sync_lyrics_surfaces(track_id, cx);
                     }
                 });
             }
@@ -2696,7 +2716,7 @@ impl MusicApp {
             if let Ok(Some(document)) = task.await {
                 let _ = this.update(cx, |app, cx| {
                     app.cache_lyrics(track_id, document);
-                    cx.notify();
+                    app.sync_lyrics_surfaces(track_id, cx);
                 });
             }
             Ok(())
@@ -3882,7 +3902,7 @@ impl MusicApp {
                         if let Ok(Some(lrc)) = task.await {
                             this.update(cx, |this, cx| {
                                 this.cache_lyrics(track_id, lrc);
-                                cx.notify();
+                                this.sync_lyrics_surfaces(track_id, cx);
                             })?;
                         }
                         Ok(())
