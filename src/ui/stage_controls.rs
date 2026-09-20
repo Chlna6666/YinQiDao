@@ -1160,8 +1160,6 @@ impl Render for StageProgressView {
                 Ok(())
             })
             .detach();
-        } else if !should_tick {
-            self.timer_started = false;
         }
 
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
