@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use gpui::{
@@ -51,7 +54,6 @@ pub(super) struct PlaybackProgress {
     visible: bool,
     drag_ratio_bits: Option<u32>,
     local_drag_ratio: Option<f32>,
-    timer_started: bool,
     slider: Option<InteractiveSliderState>,
 }
 
@@ -71,7 +73,6 @@ impl PlaybackProgress {
             visible: true,
             drag_ratio_bits: None,
             local_drag_ratio: None,
-            timer_started: false,
             slider: None,
         }
     }
@@ -185,40 +186,11 @@ impl Render for PlaybackProgress {
             && engine_state == PlaybackState::Playing
             && drag_ratio.is_none()
             && duration_ms > 0;
-        if should_tick && !self.timer_started {
-            self.timer_started = true;
-            cx.spawn(async move |this, cx| -> Result<()> {
-                loop {
-                    Timer::after(MINI_PROGRESS_REFRESH_INTERVAL).await;
-                    let keep_running = match this.update(cx, |this, cx| {
-                        let running = this.visible
-                            && this.playback_state == PlaybackState::Playing
-                            && this.drag_ratio_bits.is_none()
-                            && this.local_drag_ratio.is_none()
-                            && this
-                                .engine
-                                .as_ref()
-                                .is_some_and(|engine| {
-                                    let (state, _, duration) = engine.progress();
-                                    state == PlaybackState::Playing && duration > 0
-                                });
-                        if !running {
-                            this.timer_started = false;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    }) {
-                        Ok(running) => running,
-                        Err(_) => break,
-                    };
-                    if !keep_running {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .detach();
+        if should_tick && !_window.is_minimized() {
+            // GPUI owns the deadline and notifies only this cached View entity. This replaces the
+            // old detached Timer loop, so transport state changes and view lifetime stay ordered by
+            // the window event loop instead of racing a background task.
+            _window.request_invalidation_at(Instant::now() + MINI_PROGRESS_REFRESH_INTERVAL, cx);
         }
 
         let ratio = drag_ratio.unwrap_or_else(|| {
@@ -248,46 +220,16 @@ impl Render for PlaybackProgress {
 pub(super) struct PlaybackTime {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
-    timer_started: bool,
 }
 
 impl PlaybackTime {
     pub(super) fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
-        Self {
-            parent,
-            engine,
-            timer_started: false,
-        }
+        Self { parent, engine }
     }
 }
 
 impl Render for PlaybackTime {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.timer_started && mini_clock_should_run(&self.parent, &self.engine, cx) {
-            self.timer_started = true;
-            cx.spawn(async move |this, cx| -> Result<()> {
-                loop {
-                    Timer::after(MINI_TIME_REFRESH_INTERVAL).await;
-                    let keep_running = match this.update(cx, |this, cx| {
-                        if !mini_clock_should_run(&this.parent, &this.engine, cx) {
-                            this.timer_started = false;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    }) {
-                        Ok(keep_running) => keep_running,
-                        Err(_) => break,
-                    };
-                    if !keep_running {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .detach();
-        }
-
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (_, position_ms, duration_ms) = self
             .engine
             .as_ref()
@@ -296,6 +238,14 @@ impl Render for PlaybackTime {
             .parent
             .read_with(cx, |app, _| app.drag_progress_ratio)
             .unwrap_or(None);
+        if drag_ratio.is_none()
+            && mini_clock_should_run(&self.parent, &self.engine, cx)
+            && !window.is_minimized()
+        {
+            let remainder = position_ms % 1_000;
+            let delay = Duration::from_millis((1_000 - remainder).max(16));
+            window.request_invalidation_at(Instant::now() + delay.min(MINI_TIME_REFRESH_INTERVAL), cx);
+        }
         let display_position = drag_ratio.map_or(position_ms, |ratio| {
             (duration_ms as f32 * ratio).round() as u64
         });
