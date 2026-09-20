@@ -27,15 +27,17 @@ const LYRIC_LIST_PADDING_BOTTOM: f32 = 10.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(240);
-const LYRIC_ROW_STAGGER_MS: u64 = 28;
+const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(270);
+const LYRIC_ROW_STAGGER_MS: u64 = 18;
 const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 6;
-const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(210);
+const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
+const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 // Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
 // edge depth never snaps while translation is still cascading.
-const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 9;
+const LYRIC_BLUR_TRANSITION_RADIUS: usize = 2;
+const LYRIC_OPACITY_TRANSITION_RADIUS: usize = 9;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -841,7 +843,10 @@ fn render_lyric_row(
             depth_blur_active,
         )
     });
-    let near_focus = lyric_depth_transition_bound(index, active, previous_active, reading_mode);
+    let animate_blur =
+        lyric_blur_transition_bound(index, active, previous_active, reading_mode);
+    let animate_opacity =
+        lyric_opacity_transition_bound(index, active, previous_active, reading_mode);
 
     // Active may advance before the virtual list has target geometry. Keep the old style until the
     // hand-off actually begins. Once it begins, the stable lyric-text element changes to the new
@@ -867,13 +872,13 @@ fn render_lyric_row(
     )
     .opacity(resolved_alpha);
 
-    if near_focus && focus_started && !hovered {
-        text = text.transition(lyric_depth_transition(lyric_row_stagger_delay(
-            index,
-            active,
-            previous_active,
-            scroll_from_y,
-        )));
+    if focus_started && !hovered {
+        let delay = lyric_row_stagger_delay(index, active, previous_active, scroll_from_y);
+        if animate_blur {
+            text = text.transition(lyric_depth_transition(delay));
+        } else if animate_opacity {
+            text = text.transition(lyric_opacity_transition(delay));
+        }
     }
     let text = text.into_any_element();
 
@@ -1075,8 +1080,12 @@ fn lyric_visual_profile(
     let alpha = (focus_alpha * edge_alpha).clamp(0.012, 1.0);
 
     let blur = if depth_blur_active {
-        let edge_blur = 1.20 * edge;
-        (focus_blur + edge_blur).min(3.10)
+        // Keep element-blur captures local to the focus neighborhood. Past roughly three rows the
+        // text is already dim enough that opacity alone produces the edge-depth cue, while dropping
+        // the Gaussian pass avoids a stack of offscreen blur layers during every hand-off.
+        let blur_gate = 1.0 - smoothstep01((distance - 2.0) / 1.8);
+        let edge_blur = 0.75 * edge;
+        ((focus_blur + edge_blur) * blur_gate).min(2.35)
     } else {
         0.0
     };
@@ -1096,7 +1105,8 @@ fn lyric_focus_falloff(distance: f32) -> (f32, f32) {
     let alpha = 0.18 + 0.82 * attenuation;
 
     let blur_progress = 1.0 - 1.0 / (1.0 + 0.55 * d * d);
-    let blur = 2.05 * blur_progress;
+    let blur_gate = 1.0 - smoothstep01((d - 2.0) / 1.8);
+    let blur = 2.05 * blur_progress * blur_gate;
 
     (alpha.clamp(0.0, 1.0), blur.max(0.0))
 }
@@ -1333,11 +1343,19 @@ fn lyric_depth_transition(delay: Duration) -> Transition {
     Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
         .delay(delay)
         .fill_mode(FillMode::Both)
-        .ease(Easing::OutQuint)
+        .ease(Easing::OutCubic)
         .properties([
             TransitionProperty::Opacity,
             TransitionProperty::Blur,
         ])
+}
+
+fn lyric_opacity_transition(delay: Duration) -> Transition {
+    Transition::new(LYRIC_OPACITY_TRANSITION_DURATION)
+        .delay(delay)
+        .fill_mode(FillMode::Both)
+        .ease(Easing::OutCubic)
+        .properties([TransitionProperty::Opacity])
 }
 
 fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
@@ -1347,7 +1365,7 @@ fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
         // position until their own start time. Forwards does not apply the first keyframe during
         // delay and made all rows appear at the final logical position before delayed motion.
         .fill_mode(FillMode::Both)
-        .ease(Easing::OutQuint)
+        .ease(Easing::OutCubic)
 }
 
 #[inline]
@@ -1404,7 +1422,7 @@ fn apply_lyric_row_motion(
     .into_any_element()
 }
 
-fn lyric_depth_transition_bound(
+fn lyric_blur_transition_bound(
     index: usize,
     active: usize,
     focus_from_index: Option<usize>,
@@ -1414,9 +1432,24 @@ fn lyric_depth_transition_bound(
         return false;
     }
 
-    index.abs_diff(active) <= LYRIC_DEPTH_TRANSITION_RADIUS
+    index.abs_diff(active) <= LYRIC_BLUR_TRANSITION_RADIUS
         || focus_from_index
-            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_DEPTH_TRANSITION_RADIUS)
+            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_BLUR_TRANSITION_RADIUS)
+}
+
+fn lyric_opacity_transition_bound(
+    index: usize,
+    active: usize,
+    focus_from_index: Option<usize>,
+    reading_mode: bool,
+) -> bool {
+    if reading_mode {
+        return false;
+    }
+
+    index.abs_diff(active) <= LYRIC_OPACITY_TRANSITION_RADIUS
+        || focus_from_index
+            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_OPACITY_TRANSITION_RADIUS)
 }
 
 #[cfg(test)]
@@ -1439,7 +1472,9 @@ mod tests {
 
         assert_eq!(active, (1.0, 0.0));
         assert!(active.0 > near.0 && near.0 > middle.0 && middle.0 >= far.0);
-        assert!(active.1 < near.1 && near.1 < middle.1 && middle.1 <= far.1);
+        assert!(active.1 < near.1);
+        assert!(near.1 <= middle.1 || middle.1 == 0.0);
+        assert!(far.1 <= middle.1);
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
         assert_eq!(lyric_focus_profile(2, false, false).1, 0.0);
     }
@@ -1497,8 +1532,8 @@ mod tests {
         assert_eq!(active, (1.0, 0.0));
         assert!(active.0 > top_mid.0 && top_mid.0 > top_edge.0);
         assert!(active.0 > bottom_mid.0 && bottom_mid.0 > bottom_edge.0);
-        assert!(active.1 < top_mid.1 && top_mid.1 < top_edge.1);
-        assert!(active.1 < bottom_mid.1 && bottom_mid.1 < bottom_edge.1);
+        assert!(top_mid.1 >= 0.0 && top_edge.1 >= 0.0);
+        assert!(bottom_mid.1 >= 0.0 && bottom_edge.1 >= 0.0);
     }
 
     #[test]
@@ -1539,13 +1574,18 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_transition_covers_visible_focus_neighborhood() {
-        assert!(lyric_depth_transition_bound(12, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(8, 12, Some(11), false));
-        assert!(lyric_depth_transition_bound(6, 12, Some(11), false));
-        assert!(!lyric_depth_transition_bound(4, 12, Some(11), false));
-        assert!(!lyric_depth_transition_bound(0, 12, Some(11), false));
-        assert!(!lyric_depth_transition_bound(12, 12, Some(11), true));
+    fn lyric_transition_cost_is_limited_to_nearby_blur_rows() {
+        assert!(lyric_blur_transition_bound(12, 12, Some(11), false));
+        assert!(lyric_blur_transition_bound(10, 12, Some(11), false));
+        assert!(!lyric_blur_transition_bound(8, 12, Some(11), false));
+
+        // Opacity is compositor-cheap and may cover the full visible focus neighborhood.
+        assert!(lyric_opacity_transition_bound(8, 12, Some(11), false));
+        assert!(lyric_opacity_transition_bound(4, 12, Some(11), false));
+        assert!(!lyric_opacity_transition_bound(0, 12, Some(11), false));
+
+        assert!(!lyric_blur_transition_bound(12, 12, Some(11), true));
+        assert!(!lyric_opacity_transition_bound(12, 12, Some(11), true));
     }
 
     #[test]
