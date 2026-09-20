@@ -20,6 +20,9 @@ static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DISK_DIR: OnceLock<PathBuf> = OnceLock::new();
 static REMOTE_IMAGE_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 
+const PREFETCH_VISIBLE_LIMIT: usize = 8;
+const PREFETCH_BATCH_SIZE: usize = 4;
+
 fn mem_cache() -> &'static RwLock<HashMap<String, Arc<[u8]>>> {
     MEM_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
@@ -272,39 +275,51 @@ pub fn fetch_detached(url: &str) {
 }
 
 pub fn prefetch_urls<V: 'static>(urls: Vec<String>, cx: &mut Context<V>) {
+    let mut seen = HashSet::new();
     let urls_to_fetch: Vec<String> = urls
         .into_iter()
-        .filter(|u| !u.trim().is_empty() && get_cached(u).is_none())
+        .filter(|url| {
+            !url.trim().is_empty()
+                && get_cached(url).is_none()
+                && seen.insert(url.clone())
+        })
+        .take(PREFETCH_VISIBLE_LIMIT)
         .collect();
     if urls_to_fetch.is_empty() {
         return;
     }
 
-    let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-        for url in urls_to_fetch {
-            let should_fetch = {
-                let Ok(mut set) = in_flight().lock() else {
-                    continue;
+    // Warm only the first-screen working set. Two small batches can overlap without turning a
+    // 100-track playlist into 100 background image jobs. Each batch triggers one repaint when its
+    // bytes are resident, so visible covers appear progressively without per-image root churn.
+    for batch in urls_to_fetch.chunks(PREFETCH_BATCH_SIZE) {
+        let batch = batch.to_vec();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            for url in batch {
+                let should_fetch = {
+                    let Ok(mut set) = in_flight().lock() else {
+                        continue;
+                    };
+                    set.insert(url.clone())
                 };
-                set.insert(url.clone())
-            };
-            if should_fetch {
-                let _ = load_or_fetch(url.clone()).await;
-                if let Ok(mut set) = in_flight().lock() {
-                    set.remove(&url);
+                if should_fetch {
+                    let _ = load_or_fetch(url.clone()).await;
+                    if let Ok(mut set) = in_flight().lock() {
+                        set.remove(&url);
+                    }
                 }
             }
-        }
-        Ok(())
-    });
-
-    cx.spawn(async move |this, cx| {
-        let _ = task.await;
-        let _ = this.update(cx, |_, cx| {
-            cx.notify();
+            Ok(())
         });
-    })
-    .detach();
+
+        cx.spawn(async move |this, cx| {
+            let _ = task.await;
+            let _ = this.update(cx, |_, cx| {
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 pub fn render_remote_cover(
