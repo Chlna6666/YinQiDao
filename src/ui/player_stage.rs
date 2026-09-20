@@ -301,7 +301,9 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
 }
 
 fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElement {
-    let fluid = AnyView::from(fluid_background).cached(StyleRefinement::default().size_full());
+    let fluid = AnyView::from(fluid_background)
+        .cached(StyleRefinement::default().size_full())
+        .reuse_on_window_refresh();
     div()
         .absolute()
         .inset_0()
