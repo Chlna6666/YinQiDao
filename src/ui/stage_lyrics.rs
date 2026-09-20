@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
+    AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
@@ -34,11 +34,7 @@ const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
-const KARAOKE_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
-// Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
-// edge depth never snaps while translation is still cascading.
-const LYRIC_BLUR_TRANSITION_RADIUS: usize = 1;
-const LYRIC_OPACITY_TRANSITION_RADIUS: usize = 9;
+const LYRIC_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -583,8 +579,11 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(now + delay, cx);
         }
-        if self.karaoke_should_sample() {
-            window.request_invalidation_at(now + KARAOKE_SAMPLE_INTERVAL, cx);
+        if self.karaoke_should_sample()
+            || self.scroll_animation.is_some()
+            || self.focus_started_at.is_some()
+        {
+            window.request_invalidation_at(now + LYRIC_SAMPLE_INTERVAL, cx);
         }
         if let Some(until) = self.reading_until
             && until > now
@@ -763,8 +762,9 @@ impl Render for StageLyricsView {
         let scroll_animating = scroll_animation.is_some();
         let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
         let motion_epoch = self.motion_epoch;
-        let focus_started = self.focus_started_at.is_some();
-        let focus_animating = focus_started;
+        let focus_started_at = self.focus_started_at;
+        let scroll_started_at = scroll_animation.map(|animation| animation.started_at);
+        let focus_animating = focus_started_at.is_some();
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // automatic scroll used to make every line equally sharp during the transition, producing
         // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
@@ -840,9 +840,11 @@ impl Render for StageLyricsView {
                 index,
                 active,
                 focus_from_index,
-                focus_started,
+                focus_started_at,
+                frame_now,
                 scroll_animating,
                 scroll_from_y,
+                scroll_started_at,
                 edge_progress,
                 previous_edge_progress,
                 motion_epoch,
@@ -890,9 +892,11 @@ fn render_lyric_row(
     index: usize,
     active: usize,
     focus_from_index: Option<usize>,
-    focus_started: bool,
+    focus_started_at: Option<Instant>,
+    frame_now: Instant,
     scroll_animating: bool,
     scroll_from_y: f32,
+    scroll_started_at: Option<Instant>,
     edge_progress: f32,
     previous_edge_progress: f32,
     motion_epoch: u64,
@@ -928,23 +932,31 @@ fn render_lyric_row(
             depth_blur_active,
         )
     });
-    let animate_blur =
-        lyric_blur_transition_bound(index, active, previous_active, reading_mode);
-    let animate_opacity =
-        lyric_opacity_transition_bound(index, active, previous_active, reading_mode);
-
-    // Active may advance before the virtual list has target geometry. Keep the old style until the
-    // hand-off actually begins. Once it begins, the stable lyric-text element changes to the new
-    // alpha/blur target and GPUI/Nova owns both transitions on the GPU.
-    let (resolved_alpha, resolved_blur) = if previous_active.is_some() && !focus_started {
-        previous_profile.unwrap_or((target_alpha, target_blur))
-    } else {
-        (target_alpha, target_blur)
+    // Sample focus/depth locally instead of spawning GPUI PresentationAnimation timelines.
+    // This keeps the same visual interpolation but caps work at the StageLyricsView cadence.
+    let (resolved_alpha, resolved_blur) = match (previous_profile, focus_started_at) {
+        (Some(previous), Some(started_at)) => {
+            let elapsed = frame_now.saturating_duration_since(started_at);
+            let alpha_t = AnimationSpec::new(LYRIC_OPACITY_TRANSITION_DURATION)
+                .ease(Easing::InOutCubic)
+                .sample_elapsed(elapsed)
+                .eased_progress;
+            let blur_t = AnimationSpec::new(LYRIC_DEPTH_TRANSITION_DURATION)
+                .ease(Easing::InOutCubic)
+                .sample_elapsed(elapsed)
+                .eased_progress;
+            (
+                previous.0 + (target_alpha - previous.0) * alpha_t,
+                previous.1 + (target_blur - previous.1) * blur_t,
+            )
+        }
+        (Some(previous), None) => previous,
+        (None, _) => (target_alpha, target_blur),
     };
     let resolved_alpha = if hovered { 1.0 } else { resolved_alpha };
     let resolved_blur = if hovered { 0.0 } else { resolved_blur };
 
-    let mut text = lyric_text_layer(
+    let text = lyric_text_layer(
         line,
         karaoke_active,
         active_word_index,
@@ -955,18 +967,8 @@ fn render_lyric_row(
         text_id,
         index,
     )
-    .opacity(resolved_alpha);
-
-    if focus_started && !hovered {
-        // Keep the depth field continuous. Stagger belongs to physical row translation only;
-        // delaying opacity/blur per row made the hand-off read as a sequence of discrete steps.
-        if animate_blur {
-            text = text.transition(lyric_depth_transition());
-        } else if animate_opacity {
-            text = text.transition(lyric_opacity_transition());
-        }
-    }
-    let text = text.into_any_element();
+    .opacity(resolved_alpha)
+    .into_any_element();
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -1042,6 +1044,8 @@ fn render_lyric_row(
             focus_from_index,
             scroll_animating,
             scroll_from_y,
+            scroll_started_at,
+            frame_now,
             motion_epoch,
         );
     }
@@ -1419,21 +1423,6 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 
-fn lyric_depth_transition() -> Transition {
-    Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
-        .ease(Easing::InOutCubic)
-        .properties([
-            TransitionProperty::Opacity,
-            TransitionProperty::Blur,
-        ])
-}
-
-fn lyric_opacity_transition() -> Transition {
-    Transition::new(LYRIC_OPACITY_TRANSITION_DURATION)
-        .ease(Easing::InOutCubic)
-        .properties([TransitionProperty::Opacity])
-}
-
 fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
     AnimationSpec::new(LYRIC_ROW_MOTION_DURATION)
         .delay(delay)
@@ -1472,60 +1461,30 @@ fn apply_lyric_row_motion(
     previous_active: Option<usize>,
     animating: bool,
     from_y: f32,
-    motion_epoch: u64,
+    started_at: Option<Instant>,
+    frame_now: Instant,
+    _motion_epoch: u64,
 ) -> gpui::AnyElement {
     if !animating || from_y.abs() <= SCROLL_SETTLE_PX {
         return row.into_any_element();
     }
 
+    let Some(started_at) = started_at else {
+        return row.into_any_element();
+    };
     let delay = lyric_row_stagger_delay(index, active, previous_active, from_y);
-    let key = motion_epoch
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(index as u64);
-    row.with_animation(
-        ElementId::NamedInteger(
-            SharedString::new_static("stage-lyric-row-motion"),
-            key,
+    let progress = lyric_row_motion_spec(delay)
+        .sample_elapsed(frame_now.saturating_duration_since(started_at))
+        .eased_progress;
+
+    row.with_sampled_animation(
+        AnimationProperty::translation(
+            point(px(0.0), px(from_y)),
+            point(px(0.0), px(0.0)),
         ),
-        Animation::from_spec(lyric_row_motion_spec(delay)).with_property(
-            AnimationProperty::translation(
-                point(px(0.0), px(from_y)),
-                point(px(0.0), px(0.0)),
-            ),
-        ),
-        |element, _| element,
+        progress,
     )
     .into_any_element()
-}
-
-fn lyric_blur_transition_bound(
-    index: usize,
-    active: usize,
-    focus_from_index: Option<usize>,
-    reading_mode: bool,
-) -> bool {
-    if reading_mode {
-        return false;
-    }
-
-    index.abs_diff(active) <= LYRIC_BLUR_TRANSITION_RADIUS
-        || focus_from_index
-            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_BLUR_TRANSITION_RADIUS)
-}
-
-fn lyric_opacity_transition_bound(
-    index: usize,
-    active: usize,
-    focus_from_index: Option<usize>,
-    reading_mode: bool,
-) -> bool {
-    if reading_mode {
-        return false;
-    }
-
-    index.abs_diff(active) <= LYRIC_OPACITY_TRANSITION_RADIUS
-        || focus_from_index
-            .is_some_and(|previous| index.abs_diff(previous) <= LYRIC_OPACITY_TRANSITION_RADIUS)
 }
 
 #[cfg(test)]
@@ -1658,21 +1617,6 @@ mod tests {
                 LYRIC_ROW_STAGGER_MS * LYRIC_ROW_MAX_STAGGER_ROWS as u64
             )
         );
-    }
-
-    #[test]
-    fn lyric_transition_cost_is_limited_to_nearby_blur_rows() {
-        assert!(lyric_blur_transition_bound(12, 12, Some(11), false));
-        assert!(lyric_blur_transition_bound(11, 12, Some(11), false));
-        assert!(!lyric_blur_transition_bound(9, 12, Some(11), false));
-
-        // Opacity is compositor-cheap and may cover the full visible focus neighborhood.
-        assert!(lyric_opacity_transition_bound(8, 12, Some(11), false));
-        assert!(lyric_opacity_transition_bound(4, 12, Some(11), false));
-        assert!(!lyric_opacity_transition_bound(0, 12, Some(11), false));
-
-        assert!(!lyric_blur_transition_bound(12, 12, Some(11), true));
-        assert!(!lyric_opacity_transition_bound(12, 12, Some(11), true));
     }
 
     #[test]
