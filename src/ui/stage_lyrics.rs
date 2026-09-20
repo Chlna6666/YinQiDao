@@ -1070,19 +1070,22 @@ fn lyric_visual_profile(
     // Focus falloff is deliberately continuous rather than a row-by-row lookup table. The
     // compositor interpolates these endpoints again while the active line changes, so a lyric
     // becomes progressively more transparent and progressively sharper as it approaches focus.
-    let focus = smoothstep01(distance / 4.2);
+    // The focus band must already separate adjacent rows, not wait until a line reaches the
+    // physical viewport edge. A tighter continuous curve gives the Apple-style depth stack:
+    // current line is solid, each following/preceding row becomes progressively dimmer and softer.
+    let focus = smoothstep01(distance / 3.15);
     let edge = smoothstep01(edge_progress);
 
-    let focus_alpha = 1.0 + (0.48 - 1.0) * focus;
+    let focus_alpha = 1.0 + (0.24 - 1.0) * focus;
     // Physical viewport edge owns the final fade. Near the actual clip boundary the glyphs become
     // almost transparent instead of merely blurred, so no bright half-line appears at top/bottom.
-    let edge_alpha = 1.0 + (0.045 - 1.0) * edge;
-    let alpha = (focus_alpha * edge_alpha).clamp(0.018, 1.0);
+    let edge_alpha = 1.0 + (0.035 - 1.0) * edge;
+    let alpha = (focus_alpha * edge_alpha).clamp(0.012, 1.0);
 
     let blur = if depth_blur_active {
-        let focus_blur = 1.15 * focus;
-        let edge_blur = 1.35 * edge;
-        (focus_blur + edge_blur).min(2.50)
+        let focus_blur = 1.75 * focus;
+        let edge_blur = 1.20 * edge;
+        (focus_blur + edge_blur).min(2.95)
     } else {
         0.0
     };
@@ -1101,10 +1104,10 @@ fn lyric_focus_profile(
         return (1.0, 0.0);
     }
 
-    let focus = smoothstep01(distance as f32 / 4.2);
-    let alpha = 1.0 + (0.42 - 1.0) * focus;
+    let focus = smoothstep01(distance as f32 / 3.15);
+    let alpha = 1.0 + (0.24 - 1.0) * focus;
     let blur = if depth_blur_active {
-        1.30 * focus
+        1.75 * focus
     } else {
         0.0
     };
@@ -1437,6 +1440,23 @@ mod tests {
         assert!(active.1 < near.1 && near.1 < middle.1 && middle.1 <= far.1);
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
         assert_eq!(lyric_focus_profile(2, false, false).1, 0.0);
+    }
+
+    #[test]
+    fn focus_band_visibly_fades_each_adjacent_row() {
+        let active = lyric_visual_profile(10, 10, 0.0, false, true);
+        let row1 = lyric_visual_profile(11, 10, 0.0, false, true);
+        let row2 = lyric_visual_profile(12, 10, 0.0, false, true);
+        let row3 = lyric_visual_profile(13, 10, 0.0, false, true);
+        let row4 = lyric_visual_profile(14, 10, 0.0, false, true);
+
+        assert!(active.0 > row1.0);
+        assert!(row1.0 > row2.0);
+        assert!(row2.0 > row3.0);
+        assert!(row3.0 >= row4.0);
+        assert!(active.1 < row1.1);
+        assert!(row1.1 < row2.1);
+        assert!(row2.1 < row3.1);
     }
 
     #[test]
