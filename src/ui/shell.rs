@@ -3454,8 +3454,10 @@ impl MusicApp {
                         this.trigger_online_search(val, cx);
                         if this.page != AppPage::Library {
                             this.page = AppPage::Library;
+                            cx.notify();
+                        } else {
+                            this.notify_library_surface(cx);
                         }
-                        cx.notify();
                     });
                 }
             });
@@ -3467,8 +3469,10 @@ impl MusicApp {
                         this.trigger_online_search(val, cx);
                         if !this.search.trim().is_empty() && this.page != AppPage::Library {
                             this.page = AppPage::Library;
+                            cx.notify();
+                        } else if this.page == AppPage::Library {
+                            this.notify_library_surface(cx);
                         }
-                        cx.notify();
                     });
                 }
             });
@@ -3497,7 +3501,11 @@ impl MusicApp {
                 this.set_value("", cx);
             });
         }
-        cx.notify();
+        if self.page == AppPage::Library {
+            self.notify_library_surface(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn refresh_online_recommendations(&mut self, cx: &mut Context<Self>) {
