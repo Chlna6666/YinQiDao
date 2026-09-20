@@ -614,7 +614,7 @@ impl StageLyricsView {
         }
     }
 
-    fn prepare_scroll_animation(&mut self, window: &mut Window) {
+    fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &Context<Self>) {
         if !self.has_timeline || !self.stage_active || self.is_reading() {
             return;
         }
@@ -625,7 +625,10 @@ impl StageLyricsView {
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
             if self.anchor_bootstrap_pending && !window.is_minimized() {
-                window.request_animation_frame();
+                window.request_invalidation_at(
+                    Instant::now() + LYRIC_SAMPLE_INTERVAL,
+                    cx,
+                );
             }
             return;
         }
@@ -654,7 +657,10 @@ impl StageLyricsView {
             // scroll immediately and causes the whole lyric field to jump before the hand-off
             // animation starts. Bootstrap stays invisible until this target has real geometry.
             if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
-                window.request_animation_frame();
+                window.request_invalidation_at(
+                    Instant::now() + LYRIC_SAMPLE_INTERVAL,
+                    cx,
+                );
             }
             return;
         };
@@ -689,7 +695,6 @@ impl StageLyricsView {
             if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
                 self.focus_started_at = Some(now);
                 self.motion_epoch = self.motion_epoch.wrapping_add(1);
-                window.request_animation_frame();
             }
             return;
         }
@@ -707,7 +712,6 @@ impl StageLyricsView {
             if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
                 self.focus_started_at = Some(now);
                 self.motion_epoch = self.motion_epoch.wrapping_add(1);
-                window.request_animation_frame();
             }
             return;
         }
@@ -756,7 +760,7 @@ impl Render for StageLyricsView {
                 );
         }
 
-        self.prepare_scroll_animation(window);
+        self.prepare_scroll_animation(window, cx);
         self.schedule_deadlines(window, cx);
 
         let active = self.active_index.unwrap_or(0);
