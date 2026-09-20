@@ -181,8 +181,14 @@ pub(super) struct MiniPlayerView {
 }
 
 impl Render for MiniPlayerView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_playing = self.key.playback_state == PlaybackState::Playing;
+        let optimistic_playback_state = if is_playing {
+            PlaybackState::Paused
+        } else {
+            PlaybackState::Playing
+        };
+        let this_view = cx.weak_entity();
         let parent = self.parent.clone();
         let slider_volume = self.slider_volume;
         let icon_volume = self.icon_volume;
@@ -345,8 +351,14 @@ impl Render for MiniPlayerView {
                                             ))
                                             .on_mouse_down(gpui::MouseButton::Left, {
                                                 let parent = parent.clone();
+                                                let this_view = this_view.clone();
                                                 move |_, _, cx| {
                                                     cx.stop_propagation();
+                                                    let _ = this_view.update(cx, |view, view_cx| {
+                                                        view.key.playback_state =
+                                                            optimistic_playback_state;
+                                                        view_cx.notify();
+                                                    });
                                                     let _ = parent.update(cx, |app, app_cx| {
                                                         app.toggle_play(app_cx);
                                                     });
