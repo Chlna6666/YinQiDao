@@ -4,8 +4,9 @@ use std::{
 };
 
 use gpui::{
-    BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render, SharedString,
-    Transition, TransitionProperty, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
+    AnyView, BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render,
+    SharedString, StyleRefinement, Transition, TransitionProperty, WeakEntity, Window, div, hsla,
+    prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -24,6 +25,8 @@ use super::{
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
+const STAGE_TRANSPORT_HEIGHT: f32 = 32.0;
+const STAGE_PROGRESS_HEIGHT: f32 = 17.0;
 
 #[derive(Clone, Copy, Debug)]
 struct StageChromeFade {
@@ -388,9 +391,9 @@ impl Render for StageControlsView {
                     });
                 }
             })
-            // stage-drawer-root owns pointer activity for the whole immersive surface. Keeping
-            // another forwarding handler here multiplied Entity::update work for every mouse move.
-            .child(self.transport.clone())
+            // Keep the transport on a fixed retained-layout boundary. Its second/progress clocks
+            // may update independently without invalidating the whole Stage controls row.
+            .child(cached_stage_transport(self.transport.clone()))
             .child(control_button("stage-prev-btn", icon!(skip_back), {
                 let parent = parent.clone();
                 move |_, _, cx| {
@@ -897,7 +900,7 @@ impl Render for StageTransportView {
                     .text_color(hsla(0.0, 0.0, 1.0, 0.68))
                     .child(format_time(position)),
             )
-            .child(progress)
+            .child(cached_stage_progress(progress))
             .child(
                 div()
                     .text_xs()
@@ -1103,6 +1106,28 @@ impl Render for StageProgressView {
             .min_w(px(80.0))
             .into_any_element()
     }
+}
+
+fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyView {
+    AnyView::from(view)
+        .cached(
+            StyleRefinement::default()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(STAGE_TRANSPORT_HEIGHT)),
+        )
+        .reuse_on_window_refresh()
+}
+
+fn cached_stage_progress(view: Entity<StageProgressView>) -> AnyView {
+    AnyView::from(view)
+        .cached(
+            StyleRefinement::default()
+                .flex_1()
+                .min_w(px(80.0))
+                .h(px(STAGE_PROGRESS_HEIGHT)),
+        )
+        .reuse_on_window_refresh()
 }
 
 fn option_ratio_changed(current: Option<f32>, next: Option<f32>, epsilon: f32) -> bool {
