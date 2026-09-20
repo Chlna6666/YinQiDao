@@ -4334,7 +4334,7 @@ impl MusicApp {
         self.drag_volume_ratio = None;
         self.seeking = false;
         self.volume_dragging = false;
-        cx.notify();
+        self.sync_transport_surfaces(cx);
     }
 
     pub(crate) fn seek_to_ms(&mut self, position_ms: u64, cx: &mut Context<Self>) {
@@ -4347,7 +4347,11 @@ impl MusicApp {
         if self.send(PlayerCommand::Seek(Duration::from_millis(clamped))) {
             self.snapshot.position_ms = clamped;
             self.position_ms = clamped;
-            cx.notify();
+            self.config.position_ms = clamped;
+            self.sync_transport_surfaces(cx);
+            if let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) {
+                self.sync_lyrics_surfaces(track_id, cx);
+            }
         }
     }
 
@@ -4370,7 +4374,9 @@ impl MusicApp {
         }
         self.send(PlayerCommand::SetVolume(self.config.volume));
         self.save_config();
-        cx.notify();
+        self.system_media_sync_dirty = true;
+        self.update_system_media_async(cx);
+        self.sync_transport_surfaces(cx);
     }
 
     pub(crate) fn set_app_volume(&mut self, vol: f32, cx: &mut Context<Self>) {
@@ -4379,7 +4385,7 @@ impl MusicApp {
         self.save_config();
         self.system_media_sync_dirty = true;
         self.update_system_media_async(cx);
-        cx.notify();
+        self.sync_transport_surfaces(cx);
     }
 
     pub(crate) fn toggle_debug_log(&mut self, cx: &mut Context<Self>) {
