@@ -24,6 +24,8 @@ const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_PADDING_TOP: f32 = 8.0;
 const LYRIC_LIST_PADDING_BOTTOM: f32 = 10.0;
+const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
+const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
 const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(240);
 const LYRIC_ROW_STAGGER_MS: u64 = 28;
@@ -692,11 +694,27 @@ impl Render for StageLyricsView {
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
+        let visual_list_state = self.list_state.clone();
+        let viewport_bounds = self.list_state.bounds();
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
 
         let lyrics = list(self.list_state.clone(), move |index, _window, _cx| {
+            let (edge_progress, previous_edge_progress) = visual_list_state
+                .bounds_for_item(index)
+                .map(|bounds| {
+                    // ListState item bounds omit style padding.top while paint includes it.
+                    let target_center_y =
+                        f32::from(bounds.center().y) + LYRIC_LIST_PADDING_TOP;
+                    let previous_center_y = target_center_y + scroll_from_y;
+                    (
+                        lyric_viewport_edge_progress(target_center_y, viewport_bounds),
+                        lyric_viewport_edge_progress(previous_center_y, viewport_bounds),
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+
             render_lyric_row(
                 &lines[index],
                 index,
@@ -705,6 +723,8 @@ impl Render for StageLyricsView {
                 focus_started,
                 scroll_animating,
                 scroll_from_y,
+                edge_progress,
+                previous_edge_progress,
                 motion_epoch,
                 active_word_index,
                 position_ms,
@@ -754,6 +774,8 @@ fn render_lyric_row(
     focus_started: bool,
     scroll_animating: bool,
     scroll_from_y: f32,
+    edge_progress: f32,
+    previous_edge_progress: f32,
     motion_epoch: u64,
     active_word_index: Option<usize>,
     position_ms: u64,
@@ -767,14 +789,25 @@ fn render_lyric_row(
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
-    let (target_alpha, target_blur) =
-        lyric_visual_profile(index, active, reading_mode, depth_blur_active);
+    let (target_alpha, target_blur) = lyric_visual_profile(
+        index,
+        active,
+        edge_progress,
+        reading_mode,
+        depth_blur_active,
+    );
     let timestamp = line.timestamp_ms;
     let karaoke_active = index == active && !reading_mode;
 
     let previous_active = focus_from_index.filter(|previous| *previous != active);
     let previous_profile = previous_active.map(|previous| {
-        lyric_visual_profile(index, previous, reading_mode, depth_blur_active)
+        lyric_visual_profile(
+            index,
+            previous,
+            previous_edge_progress,
+            reading_mode,
+            depth_blur_active,
+        )
     });
     let near_focus = lyric_depth_transition_bound(index, active, previous_active, reading_mode);
 
@@ -972,25 +1005,27 @@ fn smoothstep01(value: f32) -> f32 {
 }
 
 #[inline]
-fn lyric_edge_progress(index: usize, active: usize) -> f32 {
-    if index == active {
-        return 0.0;
-    }
+fn lyric_viewport_edge_progress(
+    row_center_y: f32,
+    viewport: gpui::Bounds<gpui::Pixels>,
+) -> f32 {
+    let top = f32::from(viewport.origin.y);
+    let height = f32::from(viewport.size.height).max(1.0);
+    let bottom = top + height;
+    let y = row_center_y.clamp(top, bottom);
 
-    let distance = index.abs_diff(active) as f32;
-    let (start, end) = if index < active {
-        // The active anchor sits above center, so rows reach the physical top edge sooner.
-        (1.6, 7.2)
-    } else {
-        // The lower half has more room before the transport area.
-        (2.4, 8.6)
-    };
-    smoothstep01((distance - start) / (end - start))
+    let top_visibility =
+        smoothstep01((y - top) / LYRIC_VIEWPORT_FADE_TOP_PX.max(1.0));
+    let bottom_visibility =
+        smoothstep01((bottom - y) / LYRIC_VIEWPORT_FADE_BOTTOM_PX.max(1.0));
+
+    1.0 - top_visibility.min(bottom_visibility)
 }
 
 fn lyric_visual_profile(
     index: usize,
     active: usize,
+    edge_progress: f32,
     reading_mode: bool,
     depth_blur_active: bool,
 ) -> (f32, f32) {
@@ -1004,16 +1039,18 @@ fn lyric_visual_profile(
     // compositor interpolates these endpoints again while the active line changes, so a lyric
     // becomes progressively more transparent and progressively sharper as it approaches focus.
     let focus = smoothstep01(distance / 4.2);
-    let edge = lyric_edge_progress(index, active);
+    let edge = smoothstep01(edge_progress);
 
-    let focus_alpha = 1.0 + (0.42 - 1.0) * focus;
-    let edge_alpha = 1.0 + (0.16 - 1.0) * edge;
-    let alpha = (focus_alpha * edge_alpha).clamp(0.035, 1.0);
+    let focus_alpha = 1.0 + (0.48 - 1.0) * focus;
+    // Physical viewport edge owns the final fade. Near the actual clip boundary the glyphs become
+    // almost transparent instead of merely blurred, so no bright half-line appears at top/bottom.
+    let edge_alpha = 1.0 + (0.045 - 1.0) * edge;
+    let alpha = (focus_alpha * edge_alpha).clamp(0.018, 1.0);
 
     let blur = if depth_blur_active {
-        let focus_blur = 1.30 * focus;
-        let edge_blur = 1.55 * edge;
-        (focus_blur + edge_blur).min(2.85)
+        let focus_blur = 1.15 * focus;
+        let edge_blur = 1.35 * edge;
+        (focus_blur + edge_blur).min(2.50)
     } else {
         0.0
     };
@@ -1371,27 +1408,32 @@ mod tests {
     }
 
     #[test]
-    fn edge_progress_fades_top_and_bottom_without_region_masks() {
-        assert_eq!(lyric_edge_progress(10, 10), 0.0);
+    fn viewport_edge_progress_tracks_actual_top_and_bottom_distance() {
+        let viewport = gpui::Bounds::new(
+            gpui::point(px(0.0), px(100.0)),
+            gpui::size(px(500.0), px(600.0)),
+        );
 
-        let top_near = lyric_edge_progress(8, 10);
-        let top_far = lyric_edge_progress(4, 10);
-        let bottom_near = lyric_edge_progress(12, 10);
-        let bottom_far = lyric_edge_progress(17, 10);
+        let top_edge = lyric_viewport_edge_progress(100.0, viewport);
+        let top_inside = lyric_viewport_edge_progress(230.0, viewport);
+        let center = lyric_viewport_edge_progress(400.0, viewport);
+        let bottom_inside = lyric_viewport_edge_progress(545.0, viewport);
+        let bottom_edge = lyric_viewport_edge_progress(700.0, viewport);
 
-        assert!(top_near < top_far);
-        assert!(bottom_near < bottom_far);
-        // Top starts fading sooner because the focus anchor is above center.
-        assert!(lyric_edge_progress(7, 10) > lyric_edge_progress(13, 10));
+        assert!(top_edge > top_inside);
+        assert!(top_inside > center);
+        assert!(bottom_edge > bottom_inside);
+        assert!(bottom_inside > center);
+        assert_eq!(center, 0.0);
     }
 
     #[test]
     fn visual_profile_becomes_transparent_and_blurred_toward_edges() {
-        let active = lyric_visual_profile(10, 10, false, true);
-        let top_mid = lyric_visual_profile(6, 10, false, true);
-        let top_edge = lyric_visual_profile(2, 10, false, true);
-        let bottom_mid = lyric_visual_profile(15, 10, false, true);
-        let bottom_edge = lyric_visual_profile(19, 10, false, true);
+        let active = lyric_visual_profile(10, 10, 0.0, false, true);
+        let top_mid = lyric_visual_profile(6, 10, 0.45, false, true);
+        let top_edge = lyric_visual_profile(2, 10, 0.95, false, true);
+        let bottom_mid = lyric_visual_profile(15, 10, 0.45, false, true);
+        let bottom_edge = lyric_visual_profile(19, 10, 0.95, false, true);
 
         assert_eq!(active, (1.0, 0.0));
         assert!(active.0 > top_mid.0 && top_mid.0 > top_edge.0);
