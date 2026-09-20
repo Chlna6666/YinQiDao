@@ -1559,13 +1559,16 @@ impl MusicApp {
         self.snapshot.position_ms = 0;
         self.position_ms = 0;
         self.config.position_ms = 0;
-        cx.notify();
+        self.sync_transport_surfaces(cx);
+        if let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) {
+            self.sync_lyrics_surfaces(track_id, cx);
+        }
 
         if self.send(PlayerCommand::Stop) {
             self.save_config();
         } else {
             self.status = "音频输出不可用，请检查默认音频设备".into();
-            cx.notify();
+            self.notify_current_content_surface(cx);
         }
     }
 
@@ -1747,7 +1750,7 @@ impl MusicApp {
         }
 
         if self.snapshot.position_ms >= 3_000 {
-            self.send(PlayerCommand::Seek(Duration::ZERO));
+            self.seek_to_ms(0, cx);
             return;
         }
 
@@ -1854,7 +1857,7 @@ impl MusicApp {
             self.save_config();
             self.status = "已加入播放队列".into();
         }
-        cx.notify();
+        self.notify_current_content_surface(cx);
     }
 
     pub(crate) fn insert_next_in_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
@@ -1878,7 +1881,7 @@ impl MusicApp {
         self.queue_matches_tracks = false;
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
-        cx.notify();
+        self.notify_current_content_surface(cx);
     }
 
     pub(crate) fn ensure_track_for_remote(
@@ -1951,7 +1954,7 @@ impl MusicApp {
         self.queue_matches_tracks = false;
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
-        cx.notify();
+        self.notify_current_content_surface(cx);
     }
 
     pub(crate) fn clear_queue(&mut self, cx: &mut Context<Self>) {
@@ -1963,7 +1966,7 @@ impl MusicApp {
         self.send(PlayerCommand::SetQueue(self.config.queue.clone()));
         self.save_config();
         self.status = "播放队列已清空".into();
-        cx.notify();
+        self.notify_current_content_surface(cx);
     }
 
     pub(crate) fn seek_relative(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
