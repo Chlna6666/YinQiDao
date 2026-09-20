@@ -14,7 +14,10 @@ use crate::{
 };
 
 use super::{
-    components::{SliderStyle, interactive_slider},
+    components::{
+        SliderStyle,
+        slider::{InteractiveSliderState, SliderProgressAnimation},
+    },
     shell::{DragTarget, MusicApp},
     theme::{
         self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
@@ -22,7 +25,6 @@ use super::{
     },
 };
 
-const MINI_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const MINI_TIME_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const NOW_PLAYING_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -46,47 +48,74 @@ fn mini_clock_should_run(
 pub(super) struct PlaybackProgress {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
-    timer_started: bool,
+    transport_generation: u64,
+    playback_state: PlaybackState,
+    visible: bool,
+    drag_ratio_bits: Option<u32>,
+    animation_epoch: u64,
 }
 
 impl PlaybackProgress {
     pub(super) fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+        let transport_generation = engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
+        let playback_state = engine
+            .as_ref()
+            .map_or(PlaybackState::Stopped, |engine| engine.progress().0);
         Self {
             parent,
             engine,
-            timer_started: false,
+            transport_generation,
+            playback_state,
+            visible: true,
+            drag_ratio_bits: None,
+            animation_epoch: 0,
+        }
+    }
+
+    pub(super) fn sync(
+        &mut self,
+        engine: Option<Arc<AudioEngine>>,
+        playback_state: PlaybackState,
+        visible: bool,
+        drag_ratio: Option<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        let engine_changed = match (&self.engine, &engine) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if engine_changed {
+            self.engine = engine;
+        }
+
+        let transport_generation = self
+            .engine
+            .as_ref()
+            .map_or(0, |engine| engine.transport_generation());
+        let drag_ratio_bits = drag_ratio.map(f32::to_bits);
+        let changed = engine_changed
+            || self.transport_generation != transport_generation
+            || self.playback_state != playback_state
+            || self.visible != visible
+            || self.drag_ratio_bits != drag_ratio_bits;
+
+        if changed {
+            self.transport_generation = transport_generation;
+            self.playback_state = playback_state;
+            self.visible = visible;
+            self.drag_ratio_bits = drag_ratio_bits;
+            self.animation_epoch = self.animation_epoch.wrapping_add(1);
+            cx.notify();
         }
     }
 }
 
 impl Render for PlaybackProgress {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.timer_started && mini_clock_should_run(&self.parent, &self.engine, cx) {
-            self.timer_started = true;
-            cx.spawn(async move |this, cx| -> Result<()> {
-                loop {
-                    Timer::after(MINI_PROGRESS_REFRESH_INTERVAL).await;
-                    let keep_running = match this.update(cx, |this, cx| {
-                        if !mini_clock_should_run(&this.parent, &this.engine, cx) {
-                            this.timer_started = false;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    }) {
-                        Ok(keep_running) => keep_running,
-                        Err(_) => break,
-                    };
-                    if !keep_running {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .detach();
-        }
-
-        let (_, position_ms, duration_ms) = self
+        let (engine_state, position_ms, duration_ms) = self
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
@@ -101,21 +130,16 @@ impl Render for PlaybackProgress {
                 (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
             }
         });
+
         let parent = self.parent.clone();
         let this = cx.weak_entity();
-
-        interactive_slider(
+        let slider = InteractiveSliderState::new(
             "mini-progress-track",
-            ratio,
-            SliderStyle::mini_progress(),
             {
                 let parent = parent.clone();
                 let this = this.clone();
                 move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
-                        // Keep the track-bound pending ratio until AudioEngine reports the seeked
-                        // transport position. Clearing it here made the rail snap back to the old
-                        // decoder clock for one or more refreshes after a direct click.
                         app.seek_to_ratio(ratio, app_cx);
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
@@ -145,16 +169,38 @@ impl Render for PlaybackProgress {
                         } else {
                             app.begin_drag(DragTarget::Progress, ratio, app_cx);
                         }
-                        // commit_drag records a pending seek keyed by the current TrackId. Polling
-                        // releases it once the engine clock reaches the target or the track changes.
                         app.commit_drag(app_cx);
                     });
                     let _ = this.update(cx, |_, cx| cx.notify());
                 }
             },
-        )
-        .w_full()
-        .into_any_element()
+        );
+
+        let style = SliderStyle::mini_progress();
+        let remaining_ms = duration_ms.saturating_sub(position_ms);
+        let visual = if self.visible
+            && self.playback_state == PlaybackState::Playing
+            && engine_state == PlaybackState::Playing
+            && drag_ratio.is_none()
+            && duration_ms > 0
+            && remaining_ms > 0
+        {
+            // One renderer-owned timeline replaces the old 250 ms polling loop. The fill starts
+            // from the exact engine ratio sampled on this semantic update and reaches 1.0 at the
+            // authored track end without another view/layout notification.
+            slider.render_animated_progress(
+                ratio,
+                style,
+                SliderProgressAnimation {
+                    epoch: self.animation_epoch,
+                    duration: Duration::from_millis(remaining_ms),
+                },
+            )
+        } else {
+            slider.render(ratio, style)
+        };
+
+        visual.w_full().into_any_element()
     }
 }
 
