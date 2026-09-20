@@ -28,8 +28,7 @@ const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(430);
 const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(260);
 const LYRIC_ROW_STAGGER_MS: u64 = 32;
 const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 5;
-const LYRIC_FOCUS_CROSSFADE_DURATION: Duration = Duration::from_millis(190);
-const LYRIC_NEIGHBOR_OPACITY_DURATION: Duration = Duration::from_millis(180);
+const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 2;
@@ -739,8 +738,9 @@ fn render_lyric_row(
     });
     let near_focus = lyric_depth_transition_bound(index, active, previous_active, reading_mode);
 
-    // Active may advance before the virtual list has target geometry. Keep the exact old profile
-    // until scroll preparation starts the compositor hand-off.
+    // Active may advance before the virtual list has target geometry. Keep the old style until the
+    // hand-off actually begins. Once it begins, the stable lyric-text element changes to the new
+    // alpha/blur target and GPUI/Nova owns both transitions on the GPU.
     let (resolved_alpha, resolved_blur) = if previous_active.is_some() && !focus_started {
         previous_profile.unwrap_or((target_alpha, target_blur))
     } else {
@@ -749,50 +749,23 @@ fn render_lyric_row(
     let resolved_alpha = if hovered { 1.0 } else { resolved_alpha };
     let resolved_blur = if hovered { 0.0 } else { resolved_blur };
 
-    let is_focus_endpoint =
-        focus_started && !hovered && (index == active || previous_active == Some(index));
-    let text = if is_focus_endpoint
-        && let Some((from_alpha, from_blur)) = previous_profile
-        && ((from_alpha - target_alpha).abs() > 0.001
-            || (from_blur - target_blur).abs() > 0.001)
-    {
-        focus_crossfade_text(
-            line,
-            index,
-            active_word_index,
-            position_ms,
-            karaoke_running,
-            karaoke_epoch,
-            karaoke_active,
-            from_alpha,
-            from_blur,
-            target_alpha,
-            target_blur,
-            motion_epoch,
-            text_id,
-        )
-    } else {
-        let mut text = lyric_text_layer(
-            line,
-            karaoke_active,
-            active_word_index,
-            position_ms,
-            karaoke_running,
-            karaoke_epoch,
-            resolved_blur,
-            text_id,
-            index,
-        )
-        .opacity(resolved_alpha);
+    let mut text = lyric_text_layer(
+        line,
+        karaoke_active,
+        active_word_index,
+        position_ms,
+        karaoke_running,
+        karaoke_epoch,
+        resolved_blur,
+        text_id,
+        index,
+    )
+    .opacity(resolved_alpha);
 
-        // Opacity is a true GPUI/Nova GPU transition. Blur itself stays static here; animating blur
-        // radius on the current GPUI rev falls back to Paint driver and causes frame-generation
-        // spikes under multiple visible lyric rows.
-        if near_focus && focus_started {
-            text = text.transition(lyric_neighbor_opacity_transition());
-        }
-        text.into_any_element()
-    };
+    if near_focus && focus_started && !hovered {
+        text = text.transition(lyric_depth_transition());
+    }
+    let text = text.into_any_element();
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -945,91 +918,13 @@ fn lyric_text_layer(
     text.blur(px(blur_sigma.max(0.0)))
 }
 
-fn lyric_neighbor_opacity_transition() -> Transition {
-    Transition::new(LYRIC_NEIGHBOR_OPACITY_DURATION)
+fn lyric_depth_transition() -> Transition {
+    Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
         .ease(Easing::InOutCubic)
-        .properties([TransitionProperty::Opacity])
-}
-
-#[allow(clippy::too_many_arguments)]
-fn focus_crossfade_text(
-    line: &StageLyricLine,
-    index: usize,
-    active_word_index: Option<usize>,
-    position_ms: u64,
-    karaoke_running: bool,
-    karaoke_epoch: u64,
-    karaoke_active: bool,
-    from_alpha: f32,
-    from_blur: f32,
-    to_alpha: f32,
-    to_blur: f32,
-    motion_epoch: u64,
-    text_id: &'static str,
-) -> gpui::AnyElement {
-    let base_key = motion_epoch
-        .wrapping_mul(0x517c_c1b7_2722_0a95)
-        .wrapping_add(index as u64 * 2);
-
-    let incoming = lyric_text_layer(
-        line,
-        karaoke_active,
-        active_word_index,
-        position_ms,
-        karaoke_running,
-        karaoke_epoch,
-        to_blur,
-        text_id,
-        index,
-    )
-    .with_animation(
-        ElementId::NamedInteger(
-            SharedString::new_static("stage-lyric-focus-in"),
-            base_key,
-        ),
-        Animation::from_spec(
-            AnimationSpec::new(LYRIC_FOCUS_CROSSFADE_DURATION)
-                .ease(Easing::InOutCubic),
-        )
-        .with_property(AnimationProperty::opacity(0.0, to_alpha)),
-        |element, _| element,
-    )
-    .into_any_element();
-
-    let outgoing = lyric_text_layer(
-        line,
-        karaoke_active,
-        active_word_index,
-        position_ms,
-        karaoke_running,
-        karaoke_epoch,
-        from_blur,
-        "lyric-text-focus-out",
-        index,
-    )
-    .absolute()
-    .inset_0()
-    .with_animation(
-        ElementId::NamedInteger(
-            SharedString::new_static("stage-lyric-focus-out"),
-            base_key.wrapping_add(1),
-        ),
-        Animation::from_spec(
-            AnimationSpec::new(LYRIC_FOCUS_CROSSFADE_DURATION)
-                .ease(Easing::InOutCubic),
-        )
-        .with_property(AnimationProperty::opacity(from_alpha, 0.0)),
-        |element, _| element,
-    )
-    .into_any_element();
-
-    div()
-        .relative()
-        .w_full()
-        .min_w(px(0.0))
-        .child(incoming)
-        .child(outgoing)
-        .into_any_element()
+        .properties([
+            TransitionProperty::Opacity,
+            TransitionProperty::Blur,
+        ])
 }
 
 fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
