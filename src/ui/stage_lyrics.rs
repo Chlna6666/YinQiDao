@@ -22,13 +22,13 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_LIST_PADDING_TOP: f32 = 8.0;
-const LYRIC_LIST_PADDING_BOTTOM: f32 = 10.0;
+const LYRIC_LIST_MIN_PADDING_TOP: f32 = 8.0;
+const LYRIC_LIST_MIN_PADDING_BOTTOM: f32 = 10.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(270);
-const LYRIC_ROW_STAGGER_MS: u64 = 18;
+const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(300);
+const LYRIC_ROW_STAGGER_MS: u64 = 12;
 const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 6;
 const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
@@ -539,6 +539,9 @@ impl StageLyricsView {
 
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
+            if self.anchor_bootstrap_pending && !window.is_minimized() {
+                window.request_animation_frame();
+            }
             return;
         }
 
@@ -573,16 +576,14 @@ impl StageLyricsView {
 
         let viewport_top = f32::from(viewport.origin.y);
         let viewport_height = f32::from(viewport.size.height);
-        let usable_height =
-            (viewport_height - LYRIC_LIST_PADDING_TOP - LYRIC_LIST_PADDING_BOTTOM).max(1.0);
-        let anchor_y =
-            viewport_top + LYRIC_LIST_PADDING_TOP + usable_height * LYRIC_ANCHOR_RATIO;
+        let (list_padding_top, _) = lyric_list_spacers(viewport_height);
+        let anchor_y = viewport_top + viewport_height * LYRIC_ANCHOR_RATIO;
 
-        // GPUI ListState::bounds_for_item currently reports coordinates from the list bounds but
-        // omits style padding.top, while prepaint_items actually starts every row after padding.top.
-        // Compensate here so the active lyric's *painted* center lands on the visual anchor.
+        // GPUI ListState::bounds_for_item reports item geometry without style padding.top, while
+        // List prepaint starts the first item after that padding. Treat the dynamic top padding as a
+        // real leading spacer so item 0 can live at the same playback anchor as every later line.
         let painted_line_center =
-            f32::from(line_bounds.center().y) + LYRIC_LIST_PADDING_TOP;
+            f32::from(line_bounds.center().y) + list_padding_top;
         let diff = painted_line_center - anchor_y;
         let now = window.animation_time();
 
@@ -697,6 +698,8 @@ impl Render for StageLyricsView {
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
         let viewport_bounds = self.list_state.viewport_bounds();
+        let viewport_height = f32::from(viewport_bounds.size.height);
+        let (list_padding_top, list_padding_bottom) = lyric_list_spacers(viewport_height);
         let lines = self.lines.clone();
 
         // Snapshot ListState geometry before constructing/rendering the List element. The list
@@ -716,7 +719,7 @@ impl Render for StageLyricsView {
                     self.list_state.bounds_for_item(index).map(|bounds| {
                         // ListState item bounds omit style padding.top while paint includes it.
                         let target_center_y =
-                            f32::from(bounds.center().y) + LYRIC_LIST_PADDING_TOP;
+                            f32::from(bounds.center().y) + list_padding_top;
                         let previous_center_y = target_center_y + scroll_from_y;
                         (
                             lyric_viewport_edge_progress(target_center_y, viewport_bounds),
@@ -774,8 +777,8 @@ impl Render for StageLyricsView {
             )
         })
         .size_full()
-        .pt(px(LYRIC_LIST_PADDING_TOP))
-        .pb(px(LYRIC_LIST_PADDING_BOTTOM))
+        .pt(px(list_padding_top))
+        .pb(px(list_padding_bottom))
         .pr(px(8.0))
         .opacity(if self.anchor_bootstrap_pending { 0.0 } else { 1.0 });
 
@@ -1039,6 +1042,26 @@ fn lyric_text_layer(
 fn smoothstep01(value: f32) -> f32 {
     let t = value.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn lyric_list_spacers(viewport_height: f32) -> (f32, f32) {
+    if !viewport_height.is_finite() || viewport_height <= 1.0 {
+        return (
+            LYRIC_LIST_MIN_PADDING_TOP,
+            LYRIC_LIST_MIN_PADDING_BOTTOM,
+        );
+    }
+
+    // Padding is part of List's scroll extent. This gives the first and final authored lines enough
+    // physical room to occupy the same playback anchor used by middle lines. The first row starts
+    // slightly below the anchor, then bootstrap scrolls it upward by roughly half its measured
+    // height while the list is still hidden.
+    (
+        (viewport_height * LYRIC_ANCHOR_RATIO).max(LYRIC_LIST_MIN_PADDING_TOP),
+        (viewport_height * (1.0 - LYRIC_ANCHOR_RATIO))
+            .max(LYRIC_LIST_MIN_PADDING_BOTTOM),
+    )
 }
 
 #[inline]
@@ -1499,6 +1522,17 @@ mod tests {
         assert!(active.1 < row1.1);
         assert!(row1.1 < row2.1);
         assert!(row2.1 < row3.1);
+    }
+
+    #[test]
+    fn list_spacers_allow_edge_lines_to_use_the_playback_anchor() {
+        let (top, bottom) = lyric_list_spacers(600.0);
+        assert!((top - 600.0 * LYRIC_ANCHOR_RATIO).abs() < 0.01);
+        assert!((bottom - 600.0 * (1.0 - LYRIC_ANCHOR_RATIO)).abs() < 0.01);
+
+        let (fallback_top, fallback_bottom) = lyric_list_spacers(0.0);
+        assert_eq!(fallback_top, LYRIC_LIST_MIN_PADDING_TOP);
+        assert_eq!(fallback_bottom, LYRIC_LIST_MIN_PADDING_BOTTOM);
     }
 
     #[test]
