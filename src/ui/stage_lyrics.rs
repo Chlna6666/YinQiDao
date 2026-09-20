@@ -701,38 +701,51 @@ impl Render for StageLyricsView {
         // renderer mutably borrows its internal RefCell while invoking item callbacks, so querying
         // bounds_for_item() from inside that callback would re-borrow the same RefCell and panic.
         // Previous-frame measured geometry is exactly what FLIP/fade needs as the visual source.
-        let row_edge_progress = (0..lines.len())
-            .map(|index| {
-                self.list_state.bounds_for_item(index).map(|bounds| {
-                    // ListState item bounds omit style padding.top while paint includes it.
-                    let target_center_y =
-                        f32::from(bounds.center().y) + LYRIC_LIST_PADDING_TOP;
-                    let previous_center_y = target_center_y + scroll_from_y;
-                    (
-                        lyric_viewport_edge_progress(target_center_y, viewport_bounds),
-                        lyric_viewport_edge_progress(previous_center_y, viewport_bounds),
-                    )
+        const EDGE_GEOMETRY_RADIUS: usize = 16;
+        let edge_snapshot_start = active.saturating_sub(EDGE_GEOMETRY_RADIUS);
+        let edge_snapshot_end = active
+            .saturating_add(EDGE_GEOMETRY_RADIUS + 1)
+            .min(lines.len());
+        let row_edge_progress: Arc<[Option<(f32, f32)>]> = if reading_mode {
+            Arc::from([])
+        } else {
+            (edge_snapshot_start..edge_snapshot_end)
+                .map(|index| {
+                    self.list_state.bounds_for_item(index).map(|bounds| {
+                        // ListState item bounds omit style padding.top while paint includes it.
+                        let target_center_y =
+                            f32::from(bounds.center().y) + LYRIC_LIST_PADDING_TOP;
+                        let previous_center_y = target_center_y + scroll_from_y;
+                        (
+                            lyric_viewport_edge_progress(target_center_y, viewport_bounds),
+                            lyric_viewport_edge_progress(previous_center_y, viewport_bounds),
+                        )
+                    })
                 })
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let row_edge_progress: Arc<[Option<(f32, f32)>]> = row_edge_progress.into();
+                .collect::<Vec<_>>()
+                .into()
+        };
 
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
 
         let lyrics = list(self.list_state.clone(), move |index, _window, _cx| {
-            let (edge_progress, previous_edge_progress) = row_edge_progress
-                .get(index)
-                .and_then(|progress| *progress)
-                .unwrap_or_else(|| {
-                    // A newly materialized overdraw row has no previous-frame bounds yet. Use a
-                    // conservative distance fallback for this one frame; once measured, the next
-                    // render uses exact viewport geometry.
-                    let distance = index.abs_diff(active) as f32;
-                    let fallback = smoothstep01((distance - 3.0) / 5.0);
-                    (fallback, fallback)
-                });
+            let (edge_progress, previous_edge_progress) = if reading_mode {
+                (0.0, 0.0)
+            } else {
+                index
+                    .checked_sub(edge_snapshot_start)
+                    .and_then(|offset| row_edge_progress.get(offset))
+                    .and_then(|progress| *progress)
+                    .unwrap_or_else(|| {
+                        // A newly materialized overdraw row has no previous-frame bounds yet. Use
+                        // a conservative one-frame fallback; once measured, the next render uses
+                        // exact viewport geometry.
+                        let distance = index.abs_diff(active) as f32;
+                        let fallback = smoothstep01((distance - 3.0) / 5.0);
+                        (fallback, fallback)
+                    })
+            };
 
             render_lyric_row(
                 &lines[index],
