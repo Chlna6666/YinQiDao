@@ -66,6 +66,17 @@ struct StageLyricLine {
 }
 
 impl StageLyricLine {
+    fn from_plain(text: &str) -> Self {
+        Self {
+            timestamp_ms: 0,
+            text: SharedString::from(text.to_owned()),
+            translation: None,
+            words: Arc::from([]),
+            enhanced_complete: false,
+            time_label: SharedString::new_static(""),
+        }
+    }
+
     fn from_source(line: &LyricLine) -> Self {
         let mut byte_offset = 0;
         let words = line
@@ -156,6 +167,7 @@ pub(super) struct StageLyricsView {
     track_id: Option<TrackId>,
     source_ptr: usize,
     source_len: usize,
+    has_timeline: bool,
     position_ms: u64,
     playback_state: PlaybackState,
     active_index: Option<usize>,
@@ -190,6 +202,7 @@ impl StageLyricsView {
             track_id: None,
             source_ptr: 0,
             source_len: 0,
+            has_timeline: false,
             position_ms: 0,
             playback_state: PlaybackState::Paused,
             active_index: None,
@@ -228,14 +241,29 @@ impl StageLyricsView {
         }
 
         let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
-        let source = track_id
-            .and_then(|id| app.lyrics.get(&id))
-            .map_or(&[][..], |document| document.timed_lines());
-        let source_ptr = source.as_ptr() as usize;
-        let source_len = source.len();
+        let document = track_id.and_then(|id| app.lyrics.get(&id));
+        let timed_source = document.map_or(&[][..], |document| document.timed_lines());
+        let has_timeline = !timed_source.is_empty();
+        let plain_source = (!has_timeline)
+            .then(|| {
+                document.and_then(|document| {
+                    document
+                        .plain
+                        .as_deref()
+                        .or(document.translation.as_deref())
+                })
+            })
+            .flatten()
+            .filter(|text| !text.trim().is_empty());
+        let (source_ptr, source_len) = if has_timeline {
+            (timed_source.as_ptr() as usize, timed_source.len())
+        } else {
+            plain_source.map_or((0, 0), |text| (text.as_ptr() as usize, text.len()))
+        };
         let source_changed = self.track_id != track_id
             || self.source_ptr != source_ptr
-            || self.source_len != source_len;
+            || self.source_len != source_len
+            || self.has_timeline != has_timeline;
         let playback_state_changed = self.playback_state != app.snapshot.state;
         let stage_active_changed = self.stage_active != stage_active;
         let scrubbing = app.drag_progress_ratio.is_some();
@@ -246,12 +274,26 @@ impl StageLyricsView {
             self.track_id = track_id;
             self.source_ptr = source_ptr;
             self.source_len = source_len;
-            self.lines = source
-                .iter()
-                .map(StageLyricLine::from_source)
-                .collect::<Vec<_>>()
-                .into();
-            self.list_state.reset(source_len);
+            self.has_timeline = has_timeline;
+            self.lines = if has_timeline {
+                timed_source
+                    .iter()
+                    .map(StageLyricLine::from_source)
+                    .collect::<Vec<_>>()
+                    .into()
+            } else {
+                plain_source
+                    .map(|text| {
+                        text.lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(StageLyricLine::from_plain)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+                    .into()
+            };
+            self.list_state.reset(self.lines.len());
             self.active_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
@@ -261,7 +303,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.scroll_target = None;
             self.cancel_scroll_animation();
-            self.anchor_bootstrap_pending = stage_active;
+            self.anchor_bootstrap_pending = stage_active && has_timeline;
             changed = true;
         }
         if transport_changed && !source_changed {
@@ -332,7 +374,7 @@ impl StageLyricsView {
             changed = true;
         }
 
-        if source_changed && let Some(active) = self.active_index {
+        if source_changed && self.has_timeline && let Some(active) = self.active_index {
             self.list_state.scroll_to(ListOffset {
                 item_ix: active.saturating_sub(4),
                 offset_in_item: px(0.0),
@@ -347,11 +389,17 @@ impl StageLyricsView {
     }
 
     fn update_active_index(&mut self) -> bool {
-        let active = (!self.lines.is_empty()).then(|| {
-            self.lines
-                .partition_point(|line| line.timestamp_ms <= self.position_ms)
-                .saturating_sub(1)
-        });
+        let active = if self.lines.is_empty() {
+            None
+        } else if self.has_timeline {
+            Some(
+                self.lines
+                    .partition_point(|line| line.timestamp_ms <= self.position_ms)
+                    .saturating_sub(1),
+            )
+        } else {
+            Some(0)
+        };
         if self.active_index == active {
             return false;
         }
@@ -375,7 +423,7 @@ impl StageLyricsView {
     }
 
     fn compute_active_word_index(&self) -> Option<usize> {
-        if self.is_reading() {
+        if !self.has_timeline || self.is_reading() {
             return None;
         }
         let line = self.active_index.and_then(|index| self.lines.get(index))?;
@@ -384,7 +432,8 @@ impl StageLyricsView {
 
     #[inline]
     fn transport_should_run(&self) -> bool {
-        self.stage_active
+        self.has_timeline
+            && self.stage_active
             && self.playback_state == PlaybackState::Playing
             && self.engine.is_some()
             && !self.lines.is_empty()
@@ -440,7 +489,8 @@ impl StageLyricsView {
 
     #[inline]
     fn is_reading(&self) -> bool {
-        self.reading_until
+        !self.has_timeline
+            || self.reading_until
             .is_some_and(|until| until > Instant::now())
     }
 
@@ -530,7 +580,7 @@ impl StageLyricsView {
     }
 
     fn prepare_scroll_animation(&mut self, window: &mut Window) {
-        if !self.stage_active || self.is_reading() {
+        if !self.has_timeline || !self.stage_active || self.is_reading() {
             return;
         }
         let Some(target) = self.scroll_target else {
@@ -661,7 +711,7 @@ impl Render for StageLyricsView {
                     div()
                         .text_lg()
                         .text_color(hsla(0.0, 0.0, 1.0, 0.50))
-                        .child("暂无同步滚动歌词"),
+                        .child("暂无可显示歌词"),
                 )
                 .child(
                     div()
@@ -675,6 +725,7 @@ impl Render for StageLyricsView {
         self.schedule_deadlines(window, cx);
 
         let active = self.active_index.unwrap_or(0);
+        let has_timeline = self.has_timeline;
         let active_word_index = self.active_word_index;
         let position_ms = self.position_ms;
         let reading_mode = self.is_reading();
@@ -776,7 +827,7 @@ impl Render for StageLyricsView {
                 depth_blur_active,
                 text_id,
                 hovered_index == Some(index),
-                !(scroll_animating || focus_animating),
+                has_timeline && !(scroll_animating || focus_animating),
                 karaoke_epoch,
                 view.clone(),
                 parent.clone(),
