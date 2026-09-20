@@ -695,7 +695,7 @@ impl Render for StageLyricsView {
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
         let visual_list_state = self.list_state.clone();
-        let viewport_bounds = self.list_state.bounds();
+        let viewport_bounds = self.list_state.viewport_bounds();
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
