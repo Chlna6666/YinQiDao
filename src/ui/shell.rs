@@ -1178,23 +1178,30 @@ impl MusicApp {
         }
     }
 
+    fn sync_stage_chrome_surfaces(&mut self, cx: &mut Context<Self>) {
+        if self.stage_prepared || self.stage_open || self.stage_animating {
+            let _ = stage_controls::view(self, cx);
+            let _ = stage_controls::titlebar_view(self, cx);
+        }
+    }
+
     pub(crate) fn wake_stage_controls(&mut self, cx: &mut Context<Self>) {
         if self.stage_suppress_wake_until.is_some() {
             return;
         }
-        let needs_notify = stage_chrome::needs_wake_surface(self);
+        let needs_sync = stage_chrome::needs_wake_surface(self);
         self.stage_last_user_activity = std::time::Instant::now();
-        if needs_notify {
-            cx.notify();
+        if needs_sync {
+            self.sync_stage_chrome_surfaces(cx);
         }
     }
 
     pub(crate) fn wake_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
-        let needs_notify = stage_chrome::needs_wake_surface(self);
+        let needs_sync = stage_chrome::needs_wake_surface(self);
         self.stage_suppress_wake_until = None;
         self.stage_last_user_activity = std::time::Instant::now();
-        if needs_notify {
-            cx.notify();
+        if needs_sync {
+            self.sync_stage_chrome_surfaces(cx);
         }
     }
 
@@ -1212,7 +1219,7 @@ impl MusicApp {
         self.stage_last_mouse_pos = Some(pointer_pos);
         self.stage_suppress_wake_until = Some(now);
         if needs_notify {
-            cx.notify();
+            self.sync_stage_chrome_surfaces(cx);
         }
     }
 
