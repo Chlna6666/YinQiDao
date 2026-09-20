@@ -15,11 +15,11 @@ use lucide_gpui::icon;
 
 use super::theme::{self, ACCENT_RED, BORDER_HAIRLINE, TEXT_SECONDARY, themed_icon};
 
-static MEM_CACHE: OnceLock<RwLock<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+static MEM_CACHE: OnceLock<RwLock<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
 static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DISK_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn mem_cache() -> &'static RwLock<HashMap<String, Arc<Vec<u8>>>> {
+fn mem_cache() -> &'static RwLock<HashMap<String, Arc<[u8]>>> {
     MEM_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -41,32 +41,58 @@ fn url_disk_filename(url: &str) -> String {
     format!("{hash:016x}.png")
 }
 
-pub fn get_cached(url: &str) -> Option<Arc<Vec<u8>>> {
-    if let Ok(guard) = mem_cache().read() {
-        if let Some(bytes) = guard.get(url) {
-            return Some(bytes.clone());
-        }
-    }
-
-    if let Some(disk_dir) = DISK_DIR.get() {
-        let file_path = disk_dir.join(url_disk_filename(url));
-        if file_path.is_file() {
-            if let Ok(bytes) = fs::read(&file_path) {
-                if bytes.starts_with(b"\x89PNG") {
-                    let arc = Arc::new(bytes);
-                    if let Ok(mut guard) = mem_cache().write() {
-                        guard.insert(url.to_string(), arc.clone());
-                    }
-                    return Some(arc);
-                }
-            }
-        }
-    }
-
-    None
+/// Render-safe cache lookup. This function never touches the filesystem.
+pub fn get_cached(url: &str) -> Option<Arc<[u8]>> {
+    mem_cache()
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(url).cloned())
 }
 
-pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<Arc<Vec<u8>>> {
+/// Blocking disk lookup for worker threads only. A hit is promoted into the in-memory cache.
+pub fn load_disk_cached(url: &str) -> Option<Arc<[u8]>> {
+    if let Some(cached) = get_cached(url) {
+        return Some(cached);
+    }
+
+    let disk_dir = DISK_DIR.get()?;
+    let file_path = disk_dir.join(url_disk_filename(url));
+    let bytes = fs::read(file_path).ok()?;
+    if !bytes.starts_with(b"\x89PNG") {
+        return None;
+    }
+
+    let arc: Arc<[u8]> = bytes.into();
+    if let Ok(mut guard) = mem_cache().write() {
+        guard.insert(url.to_string(), arc.clone());
+    }
+    Some(arc)
+}
+
+async fn load_or_fetch(url: String) -> Option<Arc<[u8]>> {
+    let disk_url = url.clone();
+    if let Ok(Some(bytes)) =
+        tokio::task::spawn_blocking(move || load_disk_cached(&disk_url)).await
+    {
+        return Some(bytes);
+    }
+
+    let bytes = fetch_and_normalize(&url).await?;
+    let arc: Arc<[u8]> = bytes.into();
+
+    if let Some(disk_dir) = DISK_DIR.get() {
+        let path = disk_dir.join(url_disk_filename(&url));
+        let write_bytes = arc.clone();
+        let _ = tokio::task::spawn_blocking(move || fs::write(path, write_bytes.as_ref())).await;
+    }
+
+    if let Ok(mut guard) = mem_cache().write() {
+        guard.insert(url, arc.clone());
+    }
+    Some(arc)
+}
+
+pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<Arc<[u8]>> {
     if let Some(cached) = get_cached(url) {
         return Some(cached);
     }
@@ -82,28 +108,25 @@ pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<A
         let fetch_url = url.to_string();
         let target_url = url.to_string();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let res = fetch_and_normalize(&fetch_url).await;
+            let res = load_or_fetch(fetch_url.clone()).await;
             Ok((fetch_url, res))
         });
 
         cx.spawn(async move |this, cx| {
-            if let Ok((url_done, Some(png_bytes))) = task.await {
-                let arc = Arc::new(png_bytes);
-                if let Some(disk_dir) = DISK_DIR.get() {
-                    let path = disk_dir.join(url_disk_filename(&url_done));
-                    let _ = fs::write(path, arc.as_slice());
+            match task.await {
+                Ok((url_done, Some(_))) => {
+                    if let Ok(mut set) = in_flight().lock() {
+                        set.remove(&url_done);
+                    }
+                    let _ = this.update(cx, |_, cx| {
+                        cx.notify();
+                    });
                 }
-                if let Ok(mut guard) = mem_cache().write() {
-                    guard.insert(url_done.clone(), arc);
+                _ => {
+                    if let Ok(mut set) = in_flight().lock() {
+                        set.remove(&target_url);
+                    }
                 }
-                if let Ok(mut set) = in_flight().lock() {
-                    set.remove(&url_done);
-                }
-                let _ = this.update(cx, |_, cx| {
-                    cx.notify();
-                });
-            } else if let Ok(mut set) = in_flight().lock() {
-                set.remove(&target_url);
             }
         })
         .detach();
@@ -170,7 +193,7 @@ pub fn render_remote_avatar<V: 'static>(
     if let Some(png_bytes) = load_remote_image(url, cx) {
         img(EncodedImageBytes::new(
             ImageFormat::Png,
-            (*png_bytes).clone(),
+            png_bytes.clone(),
         ))
         .size(px(size_px))
         .rounded_full()
@@ -213,17 +236,7 @@ pub fn fetch_detached(url: &str) {
         let fetch_url = url.to_string();
         if let Ok(handle) = crate::runtime::io_handle() {
             handle.spawn(async move {
-                let result = fetch_and_normalize(&fetch_url).await;
-                if let Some(png_bytes) = result {
-                    let arc = Arc::new(png_bytes);
-                    if let Some(disk_dir) = DISK_DIR.get() {
-                        let path = disk_dir.join(url_disk_filename(&fetch_url));
-                        let _ = fs::write(path, arc.as_slice());
-                    }
-                    if let Ok(mut guard) = mem_cache().write() {
-                        guard.insert(fetch_url.clone(), arc);
-                    }
-                }
+                let _ = load_or_fetch(fetch_url.clone()).await;
                 if let Ok(mut set) = in_flight().lock() {
                     set.remove(&fetch_url);
                 }
@@ -250,16 +263,7 @@ pub fn prefetch_urls<V: 'static>(urls: Vec<String>, cx: &mut Context<V>) {
                 set.insert(url.clone())
             };
             if should_fetch {
-                if let Some(png_bytes) = fetch_and_normalize(&url).await {
-                    let arc = Arc::new(png_bytes);
-                    if let Some(disk_dir) = DISK_DIR.get() {
-                        let path = disk_dir.join(url_disk_filename(&url));
-                        let _ = fs::write(path, arc.as_slice());
-                    }
-                    if let Ok(mut guard) = mem_cache().write() {
-                        guard.insert(url.clone(), arc);
-                    }
-                }
+                let _ = load_or_fetch(url.clone()).await;
                 if let Ok(mut set) = in_flight().lock() {
                     set.remove(&url);
                 }
@@ -306,7 +310,7 @@ pub fn render_remote_cover(
     if let Some(png_bytes) = get_cached(url) {
         img(EncodedImageBytes::new(
             ImageFormat::Png,
-            (*png_bytes).clone(),
+            png_bytes.clone(),
         ))
         .w(px(width_px))
         .h(px(height_px))
