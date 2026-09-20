@@ -5622,7 +5622,7 @@ mod tests {
 
     #[test]
     fn stage_transition_is_short_and_bounded() {
-        assert_eq!(STAGE_TRANSITION_DURATION, Duration::from_millis(190));
+        assert_eq!(STAGE_TRANSITION_DURATION, Duration::from_millis(220));
         assert_eq!(stage_ease_in_out_cubic(0.0), 0.0);
         assert!((stage_ease_in_out_cubic(0.5) - 0.5).abs() < f32::EPSILON);
         assert_eq!(stage_ease_in_out_cubic(1.0), 1.0);
