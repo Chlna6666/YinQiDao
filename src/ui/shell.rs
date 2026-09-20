@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    app_runtime_events, home, library as library_page, mini_player_view, player,
+    app_runtime_events, home, library as library_page, mini_player_view, player, player_stage,
     player::NowPlaying,
     route::{self, AppRoute},
     settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
@@ -207,6 +207,9 @@ pub struct MusicApp {
     // root repaint until AudioEngine ACK arrives so mouse-down never competes with a full-window
     // layout generation frame.
     transport_root_notify_pending: bool,
+    // Track switches update retained surfaces immediately, but delay the expensive shell/titlebar
+    // rebuild until the audio worker confirms the new track.
+    track_root_notify_pending: bool,
     pub(crate) fluid_background: Option<Entity<crate::gpu::AppleFluidView>>,
     pub(crate) artwork_online_fallback_requested: HashSet<TrackId>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
@@ -820,6 +823,7 @@ impl MusicApp {
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
             transport_root_notify_pending: false,
+            track_root_notify_pending: false,
             fluid_background: None,
             artwork_online_fallback_requested: HashSet::new(),
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
@@ -1842,10 +1846,12 @@ impl MusicApp {
             self.bump_ui_content_revision();
             self.status = "正在准备播放".into();
             self.save_config();
+            self.track_root_notify_pending = true;
+            self.sync_track_visual_surfaces(cx);
         } else {
             self.status = "音频命令队列繁忙，请稍后重试".into();
+            self.notify_current_content_surface(cx);
         }
-        cx.notify();
     }
 
     pub(crate) fn add_to_queue(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
@@ -2435,7 +2441,7 @@ impl MusicApp {
             .is_some_and(|engine| engine.try_play_transient_track(track.clone()));
         if !accepted {
             self.status = "音频命令队列繁忙，请稍后重试".into();
-            cx.notify();
+            self.notify_current_content_surface(cx);
             return false;
         }
 
@@ -2451,7 +2457,8 @@ impl MusicApp {
         self.bump_ui_content_revision();
         self.status = "正在准备播放".into();
         self.save_config();
-        cx.notify();
+        self.track_root_notify_pending = true;
+        self.sync_track_visual_surfaces(cx);
         true
     }
 
@@ -3902,6 +3909,13 @@ impl MusicApp {
         }
     }
 
+    fn sync_track_visual_surfaces(&mut self, cx: &mut Context<MusicApp>) {
+        self.sync_transport_surfaces(cx);
+        player_stage::sync_if_created(self, cx);
+        stage_lyrics::sync_if_created(self, cx);
+        self.notify_current_content_surface(cx);
+    }
+
     fn sync_transport_surfaces(&mut self, cx: &mut Context<MusicApp>) {
         let playing = self.snapshot.state == PlaybackState::Playing;
         self.sync_transport_control_surfaces(cx);
@@ -3945,6 +3959,8 @@ impl MusicApp {
         let previous_error = self.snapshot.error.clone();
         let transport_ack_pending = self.transport_root_notify_pending;
         self.transport_root_notify_pending = false;
+        let track_ack_pending = self.track_root_notify_pending;
+        self.track_root_notify_pending = false;
 
         self.snapshot = engine.snapshot();
         let track_changed = match (
@@ -4034,7 +4050,7 @@ impl MusicApp {
                 self.notify_transport_position_surfaces(cx);
             }
         }
-        if root_visible_change {
+        if root_visible_change || track_ack_pending {
             cx.notify();
         }
     }
