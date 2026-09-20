@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
+    Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, linear_color_stop,
     linear_gradient, list, point, prelude::*, px,
@@ -1295,6 +1295,7 @@ fn format_lyric_time(ms: u64) -> String {
 fn lyric_depth_transition(delay: Duration) -> Transition {
     Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
         .delay(delay)
+        .fill_mode(FillMode::Both)
         .ease(Easing::OutQuint)
         .properties([
             TransitionProperty::Opacity,
@@ -1305,6 +1306,10 @@ fn lyric_depth_transition(delay: Duration) -> Transition {
 fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
     AnimationSpec::new(LYRIC_ROW_MOTION_DURATION)
         .delay(delay)
+        // Delay is part of the visual choreography: lower rows must remain at their old FLIP
+        // position until their own start time. Forwards does not apply the first keyframe during
+        // delay and made all rows appear at the final logical position before delayed motion.
+        .fill_mode(FillMode::Both)
         .ease(Easing::OutQuint)
 }
 
@@ -1409,6 +1414,20 @@ mod tests {
 
         let far_upper = lyric_edge_envelope(1, 10);
         assert!(far_upper.0 >= 0.20 && far_upper.1 >= 2.0);
+    }
+
+    #[test]
+    fn delayed_row_motion_holds_the_old_position_before_start() {
+        let spec = lyric_row_motion_spec(Duration::from_millis(LYRIC_ROW_STAGGER_MS * 2));
+        let before = spec.sample_elapsed(Duration::from_millis(LYRIC_ROW_STAGGER_MS));
+        assert!(before.applies);
+        assert_eq!(before.eased_progress, 0.0);
+
+        let after = spec.sample_elapsed(Duration::from_millis(
+            LYRIC_ROW_STAGGER_MS * 2 + LYRIC_ROW_MOTION_DURATION.as_millis() as u64,
+        ));
+        assert!(after.applies);
+        assert_eq!(after.eased_progress, 1.0);
     }
 
     #[test]
