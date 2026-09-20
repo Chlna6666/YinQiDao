@@ -16,7 +16,7 @@ use crate::{
 use super::{
     components::{
         SliderStyle, interactive_slider,
-        slider::{InteractiveSliderState, SliderProgressAnimation},
+        slider::InteractiveSliderState,
     },
     shell::{DragTarget, MusicApp},
     theme::{
@@ -25,6 +25,7 @@ use super::{
     },
 };
 
+const MINI_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const MINI_TIME_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const NOW_PLAYING_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -52,7 +53,7 @@ pub(super) struct PlaybackProgress {
     playback_state: PlaybackState,
     visible: bool,
     drag_ratio_bits: Option<u32>,
-    animation_epoch: u64,
+    timer_started: bool,
 }
 
 impl PlaybackProgress {
@@ -70,7 +71,7 @@ impl PlaybackProgress {
             playback_state,
             visible: true,
             drag_ratio_bits: None,
-            animation_epoch: 0,
+            timer_started: false,
         }
     }
 
@@ -107,7 +108,6 @@ impl PlaybackProgress {
             self.playback_state = playback_state;
             self.visible = visible;
             self.drag_ratio_bits = drag_ratio_bits;
-            self.animation_epoch = self.animation_epoch.wrapping_add(1);
             cx.notify();
         }
     }
@@ -123,6 +123,49 @@ impl Render for PlaybackProgress {
             .parent
             .read_with(cx, |app, _| app.drag_progress_ratio)
             .unwrap_or(None);
+
+        let should_tick = self.visible
+            && self.playback_state == PlaybackState::Playing
+            && engine_state == PlaybackState::Playing
+            && drag_ratio.is_none()
+            && duration_ms > 0;
+        if should_tick && !self.timer_started {
+            self.timer_started = true;
+            cx.spawn(async move |this, cx| -> Result<()> {
+                loop {
+                    Timer::after(MINI_PROGRESS_REFRESH_INTERVAL).await;
+                    let keep_running = match this.update(cx, |this, cx| {
+                        let running = this.visible
+                            && this.playback_state == PlaybackState::Playing
+                            && this.drag_ratio_bits.is_none()
+                            && this
+                                .engine
+                                .as_ref()
+                                .is_some_and(|engine| {
+                                    let (state, _, duration) = engine.progress();
+                                    state == PlaybackState::Playing && duration > 0
+                                });
+                        if !running {
+                            this.timer_started = false;
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    }) {
+                        Ok(running) => running,
+                        Err(_) => break,
+                    };
+                    if !keep_running {
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .detach();
+        } else if !should_tick {
+            self.timer_started = false;
+        }
+
         let ratio = drag_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
                 0.0
@@ -176,31 +219,13 @@ impl Render for PlaybackProgress {
             },
         );
 
-        let style = SliderStyle::mini_progress();
-        let remaining_ms = duration_ms.saturating_sub(position_ms);
-        let visual = if self.visible
-            && self.playback_state == PlaybackState::Playing
-            && engine_state == PlaybackState::Playing
-            && drag_ratio.is_none()
-            && duration_ms > 0
-            && remaining_ms > 0
-        {
-            // One renderer-owned timeline replaces the old 250 ms polling loop. The fill starts
-            // from the exact engine ratio sampled on this semantic update and reaches 1.0 at the
-            // authored track end without another view/layout notification.
-            slider.render_animated_progress(
-                ratio,
-                style,
-                SliderProgressAnimation {
-                    epoch: self.animation_epoch,
-                    duration: Duration::from_millis(remaining_ms),
-                },
-            )
-        } else {
-            slider.render(ratio, style)
-        };
-
-        visual.w_full().into_any_element()
+        // A multi-minute renderer animation keeps the entire window in PresentationAnimation
+        // mode for the whole song. At high refresh rates that still generates/presents frames
+        // continuously. Sample the atomic engine clock in this cached child instead.
+        slider
+            .render(ratio, SliderStyle::mini_progress())
+            .w_full()
+            .into_any_element()
     }
 }
 
