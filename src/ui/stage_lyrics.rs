@@ -1092,6 +1092,8 @@ fn render_lyric_row(
         focus_from_index,
         scroll_animating,
         scroll_from_y,
+        scroll_started_at,
+        frame_now,
         motion_epoch,
     )
 }
