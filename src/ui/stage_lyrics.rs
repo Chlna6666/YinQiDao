@@ -7,8 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
-    Transition, TransitionProperty, WeakEntity, Window, div, hsla, linear_color_stop,
-    linear_gradient, list, point, prelude::*, px,
+    Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -23,10 +22,8 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_LIST_PADDING_TOP: f32 = 18.0;
-const LYRIC_LIST_PADDING_BOTTOM: f32 = 22.0;
-const LYRIC_EDGE_FADE_TOP: f32 = 92.0;
-const LYRIC_EDGE_FADE_BOTTOM: f32 = 118.0;
+const LYRIC_LIST_PADDING_TOP: f32 = 8.0;
+const LYRIC_LIST_PADDING_BOTTOM: f32 = 10.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
 const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(240);
 const LYRIC_ROW_STAGGER_MS: u64 = 28;
@@ -745,32 +742,6 @@ impl Render for StageLyricsView {
                     .update(cx, |app, cx| app.wake_stage_controls(cx));
             }))
             .child(lyrics)
-            .child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .top(px(0.0))
-                    .h(px(LYRIC_EDGE_FADE_TOP))
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.28), 0.0),
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 1.0),
-                    )),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .bottom(px(0.0))
-                    .h(px(LYRIC_EDGE_FADE_BOTTOM))
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 0.0),
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.34), 1.0),
-                    )),
-            )
     }
 }
 
@@ -1023,29 +994,28 @@ fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
     }
 
     if index < active {
-        // Keep real lyric content underneath the top fade slab. The old envelope multiplied far
-        // rows down to ~1% opacity before they reached the viewport edge, which produced the
-        // screenshot-visible empty band.
+        // No top fog slab: each real lyric line fades itself out as it approaches the viewport
+        // boundary. Keep enough alpha on overscanned rows so the top never becomes an empty band.
         match active - index {
             1 | 2 => (1.0, 0.0),
-            3 => (0.94, 0.10),
-            4 => (0.82, 0.35),
-            5 => (0.68, 0.75),
-            6 => (0.52, 1.20),
-            7 => (0.36, 1.80),
-            _ => (0.22, 2.45),
+            3 => (0.96, 0.05),
+            4 => (0.88, 0.16),
+            5 => (0.76, 0.34),
+            6 => (0.60, 0.58),
+            7 => (0.42, 0.88),
+            _ => (0.26, 1.20),
         }
     } else {
-        // The lower half has more visual room and the transport dock overlays it, so keep one more
-        // line readable before the physical bottom fade takes over.
+        // Bottom has more room, so its falloff begins one line later. This remains line-local and
+        // never paints a rectangular mask over the album background or controls.
         match index - active {
             1 | 2 | 3 => (1.0, 0.0),
-            4 => (0.92, 0.10),
-            5 => (0.80, 0.30),
-            6 => (0.66, 0.65),
-            7 => (0.50, 1.10),
-            8 => (0.34, 1.70),
-            _ => (0.22, 2.40),
+            4 => (0.96, 0.05),
+            5 => (0.88, 0.16),
+            6 => (0.76, 0.34),
+            7 => (0.60, 0.58),
+            8 => (0.42, 0.88),
+            _ => (0.26, 1.20),
         }
     }
 }
@@ -1057,21 +1027,20 @@ fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: b
 
     let alpha = match distance {
         0 => 1.0,
-        1 => 0.66,
-        2 => 0.48,
-        3 => 0.36,
+        1 => 0.76,
+        2 => 0.58,
+        3 => 0.44,
+        4 => 0.34,
         _ => 0.28,
     };
     let blur_sigma = if depth_blur_active {
         match distance {
             0 => 0.0,
-            // Keep the first defocused row at a real one-pixel sigma. Sub-pixel blur is visually
-            // close to identity on the retained Nova path and made the depth hand-off look absent.
-            1 => 0.80,
-            2 => 1.20,
-            3 => 1.60,
-            4 => 1.90,
-            _ => 2.10,
+            1 => 0.45,
+            2 => 0.80,
+            3 => 1.10,
+            4 => 1.40,
+            _ => 1.65,
         }
     } else {
         0.0
@@ -1396,10 +1365,10 @@ mod tests {
     #[test]
     fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
         assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.66, 0.80));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.36, 1.60));
-        assert_eq!(lyric_focus_profile(5, false, true), (0.28, 2.10));
-        assert_eq!(lyric_focus_profile(2, false, false), (0.48, 0.0));
+        assert_eq!(lyric_focus_profile(1, false, true), (0.76, 0.45));
+        assert_eq!(lyric_focus_profile(3, false, true), (0.44, 1.10));
+        assert_eq!(lyric_focus_profile(5, false, true), (0.28, 1.65));
+        assert_eq!(lyric_focus_profile(2, false, false), (0.58, 0.0));
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
     }
 
@@ -1409,11 +1378,11 @@ mod tests {
 
         let upper = lyric_edge_envelope(5, 10);
         let lower = lyric_edge_envelope(16, 10);
-        assert!(upper.0 > 0.5 && upper.1 > 0.5);
-        assert!(lower.0 > 0.5 && lower.1 > 0.5);
+        assert!(upper.0 > 0.7 && upper.1 > 0.3);
+        assert!(lower.0 > 0.7 && lower.1 > 0.3);
 
         let far_upper = lyric_edge_envelope(1, 10);
-        assert!(far_upper.0 >= 0.20 && far_upper.1 >= 2.0);
+        assert!(far_upper.0 >= 0.25 && far_upper.1 >= 1.0);
     }
 
     #[test]
