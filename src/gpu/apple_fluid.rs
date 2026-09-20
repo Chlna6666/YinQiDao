@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
@@ -10,6 +10,7 @@ use crate::artwork::ArtworkPalette;
 use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
 
 const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
+const FLUID_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
     static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
@@ -61,7 +62,6 @@ pub(crate) struct AppleFluidView {
     playing: bool,
     animation_seconds: f32,
     last_frame_at: Instant,
-    frame_armed: bool,
     shader_available: bool,
 }
 
@@ -78,7 +78,6 @@ impl AppleFluidView {
             playing: false,
             animation_seconds: 0.0,
             last_frame_at: Instant::now(),
-            frame_armed: false,
             shader_available,
         }
     }
@@ -130,26 +129,14 @@ impl Render for AppleFluidView {
                         .min(0.05);
                     self.animation_seconds = (self.animation_seconds + delta).rem_euclid(21_600.0);
 
-                    // Keep the visual clock tied to GPUI/DWM presentation cadence, but do not use
-                    // request_animation_frame(): in the pinned GPUI that API force-renders the whole
-                    // window. A next-frame callback marks only this retained shader view dirty.
-                    if !self.frame_armed {
-                        self.frame_armed = true;
-                        let entity = cx.entity();
-                        window.on_next_frame(move |window, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.frame_armed = false;
-                                if this.stage_visible
-                                    && this.playing
-                                    && !window.is_minimized()
-                                {
-                                    cx.notify();
-                                }
-                            });
-                        });
-                    }
-                } else {
-                    self.frame_armed = false;
+                    // Do not bind this slow ambient effect to the monitor's raw presentation
+                    // rate. On 240 Hz displays that used to notify this retained View 240 times/s
+                    // and compete with pointer/transport work. A 60 Hz entity-local invalidation
+                    // is visually continuous for the fluid field while leaving input frames free.
+                    window.request_invalidation_at(
+                        Instant::now() + FLUID_FRAME_INTERVAL,
+                        cx,
+                    );
                 }
                 self.last_frame_at = now;
 
