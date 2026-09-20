@@ -659,14 +659,11 @@ fn songs_view(
                         .current_track
                         .as_ref()
                         .is_some_and(|t| t.id == track_id);
-                    let is_playing = is_current
-                        && app.snapshot.state == crate::model::PlaybackState::Playing;
                     let artwork = app.artworks.get(&track_id).cloned();
                     local_list = local_list.child(song_table_row(
                         idx + 1,
                         track,
                         is_current,
-                        is_playing,
                         artwork,
                         view,
                     ));
@@ -930,15 +927,11 @@ fn recent_view(
                                             .current_track
                                             .as_ref()
                                             .is_some_and(|t| t.id == track_id);
-                                        let is_playing = is_current
-                                            && this.snapshot.state
-                                                == crate::model::PlaybackState::Playing;
                                         let artwork = this.artworks.get(&track_id).cloned();
                                         items.push(song_table_row(
                                             idx + 1,
                                             track,
                                             is_current,
-                                            is_playing,
                                             artwork,
                                             &view_clone,
                                         ));
