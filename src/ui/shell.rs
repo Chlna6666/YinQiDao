@@ -279,6 +279,7 @@ struct HomePageRenderKey {
     has_online_plugins: bool,
     online_authenticated: bool,
     current_track: Option<TrackId>,
+    playback_state: PlaybackState,
 }
 
 fn home_page_render_key(app: &MusicApp) -> HomePageRenderKey {
@@ -290,6 +291,7 @@ fn home_page_render_key(app: &MusicApp) -> HomePageRenderKey {
         has_online_plugins: app.has_online_plugins,
         online_authenticated: app.online_authenticated,
         current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
+        playback_state: app.snapshot.state,
     }
 }
 
@@ -518,7 +520,6 @@ struct OnlinePlaylistRenderKey {
     loading: bool,
     buffering_track: Option<String>,
     current_track: Option<TrackId>,
-    playback_state: PlaybackState,
 }
 
 fn online_playlist_render_key(app: &MusicApp) -> OnlinePlaylistRenderKey {
@@ -535,7 +536,6 @@ fn online_playlist_render_key(app: &MusicApp) -> OnlinePlaylistRenderKey {
             .is_some_and(|p| p.loading),
         buffering_track: app.online_track_buffering.clone(),
         current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
-        playback_state: app.snapshot.state,
     }
 }
 
