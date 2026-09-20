@@ -10,7 +10,7 @@ use crate::{
     online::{EnrichmentResult, OnlineServices},
 };
 
-use super::{shell::MusicApp, stage_lyrics};
+use super::shell::MusicApp;
 
 struct EnrichmentOutcome {
     result: EnrichmentResult,
@@ -253,6 +253,7 @@ impl MusicApp {
 
                         if let Some(lyrics) = outcome.result.lyrics.or(outcome.cached_lyrics) {
                             this.cache_lyrics(track_id, lyrics);
+                            this.sync_lyrics_surfaces(track_id, cx);
                         }
                         if let Some(artwork) = outcome.artwork {
                             // Local embedded/sidecar artwork is absolute priority. Even if a stale
@@ -330,13 +331,8 @@ impl MusicApp {
                     .current_track
                     .as_ref()
                     .is_some_and(|track| track.id == track_id);
-                if lyrics_changed && current_track {
-                    stage_lyrics::sync_if_created(this, cx);
-                }
-
                 let root_visible_change = this.page == AppPage::Library
-                    || (current_track && (artwork_changed || metadata_changed))
-                    || (lyrics_changed && current_track && this.config.desktop_lyrics.visible);
+                    || (current_track && (artwork_changed || metadata_changed));
                 if root_visible_change {
                     cx.notify();
                 }
