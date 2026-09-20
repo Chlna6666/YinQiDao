@@ -28,6 +28,7 @@ use super::{
 };
 
 const STAGE_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
@@ -228,6 +229,8 @@ pub(super) struct StageControlsView {
     fade: StageChromeFade,
     playback_state: PlaybackState,
     volume: f32,
+    last_volume_command_at: Instant,
+    last_volume_command: f32,
 }
 
 impl StageControlsView {
@@ -246,6 +249,8 @@ impl StageControlsView {
             fade: StageChromeFade::new(true),
             playback_state: PlaybackState::Paused,
             volume: 1.0,
+            last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
+            last_volume_command: 1.0,
         }
     }
 
@@ -276,16 +281,25 @@ impl StageControlsView {
                 });
             },
             move |ratio, cx| {
+                let ratio = ratio.clamp(0.0, 1.0);
                 let _ = this_drag.update(cx, |this, cx| {
                     if this
                         .volume_drag_ratio
-                        .is_some_and(|current| (current - ratio).abs() < 0.001)
+                        .is_some_and(|current| (current - ratio).abs() < 0.002)
                     {
                         return;
                     }
                     this.volume_drag_ratio = Some(ratio);
-                    if let Some(engine) = &this.engine {
-                        let _ = engine.try_send(PlayerCommand::SetVolume(ratio));
+                    let now = Instant::now();
+                    let due = now.saturating_duration_since(this.last_volume_command_at)
+                        >= VOLUME_COMMAND_INTERVAL;
+                    let stepped = (this.last_volume_command - ratio).abs() >= 0.02;
+                    if due || stepped {
+                        this.last_volume_command_at = now;
+                        this.last_volume_command = ratio;
+                        if let Some(engine) = &this.engine {
+                            let _ = engine.try_send(PlayerCommand::SetVolume(ratio));
+                        }
                     }
                     cx.notify();
                 });
