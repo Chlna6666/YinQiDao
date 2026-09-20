@@ -23,7 +23,6 @@ use super::{
     theme::{
         self, ACCENT_RED, BORDER_CARD, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY,
         TEXT_TERTIARY, elegant_gradient_for, format_time, press_transition, themed_icon,
-        waveform_animation,
     },
 };
 
@@ -803,15 +802,11 @@ fn songs_view(
                                             .current_track
                                             .as_ref()
                                             .is_some_and(|t| t.id == track_id);
-                                        let is_playing = is_current
-                                            && this.snapshot.state
-                                                == crate::model::PlaybackState::Playing;
                                         let artwork = this.artworks.get(&track_id).cloned();
                                         items.push(song_table_row(
                                             idx + 1,
                                             track,
                                             is_current,
-                                            is_playing,
                                             artwork,
                                             &view_clone,
                                         ));
@@ -964,7 +959,6 @@ fn song_table_row(
     index: usize,
     track: &Track,
     is_current: bool,
-    is_playing: bool,
     artwork: Option<std::sync::Arc<[u8]>>,
     view: &gpui::WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
@@ -1025,16 +1019,14 @@ fn song_table_row(
                 .w(px(36.0))
                 .flex()
                 .items_center()
-                .child_if(is_playing, || waveform_animation(true))
-                .child_if(!is_playing, || {
+                .child(if is_current {
+                    themed_icon(icon!(play), 13.0, ACCENT_RED.into()).into_any_element()
+                } else {
                     div()
                         .text_xs()
-                        .text_color(if is_current {
-                            ACCENT_RED
-                        } else {
-                            TEXT_TERTIARY
-                        })
+                        .text_color(TEXT_TERTIARY)
                         .child(format!("{index:02}"))
+                        .into_any_element()
                 }),
         )
         .child(
