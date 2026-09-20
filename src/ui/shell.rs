@@ -12,7 +12,8 @@ use anyhow::{Result, anyhow};
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
+    KeyDownEvent, Render, SharedString, Subscription, Timer, TransformOrigin, WeakEntity, Window,
+    WindowBounds,
     WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
@@ -38,7 +39,7 @@ use super::{
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
 const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
-const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(190);
+const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // Hidden Stage preparation must never compete with the transport's startup window. The audible
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
 const STAGE_BACKGROUND_PREWARM_DELAY: Duration = Duration::from_millis(2_000);
@@ -1009,6 +1010,16 @@ impl MusicApp {
         self.stage_transition_from + (self.stage_transition_to - self.stage_transition_from) * eased
     }
 
+    fn finalize_stage_close_route(&mut self, cx: &mut Context<Self>) {
+        let return_page = if self.previous_page == AppPage::Player {
+            AppPage::Home
+        } else {
+            self.previous_page
+        };
+        self.page = return_page;
+        route::navigate_to(cx, return_page);
+    }
+
     fn begin_stage_transition(&mut self, open: bool, cx: &mut Context<Self>) {
         let target = if open { 1.0 } else { 0.0 };
         if self.stage_animating && (self.stage_transition_to - target).abs() <= 0.001 {
@@ -1020,6 +1031,9 @@ impl MusicApp {
         if !self.stage_animating && (current - target).abs() <= 0.001 {
             self.stage_open = open;
             self.stage_progress = target;
+            if !open {
+                self.finalize_stage_close_route(cx);
+            }
             return;
         }
 
@@ -1035,6 +1049,9 @@ impl MusicApp {
         if distance <= 0.001 {
             self.stage_progress = target;
             self.stage_animating = false;
+            if !open {
+                self.finalize_stage_close_route(cx);
+            }
             return;
         }
         self.stage_transition_duration = Duration::from_secs_f32(
@@ -1104,6 +1121,9 @@ impl MusicApp {
                             this.stage_animating = false;
                             this.stage_transition_started_at = None;
                             this.stage_transition_start_armed = false;
+                            if this.stage_progress <= 0.001 {
+                                this.finalize_stage_close_route(cx);
+                            }
                             cx.notify();
                         })?;
                         Ok(())
@@ -1119,8 +1139,10 @@ impl MusicApp {
             self.open_stage(cx);
             return;
         }
-        if self.stage_open {
+        if self.stage_open || self.stage_animating {
+            self.previous_page = page;
             self.close_stage(cx);
+            return;
         }
         self.previous_page = page;
         self.page = page;
@@ -1148,13 +1170,6 @@ impl MusicApp {
         self.begin_stage_transition(false, cx);
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
-        let return_page = if self.previous_page == AppPage::Player {
-            AppPage::Home
-        } else {
-            self.previous_page
-        };
-        self.page = return_page;
-        route::navigate_to(cx, return_page);
         cx.notify();
     }
 
@@ -4602,18 +4617,25 @@ impl Render for MusicApp {
             let fluid_background = fluid_background
                 .clone()
                 .expect("Stage surface requires a prepared fluid background");
-            let viewport_height = window.viewport_size().height;
-            let zero = point(px(0.0), px(0.0));
-            let below_viewport = point(px(0.0), viewport_height);
-            let progress_position = |progress: f32| {
-                point(
-                    px(0.0),
-                    px(f32::from(viewport_height) * (1.0 - progress.clamp(0.0, 1.0))),
-                )
+            let stage_visual = |progress: f32| {
+                let progress = progress.clamp(0.0, 1.0);
+                (0.992 + 0.008 * progress, progress)
             };
-            let motion = AnimationProperty::translation(
-                progress_position(self.stage_transition_from),
-                progress_position(self.stage_transition_to),
+            let (from_scale, from_opacity) = stage_visual(self.stage_transition_from);
+            let (to_scale, to_opacity) = stage_visual(self.stage_transition_to);
+            let motion = AnimationProperty::scale_opacity(
+                from_scale,
+                to_scale,
+                from_opacity,
+                to_opacity,
+                TransformOrigin::new(0.5, 0.5),
+            );
+            let hidden_stage = AnimationProperty::scale_opacity(
+                0.992,
+                1.0,
+                0.0,
+                1.0,
+                TransformOrigin::new(0.5, 0.5),
             );
             let stage_titlebar = stage_controls::titlebar_view(self, cx);
 
@@ -4665,10 +4687,7 @@ impl Render for MusicApp {
 
             let stage_surface = if stage_prewarm {
                 stage_layer
-                    .with_sampled_animation(
-                        AnimationProperty::translation(below_viewport, zero),
-                        0.0,
-                    )
+                    .with_sampled_animation(hidden_stage, 0.0)
                     .into_any_element()
             } else if self.stage_animating {
                 if self.stage_transition_started_at.is_some() {
