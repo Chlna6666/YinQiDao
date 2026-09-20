@@ -139,6 +139,16 @@ impl LyricScrollAnimation {
     }
 }
 
+pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
+    let existing = cx
+        .try_global::<StageLyricsViewCache>()
+        .and_then(|cache| cache.view.clone());
+    if let Some(view) = existing {
+        let stage_active = app.stage_open || app.stage_animating;
+        view.update(cx, |view, cx| view.sync_from_app(app, stage_active, cx));
+    }
+}
+
 pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageLyricsView> {
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
