@@ -3,10 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
 use gpui::{
     Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render,
-    StatefulInteractiveElement as _, Timer, WeakEntity, Window, div, hsla, img, linear_color_stop,
+    StatefulInteractiveElement as _, WeakEntity, Window, div, hsla, img, linear_color_stop,
     linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
@@ -31,7 +30,7 @@ const NOW_PLAYING_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 fn mini_clock_visible(parent: &WeakEntity<MusicApp>, cx: &gpui::App) -> bool {
     parent
-        .read_with(cx, |app, _| !app.stage_open)
+        .read_with(cx, |app, _| !(app.stage_open || app.stage_animating))
         .unwrap_or(false)
 }
 
@@ -226,6 +225,18 @@ impl PlaybackTime {
     pub(super) fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
         Self { parent, engine }
     }
+
+    pub(super) fn sync(&mut self, engine: Option<Arc<AudioEngine>>, cx: &mut Context<Self>) {
+        let changed = match (&self.engine, &engine) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.engine = engine;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for PlaybackTime {
@@ -294,7 +305,6 @@ pub struct NowPlaying {
     engine: Option<Arc<AudioEngine>>,
     dynamic_blur: bool,
     artwork: Option<Arc<[u8]>>,
-    timer_started: bool,
 }
 
 #[allow(dead_code)]
@@ -308,36 +318,19 @@ impl NowPlaying {
             engine,
             dynamic_blur,
             artwork,
-            timer_started: false,
         }
     }
 }
 
 impl Render for NowPlaying {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.timer_started {
-            self.timer_started = true;
-            cx.spawn(async move |this, cx| -> Result<()> {
-                loop {
-                    Timer::after(NOW_PLAYING_REFRESH_INTERVAL).await;
-                    if this
-                        .update(cx, |this, cx| {
-                            if this
-                                .engine
-                                .as_ref()
-                                .is_some_and(|engine| engine.progress().0 == PlaybackState::Playing)
-                            {
-                                cx.notify();
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .detach();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.progress().0 == PlaybackState::Playing)
+            && !window.is_minimized()
+        {
+            window.request_invalidation_at(Instant::now() + NOW_PLAYING_REFRESH_INTERVAL, cx);
         }
 
         let snapshot = self
