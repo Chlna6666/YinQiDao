@@ -115,7 +115,7 @@ pub(super) fn view(
         view
     });
 
-    let mini_clock_visible = !app.stage_open;
+    let mini_clock_visible = !(app.stage_open || app.stage_animating);
     let drag_progress_ratio = app.drag_progress_ratio;
     playback_progress.update(cx, |progress, cx| {
         progress.sync(
@@ -125,6 +125,9 @@ pub(super) fn view(
             drag_progress_ratio,
             cx,
         );
+    });
+    playback_time.update(cx, |time, cx| {
+        time.sync(app.engine.clone(), cx);
     });
 
     let track = app.snapshot.current_track.as_ref();
