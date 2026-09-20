@@ -6,10 +6,11 @@ use gpui_tokio::Tokio;
 
 use crate::{
     lyrics::LyricsDocument,
+    model::AppPage,
     online::{EnrichmentResult, OnlineServices},
 };
 
-use super::shell::MusicApp;
+use super::{shell::MusicApp, stage_lyrics};
 
 struct EnrichmentOutcome {
     result: EnrichmentResult,
@@ -240,8 +241,16 @@ impl MusicApp {
             this.update(cx, |this, cx| {
                 this.enrichment_loading.remove(&track_id);
                 this.enrichment_done.insert(track_id);
+                let mut lyrics_changed = false;
+                let mut artwork_changed = false;
+                let mut metadata_changed = false;
                 match outcome {
                     Ok(outcome) => {
+                        lyrics_changed =
+                            outcome.result.lyrics.is_some() || outcome.cached_lyrics.is_some();
+                        artwork_changed = outcome.artwork.is_some();
+                        metadata_changed = outcome.result.metadata.is_some();
+
                         if let Some(lyrics) = outcome.result.lyrics.or(outcome.cached_lyrics) {
                             this.cache_lyrics(track_id, lyrics);
                         }
@@ -315,7 +324,22 @@ impl MusicApp {
                     this.enrichment_done.remove(&track_id);
                     this.request_current_enrichment(cx);
                 }
-                cx.notify();
+
+                let current_track = this
+                    .snapshot
+                    .current_track
+                    .as_ref()
+                    .is_some_and(|track| track.id == track_id);
+                if lyrics_changed && current_track {
+                    stage_lyrics::sync_if_created(this, cx);
+                }
+
+                let root_visible_change = this.page == AppPage::Library
+                    || (current_track && (artwork_changed || metadata_changed))
+                    || (lyrics_changed && current_track && this.config.desktop_lyrics.visible);
+                if root_visible_change {
+                    cx.notify();
+                }
             })?;
             Ok(())
         })
