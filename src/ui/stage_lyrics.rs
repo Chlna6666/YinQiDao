@@ -34,6 +34,7 @@ const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
+const KARAOKE_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
 // Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
 // edge depth never snaps while translation is still cascading.
 const LYRIC_BLUR_TRANSITION_RADIUS: usize = 1;
@@ -466,6 +467,28 @@ impl StageLyricsView {
         ))
     }
 
+    fn karaoke_should_sample(&self) -> bool {
+        if !self.transport_should_run() || self.scrubbing || self.is_reading() {
+            return false;
+        }
+        let Some(line) = self.active_index.and_then(|index| self.lines.get(index)) else {
+            return false;
+        };
+        if !line.enhanced_complete {
+            return false;
+        }
+        let Some(word_index) = self.active_word_index else {
+            return false;
+        };
+        let Some(word) = line.words.get(word_index) else {
+            return false;
+        };
+        let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
+            return false;
+        };
+        self.position_ms < word.timestamp_ms.saturating_add(duration_ms)
+    }
+
     fn refresh_transport(&mut self) {
         if !self.transport_should_run() || self.scrubbing {
             return;
@@ -559,6 +582,9 @@ impl StageLyricsView {
             && let Some(delay) = self.next_transport_delay()
         {
             window.request_invalidation_at(now + delay, cx);
+        }
+        if self.karaoke_should_sample() {
+            window.request_invalidation_at(now + KARAOKE_SAMPLE_INTERVAL, cx);
         }
         if let Some(until) = self.reading_until
             && until > now
@@ -1241,19 +1267,13 @@ fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
 }
 
-fn word_reveal_remaining(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
-    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
-    let end = word.timestamp_ms.saturating_add(duration_ms);
-    (position_ms < end).then(|| Duration::from_millis(end.saturating_sub(position_ms)))
-}
-
 fn karaoke_word(
     word: &StageLyricWord,
     index: usize,
     current_word: Option<usize>,
     position_ms: u64,
-    animate: bool,
-    karaoke_epoch: u64,
+    _animate: bool,
+    _karaoke_epoch: u64,
 ) -> gpui::AnyElement {
     const DIM_ALPHA: f32 = 0.28;
     const DONE_ALPHA: f32 = 0.97;
@@ -1299,27 +1319,7 @@ fn karaoke_word(
         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
         .child(word.text.clone());
 
-    let overlay = if animate
-        && progress < 1.0
-        && let Some(remaining) = word_reveal_remaining(word, position_ms)
-        && !remaining.is_zero()
-    {
-        let key = karaoke_epoch
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(word.timestamp_ms.rotate_left(17))
-            .wrapping_add(index as u64);
-        overlay
-            .with_animation(
-                ElementId::NamedInteger(SharedString::new_static("lyric-word-sweep"), key),
-                Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
-                    HorizontalRevealEdge::Left,
-                    progress,
-                    1.0,
-                )),
-                |element, _| element,
-            )
-            .into_any_element()
-    } else if progress < 1.0 {
+    let overlay = if progress < 1.0 {
         overlay
             .with_sampled_animation(
                 AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
@@ -1780,14 +1780,5 @@ mod tests {
         assert_eq!(word_reveal_progress(word, 1_000), 0.0);
         assert!((word_reveal_progress(word, 1_150) - 0.5).abs() < 0.001);
         assert_eq!(word_reveal_progress(word, 1_300), 1.0);
-        assert_eq!(
-            word_reveal_remaining(word, 1_000),
-            Some(Duration::from_millis(300))
-        );
-        assert_eq!(
-            word_reveal_remaining(word, 1_250),
-            Some(Duration::from_millis(50))
-        );
-        assert_eq!(word_reveal_remaining(word, 1_300), None);
     }
 }
