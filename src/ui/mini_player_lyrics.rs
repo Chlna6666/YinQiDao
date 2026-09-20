@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, IntoElement, div, hsla, prelude::*, px};
+use gpui::{AnyView, Context, Entity, IntoElement, StyleRefinement, div, hsla, prelude::*, px};
 
 use super::{
     app_runtime_events, mini_player_view,
@@ -22,8 +22,16 @@ pub(super) fn mini_player(
     }
 
     let mini_player = mini_player_view::view(app, cx, playback_progress, playback_time);
+    let mini_player = AnyView::from(mini_player)
+        .cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(px(72.0)),
+        )
+        .reuse_on_window_refresh();
     div()
         .relative()
+        .h(px(72.0))
         .child(mini_player)
         .child(
             div()
