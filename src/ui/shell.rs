@@ -2747,11 +2747,30 @@ impl MusicApp {
         .detach();
     }
 
+    fn prefetch_online_playlist_images(
+        data: &OnlinePlaylistViewData,
+        cx: &mut Context<Self>,
+    ) {
+        let mut urls = Vec::with_capacity(data.tracks.len().saturating_add(1));
+        if let Some(url) = data.cover_url.as_ref().filter(|url| !url.trim().is_empty()) {
+            urls.push(url.clone());
+        }
+        urls.extend(
+            data.tracks
+                .iter()
+                .filter_map(|track| track.cover_url.as_ref())
+                .filter(|url| !url.trim().is_empty())
+                .cloned(),
+        );
+        crate::ui::image_cache::prefetch_urls(urls, cx);
+    }
+
     pub(crate) fn show_online_playlist_detail(
         &mut self,
         data: OnlinePlaylistViewData,
         cx: &mut Context<Self>,
     ) {
+        Self::prefetch_online_playlist_images(&data, cx);
         self.active_online_playlist = Some(data);
         self.page = AppPage::OnlinePlaylist;
         cx.notify();
@@ -2808,6 +2827,7 @@ impl MusicApp {
                         loading: false,
                         route,
                     };
+                    Self::prefetch_online_playlist_images(&view_data, cx);
                     app.online_playlist_cache.insert(c_key, view_data.clone());
                     if let Some(data) = &mut app.active_online_playlist {
                         if data.title == view_data.title {
@@ -2921,6 +2941,7 @@ impl MusicApp {
                         loading: false,
                         route,
                     };
+                    Self::prefetch_online_playlist_images(&view_data, cx);
                     app.online_playlist_cache
                         .insert("user_favorite".to_string(), view_data.clone());
                     if let Some(data) = &mut app.active_online_playlist {
@@ -3000,6 +3021,7 @@ impl MusicApp {
                         loading: false,
                         route,
                     };
+                    Self::prefetch_online_playlist_images(&view_data, cx);
                     app.online_playlist_cache
                         .insert("netease_cloud_library".to_string(), view_data.clone());
                     if let Some(data) = &mut app.active_online_playlist {
