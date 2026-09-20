@@ -12,9 +12,8 @@ use anyhow::{Result, anyhow};
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Timer, TransformOrigin, WeakEntity, Window,
-    WindowBounds,
-    WindowOptions, div, hsla, prelude::*, px, rgb, size,
+    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -4912,26 +4911,23 @@ impl Render for MusicApp {
             let fluid_background = fluid_background
                 .clone()
                 .expect("Stage surface requires a prepared fluid background");
-            let stage_visual = |progress: f32| {
-                let progress = progress.clamp(0.0, 1.0);
-                (0.992 + 0.008 * progress, progress)
+            let viewport_height = f32::from(window.viewport_size().height);
+            let stage_position = |progress: f32| {
+                point(
+                    px(0.0),
+                    px(viewport_height * (1.0 - progress.clamp(0.0, 1.0))),
+                )
             };
-            let (from_scale, from_opacity) = stage_visual(self.stage_transition_from);
-            let (to_scale, to_opacity) = stage_visual(self.stage_transition_to);
-            let motion = AnimationProperty::scale_opacity(
-                from_scale,
-                to_scale,
-                from_opacity,
-                to_opacity,
-                TransformOrigin::new(0.5, 0.5),
+            // The immersive surface is a real bottom drawer. Keep opacity at 1.0 and move the
+            // already-composited retained layer instead of cross-fading it with the application
+            // shell. This avoids the translucent double-exposure visible during enter/exit and
+            // preserves continuous reversal by starting from the sampled logical progress.
+            let motion = AnimationProperty::translation(
+                stage_position(self.stage_transition_from),
+                stage_position(self.stage_transition_to),
             );
-            let hidden_stage = AnimationProperty::scale_opacity(
-                0.992,
-                1.0,
-                0.0,
-                1.0,
-                TransformOrigin::new(0.5, 0.5),
-            );
+            let hidden_stage =
+                AnimationProperty::translation(stage_position(0.0), stage_position(1.0));
             let stage_titlebar = stage_controls::titlebar_view(self, cx);
 
             let stage_layer = div()
