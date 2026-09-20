@@ -1025,6 +1025,11 @@ impl MusicApp {
     }
 
     fn finalize_stage_close_route(&mut self, cx: &mut Context<Self>) {
+        // Complete the retained lyrics lifecycle before the Stage subtree disappears. Exit keeps
+        // stage_open || stage_animating true until this point, so without this final sync the lyrics
+        // entity never observes stage_active = false and can reuse stale ListState on re-entry.
+        stage_lyrics::sync_if_created(self, cx);
+
         let return_page = if self.previous_page == AppPage::Player {
             AppPage::Home
         } else {

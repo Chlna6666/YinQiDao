@@ -28,6 +28,9 @@ const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_LIST_MIN_PADDING_TOP: f32 = 8.0;
 const LYRIC_LIST_MIN_PADDING_BOTTOM: f32 = 10.0;
+// GPUI List does not materialize items when vertical padding consumes the viewport.
+// Keep a small real content band so anchor spacers still leave paintable list space.
+const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
@@ -414,6 +417,9 @@ impl StageLyricsView {
                     self.scroll_target = self.active_index;
                 }
             } else {
+                self.reading_until = None;
+                self.scroll_target = None;
+                self.hovered_index = None;
                 self.anchor_bootstrap_pending = false;
                 self.cancel_scroll_animation();
             }
@@ -674,7 +680,7 @@ impl StageLyricsView {
             Timer::after(LYRIC_SAMPLE_INTERVAL).await;
             let _ = this.update(cx, |this, cx| {
                 this.geometry_retry_scheduled = false;
-                if this.stage_active && this.has_timeline && this.scroll_target.is_some() {
+                if this.stage_active && !this.lines.is_empty() {
                     // StageLyrics is cached with reuse_on_window_refresh(). A window-only deadline
                     // can therefore repaint the parent while reusing this stale child forever.
                     // Notify the retained lyric entity itself after ListState has had one prepaint
@@ -858,13 +864,19 @@ impl Render for StageLyricsView {
         let focus_from_index = self.focus_from_index;
         let viewport_bounds = self.list_state.viewport_bounds();
         let measured_viewport_height = f32::from(viewport_bounds.size.height);
-        let provisional_viewport_height = if measured_viewport_height > 1.0 {
+        if measured_viewport_height <= 1.0 && self.stage_active && !window.is_minimized() {
+            self.schedule_geometry_retry(cx);
+        }
+        // First-pass StageLyrics bounds are not known yet. Using the whole window height here can
+        // make List padding larger than the actual right-column viewport, which makes GPUI paint no
+        // rows at all. Start with minimum padding, then refine from the measured List viewport.
+        let layout_viewport_height = if measured_viewport_height > 1.0 {
             measured_viewport_height
         } else {
-            f32::from(window.viewport_size().height)
+            0.0
         };
         let (list_padding_top, list_padding_bottom) =
-            lyric_list_spacers(provisional_viewport_height);
+            lyric_list_spacers(layout_viewport_height);
         let lines = self.lines.clone();
 
         // Snapshot ListState geometry before constructing/rendering the List element. The list
@@ -1224,15 +1236,20 @@ fn lyric_list_spacers(viewport_height: f32) -> (f32, f32) {
         );
     }
 
-    // Padding is part of List's scroll extent. This gives the first and final authored lines enough
-    // physical room to occupy the same playback anchor used by middle lines. The first row starts
-    // slightly below the anchor, then bootstrap scrolls it upward by roughly half its measured
-    // height while the list is still hidden.
-    (
-        (viewport_height * LYRIC_ANCHOR_RATIO).max(LYRIC_LIST_MIN_PADDING_TOP),
-        (viewport_height * (1.0 - LYRIC_ANCHOR_RATIO))
-            .max(LYRIC_LIST_MIN_PADDING_BOTTOM),
-    )
+    // GPUI List prepaint clears every item when viewport_height <= top + bottom. Reserve a real
+    // content band and spend the remaining height on the first/last-line anchor spacers.
+    let padding_budget = (viewport_height - LYRIC_LIST_CONTENT_RESERVE_PX).max(0.0);
+    let minimum_padding = LYRIC_LIST_MIN_PADDING_TOP + LYRIC_LIST_MIN_PADDING_BOTTOM;
+    if padding_budget <= minimum_padding {
+        let top = padding_budget * LYRIC_ANCHOR_RATIO;
+        return (top, padding_budget - top);
+    }
+
+    let top = (viewport_height * LYRIC_ANCHOR_RATIO)
+        .max(LYRIC_LIST_MIN_PADDING_TOP)
+        .min(padding_budget - LYRIC_LIST_MIN_PADDING_BOTTOM);
+    let bottom = padding_budget - top;
+    (top, bottom)
 }
 
 #[inline]
@@ -1624,7 +1641,8 @@ mod tests {
     fn list_spacers_allow_edge_lines_to_use_the_playback_anchor() {
         let (top, bottom) = lyric_list_spacers(600.0);
         assert!((top - 600.0 * LYRIC_ANCHOR_RATIO).abs() < 0.01);
-        assert!((bottom - 600.0 * (1.0 - LYRIC_ANCHOR_RATIO)).abs() < 0.01);
+        assert!((top + bottom - (600.0 - LYRIC_LIST_CONTENT_RESERVE_PX)).abs() < 0.01);
+        assert!(top + bottom < 600.0);
 
         let (fallback_top, fallback_bottom) = lyric_list_spacers(0.0);
         assert_eq!(fallback_top, LYRIC_LIST_MIN_PADDING_TOP);
