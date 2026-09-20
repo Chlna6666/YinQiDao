@@ -515,10 +515,10 @@ fn render_online_song_row(
             app_listener(view, move |this, _, _, cx| {
                 // A newer selection supersedes/cancels the previous online prepare task in
                 // MusicApp. Never turn buffering into a global input lock for the playlist.
-                this.play_online_playlist_track(
+                this.play_online_playlist_track_shared(
                     track_route.clone(),
                     song_playlist_title.clone(),
-                    song_playlist_tracks.as_ref().to_vec(),
+                    song_playlist_tracks.clone(),
                     track_index,
                     cx,
                 );
