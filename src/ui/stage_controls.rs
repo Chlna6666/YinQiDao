@@ -821,7 +821,7 @@ impl StageTransportView {
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
             || self.playback_state != playback_state
-            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
+            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0015);
 
         if engine_changed {
             self.engine = app.engine.clone();
@@ -1003,7 +1003,7 @@ impl StageProgressView {
             || self.playback_state != playback_state
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
-            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
+            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0015);
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
@@ -1049,7 +1049,7 @@ impl StageProgressView {
                     if this.local_dragging
                         && this
                             .drag_progress_ratio
-                            .is_some_and(|current| (current - ratio).abs() < 0.0005)
+                            .is_some_and(|current| (current - ratio).abs() < 0.0015)
                     {
                         return;
                     }
