@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     components::{
-        SliderStyle,
+        SliderStyle, interactive_slider,
         slider::{InteractiveSliderState, SliderProgressAnimation},
     },
     shell::{DragTarget, MusicApp},
