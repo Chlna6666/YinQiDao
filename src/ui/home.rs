@@ -23,7 +23,7 @@ use super::{
     shell::{MusicApp, app_listener},
     theme::{
         self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
-        elegant_gradient_for, format_time, press_transition, themed_icon, waveform_animation,
+        elegant_gradient_for, format_time, press_transition, themed_icon,
     },
 };
 
@@ -1715,7 +1715,9 @@ pub(super) fn track_row(
                 .flex()
                 .items_center()
                 .gap_4()
-                .child_if(is_playing, || waveform_animation(true))
+                .child_if(is_playing, || {
+                    themed_icon(icon!(play), 13.0, ACCENT_RED.into())
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("home-add-queue-{track_id}")))
