@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use gpui::{IntoElement, WeakEntity, div, hsla, prelude::*, px, rgb, uniform_list};
 use lucide_gpui::icon;
@@ -290,7 +290,7 @@ fn render_songs_table(
             .into_any_element();
     }
 
-    let tracks = data.tracks.clone();
+    let tracks: Arc<[RemoteTrack]> = data.tracks.clone().into();
     let track_route = route.clone();
     let playlist_title = data.title.clone();
     let view_clone = view.clone();
@@ -346,7 +346,7 @@ fn render_songs_table(
                                     track,
                                     &track_route,
                                     &playlist_title,
-                                    &tracks,
+                                    tracks.clone(),
                                     idx,
                                     &view_clone,
                                     is_buffering,
@@ -369,7 +369,7 @@ fn render_online_song_row(
     track: &RemoteTrack,
     route: &PluginRoute,
     playlist_title: &str,
-    playlist_tracks: &[RemoteTrack],
+    playlist_tracks: Arc<[RemoteTrack]>,
     track_index: usize,
     view: &WeakEntity<MusicApp>,
     is_buffering: bool,
@@ -378,7 +378,7 @@ fn render_online_song_row(
 ) -> gpui::AnyElement {
     let track_route = route.clone();
     let song_playlist_title = playlist_title.to_string();
-    let song_playlist_tracks = playlist_tracks.to_vec();
+    let song_playlist_tracks = playlist_tracks;
     let cover_url = track.cover_url.as_deref();
     let title = track.title.clone();
     let artists = if track.artists.is_empty() {
@@ -521,7 +521,7 @@ fn render_online_song_row(
                 this.play_online_playlist_track(
                     track_route.clone(),
                     song_playlist_title.clone(),
-                    song_playlist_tracks.clone(),
+                    song_playlist_tracks.as_ref().to_vec(),
                     track_index,
                     cx,
                 );
