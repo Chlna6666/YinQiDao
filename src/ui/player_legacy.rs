@@ -53,6 +53,7 @@ pub(super) struct PlaybackProgress {
     playback_state: PlaybackState,
     visible: bool,
     drag_ratio_bits: Option<u32>,
+    local_drag_ratio: Option<f32>,
     timer_started: bool,
 }
 
@@ -71,6 +72,7 @@ impl PlaybackProgress {
             playback_state,
             visible: true,
             drag_ratio_bits: None,
+            local_drag_ratio: None,
             timer_started: false,
         }
     }
@@ -119,10 +121,11 @@ impl Render for PlaybackProgress {
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
-        let drag_ratio = self
+        let app_drag_ratio = self
             .parent
             .read_with(cx, |app, _| app.drag_progress_ratio)
             .unwrap_or(None);
+        let drag_ratio = self.local_drag_ratio.or(app_drag_ratio);
 
         let should_tick = self.visible
             && self.playback_state == PlaybackState::Playing
@@ -138,6 +141,7 @@ impl Render for PlaybackProgress {
                         let running = this.visible
                             && this.playback_state == PlaybackState::Playing
                             && this.drag_ratio_bits.is_none()
+                            && this.local_drag_ratio.is_none()
                             && this
                                 .engine
                                 .as_ref()
@@ -182,39 +186,41 @@ impl Render for PlaybackProgress {
                 let parent = parent.clone();
                 let this = this.clone();
                 move |ratio, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.local_drag_ratio = None;
+                        cx.notify();
+                    });
                     let _ = parent.update(cx, |app, app_cx| {
                         app.seek_to_ratio(ratio, app_cx);
                     });
-                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            },
+            {
+                let this = this.clone();
+                move |ratio, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .local_drag_ratio
+                            .is_some_and(|current| (current - ratio).abs() < 0.001)
+                        {
+                            return;
+                        }
+                        this.local_drag_ratio = Some(ratio.clamp(0.0, 1.0));
+                        cx.notify();
+                    });
                 }
             },
             {
                 let parent = parent.clone();
                 let this = this.clone();
                 move |ratio, cx| {
-                    let _ = parent.update(cx, |app, app_cx| {
-                        if app.drag_target == Some(DragTarget::Progress) {
-                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                        } else {
-                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                        }
+                    let _ = this.update(cx, |this, cx| {
+                        this.local_drag_ratio = None;
+                        cx.notify();
                     });
-                    let _ = this.update(cx, |_, cx| cx.notify());
-                }
-            },
-            {
-                let parent = parent.clone();
-                let this = this.clone();
-                move |ratio, cx| {
                     let _ = parent.update(cx, |app, app_cx| {
-                        if app.drag_target == Some(DragTarget::Progress) {
-                            app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                        } else {
-                            app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                        }
-                        app.commit_drag(app_cx);
+                        app.seek_to_ratio(ratio, app_cx);
                     });
-                    let _ = this.update(cx, |_, cx| cx.notify());
                 }
             },
         );
