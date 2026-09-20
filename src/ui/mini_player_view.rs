@@ -15,7 +15,7 @@ use crate::{
 use super::{
     components::{SliderStyle, slider::InteractiveSliderState},
     player_stage::{PlaybackProgress, PlaybackTime},
-    shell::{DragTarget, MusicApp},
+    shell::MusicApp,
     theme::{
         self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, elegant_gradient_for, press_transition,
         themed_icon,
@@ -79,9 +79,12 @@ pub(super) fn view(
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let volume_slider = mini_volume_slider(parent.clone());
-        let view = cx.new(move |_| MiniPlayerView {
-            parent,
+        let view_parent = parent.clone();
+        let slider_parent = parent.clone();
+        let view = cx.new(move |cx| {
+            let volume_slider = mini_volume_slider(slider_parent, cx.weak_entity());
+            MiniPlayerView {
+            parent: view_parent,
             playback_progress: initial_progress,
             playback_time: initial_time,
             volume_slider,
@@ -100,6 +103,7 @@ pub(super) fn view(
             },
             slider_volume: 1.0,
             icon_volume: 1.0,
+            }
         });
         cache.view = Some(view.clone());
         view
@@ -534,36 +538,49 @@ fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyView {
         .reuse_on_window_refresh()
 }
 
-fn mini_volume_slider(parent: WeakEntity<MusicApp>) -> InteractiveSliderState {
+fn mini_volume_slider(
+    parent: WeakEntity<MusicApp>,
+    owner: WeakEntity<MiniPlayerView>,
+) -> InteractiveSliderState {
     let click_parent = parent.clone();
     let drag_parent = parent.clone();
+    let click_owner = owner.clone();
+    let drag_owner = owner.clone();
     InteractiveSliderState::new(
         "mini-volume-bar",
         move |ratio, cx| {
+            let ratio = ratio.clamp(0.0, 1.0);
+            let _ = click_owner.update(cx, |view, cx| {
+                view.slider_volume = ratio;
+                cx.notify();
+            });
             let _ = click_parent.update(cx, |app, app_cx| {
                 app.pending_volume_ratio = None;
                 app.set_app_volume(ratio, app_cx);
             });
         },
         move |ratio, cx| {
-            let _ = drag_parent.update(cx, |app, app_cx| {
-                if app.drag_target == Some(DragTarget::Volume) {
-                    app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                } else {
-                    app.begin_drag(DragTarget::Volume, ratio, app_cx);
+            let ratio = ratio.clamp(0.0, 1.0);
+            let _ = drag_owner.update(cx, |view, cx| {
+                if (view.slider_volume - ratio).abs() < 0.002 {
+                    return;
                 }
-                app.send(PlayerCommand::SetVolume(ratio));
+                view.slider_volume = ratio;
+                cx.notify();
             });
+            if let Ok(Some(engine)) = drag_parent.read_with(cx, |app, _| app.engine.clone()) {
+                let _ = engine.try_send(PlayerCommand::SetVolume(ratio));
+            }
         },
         move |ratio, cx| {
+            let ratio = ratio.clamp(0.0, 1.0);
+            let _ = owner.update(cx, |view, cx| {
+                view.slider_volume = ratio;
+                cx.notify();
+            });
             let _ = parent.update(cx, |app, app_cx| {
-                if app.drag_target == Some(DragTarget::Volume) {
-                    app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                } else {
-                    app.begin_drag(DragTarget::Volume, ratio, app_cx);
-                }
-                app.commit_drag(app_cx);
                 app.pending_volume_ratio = None;
+                app.set_app_volume(ratio, app_cx);
             });
         },
     )
