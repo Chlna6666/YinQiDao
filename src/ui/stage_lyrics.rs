@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
+    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
@@ -34,9 +34,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(320);
-const LYRIC_ROW_STAGGER_MS: u64 = 14;
-const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 6;
+const LYRIC_SCROLL_MOTION_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
 const SCROLL_SETTLE_PX: f32 = 0.30;
@@ -136,7 +134,7 @@ struct LyricScrollAnimation {
 impl LyricScrollAnimation {
     fn progress_at(self, now: Instant) -> f32 {
         let elapsed = now.saturating_duration_since(self.started_at);
-        lyric_row_motion_spec(Duration::ZERO)
+        lyric_scroll_motion_spec()
             .sample_elapsed(elapsed)
             .eased_progress
     }
@@ -633,7 +631,7 @@ impl StageLyricsView {
         }
         if self
             .scroll_animation
-            .is_some_and(|animation| animation.started_at + LYRIC_HANDOFF_DURATION <= now)
+            .is_some_and(|animation| animation.started_at + LYRIC_SCROLL_MOTION_DURATION <= now)
         {
             self.scroll_animation = None;
         }
@@ -849,9 +847,9 @@ impl Render for StageLyricsView {
         let scroll_animation = self.scroll_animation;
         let scroll_animating = scroll_animation.is_some();
         let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
+        let scroll_progress = scroll_animation.map_or(1.0, |scroll| scroll.progress_at(frame_now));
         let motion_epoch = self.motion_epoch;
         let focus_started_at = self.focus_started_at;
-        let scroll_started_at = scroll_animation.map(|animation| animation.started_at);
         let focus_animating = focus_started_at.is_some();
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // automatic scroll used to make every line equally sharp during the transition, producing
@@ -936,12 +934,8 @@ impl Render for StageLyricsView {
                 focus_from_index,
                 focus_started_at,
                 frame_now,
-                scroll_animating,
-                scroll_from_y,
-                scroll_started_at,
                 edge_progress,
                 previous_edge_progress,
-                motion_epoch,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -960,7 +954,28 @@ impl Render for StageLyricsView {
         .pb(px(list_padding_bottom))
         .pr(px(8.0));
 
-        let lyrics = lyrics.into_any_element();
+        // Commit one logical scroll per lyric boundary, then visually preserve the previous frame
+        // with a single inverse translation on the entire lyric surface. This keeps every row's
+        // spacing rigid while the column moves upward as one Apple Music-style hand-off.
+        let lyrics = if let Some(scroll) = scroll_animation {
+            lyrics
+                .composite_layer()
+                .with_stable_sampled_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("stage-lyrics-scroll-motion"),
+                        motion_epoch,
+                    ),
+                    AnimationProperty::translation(
+                        point(px(0.0), px(scroll.from_y)),
+                        point(px(0.0), px(0.0)),
+                    ),
+                    scroll_progress,
+                    scroll_progress < 1.0,
+                )
+                .into_any_element()
+        } else {
+            lyrics.into_any_element()
+        };
 
         div()
             .id("stage-lyrics-view")
@@ -988,12 +1003,8 @@ fn render_lyric_row(
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
     frame_now: Instant,
-    scroll_animating: bool,
-    scroll_from_y: f32,
-    scroll_started_at: Option<Instant>,
     edge_progress: f32,
     previous_edge_progress: f32,
-    motion_epoch: u64,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -1131,17 +1142,7 @@ fn render_lyric_row(
     }
 
     if !interactive {
-        return apply_lyric_row_motion(
-            row,
-            index,
-            active,
-            focus_from_index,
-            scroll_animating,
-            scroll_from_y,
-            scroll_started_at,
-            frame_now,
-            motion_epoch,
-        );
+        return row.into_any_element();
     }
 
     let local = view;
@@ -1165,17 +1166,7 @@ fn render_lyric_row(
         });
     });
 
-    apply_lyric_row_motion(
-        row,
-        index,
-        active,
-        focus_from_index,
-        scroll_animating,
-        scroll_from_y,
-        scroll_started_at,
-        frame_now,
-        motion_epoch,
-    )
+    row.into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1524,85 +1515,10 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 
-fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
-    AnimationSpec::new(LYRIC_ROW_MOTION_DURATION)
-        .delay(delay)
-        // Delay is part of the visual choreography: lower rows must remain at their old FLIP
-        // position until their own start time. Forwards does not apply the first keyframe during
-        // delay and made all rows appear at the final logical position before delayed motion.
-        .fill_mode(FillMode::Both)
-        .ease(Easing::OutQuint)
+fn lyric_scroll_motion_spec() -> AnimationSpec {
+    AnimationSpec::new(LYRIC_SCROLL_MOTION_DURATION).ease(Easing::OutQuint)
 }
 
-#[inline]
-fn lyric_row_stagger_delay(
-    index: usize,
-    active: usize,
-    previous_active: Option<usize>,
-    from_y: f32,
-) -> Duration {
-    let leader = previous_active.unwrap_or(active);
-    let trailing_distance = if from_y >= 0.0 {
-        // Normal forward playback: old active starts immediately, the promoted new active follows,
-        // then every lower row starts on its own compositor timestamp.
-        index.saturating_sub(leader)
-    } else {
-        // Reverse seek mirrors the same cascade direction.
-        leader.saturating_sub(index)
-    }
-    .min(LYRIC_ROW_MAX_STAGGER_ROWS);
-
-    Duration::from_millis(trailing_distance as u64 * LYRIC_ROW_STAGGER_MS)
-}
-
-#[inline]
-fn lyric_row_motion_key(motion_epoch: u64, index: usize) -> u64 {
-    motion_epoch
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(index as u64)
-}
-
-fn apply_lyric_row_motion(
-    row: gpui::Stateful<gpui::Div>,
-    index: usize,
-    active: usize,
-    previous_active: Option<usize>,
-    animating: bool,
-    from_y: f32,
-    started_at: Option<Instant>,
-    frame_now: Instant,
-    motion_epoch: u64,
-) -> gpui::AnyElement {
-    if !animating || from_y.abs() <= SCROLL_SETTLE_PX {
-        return row.into_any_element();
-    }
-
-    let Some(started_at) = started_at else {
-        return row.into_any_element();
-    };
-    let delay = lyric_row_stagger_delay(index, active, previous_active, from_y);
-    let sample = lyric_row_motion_spec(delay)
-        .sample_elapsed(frame_now.saturating_duration_since(started_at));
-    let progress = sample.eased_progress;
-    let motion_key = lyric_row_motion_key(motion_epoch, index);
-
-    // Keep one stable retained scene-animation identity for this row during the whole hand-off.
-    // The frame-local sampled wrapper could be replayed after ListState had already advanced its
-    // logical scroll, leaving the lyric visually parked instead of climbing with the next line.
-    row.with_stable_sampled_animation(
-        ElementId::NamedInteger(
-            SharedString::new_static("stage-lyric-row-motion"),
-            motion_key,
-        ),
-        AnimationProperty::translation(
-            point(px(0.0), px(from_y)),
-            point(px(0.0), px(0.0)),
-        ),
-        progress,
-        progress < 1.0,
-    )
-    .into_any_element()
-}
 
 #[cfg(test)]
 mod tests {
@@ -1701,62 +1617,28 @@ mod tests {
     }
 
     #[test]
-    fn delayed_row_motion_holds_the_old_position_before_start() {
-        let spec = lyric_row_motion_spec(Duration::from_millis(LYRIC_ROW_STAGGER_MS * 2));
-        let before = spec.sample_elapsed(Duration::from_millis(LYRIC_ROW_STAGGER_MS));
-        assert!(before.applies);
-        assert_eq!(before.eased_progress, 0.0);
-
-        let after = spec.sample_elapsed(Duration::from_millis(
-            LYRIC_ROW_STAGGER_MS * 2 + LYRIC_ROW_MOTION_DURATION.as_millis() as u64,
-        ));
-        assert!(after.applies);
-        assert_eq!(after.eased_progress, 1.0);
+    fn scroll_motion_starts_at_old_geometry_and_settles() {
+        let spec = lyric_scroll_motion_spec();
+        let start = spec.sample_elapsed(Duration::ZERO);
+        let middle = spec.sample_elapsed(LYRIC_SCROLL_MOTION_DURATION / 2);
+        let end = spec.sample_elapsed(LYRIC_SCROLL_MOTION_DURATION);
+        assert_eq!(start.eased_progress, 0.0);
+        assert!(middle.eased_progress > 0.0 && middle.eased_progress < 1.0);
+        assert_eq!(end.eased_progress, 1.0);
     }
 
     #[test]
-    fn row_scroll_stagger_promotes_from_previous_active() {
-        let previous = Some(9);
-        assert_eq!(
-            lyric_row_stagger_delay(9, 10, previous, 80.0),
-            Duration::ZERO
-        );
-        assert_eq!(
-            lyric_row_stagger_delay(10, 10, previous, 80.0),
-            Duration::from_millis(LYRIC_ROW_STAGGER_MS)
-        );
-        assert_eq!(
-            lyric_row_stagger_delay(12, 10, previous, 80.0),
-            Duration::from_millis(LYRIC_ROW_STAGGER_MS * 3)
-        );
-        assert_eq!(
-            lyric_row_stagger_delay(20, 10, previous, 80.0),
-            Duration::from_millis(
-                LYRIC_ROW_STAGGER_MS * LYRIC_ROW_MAX_STAGGER_ROWS as u64
-            )
-        );
-    }
-
-    #[test]
-    fn row_motion_identity_is_stable_within_handoff_and_changes_between_handoffs() {
-        let first = lyric_row_motion_key(7, 3);
-        assert_eq!(first, lyric_row_motion_key(7, 3));
-        assert_ne!(first, lyric_row_motion_key(8, 3));
-        assert_ne!(first, lyric_row_motion_key(7, 4));
-    }
-
-    #[test]
-    fn scroll_animation_leading_row_matches_renderer_timing() {
+    fn scroll_animation_keeps_continuity_and_settles() {
         let start = Instant::now();
         let animation = LyricScrollAnimation {
             from_y: 120.0,
             started_at: start,
         };
         assert!((animation.offset_at(start) - 120.0).abs() < 0.001);
-        let halfway = animation.offset_at(start + LYRIC_ROW_MOTION_DURATION / 2);
+        let halfway = animation.offset_at(start + LYRIC_SCROLL_MOTION_DURATION / 2);
         assert!(halfway > 0.0 && halfway < 120.0);
         assert!(animation
-            .offset_at(start + LYRIC_ROW_MOTION_DURATION)
+            .offset_at(start + LYRIC_SCROLL_MOTION_DURATION)
             .abs()
             < 0.001);
     }
