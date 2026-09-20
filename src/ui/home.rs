@@ -295,14 +295,12 @@ fn home_plugin_interaction_handler(
             let interaction = match interaction {
                 PluginUiInteraction::BeginInput { .. } => {
                     app.status = "插件文本输入正在等待 Host 输入组件接入".into();
-                    app_cx.notify();
                     return;
                 }
                 interaction => interaction,
             };
 
             app.status = format!("正在处理首页插件操作：{plugin_id}/{page_id}");
-            app_cx.notify();
             let task = Tokio::spawn_result(app_cx, async move {
                 match interaction {
                     PluginUiInteraction::Action { action_id } => {
@@ -346,7 +344,7 @@ fn home_plugin_interaction_handler(
                             }),
                             Err(error) => format!("首页插件操作失败：{error:#}"),
                         };
-                        cx.notify();
+                        this.notify_home_surface(cx);
                     })?;
                     Ok(())
                 })
