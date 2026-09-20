@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
@@ -32,6 +35,7 @@ impl Global for MiniPlayerViewCache {}
 const MINI_PLAYBACK_TIME_WIDTH: f32 = 104.0;
 const MINI_PLAYBACK_TIME_HEIGHT: f32 = 18.0;
 const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 12.0;
+const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MiniPlayerRenderKey {
@@ -103,6 +107,8 @@ pub(super) fn view(
             },
             slider_volume: 1.0,
             icon_volume: 1.0,
+            last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
+            last_volume_command: 1.0,
             }
         });
         cache.view = Some(view.clone());
@@ -178,6 +184,8 @@ pub(super) struct MiniPlayerView {
     key: MiniPlayerRenderKey,
     slider_volume: f32,
     icon_volume: f32,
+    last_volume_command_at: Instant,
+    last_volume_command: f32,
 }
 
 impl Render for MiniPlayerView {
@@ -573,14 +581,28 @@ fn mini_volume_slider(
         },
         move |ratio, cx| {
             let ratio = ratio.clamp(0.0, 1.0);
-            let _ = drag_owner.update(cx, |view, cx| {
-                if (view.slider_volume - ratio).abs() < 0.002 {
-                    return;
-                }
-                view.slider_volume = ratio;
-                cx.notify();
-            });
-            if let Ok(Some(engine)) = drag_parent.read_with(cx, |app, _| app.engine.clone()) {
+            let should_send = drag_owner
+                .update(cx, |view, cx| {
+                    if (view.slider_volume - ratio).abs() < 0.002 {
+                        return false;
+                    }
+                    view.slider_volume = ratio;
+                    let now = Instant::now();
+                    let due = now.saturating_duration_since(view.last_volume_command_at)
+                        >= VOLUME_COMMAND_INTERVAL;
+                    let stepped = (view.last_volume_command - ratio).abs() >= 0.02;
+                    let should_send = due || stepped;
+                    if should_send {
+                        view.last_volume_command_at = now;
+                        view.last_volume_command = ratio;
+                    }
+                    cx.notify();
+                    should_send
+                })
+                .unwrap_or(false);
+            if should_send
+                && let Ok(Some(engine)) = drag_parent.read_with(cx, |app, _| app.engine.clone())
+            {
                 let _ = engine.try_send(PlayerCommand::SetVolume(ratio));
             }
         },
