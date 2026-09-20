@@ -164,6 +164,13 @@ impl Render for StagePlayerView {
                     .min_h(px(0.0)),
             )
             .reuse_on_window_refresh();
+        let controls = AnyView::from(self.controls.clone())
+            .cached(
+                StyleRefinement::default()
+                    .w_full()
+                    .h(px(72.0)),
+            )
+            .reuse_on_window_refresh();
         div()
             .id("stage-player-root")
             .size_full()
@@ -203,7 +210,7 @@ impl Render for StagePlayerView {
                                     .left(px(0.0))
                                     .right(px(0.0))
                                     .bottom(px(0.0))
-                                    .child(self.controls.clone()),
+                                    .child(controls),
                             ),
                     ),
             )
