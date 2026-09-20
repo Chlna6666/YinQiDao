@@ -129,7 +129,7 @@ pub struct OnlinePlaylistViewData {
 pub(crate) struct OnlinePlaylistQueue {
     pub route: crate::plugin::abi::PluginRoute,
     pub playlist_title: String,
-    pub tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub tracks: Arc<[crate::plugin::abi::RemoteTrack]>,
     pub current_index: usize,
 }
 
@@ -3029,6 +3029,17 @@ impl MusicApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.play_online_playlist_track_shared(route, playlist_title, tracks.into(), index, cx);
+    }
+
+    pub(crate) fn play_online_playlist_track_shared(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        playlist_title: String,
+        tracks: Arc<[crate::plugin::abi::RemoteTrack]>,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(track) = tracks.get(index).cloned() {
             self.online_playlist_queue = Some(OnlinePlaylistQueue {
                 route: route.clone(),
@@ -3048,11 +3059,12 @@ impl MusicApp {
         first: crate::plugin::abi::RemoteTrack,
         cx: &mut Context<Self>,
     ) {
+        let tracks: Arc<[crate::plugin::abi::RemoteTrack]> = tracks.into();
         let index = tracks
             .iter()
             .position(|t| t.source.source_id == first.source.source_id)
             .unwrap_or(0);
-        self.play_online_playlist_track(route, playlist_title, tracks, index, cx);
+        self.play_online_playlist_track_shared(route, playlist_title, tracks, index, cx);
     }
 
     pub(crate) fn open_context_menu(
