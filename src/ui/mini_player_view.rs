@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
     IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    Subscription, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::{
+    app_ui_events::{self, AppUiEvent},
     components::{SliderStyle, slider::InteractiveSliderState},
     player_stage::{PlaybackProgress, PlaybackTime},
     shell::MusicApp,
@@ -77,6 +78,7 @@ pub(super) fn view(
     playback_time: Entity<PlaybackTime>,
 ) -> Entity<MiniPlayerView> {
     let parent = cx.entity().downgrade();
+    let ui_events = app_ui_events::bridge(cx);
     let initial_progress = playback_progress.clone();
     let initial_time = playback_time.clone();
     let view = cx.update_default_global(move |cache: &mut MiniPlayerViewCache, cx| {
@@ -85,8 +87,17 @@ pub(super) fn view(
         }
         let view_parent = parent.clone();
         let slider_parent = parent.clone();
+        let view_events = ui_events.clone();
         let view = cx.new(move |cx| {
             let volume_slider = mini_volume_slider(slider_parent, cx.weak_entity());
+            let ui_subscription = cx.subscribe(&view_events, |view, _bridge, event, cx| {
+                if let AppUiEvent::PlaybackStateChanged(state) = *event
+                    && view.key.playback_state != state
+                {
+                    view.key.playback_state = state;
+                    cx.notify();
+                }
+            });
             MiniPlayerView {
             parent: view_parent,
             playback_progress: initial_progress,
@@ -109,6 +120,7 @@ pub(super) fn view(
             icon_volume: 1.0,
             last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
             last_volume_command: 1.0,
+            _ui_subscription: ui_subscription,
             }
         });
         cache.view = Some(view.clone());
@@ -116,13 +128,11 @@ pub(super) fn view(
     });
 
     let mini_clock_visible = !(app.stage_open || app.stage_animating);
-    let drag_progress_ratio = app.drag_progress_ratio;
     playback_progress.update(cx, |progress, cx| {
         progress.sync(
             app.engine.clone(),
             app.snapshot.state,
             mini_clock_visible,
-            drag_progress_ratio,
             cx,
         );
     });
@@ -189,17 +199,12 @@ pub(super) struct MiniPlayerView {
     icon_volume: f32,
     last_volume_command_at: Instant,
     last_volume_command: f32,
+    _ui_subscription: Subscription,
 }
 
 impl Render for MiniPlayerView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_playing = self.key.playback_state == PlaybackState::Playing;
-        let optimistic_playback_state = if is_playing {
-            PlaybackState::Paused
-        } else {
-            PlaybackState::Playing
-        };
-        let this_view = cx.weak_entity();
         let parent = self.parent.clone();
         let slider_volume = self.slider_volume;
         let icon_volume = self.icon_volume;
@@ -362,14 +367,8 @@ impl Render for MiniPlayerView {
                                             ))
                                             .on_mouse_down(gpui::MouseButton::Left, {
                                                 let parent = parent.clone();
-                                                let this_view = this_view.clone();
                                                 move |_, _, cx| {
                                                     cx.stop_propagation();
-                                                    let _ = this_view.update(cx, |view, view_cx| {
-                                                        view.key.playback_state =
-                                                            optimistic_playback_state;
-                                                        view_cx.notify();
-                                                    });
                                                     let _ = parent.update(cx, |app, app_cx| {
                                                         app.toggle_play(app_cx);
                                                     });

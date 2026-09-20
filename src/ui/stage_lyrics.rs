@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
-    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
+    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Subscription,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
@@ -17,7 +17,11 @@ use crate::{
     model::{PlaybackState, TrackId},
 };
 
-use super::{shell::MusicApp, theme::themed_icon};
+use super::{
+    app_ui_events::{self, AppUiEvent},
+    shell::MusicApp,
+    theme::themed_icon,
+};
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 360.0;
@@ -152,11 +156,14 @@ pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
 pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageLyricsView> {
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
+    let ui_events = app_ui_events::bridge(cx);
     let view = cx.update_default_global(|cache: &mut StageLyricsViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StageLyricsView::new(parent, engine));
+        let view_events = ui_events.clone();
+        let view =
+            cx.new(move |cx| StageLyricsView::new(parent, engine, view_events, cx));
         cache.view = Some(view.clone());
         view
     });
@@ -194,13 +201,22 @@ pub(super) struct StageLyricsView {
     anchor_bootstrap_pending: bool,
     stage_active: bool,
     scrubbing: bool,
+    _ui_subscription: Subscription,
 }
 
 impl StageLyricsView {
-    fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+    fn new(
+        parent: WeakEntity<MusicApp>,
+        engine: Option<Arc<AudioEngine>>,
+        ui_events: Entity<app_ui_events::AppUiEventBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let transport_generation = engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            this.apply_ui_event(*event, cx);
+        });
         Self {
             parent,
             engine,
@@ -226,6 +242,45 @@ impl StageLyricsView {
             anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
+            _ui_subscription: ui_subscription,
+        }
+    }
+
+    fn apply_ui_event(&mut self, event: AppUiEvent, cx: &mut Context<Self>) {
+        match event {
+            AppUiEvent::PlaybackStateChanged(state) => {
+                if self.playback_state != state {
+                    self.playback_state = state;
+                    self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+                    cx.notify();
+                }
+            }
+            AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                let scrubbing = ratio.is_some();
+                let mut changed = false;
+                if self.scrubbing != scrubbing {
+                    self.scrubbing = scrubbing;
+                    self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+                    changed = true;
+                }
+
+                let previous_word = self.active_word_index;
+                if self.position_ms != position_ms {
+                    self.position_ms = position_ms;
+                    changed = true;
+                }
+                let active_changed = self.update_active_index();
+                let next_word = self.compute_active_word_index();
+                let word_changed = previous_word != next_word;
+                self.active_word_index = next_word;
+                if !active_changed && word_changed {
+                    self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+                }
+                changed |= active_changed || word_changed;
+                if changed {
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -273,8 +328,6 @@ impl StageLyricsView {
             || self.has_timeline != has_timeline;
         let playback_state_changed = self.playback_state != app.snapshot.state;
         let stage_active_changed = self.stage_active != stage_active;
-        let scrubbing = app.drag_progress_ratio.is_some();
-        let scrubbing_changed = self.scrubbing != scrubbing;
 
         let mut changed = engine_changed;
         if source_changed {
@@ -311,6 +364,7 @@ impl StageLyricsView {
             self.scroll_target = None;
             self.cancel_scroll_animation();
             self.anchor_bootstrap_pending = stage_active && has_timeline;
+            self.scrubbing = false;
             changed = true;
         }
         if transport_changed && !source_changed {
@@ -325,9 +379,11 @@ impl StageLyricsView {
             .engine
             .as_ref()
             .map_or(app.snapshot.position_ms, |engine| engine.progress().1);
-        let position_ms = app.drag_progress_ratio.map_or(live_position_ms, |ratio| {
-            (app.snapshot.duration_ms as f32 * ratio.clamp(0.0, 1.0)).round() as u64
-        });
+        let position_ms = if self.scrubbing {
+            self.position_ms
+        } else {
+            live_position_ms
+        };
         let previous_word = self.active_word_index;
         let position_changed = self.position_ms != position_ms;
         if position_changed {
@@ -337,13 +393,6 @@ impl StageLyricsView {
             self.playback_state = app.snapshot.state;
             // Karaoke owns an independent epoch: pausing/resuming must not retrigger the active-line
             // focus scale animation. Only the word sweep restarts from the exact transport sample.
-            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
-            changed = true;
-        }
-        if scrubbing_changed {
-            self.scrubbing = scrubbing;
-            // During a drag the mask is sampled directly. Releasing creates a fresh retained
-            // animation from the released transport position, so no stale timeline can catch up.
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }

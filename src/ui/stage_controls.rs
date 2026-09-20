@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render,
-    SharedString, StyleRefinement, Transition, TransitionProperty, WeakEntity, Window, div,
+    SharedString, StyleRefinement, Subscription, Transition, TransitionProperty, WeakEntity, Window, div,
     hsla,
     prelude::*, px, rgb,
 };
@@ -17,6 +17,7 @@ use crate::{
 };
 
 use super::{
+    app_ui_events::{self, AppUiEvent, AppUiEventBridge},
     components::{
         SliderStyle,
         slider::InteractiveSliderState,
@@ -164,14 +165,18 @@ struct StageTitlebarViewCache {
 impl Global for StageTitlebarViewCache {}
 
 pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageControlsView> {
-    let transport = transport_view(app, cx);
+    let ui_events = app_ui_events::bridge(cx);
+    let transport = transport_view(app, cx, ui_events.clone());
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageControlsViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StageControlsView::new(parent, transport.clone(), engine));
+        let view_events = ui_events.clone();
+        let view = cx.new(move |cx| {
+            StageControlsView::new(parent, transport.clone(), engine, view_events, cx)
+        });
         cache.view = Some(view.clone());
         view
     });
@@ -198,20 +203,26 @@ pub(super) fn titlebar_view(
     view
 }
 
-fn transport_view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageTransportView> {
+fn transport_view(
+    app: &MusicApp,
+    cx: &mut Context<MusicApp>,
+    ui_events: Entity<AppUiEventBridge>,
+) -> Entity<StageTransportView> {
     let parent = cx.entity().downgrade();
     let engine = app.engine.clone();
     let view = cx.update_default_global(|cache: &mut StageTransportViewCache, cx| {
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StageTransportView::new(parent, engine));
+        let view_events = ui_events.clone();
+        let view =
+            cx.new(move |cx| StageTransportView::new(parent, engine, view_events, cx));
         cache.view = Some(view.clone());
         view
     });
 
     let stage_active = app.stage_open || app.stage_animating;
-    let controls_visible = stage_chrome::target_visible(app) || app.drag_target.is_some();
+    let controls_visible = stage_chrome::target_visible(app);
     view.update(cx, |view, cx| {
         view.sync_from_app(app, stage_active, controls_visible, cx)
     });
@@ -230,6 +241,7 @@ pub(super) struct StageControlsView {
     volume: f32,
     last_volume_command_at: Instant,
     last_volume_command: f32,
+    _ui_subscription: Subscription,
 }
 
 impl StageControlsView {
@@ -237,7 +249,17 @@ impl StageControlsView {
         parent: WeakEntity<MusicApp>,
         transport: Entity<StageTransportView>,
         engine: Option<Arc<AudioEngine>>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            if let AppUiEvent::PlaybackStateChanged(state) = *event
+                && this.playback_state != state
+            {
+                this.playback_state = state;
+                cx.notify();
+            }
+        });
         Self {
             parent,
             transport,
@@ -250,6 +272,7 @@ impl StageControlsView {
             volume: 1.0,
             last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
             last_volume_command: 1.0,
+            _ui_subscription: ui_subscription,
         }
     }
 
@@ -363,18 +386,9 @@ impl Render for StageControlsView {
             self.fade.value()
         };
         let playing = self.playback_state == PlaybackState::Playing;
-        let optimistic_playback_state = match self.playback_state {
-            PlaybackState::Playing | PlaybackState::Loading | PlaybackState::Buffering => {
-                PlaybackState::Paused
-            }
-            PlaybackState::Paused | PlaybackState::Stopped | PlaybackState::Error => {
-                PlaybackState::Playing
-            }
-        };
         self.ensure_volume_slider(cx);
         let volume = self.volume_drag_ratio.unwrap_or(self.volume);
         let parent = self.parent.clone();
-        let this_play = cx.entity().downgrade();
 
         // Opacity is a GPU visual transition in the pinned GPUI fork. The View only renders at the
         // semantic endpoints; the renderer interpolates the dock without a per-frame CPU RAF.
@@ -445,10 +459,6 @@ impl Render for StageControlsView {
                         let parent = parent.clone();
                         move |_, _, cx| {
                             cx.stop_propagation();
-                            let _ = this_play.update(cx, |this, cx| {
-                                this.playback_state = optimistic_playback_state;
-                                cx.notify();
-                            });
                             let _ = parent.update(cx, |app, app_cx| {
                                 app.wake_stage_controls_immediately(app_cx);
                                 app.toggle_play(app_cx);
@@ -782,12 +792,34 @@ struct StageTransportView {
     controls_visible: bool,
     playback_state: PlaybackState,
     drag_progress_ratio: Option<f32>,
-    local_dragging: bool,
     progress: Option<Entity<StageProgressView>>,
+    ui_events: Entity<AppUiEventBridge>,
+    _ui_subscription: Subscription,
 }
 
 impl StageTransportView {
-    fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+    fn new(
+        parent: WeakEntity<MusicApp>,
+        engine: Option<Arc<AudioEngine>>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(state) => {
+                    if this.playback_state != state {
+                        this.playback_state = state;
+                        cx.notify();
+                    }
+                }
+                AppUiEvent::ProgressChanged { ratio, .. } => {
+                    if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                        this.drag_progress_ratio = ratio;
+                        cx.notify();
+                    }
+                }
+            }
+        });
         Self {
             parent,
             engine,
@@ -795,8 +827,9 @@ impl StageTransportView {
             controls_visible: true,
             playback_state: PlaybackState::Paused,
             drag_progress_ratio: None,
-            local_dragging: false,
             progress: None,
+            ui_events,
+            _ui_subscription: ui_subscription,
         }
     }
 
@@ -813,16 +846,10 @@ impl StageTransportView {
             _ => true,
         };
         let playback_state = app.snapshot.state;
-        let drag_progress_ratio = if self.local_dragging {
-            self.drag_progress_ratio
-        } else {
-            app.drag_progress_ratio
-        };
         let changed = engine_changed
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
-            || self.playback_state != playback_state
-            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0015);
+            || self.playback_state != playback_state;
 
         if engine_changed {
             self.engine = app.engine.clone();
@@ -830,21 +857,18 @@ impl StageTransportView {
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
         self.playback_state = playback_state;
-        self.drag_progress_ratio = drag_progress_ratio;
 
         if let Some(progress) = &self.progress {
             let engine = self.engine.clone();
             let playback_state = self.playback_state;
             let stage_active = self.stage_active;
             let controls_visible = self.controls_visible;
-            let drag_progress_ratio = self.drag_progress_ratio;
             progress.update(cx, |progress, cx| {
                 progress.sync(
                     engine,
                     playback_state,
                     stage_active,
                     controls_visible,
-                    drag_progress_ratio,
                     cx,
                 )
             });
@@ -860,21 +884,22 @@ impl StageTransportView {
             return progress.clone();
         }
         let parent = self.parent.clone();
-        let owner = cx.entity().downgrade();
         let engine = self.engine.clone();
         let playback_state = self.playback_state;
         let stage_active = self.stage_active;
         let controls_visible = self.controls_visible;
         let drag_progress_ratio = self.drag_progress_ratio;
-        let progress = cx.new(move |_| {
+        let ui_events = self.ui_events.clone();
+        let progress = cx.new(move |cx| {
             StageProgressView::new(
                 parent,
-                owner,
                 engine,
                 playback_state,
                 stage_active,
                 controls_visible,
                 drag_progress_ratio,
+                ui_events,
+                cx,
             )
         });
         self.progress = Some(progress.clone());
@@ -933,7 +958,6 @@ impl Render for StageTransportView {
 
 struct StageProgressView {
     parent: WeakEntity<MusicApp>,
-    owner: WeakEntity<StageTransportView>,
     engine: Option<Arc<AudioEngine>>,
     playback_state: PlaybackState,
     stage_active: bool,
@@ -942,24 +966,46 @@ struct StageProgressView {
     local_dragging: bool,
     transport_generation: u64,
     slider: Option<InteractiveSliderState>,
+    ui_events: Entity<AppUiEventBridge>,
+    last_preview_emit_at: Instant,
+    _ui_subscription: Subscription,
 }
 
 impl StageProgressView {
     fn new(
         parent: WeakEntity<MusicApp>,
-        owner: WeakEntity<StageTransportView>,
         engine: Option<Arc<AudioEngine>>,
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
         drag_progress_ratio: Option<f32>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
     ) -> Self {
         let transport_generation = engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(state) => {
+                    if this.playback_state != state {
+                        this.playback_state = state;
+                        cx.notify();
+                    }
+                }
+                AppUiEvent::ProgressChanged { ratio, .. } => {
+                    if this.local_dragging && ratio.is_some() {
+                        return;
+                    }
+                    if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                        this.drag_progress_ratio = ratio;
+                        cx.notify();
+                    }
+                }
+            }
+        });
         Self {
             parent,
-            owner,
             engine,
             playback_state,
             stage_active,
@@ -968,6 +1014,9 @@ impl StageProgressView {
             local_dragging: false,
             transport_generation,
             slider: None,
+            ui_events,
+            last_preview_emit_at: Instant::now() - app_ui_events::PROGRESS_PREVIEW_INTERVAL,
+            _ui_subscription: ui_subscription,
         }
     }
 
@@ -977,7 +1026,6 @@ impl StageProgressView {
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
-        drag_progress_ratio: Option<f32>,
         cx: &mut Context<Self>,
     ) {
         let engine_changed = match (&self.engine, &engine) {
@@ -992,21 +1040,14 @@ impl StageProgressView {
             .engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
-        let drag_progress_ratio = if self.local_dragging {
-            self.drag_progress_ratio
-        } else {
-            drag_progress_ratio
-        };
         let changed = engine_changed
             || self.transport_generation != transport_generation
             || self.playback_state != playback_state
             || self.stage_active != stage_active
-            || self.controls_visible != controls_visible
-            || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0015);
+            || self.controls_visible != controls_visible;
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
-        self.drag_progress_ratio = drag_progress_ratio;
         if changed {
             self.transport_generation = transport_generation;
             cx.notify();
@@ -1020,10 +1061,12 @@ impl StageProgressView {
 
         let parent = self.parent.clone();
         let click_parent = parent.clone();
+        let drag_parent = parent.clone();
         let commit_parent = parent;
         let this_click = cx.entity().downgrade();
         let this_drag = this_click.clone();
         let this_commit = this_click.clone();
+        let ui_events = self.ui_events.clone();
 
         self.slider = Some(InteractiveSliderState::new(
             "stage-progress-track",
@@ -1031,56 +1074,80 @@ impl StageProgressView {
                 let _ = this_click.update(cx, |this, cx| {
                     this.local_dragging = false;
                     this.drag_progress_ratio = None;
-                    let _ = this.owner.update(cx, |owner, cx| {
-                        owner.local_dragging = false;
-                        owner.drag_progress_ratio = None;
-                        cx.notify();
-                    });
                     cx.notify();
                 });
                 let _ = click_parent.update(cx, |app, app_cx| {
+                    app.seeking = false;
                     app.wake_stage_controls_immediately(app_cx);
                     app.seek_to_ratio(ratio, app_cx);
                 });
             },
             move |ratio, cx| {
                 let ratio = ratio.clamp(0.0, 1.0);
-                let _ = this_drag.update(cx, |this, cx| {
+                let result = this_drag.update(cx, |this, cx| {
                     if this.local_dragging
                         && this
                             .drag_progress_ratio
                             .is_some_and(|current| (current - ratio).abs() < 0.0015)
                     {
-                        return;
+                        return None;
                     }
+
+                    let began = !this.local_dragging;
                     this.local_dragging = true;
                     this.drag_progress_ratio = Some(ratio);
-                    let _ = this.owner.update(cx, |owner, cx| {
-                        owner.local_dragging = true;
-                        owner.drag_progress_ratio = Some(ratio);
-                        cx.notify();
-                    });
+                    let now = Instant::now();
+                    let should_emit = now
+                        .saturating_duration_since(this.last_preview_emit_at)
+                        >= app_ui_events::PROGRESS_PREVIEW_INTERVAL;
                     cx.notify();
+
+                    if !should_emit {
+                        return Some((None, began));
+                    }
+                    this.last_preview_emit_at = now;
+                    let duration_ms = this
+                        .engine
+                        .as_ref()
+                        .map_or(0, |engine| engine.progress().2);
+                    let position_ms = (duration_ms as f32 * ratio).round() as u64;
+                    Some((
+                        Some(AppUiEvent::ProgressChanged {
+                            position_ms,
+                            ratio: Some(ratio),
+                        }),
+                        began,
+                    ))
                 });
+
+                let Ok(Some((event, began))) = result else {
+                    return;
+                };
+                if began {
+                    let _ = drag_parent.update(cx, |app, _app_cx| {
+                        app.seeking = true;
+                        app.stage_last_user_activity = Instant::now();
+                    });
+                }
+                if let Some(event) = event {
+                    app_ui_events::emit_from_app(&ui_events, event, cx);
+                }
             },
             move |ratio, cx| {
                 let _ = this_commit.update(cx, |this, cx| {
                     this.local_dragging = false;
                     this.drag_progress_ratio = None;
-                    let _ = this.owner.update(cx, |owner, cx| {
-                        owner.local_dragging = false;
-                        owner.drag_progress_ratio = None;
-                        cx.notify();
-                    });
                     cx.notify();
                 });
                 let _ = commit_parent.update(cx, |app, app_cx| {
+                    app.seeking = false;
                     app.wake_stage_controls_immediately(app_cx);
                     app.seek_to_ratio(ratio, app_cx);
                 });
             },
         ));
     }
+
 }
 
 impl Render for StageProgressView {

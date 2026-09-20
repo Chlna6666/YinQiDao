@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod app_runtime_events;
+pub(crate) mod app_ui_events;
 pub(crate) mod audio_debug_analysis;
 pub(crate) mod audio_debug_window;
 pub(crate) mod audio_spatial_debug_3d;

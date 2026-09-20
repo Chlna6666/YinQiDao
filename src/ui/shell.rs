@@ -30,7 +30,8 @@ use crate::{
 };
 
 use super::{
-    app_runtime_events, home, library as library_page, mini_player_view, player, player_stage,
+    app_runtime_events, app_ui_events, home, library as library_page, mini_player_view, player,
+    player_stage,
     player::NowPlaying,
     route::{self, AppRoute},
     settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
@@ -350,12 +351,14 @@ struct HomePage {
     plugin_home_loading: HashMap<String, u64>,
     plugin_home_failed: HashMap<String, u64>,
     _subscription: Subscription,
+    _ui_subscription: Subscription,
 }
 
 impl HomePage {
     fn new(
         parent: Entity<MusicApp>,
         initial_key: HomePageRenderKey,
+        ui_events: Entity<app_ui_events::AppUiEventBridge>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&parent, |this, parent, cx| {
@@ -377,6 +380,15 @@ impl HomePage {
                 });
             });
         });
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            if matches!(
+                *event,
+                app_ui_events::AppUiEvent::PlaybackStateChanged(_)
+            ) && this.last_key.active
+            {
+                cx.notify();
+            }
+        });
         Self {
             parent: parent.downgrade(),
             last_key: initial_key,
@@ -384,6 +396,7 @@ impl HomePage {
             plugin_home_loading: HashMap::new(),
             plugin_home_failed: HashMap::new(),
             _subscription: subscription,
+            _ui_subscription: ui_subscription,
         }
     }
 
@@ -952,7 +965,9 @@ impl MusicApp {
         }
         let initial_key = home_page_render_key(self);
         let parent = cx.entity();
-        let page = cx.new(move |cx| HomePage::new(parent, initial_key, cx));
+        let ui_events = app_ui_events::bridge(cx);
+        let page =
+            cx.new(move |cx| HomePage::new(parent, initial_key, ui_events, cx));
         self.home_page = Some(page.clone());
         page
     }
@@ -1509,7 +1524,11 @@ impl MusicApp {
                 self.cancel_online_preload_tasks();
                 self.online_preloaded_tracks.clear();
                 self.snapshot.state = PlaybackState::Stopped;
-                cx.notify();
+                app_ui_events::emit_music(
+                    cx,
+                    app_ui_events::AppUiEvent::PlaybackStateChanged(PlaybackState::Stopped),
+                );
+                self.notify_current_content_surface(cx);
                 return;
             }
         }
@@ -1540,6 +1559,10 @@ impl MusicApp {
         // React on the foreground turn. AudioEngine mirrors the intent through its atomic
         // optimistic state; the existing audible startup/delay path remains unchanged.
         self.snapshot.state = next_state;
+        app_ui_events::emit_music(
+            cx,
+            app_ui_events::AppUiEvent::PlaybackStateChanged(next_state),
+        );
         if matches!(
             previous_state,
             PlaybackState::Playing | PlaybackState::Loading | PlaybackState::Buffering
@@ -1547,9 +1570,8 @@ impl MusicApp {
             self.cancel_online_preload_tasks();
         }
 
-        // Mini-player and Stage controls both provide local optimistic feedback. Do not rebuild
-        // the root shell in the same input turn; the audio worker's SnapshotChanged ACK performs
-        // the authoritative synchronization shortly after the non-blocking command enqueue.
+        // The optimistic state was broadcast to retained GPUI entities above. This marker only
+        // recognizes the worker ACK; it no longer asks every transport surface to resync manually.
         self.transport_root_notify_pending = true;
 
         if self.send(command) {
@@ -1560,6 +1582,10 @@ impl MusicApp {
         } else {
             self.transport_root_notify_pending = false;
             self.snapshot.state = previous_state;
+            app_ui_events::emit_music(
+                cx,
+                app_ui_events::AppUiEvent::PlaybackStateChanged(previous_state),
+            );
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
         }
@@ -1574,10 +1600,17 @@ impl MusicApp {
         self.snapshot.position_ms = 0;
         self.position_ms = 0;
         self.config.position_ms = 0;
-        self.sync_transport_surfaces(cx);
-        if let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) {
-            self.sync_lyrics_surfaces(track_id, cx);
-        }
+        app_ui_events::emit_music(
+            cx,
+            app_ui_events::AppUiEvent::PlaybackStateChanged(PlaybackState::Stopped),
+        );
+        app_ui_events::emit_music(
+            cx,
+            app_ui_events::AppUiEvent::ProgressChanged {
+                position_ms: 0,
+                ratio: None,
+            },
+        );
 
         if self.send(PlayerCommand::Stop) {
             self.save_config();
@@ -1730,7 +1763,7 @@ impl MusicApp {
         if let Some(queue) = &mut self.online_playlist_queue {
             if !queue.tracks.is_empty() {
                 if self.snapshot.position_ms >= 3_000 {
-                    self.send(PlayerCommand::Seek(Duration::ZERO));
+                    self.seek_to_ms(0, cx);
                     return;
                 }
                 let prev_idx = match self.config.repeat {
@@ -1848,6 +1881,10 @@ impl MusicApp {
                 self.snapshot.current_track = Some(track.clone());
                 self.snapshot.duration_ms = track.duration_ms;
                 self.snapshot.state = PlaybackState::Loading;
+                app_ui_events::emit_music(
+                    cx,
+                    app_ui_events::AppUiEvent::PlaybackStateChanged(PlaybackState::Loading),
+                );
                 self.record_recent_play(&track);
             } else {
                 self.recent_plays.retain(|id| *id != track_id);
@@ -2463,6 +2500,10 @@ impl MusicApp {
         self.snapshot.current_track = Some(track.clone());
         self.snapshot.duration_ms = track.duration_ms;
         self.snapshot.state = PlaybackState::Loading;
+        app_ui_events::emit_music(
+            cx,
+            app_ui_events::AppUiEvent::PlaybackStateChanged(PlaybackState::Loading),
+        );
         self.config.current_track = Some(track_id);
         self.record_recent_play(&track);
         self.bump_ui_content_revision();
@@ -4052,7 +4093,10 @@ impl MusicApp {
         self.update_system_media_async(cx);
 
         if playback_state_changed || transport_ack_pending {
-            self.sync_transport_surfaces(cx);
+            app_ui_events::emit_music(
+                cx,
+                app_ui_events::AppUiEvent::PlaybackStateChanged(self.snapshot.state),
+            );
         } else {
             if volume_changed || repeat_changed || shuffle_changed {
                 self.sync_transport_control_surfaces(cx);
@@ -4370,10 +4414,15 @@ impl MusicApp {
             DragTarget::Progress => {
                 self.seeking = true;
                 self.drag_progress_ratio = Some(ratio);
-                // Shared drag state is semantic input for StageLyrics only. Do not invalidate the
-                // MusicApp root for pointer-frequency samples; update the retained lyric view
-                // directly so scrubbing remains synchronized without waking heavy pages.
-                stage_lyrics::sync_if_created(self, cx);
+                let position_ms =
+                    (self.snapshot.duration_ms as f32 * ratio).round() as u64;
+                app_ui_events::emit_music(
+                    cx,
+                    app_ui_events::AppUiEvent::ProgressChanged {
+                        position_ms,
+                        ratio: Some(ratio),
+                    },
+                );
             }
             DragTarget::Volume => {
                 self.volume_dragging = true;
@@ -4398,7 +4447,15 @@ impl MusicApp {
                     .is_none_or(|current| (current - ratio).abs() >= 0.0015);
                 if changed {
                     self.drag_progress_ratio = Some(ratio);
-                    stage_lyrics::sync_if_created(self, cx);
+                    let position_ms =
+                        (self.snapshot.duration_ms as f32 * ratio).round() as u64;
+                    app_ui_events::emit_music(
+                        cx,
+                        app_ui_events::AppUiEvent::ProgressChanged {
+                            position_ms,
+                            ratio: Some(ratio),
+                        },
+                    );
                     return true;
                 }
             }
@@ -4459,10 +4516,13 @@ impl MusicApp {
             self.snapshot.position_ms = clamped;
             self.position_ms = clamped;
             self.config.position_ms = clamped;
-            self.sync_transport_surfaces(cx);
-            if let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) {
-                self.sync_lyrics_surfaces(track_id, cx);
-            }
+            app_ui_events::emit_music(
+                cx,
+                app_ui_events::AppUiEvent::ProgressChanged {
+                    position_ms: clamped,
+                    ratio: None,
+                },
+            );
         }
     }
 
@@ -4517,14 +4577,20 @@ impl MusicApp {
         gpui::Entity<player::PlaybackTime>,
     ) {
         let parent = cx.entity().downgrade();
+        let ui_events = app_ui_events::bridge(cx);
         if self.playback_progress.is_none() {
             let engine = self.engine.clone();
-            self.playback_progress =
-                Some(cx.new(|_| player::PlaybackProgress::new(parent.clone(), engine)));
+            let progress_parent = parent.clone();
+            let progress_events = ui_events.clone();
+            self.playback_progress = Some(cx.new(move |cx| {
+                player::PlaybackProgress::new(progress_parent, engine, progress_events, cx)
+            }));
         }
         if self.playback_time.is_none() {
             let engine = self.engine.clone();
-            self.playback_time = Some(cx.new(|_| player::PlaybackTime::new(parent, engine)));
+            self.playback_time = Some(cx.new(move |cx| {
+                player::PlaybackTime::new(parent, engine, ui_events, cx)
+            }));
         }
         (
             self.playback_progress

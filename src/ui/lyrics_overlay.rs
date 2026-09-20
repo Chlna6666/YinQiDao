@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
+    AnimationExt as _, AnimationProperty, Context, Entity, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
     IntoElement, Subscription, TransformOrigin, WeakEntity, WgslShaderSource, Window,
     WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
@@ -17,7 +17,10 @@ use crate::{
     settings::DesktopLyricsAlignment,
 };
 
-use super::shell::MusicApp;
+use super::{
+    app_ui_events::{AppUiEvent, AppUiEventBridge},
+    shell::MusicApp,
+};
 
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
@@ -27,6 +30,7 @@ const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl"
 pub(crate) struct DesktopLyricsView {
     parent: WeakEntity<MusicApp>,
     _parent_subscription: Option<Subscription>,
+    _ui_subscription: Subscription,
     bounds_subscription: Option<Subscription>,
     hovered: bool,
     settings_open: bool,
@@ -38,7 +42,11 @@ pub(crate) struct DesktopLyricsView {
 }
 
 impl DesktopLyricsView {
-    pub(crate) fn new(parent: WeakEntity<MusicApp>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        parent: WeakEntity<MusicApp>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let parent_subscription = parent.upgrade().map(|parent_entity| {
             cx.observe(&parent_entity, |_this, _parent, cx| {
                 // Structural transport/config changes re-render this View immediately. The next
@@ -46,9 +54,18 @@ impl DesktopLyricsView {
                 cx.notify();
             })
         });
+        let ui_subscription = cx.subscribe(&ui_events, |_this, _bridge, event, cx| {
+            if matches!(
+                *event,
+                AppUiEvent::PlaybackStateChanged(_) | AppUiEvent::ProgressChanged { .. }
+            ) {
+                cx.notify();
+            }
+        });
         Self {
             parent,
             _parent_subscription: parent_subscription,
+            _ui_subscription: ui_subscription,
             bounds_subscription: None,
             hovered: false,
             settings_open: false,

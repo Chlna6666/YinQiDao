@@ -10,7 +10,7 @@ use crate::{
     lyrics::LyricWord,
     model::{PlaybackState, TrackId},
     settings::DesktopLyricsAlignment,
-    ui::{MusicApp, lyrics_overlay::DesktopLyricsView},
+    ui::{MusicApp, app_ui_events, lyrics_overlay::DesktopLyricsView},
 };
 
 const MIN_OVERLAY_WIDTH: f32 = 420.0;
@@ -165,6 +165,7 @@ impl MusicApp {
             _ => WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx)),
         };
         let parent = cx.entity().downgrade();
+        let ui_events = app_ui_events::bridge(cx);
         let options = WindowOptions {
             titlebar: None,
             window_bounds: Some(window_bounds),
@@ -185,7 +186,7 @@ impl MusicApp {
         };
 
         match cx.open_window(options, move |_, cx| {
-            cx.new(|cx| DesktopLyricsView::new(parent, cx))
+            cx.new(|cx| DesktopLyricsView::new(parent, ui_events, cx))
         }) {
             Ok(window) => {
                 cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {

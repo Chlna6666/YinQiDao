@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Window, div, hsla, img,
+    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div, hsla, img,
     linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
@@ -13,6 +13,7 @@ use crate::{
 };
 
 use super::{
+    app_ui_events::{self, AppUiEvent},
     player_legacy, stage_controls, stage_lyrics,
     shell::MusicApp,
     theme::{TEXT_WHITE, elegant_gradient_for, themed_icon},
@@ -88,7 +89,6 @@ pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
         artwork_ptr: artwork.as_ref().map_or(0, |bytes| bytes.as_ptr() as usize),
         artwork_len: artwork.as_ref().map_or(0, |bytes| bytes.len()),
     };
-    let playing = app.snapshot.state == PlaybackState::Playing;
 
     stage.update(cx, |stage, cx| {
         let mut changed = false;
@@ -99,11 +99,6 @@ pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
                 artwork,
             );
             changed = true;
-        }
-        if stage.playing != playing {
-            stage.playing = playing;
-            let fluid = stage.fluid_background.clone();
-            fluid.update(cx, |view, cx| view.set_playing(playing, cx));
         }
         if changed {
             cx.notify();
@@ -127,6 +122,7 @@ pub(super) fn render(
     };
     let playing = app.snapshot.state == PlaybackState::Playing;
 
+    let ui_events = app_ui_events::bridge(cx);
     let initial_fluid = fluid_background.clone();
     let initial_lyrics = lyrics.clone();
     let initial_controls = controls.clone();
@@ -134,13 +130,27 @@ pub(super) fn render(
         if let Some(view) = &cache.view {
             return view.clone();
         }
-        let view = cx.new(move |_| StagePlayerView {
-            fluid_background: initial_fluid,
-            lyrics: initial_lyrics,
-            controls: initial_controls,
-            cover: StageCoverRenderData::default(),
-            key: StagePlayerRenderKey::default(),
-            playing: false,
+        let view_events = ui_events.clone();
+        let view = cx.new(move |cx| {
+            let ui_subscription = cx.subscribe(&view_events, |stage, _bridge, event, cx| {
+                if let AppUiEvent::PlaybackStateChanged(state) = *event {
+                    let playing = state == PlaybackState::Playing;
+                    if stage.playing != playing {
+                        stage.playing = playing;
+                        let fluid = stage.fluid_background.clone();
+                        fluid.update(cx, |view, cx| view.set_playing(playing, cx));
+                    }
+                }
+            });
+            StagePlayerView {
+                fluid_background: initial_fluid,
+                lyrics: initial_lyrics,
+                controls: initial_controls,
+                cover: StageCoverRenderData::default(),
+                key: StagePlayerRenderKey::default(),
+                playing: false,
+                _ui_subscription: ui_subscription,
+            }
         });
         cache.view = Some(view.clone());
         view
@@ -189,6 +199,7 @@ struct StagePlayerView {
     cover: StageCoverRenderData,
     key: StagePlayerRenderKey,
     playing: bool,
+    _ui_subscription: Subscription,
 }
 
 impl Render for StagePlayerView {

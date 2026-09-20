@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render,
+    Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render, Subscription,
     StatefulInteractiveElement as _, WeakEntity, Window, div, hsla, img, linear_color_stop,
     linear_gradient, prelude::*, px, rgb,
 };
@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::{
+    app_ui_events::{self, AppUiEvent, AppUiEventBridge},
     components::{SliderStyle, slider::InteractiveSliderState},
     shell::MusicApp,
     theme::{
@@ -54,16 +55,43 @@ pub(super) struct PlaybackProgress {
     drag_ratio_bits: Option<u32>,
     local_drag_ratio: Option<f32>,
     slider: Option<InteractiveSliderState>,
+    ui_events: Entity<AppUiEventBridge>,
+    last_preview_emit_at: Instant,
+    _ui_subscription: Subscription,
 }
 
 impl PlaybackProgress {
-    pub(super) fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
+    pub(super) fn new(
+        parent: WeakEntity<MusicApp>,
+        engine: Option<Arc<AudioEngine>>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let transport_generation = engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
         let playback_state = engine
             .as_ref()
             .map_or(PlaybackState::Stopped, |engine| engine.progress().0);
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(state) => {
+                    if this.playback_state != state {
+                        this.playback_state = state;
+                        cx.notify();
+                    }
+                }
+                AppUiEvent::ProgressChanged { ratio, .. } => {
+                    let next = ratio.map(f32::to_bits);
+                    if this.drag_ratio_bits != next {
+                        this.drag_ratio_bits = next;
+                        if this.local_drag_ratio.is_none() || ratio.is_none() {
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+        });
         Self {
             parent,
             engine,
@@ -73,6 +101,9 @@ impl PlaybackProgress {
             drag_ratio_bits: None,
             local_drag_ratio: None,
             slider: None,
+            ui_events,
+            last_preview_emit_at: Instant::now() - app_ui_events::PROGRESS_PREVIEW_INTERVAL,
+            _ui_subscription: ui_subscription,
         }
     }
 
@@ -83,6 +114,7 @@ impl PlaybackProgress {
 
         let parent = self.parent.clone();
         let this = cx.weak_entity();
+        let ui_events = self.ui_events.clone();
         self.slider = Some(InteractiveSliderState::new(
             "mini-progress-track",
             {
@@ -100,18 +132,42 @@ impl PlaybackProgress {
             },
             {
                 let this = this.clone();
+                let ui_events = ui_events.clone();
                 move |ratio, cx| {
                     let ratio = ratio.clamp(0.0, 1.0);
-                    let _ = this.update(cx, |this, cx| {
-                        if this
-                            .local_drag_ratio
-                            .is_some_and(|current| (current - ratio).abs() < 0.001)
-                        {
-                            return;
-                        }
-                        this.local_drag_ratio = Some(ratio);
-                        cx.notify();
-                    });
+                    let event = this
+                        .update(cx, |this, cx| {
+                            if this
+                                .local_drag_ratio
+                                .is_some_and(|current| (current - ratio).abs() < 0.001)
+                            {
+                                return None;
+                            }
+                            this.local_drag_ratio = Some(ratio);
+                            let now = Instant::now();
+                            let should_emit = now
+                                .saturating_duration_since(this.last_preview_emit_at)
+                                >= app_ui_events::PROGRESS_PREVIEW_INTERVAL;
+                            cx.notify();
+                            if !should_emit {
+                                return None;
+                            }
+                            this.last_preview_emit_at = now;
+                            let duration_ms = this
+                                .engine
+                                .as_ref()
+                                .map_or(0, |engine| engine.progress().2);
+                            let position_ms = (duration_ms as f32 * ratio).round() as u64;
+                            Some(AppUiEvent::ProgressChanged {
+                                position_ms,
+                                ratio: Some(ratio),
+                            })
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(event) = event {
+                        app_ui_events::emit_from_app(&ui_events, event, cx);
+                    }
                 }
             },
             {
@@ -135,7 +191,6 @@ impl PlaybackProgress {
         engine: Option<Arc<AudioEngine>>,
         playback_state: PlaybackState,
         visible: bool,
-        drag_ratio: Option<f32>,
         cx: &mut Context<Self>,
     ) {
         let engine_changed = match (&self.engine, &engine) {
@@ -151,18 +206,15 @@ impl PlaybackProgress {
             .engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
-        let drag_ratio_bits = drag_ratio.map(f32::to_bits);
         let changed = engine_changed
             || self.transport_generation != transport_generation
             || self.playback_state != playback_state
-            || self.visible != visible
-            || self.drag_ratio_bits != drag_ratio_bits;
+            || self.visible != visible;
 
         if changed {
             self.transport_generation = transport_generation;
             self.playback_state = playback_state;
             self.visible = visible;
-            self.drag_ratio_bits = drag_ratio_bits;
             cx.notify();
         }
     }
@@ -174,11 +226,8 @@ impl Render for PlaybackProgress {
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
-        let app_drag_ratio = self
-            .parent
-            .read_with(cx, |app, _| app.drag_progress_ratio)
-            .unwrap_or(None);
-        let drag_ratio = self.local_drag_ratio.or(app_drag_ratio);
+        let shared_drag_ratio = self.drag_ratio_bits.map(f32::from_bits);
+        let drag_ratio = self.local_drag_ratio.or(shared_drag_ratio);
 
         let should_tick = self.visible
             && self.playback_state == PlaybackState::Playing
@@ -219,11 +268,37 @@ impl Render for PlaybackProgress {
 pub(super) struct PlaybackTime {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
+    preview_position_ms: Option<u64>,
+    _ui_subscription: Subscription,
 }
 
 impl PlaybackTime {
-    pub(super) fn new(parent: WeakEntity<MusicApp>, engine: Option<Arc<AudioEngine>>) -> Self {
-        Self { parent, engine }
+    pub(super) fn new(
+        parent: WeakEntity<MusicApp>,
+        engine: Option<Arc<AudioEngine>>,
+        ui_events: Entity<AppUiEventBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(_) => cx.notify(),
+                AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                    let next = ratio.map(|_| position_ms);
+                    if this.preview_position_ms != next {
+                        this.preview_position_ms = next;
+                        cx.notify();
+                    } else if ratio.is_none() {
+                        cx.notify();
+                    }
+                }
+            }
+        });
+        Self {
+            parent,
+            engine,
+            preview_position_ms: None,
+            _ui_subscription: ui_subscription,
+        }
     }
 
     pub(super) fn sync(&mut self, engine: Option<Arc<AudioEngine>>, cx: &mut Context<Self>) {
@@ -245,11 +320,8 @@ impl Render for PlaybackTime {
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
-        let drag_ratio = self
-            .parent
-            .read_with(cx, |app, _| app.drag_progress_ratio)
-            .unwrap_or(None);
-        if drag_ratio.is_none()
+        let preview_position_ms = self.preview_position_ms;
+        if preview_position_ms.is_none()
             && mini_clock_should_run(&self.parent, &self.engine, cx)
             && !window.is_minimized()
         {
@@ -257,9 +329,7 @@ impl Render for PlaybackTime {
             let delay = Duration::from_millis((1_000 - remainder).max(16));
             window.request_invalidation_at(Instant::now() + delay.min(MINI_TIME_REFRESH_INTERVAL), cx);
         }
-        let display_position = drag_ratio.map_or(position_ms, |ratio| {
-            (duration_ms as f32 * ratio).round() as u64
-        });
+        let display_position = preview_position_ms.unwrap_or(position_ms);
 
         div()
             .flex()
