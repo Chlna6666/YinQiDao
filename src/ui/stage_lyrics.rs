@@ -33,7 +33,7 @@ const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 // Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
 // edge depth never snaps while translation is still cascading.
-const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 6;
+const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 9;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -965,87 +965,81 @@ fn lyric_text_layer(
     text.blur(px(blur_sigma.max(0.0)))
 }
 
+#[inline]
+fn smoothstep01(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn lyric_edge_progress(index: usize, active: usize) -> f32 {
+    if index == active {
+        return 0.0;
+    }
+
+    let distance = index.abs_diff(active) as f32;
+    let (start, end) = if index < active {
+        // The active anchor sits above center, so rows reach the physical top edge sooner.
+        (1.6, 7.2)
+    } else {
+        // The lower half has more room before the transport area.
+        (2.4, 8.6)
+    };
+    smoothstep01((distance - start) / (end - start))
+}
+
 fn lyric_visual_profile(
     index: usize,
     active: usize,
     reading_mode: bool,
     depth_blur_active: bool,
 ) -> (f32, f32) {
-    let distance = index.abs_diff(active);
-    let (mut alpha, mut blur) =
-        lyric_focus_profile(distance, reading_mode, depth_blur_active);
-
-    if reading_mode {
-        return (alpha, blur);
-    }
-
-    let (edge_alpha, edge_blur) = lyric_edge_envelope(index, active);
-    alpha *= edge_alpha;
-    if depth_blur_active {
-        blur += edge_blur;
-    }
-
-    (alpha.clamp(0.0, 1.0), blur)
-}
-
-fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
-    if index == active {
-        return (1.0, 0.0);
-    }
-
-    if index < active {
-        // No top fog slab: each real lyric line fades itself out as it approaches the viewport
-        // boundary. Keep enough alpha on overscanned rows so the top never becomes an empty band.
-        match active - index {
-            1 | 2 => (1.0, 0.0),
-            3 => (0.96, 0.05),
-            4 => (0.88, 0.16),
-            5 => (0.76, 0.34),
-            6 => (0.60, 0.58),
-            7 => (0.42, 0.88),
-            _ => (0.26, 1.20),
-        }
-    } else {
-        // Bottom has more room, so its falloff begins one line later. This remains line-local and
-        // never paints a rectangular mask over the album background or controls.
-        match index - active {
-            1 | 2 | 3 => (1.0, 0.0),
-            4 => (0.96, 0.05),
-            5 => (0.88, 0.16),
-            6 => (0.76, 0.34),
-            7 => (0.60, 0.58),
-            8 => (0.42, 0.88),
-            _ => (0.26, 1.20),
-        }
-    }
-}
-
-fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
     if reading_mode {
         return (1.0, 0.0);
     }
 
-    let alpha = match distance {
-        0 => 1.0,
-        1 => 0.76,
-        2 => 0.58,
-        3 => 0.44,
-        4 => 0.34,
-        _ => 0.28,
-    };
-    let blur_sigma = if depth_blur_active {
-        match distance {
-            0 => 0.0,
-            1 => 0.45,
-            2 => 0.80,
-            3 => 1.10,
-            4 => 1.40,
-            _ => 1.65,
-        }
+    let distance = index.abs_diff(active) as f32;
+
+    // Focus falloff is deliberately continuous rather than a row-by-row lookup table. The
+    // compositor interpolates these endpoints again while the active line changes, so a lyric
+    // becomes progressively more transparent and progressively sharper as it approaches focus.
+    let focus = smoothstep01(distance / 4.2);
+    let edge = lyric_edge_progress(index, active);
+
+    let focus_alpha = 1.0 + (0.42 - 1.0) * focus;
+    let edge_alpha = 1.0 + (0.16 - 1.0) * edge;
+    let alpha = (focus_alpha * edge_alpha).clamp(0.035, 1.0);
+
+    let blur = if depth_blur_active {
+        let focus_blur = 1.30 * focus;
+        let edge_blur = 1.55 * edge;
+        (focus_blur + edge_blur).min(2.85)
     } else {
         0.0
     };
-    (alpha, blur_sigma)
+
+    (alpha, blur)
+}
+
+// Keep the standalone focus profile helper for reading-mode and regression tests. It uses the same
+// continuous curve as the compositor profile but without viewport-edge attenuation.
+fn lyric_focus_profile(
+    distance: usize,
+    reading_mode: bool,
+    depth_blur_active: bool,
+) -> (f32, f32) {
+    if reading_mode {
+        return (1.0, 0.0);
+    }
+
+    let focus = smoothstep01(distance as f32 / 4.2);
+    let alpha = 1.0 + (0.42 - 1.0) * focus;
+    let blur = if depth_blur_active {
+        1.30 * focus
+    } else {
+        0.0
+    };
+    (alpha.clamp(0.0, 1.0), blur)
 }
 
 fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
@@ -1363,26 +1357,47 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_profile_keeps_the_active_line_unambiguous() {
-        assert_eq!(lyric_focus_profile(0, false, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(1, false, true), (0.76, 0.45));
-        assert_eq!(lyric_focus_profile(3, false, true), (0.44, 1.10));
-        assert_eq!(lyric_focus_profile(5, false, true), (0.28, 1.65));
-        assert_eq!(lyric_focus_profile(2, false, false), (0.58, 0.0));
+    fn lyric_depth_profile_is_continuous_and_monotonic() {
+        let active = lyric_focus_profile(0, false, true);
+        let near = lyric_focus_profile(1, false, true);
+        let middle = lyric_focus_profile(3, false, true);
+        let far = lyric_focus_profile(6, false, true);
+
+        assert_eq!(active, (1.0, 0.0));
+        assert!(active.0 > near.0 && near.0 > middle.0 && middle.0 >= far.0);
+        assert!(active.1 < near.1 && near.1 < middle.1 && middle.1 <= far.1);
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
+        assert_eq!(lyric_focus_profile(2, false, false).1, 0.0);
     }
 
     #[test]
-    fn edge_envelope_fades_before_rows_hit_viewport_boundaries() {
-        assert_eq!(lyric_edge_envelope(10, 10), (1.0, 0.0));
+    fn edge_progress_fades_top_and_bottom_without_region_masks() {
+        assert_eq!(lyric_edge_progress(10, 10), 0.0);
 
-        let upper = lyric_edge_envelope(5, 10);
-        let lower = lyric_edge_envelope(16, 10);
-        assert!(upper.0 > 0.7 && upper.1 > 0.3);
-        assert!(lower.0 > 0.7 && lower.1 > 0.3);
+        let top_near = lyric_edge_progress(8, 10);
+        let top_far = lyric_edge_progress(4, 10);
+        let bottom_near = lyric_edge_progress(12, 10);
+        let bottom_far = lyric_edge_progress(17, 10);
 
-        let far_upper = lyric_edge_envelope(1, 10);
-        assert!(far_upper.0 >= 0.25 && far_upper.1 >= 1.0);
+        assert!(top_near < top_far);
+        assert!(bottom_near < bottom_far);
+        // Top starts fading sooner because the focus anchor is above center.
+        assert!(lyric_edge_progress(7, 10) > lyric_edge_progress(13, 10));
+    }
+
+    #[test]
+    fn visual_profile_becomes_transparent_and_blurred_toward_edges() {
+        let active = lyric_visual_profile(10, 10, false, true);
+        let top_mid = lyric_visual_profile(6, 10, false, true);
+        let top_edge = lyric_visual_profile(2, 10, false, true);
+        let bottom_mid = lyric_visual_profile(15, 10, false, true);
+        let bottom_edge = lyric_visual_profile(19, 10, false, true);
+
+        assert_eq!(active, (1.0, 0.0));
+        assert!(active.0 > top_mid.0 && top_mid.0 > top_edge.0);
+        assert!(active.0 > bottom_mid.0 && bottom_mid.0 > bottom_edge.0);
+        assert!(active.1 < top_mid.1 && top_mid.1 < top_edge.1);
+        assert!(active.1 < bottom_mid.1 && bottom_mid.1 < bottom_edge.1);
     }
 
     #[test]
