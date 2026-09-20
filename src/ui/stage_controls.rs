@@ -302,13 +302,6 @@ impl StageControlsView {
                     }
                     cx.notify();
                 });
-                let _ = drag_parent.update(cx, |app, app_cx| {
-                    if app.drag_target == Some(DragTarget::Volume) {
-                        app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                    } else {
-                        app.begin_drag(DragTarget::Volume, ratio, app_cx);
-                    }
-                });
             },
             move |ratio, cx| {
                 let _ = this_commit.update(cx, |this, cx| {
@@ -318,13 +311,8 @@ impl StageControlsView {
                 });
                 let _ = commit_parent.update(cx, |app, app_cx| {
                     app.wake_stage_controls_immediately(app_cx);
-                    if app.drag_target == Some(DragTarget::Volume) {
-                        app.update_drag_ratio(DragTarget::Volume, ratio, app_cx);
-                    } else {
-                        app.begin_drag(DragTarget::Volume, ratio, app_cx);
-                    }
-                    app.commit_drag(app_cx);
                     app.pending_volume_ratio = None;
+                    app.set_app_volume(ratio, app_cx);
                 });
             },
         ));
@@ -1032,7 +1020,6 @@ impl StageProgressView {
 
         let parent = self.parent.clone();
         let click_parent = parent.clone();
-        let drag_parent = parent.clone();
         let commit_parent = parent;
         let this_click = cx.entity().downgrade();
         let this_drag = this_click.clone();
