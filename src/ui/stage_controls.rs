@@ -3,10 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
 use gpui::{
     AnyView, BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render,
-    SharedString, StyleRefinement, Timer, Transition, TransitionProperty, WeakEntity, Window, div,
+    SharedString, StyleRefinement, Transition, TransitionProperty, WeakEntity, Window, div,
     hsla,
     prelude::*, px, rgb,
 };
@@ -22,7 +21,7 @@ use super::{
         SliderStyle,
         slider::InteractiveSliderState,
     },
-    shell::{DragTarget, MusicApp},
+    shell::MusicApp,
     stage_chrome,
     theme::{self, ACCENT_RED, format_remaining_time, format_time, themed_icon},
 };
@@ -261,7 +260,6 @@ impl StageControlsView {
 
         let parent = self.parent.clone();
         let click_parent = parent.clone();
-        let drag_parent = parent.clone();
         let commit_parent = parent;
         let this_click = cx.entity().downgrade();
         let this_drag = this_click.clone();
@@ -955,7 +953,6 @@ struct StageProgressView {
     drag_progress_ratio: Option<f32>,
     local_dragging: bool,
     transport_generation: u64,
-    timer_started: bool,
     slider: Option<InteractiveSliderState>,
 }
 
@@ -982,7 +979,6 @@ impl StageProgressView {
             drag_progress_ratio,
             local_dragging: false,
             transport_generation,
-            timer_started: false,
             slider: None,
         }
     }
@@ -1079,13 +1075,6 @@ impl StageProgressView {
                     });
                     cx.notify();
                 });
-                let _ = drag_parent.update(cx, |app, app_cx| {
-                    if app.drag_target == Some(DragTarget::Progress) {
-                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                    } else {
-                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                    }
-                });
             },
             move |ratio, cx| {
                 let _ = this_commit.update(cx, |this, cx| {
@@ -1100,12 +1089,7 @@ impl StageProgressView {
                 });
                 let _ = commit_parent.update(cx, |app, app_cx| {
                     app.wake_stage_controls_immediately(app_cx);
-                    if app.drag_target == Some(DragTarget::Progress) {
-                        app.update_drag_ratio(DragTarget::Progress, ratio, app_cx);
-                    } else {
-                        app.begin_drag(DragTarget::Progress, ratio, app_cx);
-                    }
-                    app.commit_drag(app_cx);
+                    app.seek_to_ratio(ratio, app_cx);
                 });
             },
         ));
@@ -1127,41 +1111,13 @@ impl Render for StageProgressView {
             && duration_ms > 0
             && !window.is_minimized();
 
-        if should_tick && !self.timer_started {
-            self.timer_started = true;
-            cx.spawn(async move |this, cx| -> Result<()> {
-                loop {
-                    Timer::after(STAGE_PROGRESS_REFRESH_INTERVAL).await;
-                    let keep_running = match this.update(cx, |this, cx| {
-                        let running = this.stage_active
-                            && this.controls_visible
-                            && this.playback_state == PlaybackState::Playing
-                            && !this.local_dragging
-                            && this.drag_progress_ratio.is_none()
-                            && this
-                                .engine
-                                .as_ref()
-                                .is_some_and(|engine| {
-                                    let (state, _, duration) = engine.progress();
-                                    state == PlaybackState::Playing && duration > 0
-                                });
-                        if !running {
-                            this.timer_started = false;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    }) {
-                        Ok(running) => running,
-                        Err(_) => break,
-                    };
-                    if !keep_running {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .detach();
+        if should_tick {
+            // Deadline invalidation is coalesced by GPUI per current View entity. No detached timer
+            // survives pause/close, and no root MusicApp notification is involved.
+            window.request_invalidation_at(
+                Instant::now() + STAGE_PROGRESS_REFRESH_INTERVAL,
+                cx,
+            );
         }
 
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
