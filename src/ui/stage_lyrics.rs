@@ -918,6 +918,299 @@ fn lyric_text_layer(
     text.blur(px(blur_sigma.max(0.0)))
 }
 
+fn lyric_visual_profile(
+    index: usize,
+    active: usize,
+    reading_mode: bool,
+    depth_blur_active: bool,
+) -> (f32, f32) {
+    let distance = index.abs_diff(active);
+    let (mut alpha, mut blur) =
+        lyric_focus_profile(distance, reading_mode, depth_blur_active);
+
+    if reading_mode {
+        return (alpha, blur);
+    }
+
+    let (edge_alpha, edge_blur) = lyric_edge_envelope(index, active);
+    alpha *= edge_alpha;
+    if depth_blur_active {
+        blur += edge_blur;
+    }
+
+    (alpha.clamp(0.0, 1.0), blur)
+}
+
+fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
+    if index == active {
+        return (1.0, 0.0);
+    }
+
+    if index < active {
+        // The focus anchor is above vertical center, so top-edge falloff begins sooner.
+        match active - index {
+            1 | 2 => (1.0, 0.0),
+            3 => (0.88, 0.20),
+            4 => (0.62, 0.55),
+            5 => (0.34, 1.05),
+            6 => (0.14, 1.65),
+            _ => (0.04, 2.20),
+        }
+    } else {
+        // The lower half has more visual room; fade one row later.
+        match index - active {
+            1 | 2 | 3 => (1.0, 0.0),
+            4 => (0.84, 0.20),
+            5 => (0.58, 0.55),
+            6 => (0.30, 1.05),
+            7 => (0.12, 1.65),
+            _ => (0.04, 2.20),
+        }
+    }
+}
+
+fn lyric_focus_profile(distance: usize, reading_mode: bool, depth_blur_active: bool) -> (f32, f32) {
+    if reading_mode {
+        return (1.0, 0.0);
+    }
+
+    let alpha = match distance {
+        0 => 1.0,
+        1 => 0.66,
+        2 => 0.48,
+        3 => 0.36,
+        _ => 0.28,
+    };
+    let blur_sigma = if depth_blur_active {
+        match distance {
+            0 => 0.0,
+            // Keep the first defocused row at a real one-pixel sigma. Sub-pixel blur is visually
+            // close to identity on the retained Nova path and made the depth hand-off look absent.
+            1 => 0.80,
+            2 => 1.20,
+            3 => 1.60,
+            4 => 1.90,
+            _ => 2.10,
+        }
+    } else {
+        0.0
+    };
+    (alpha, blur_sigma)
+}
+
+fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
+    if !line.enhanced_complete {
+        return None;
+    }
+    line.words
+        .partition_point(|word| word.timestamp_ms <= position_ms)
+        .checked_sub(1)
+}
+
+fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
+    if !line.enhanced_complete {
+        return None;
+    }
+    line.words
+        .get(
+            line.words
+                .partition_point(|word| word.timestamp_ms <= position_ms),
+        )
+        .map(|word| word.timestamp_ms)
+}
+
+fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
+    let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
+        return if position_ms >= word.timestamp_ms {
+            1.0
+        } else {
+            0.0
+        };
+    };
+    let elapsed = position_ms
+        .saturating_sub(word.timestamp_ms)
+        .min(duration_ms);
+    (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
+}
+
+fn word_reveal_remaining(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
+    let end = word.timestamp_ms.saturating_add(duration_ms);
+    (position_ms < end).then(|| Duration::from_millis(end.saturating_sub(position_ms)))
+}
+
+fn karaoke_word(
+    word: &StageLyricWord,
+    index: usize,
+    current_word: Option<usize>,
+    position_ms: u64,
+    animate: bool,
+    karaoke_epoch: u64,
+) -> gpui::AnyElement {
+    const DIM_ALPHA: f32 = 0.28;
+    const DONE_ALPHA: f32 = 0.97;
+
+    let Some(current_word) = current_word else {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
+    };
+    if index < current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DONE_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
+    }
+    if index > current_word {
+        return div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+            .child(word.text.clone())
+            .into_any_element();
+    }
+
+    let progress = word_reveal_progress(word, position_ms);
+    let base = div()
+        .whitespace_nowrap()
+        .text_color(hsla(0.0, 0.0, 1.0, DIM_ALPHA))
+        .child(word.text.clone());
+    let overlay = div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .h_full()
+        .w_full()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+        .child(word.text.clone());
+
+    let overlay = if animate
+        && progress < 1.0
+        && let Some(remaining) = word_reveal_remaining(word, position_ms)
+        && !remaining.is_zero()
+    {
+        let key = karaoke_epoch
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(word.timestamp_ms.rotate_left(17))
+            .wrapping_add(index as u64);
+        overlay
+            .with_animation(
+                ElementId::NamedInteger(SharedString::new_static("lyric-word-sweep"), key),
+                Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
+                    HorizontalRevealEdge::Left,
+                    progress,
+                    1.0,
+                )),
+                |element, _| element,
+            )
+            .into_any_element()
+    } else if progress < 1.0 {
+        overlay
+            .with_sampled_animation(
+                AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, 0.0, 1.0),
+                progress,
+            )
+            .into_any_element()
+    } else {
+        overlay.into_any_element()
+    };
+
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(base)
+        .child(overlay)
+        .into_any_element()
+}
+
+fn stage_primary_lyric(
+    line: &StageLyricLine,
+    karaoke_active: bool,
+    current_word: Option<usize>,
+    position_ms: u64,
+    animate: bool,
+    karaoke_epoch: u64,
+) -> gpui::AnyElement {
+    if !line.enhanced_complete {
+        return div()
+            .w_full()
+            .min_w(px(0.0))
+            .text_size(px(28.0))
+            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+            .child(line.text.clone())
+            .into_any_element();
+    }
+
+    // Keep exactly the same word-fragment layout whether this line is focused or not. Previously a
+    // line changed from one shaped text run to many flex fragments at the active boundary, causing
+    // rewrap/reflow on the same frame as the scroll hand-off.
+    let mut row = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .text_size(px(28.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD);
+    for (index, word) in line.words.iter().enumerate() {
+        row = if karaoke_active {
+            row.child(karaoke_word(
+                word,
+                index,
+                current_word,
+                position_ms,
+                animate,
+                karaoke_epoch,
+            ))
+        } else {
+            row.child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+                    .child(word.text.clone()),
+            )
+        };
+    }
+    row.into_any_element()
+}
+
+fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
+    if line.words.is_empty() || line.text.is_empty() {
+        return false;
+    }
+    let mut remaining = line.text.as_str();
+    for word in line.words.iter() {
+        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    remaining.is_empty()
+}
+
+fn format_lyric_time(ms: u64) -> String {
+    let total_secs = ms / 1_000;
+    let millis = ms % 1_000;
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+    } else {
+        format!("{minutes:02}:{seconds:02}.{millis:03}")
+    }
+}
+
+
 fn lyric_depth_transition() -> Transition {
     Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
         .ease(Easing::InOutCubic)
