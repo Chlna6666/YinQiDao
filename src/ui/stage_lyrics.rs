@@ -34,8 +34,8 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(300);
-const LYRIC_ROW_STAGGER_MS: u64 = 12;
+const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(320);
+const LYRIC_ROW_STAGGER_MS: u64 = 14;
 const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 6;
 const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
@@ -1531,7 +1531,7 @@ fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
         // position until their own start time. Forwards does not apply the first keyframe during
         // delay and made all rows appear at the final logical position before delayed motion.
         .fill_mode(FillMode::Both)
-        .ease(Easing::OutCubic)
+        .ease(Easing::OutQuint)
 }
 
 #[inline]
@@ -1555,6 +1555,13 @@ fn lyric_row_stagger_delay(
     Duration::from_millis(trailing_distance as u64 * LYRIC_ROW_STAGGER_MS)
 }
 
+#[inline]
+fn lyric_row_motion_key(motion_epoch: u64, index: usize) -> u64 {
+    motion_epoch
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(index as u64)
+}
+
 fn apply_lyric_row_motion(
     row: gpui::Stateful<gpui::Div>,
     index: usize,
@@ -1564,7 +1571,7 @@ fn apply_lyric_row_motion(
     from_y: f32,
     started_at: Option<Instant>,
     frame_now: Instant,
-    _motion_epoch: u64,
+    motion_epoch: u64,
 ) -> gpui::AnyElement {
     if !animating || from_y.abs() <= SCROLL_SETTLE_PX {
         return row.into_any_element();
@@ -1574,16 +1581,25 @@ fn apply_lyric_row_motion(
         return row.into_any_element();
     };
     let delay = lyric_row_stagger_delay(index, active, previous_active, from_y);
-    let progress = lyric_row_motion_spec(delay)
-        .sample_elapsed(frame_now.saturating_duration_since(started_at))
-        .eased_progress;
+    let sample = lyric_row_motion_spec(delay)
+        .sample_elapsed(frame_now.saturating_duration_since(started_at));
+    let progress = sample.eased_progress;
+    let motion_key = lyric_row_motion_key(motion_epoch, index);
 
-    row.with_sampled_animation(
+    // Keep one stable retained scene-animation identity for this row during the whole hand-off.
+    // The frame-local sampled wrapper could be replayed after ListState had already advanced its
+    // logical scroll, leaving the lyric visually parked instead of climbing with the next line.
+    row.with_stable_sampled_animation(
+        ElementId::NamedInteger(
+            SharedString::new_static("stage-lyric-row-motion"),
+            motion_key,
+        ),
         AnimationProperty::translation(
             point(px(0.0), px(from_y)),
             point(px(0.0), px(0.0)),
         ),
         progress,
+        progress < 1.0,
     )
     .into_any_element()
 }
@@ -1719,6 +1735,14 @@ mod tests {
                 LYRIC_ROW_STAGGER_MS * LYRIC_ROW_MAX_STAGGER_ROWS as u64
             )
         );
+    }
+
+    #[test]
+    fn row_motion_identity_is_stable_within_handoff_and_changes_between_handoffs() {
+        let first = lyric_row_motion_key(7, 3);
+        assert_eq!(first, lyric_row_motion_key(7, 3));
+        assert_ne!(first, lyric_row_motion_key(8, 3));
+        assert_ne!(first, lyric_row_motion_key(7, 4));
     }
 
     #[test]
