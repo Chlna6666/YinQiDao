@@ -202,10 +202,10 @@ pub struct MusicApp {
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
-    // Stage transport buttons update their own retained controls optimistically. Defer the heavy
-    // MusicApp root repaint until AudioEngine ACK arrives so mouse-down never competes with a full
-    // 800+ node layout generation frame.
-    stage_transport_root_notify_pending: bool,
+    // Transport buttons update their retained controls optimistically. Defer the heavy MusicApp
+    // root repaint until AudioEngine ACK arrives so mouse-down never competes with a full-window
+    // layout generation frame.
+    transport_root_notify_pending: bool,
     pub(crate) fluid_background: Option<Entity<crate::gpu::AppleFluidView>>,
     pub(crate) artwork_online_fallback_requested: HashSet<TrackId>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
@@ -824,7 +824,7 @@ impl MusicApp {
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
-            stage_transport_root_notify_pending: false,
+            transport_root_notify_pending: false,
             fluid_background: None,
             artwork_online_fallback_requested: HashSet::new(),
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
@@ -1509,13 +1509,10 @@ impl MusicApp {
             self.cancel_online_preload_tasks();
         }
 
-        let defer_stage_root_notify = self.stage_open || self.stage_animating;
-        if defer_stage_root_notify {
-            self.stage_transport_root_notify_pending = true;
-        } else {
-            self.stage_transport_root_notify_pending = false;
-            cx.notify();
-        }
+        // Mini-player and Stage controls both provide local optimistic feedback. Do not rebuild
+        // the root shell in the same input turn; the audio worker's SnapshotChanged ACK performs
+        // the authoritative synchronization shortly after the non-blocking command enqueue.
+        self.transport_root_notify_pending = true;
 
         if self.send(command) {
             self.save_config();
@@ -1523,7 +1520,7 @@ impl MusicApp {
                 self.schedule_online_playlist_prefetch(cx);
             }
         } else {
-            self.stage_transport_root_notify_pending = false;
+            self.transport_root_notify_pending = false;
             self.snapshot.state = previous_state;
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
@@ -3767,8 +3764,8 @@ impl MusicApp {
         let previous_repeat = self.snapshot.repeat;
         let previous_shuffle = self.snapshot.shuffle;
         let previous_error = self.snapshot.error.clone();
-        let deferred_stage_transport_notify = self.stage_transport_root_notify_pending;
-        self.stage_transport_root_notify_pending = false;
+        let deferred_stage_transport_notify = self.transport_root_notify_pending;
+        self.transport_root_notify_pending = false;
 
         self.snapshot = engine.snapshot();
         let track_changed = match (
