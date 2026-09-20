@@ -155,13 +155,15 @@ struct StagePlayerView {
 
 impl Render for StagePlayerView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let lyrics = AnyView::from(self.lyrics.clone()).cached(
-            StyleRefinement::default()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .min_h(px(0.0)),
-        );
+        let lyrics = AnyView::from(self.lyrics.clone())
+            .cached(
+                StyleRefinement::default()
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0)),
+            )
+            .reuse_on_window_refresh();
         div()
             .id("stage-player-root")
             .size_full()
