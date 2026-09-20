@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     components::{SliderStyle, slider::InteractiveSliderState},
-    shell::{DragTarget, MusicApp},
+    shell::MusicApp,
     theme::{
         self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
         elegant_gradient_for, press_transition, themed_icon,
@@ -219,8 +219,6 @@ impl Render for PlaybackProgress {
                 Ok(())
             })
             .detach();
-        } else if !should_tick {
-            self.timer_started = false;
         }
 
         let ratio = drag_ratio.unwrap_or_else(|| {
