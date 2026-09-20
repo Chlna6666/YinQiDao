@@ -2593,22 +2593,24 @@ impl MusicApp {
             }
 
             let cached_url = target_url.clone();
-            let cached_bytes =
-                tokio::task::spawn_blocking(move || crate::ui::image_cache::get_cached(&cached_url))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let cached_bytes = tokio::task::spawn_blocking(move || {
+                crate::ui::image_cache::load_disk_cached(&cached_url)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             if let Some(bytes) = cached_bytes {
-                let bytes = (*bytes).clone();
                 if let Some(cache) = artwork_cache.clone() {
                     let key = target_url.clone();
-                    let art = tokio::task::spawn_blocking(move || cache.store(&key, &bytes))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))??;
+                    let cache_bytes = bytes.clone();
+                    let art =
+                        tokio::task::spawn_blocking(move || cache.store(&key, cache_bytes.as_ref()))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))??;
                     return Ok((art.png, art.blurred_png, art.palette));
                 }
 
                 return tokio::task::spawn_blocking(move || {
-                    let img = image::load_from_memory(&bytes)?;
+                    let img = image::load_from_memory(bytes.as_ref())?;
                     let small = img.thumbnail(img.width().min(768), img.height().min(768));
                     let mut png_buf = Vec::new();
                     small.write_to(
