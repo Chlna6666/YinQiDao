@@ -987,9 +987,6 @@ impl StageProgressView {
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
             || option_ratio_changed(self.drag_progress_ratio, drag_progress_ratio, 0.0005);
-        if !engine_changed {
-            self.engine = engine;
-        }
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
