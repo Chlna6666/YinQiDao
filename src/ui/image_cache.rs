@@ -18,6 +18,7 @@ use super::theme::{self, ACCENT_RED, BORDER_HAIRLINE, TEXT_SECONDARY, themed_ico
 static MEM_CACHE: OnceLock<RwLock<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
 static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DISK_DIR: OnceLock<PathBuf> = OnceLock::new();
+static REMOTE_IMAGE_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 
 fn mem_cache() -> &'static RwLock<HashMap<String, Arc<[u8]>>> {
     MEM_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
@@ -135,18 +136,18 @@ pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<A
     None
 }
 
-async fn fetch_and_normalize(url: &str) -> Option<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
+fn remote_image_client() -> Option<&'static reqwest::Client> {
+    REMOTE_IMAGE_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
 
-    let response = client.get(url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body = response.bytes().await.ok()?;
-
+fn normalize_remote_image(body: Vec<u8>) -> Option<Vec<u8>> {
     let img = image::load_from_memory(&body).ok()?;
     let img = if img.width() > 512 || img.height() > 512 {
         img.thumbnail(512, 512)
@@ -157,6 +158,22 @@ async fn fetch_and_normalize(url: &str) -> Option<Vec<u8>> {
     let mut out = Cursor::new(Vec::new());
     img.write_to(&mut out, image::ImageFormat::Png).ok()?;
     Some(out.into_inner())
+}
+
+async fn fetch_and_normalize(url: &str) -> Option<Vec<u8>> {
+    let client = remote_image_client()?;
+    let response = client.get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.bytes().await.ok()?.to_vec();
+
+    // Image decode/resize/PNG encoding is CPU-heavy and must not occupy the async runtime workers
+    // that also drive plugin RPC/network requests.
+    tokio::task::spawn_blocking(move || normalize_remote_image(body))
+        .await
+        .ok()
+        .flatten()
 }
 
 pub fn render_remote_avatar<V: 'static>(
@@ -234,13 +251,22 @@ pub fn fetch_detached(url: &str) {
     };
     if should_fetch {
         let fetch_url = url.to_string();
-        if let Ok(handle) = crate::runtime::io_handle() {
-            handle.spawn(async move {
-                let _ = load_or_fetch(fetch_url.clone()).await;
+        match crate::runtime::io_handle() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let _ = load_or_fetch(fetch_url.clone()).await;
+                    if let Ok(mut set) = in_flight().lock() {
+                        set.remove(&fetch_url);
+                    }
+                });
+            }
+            Err(_) => {
+                // Never strand an URL in IN_FLIGHT when the runtime is unavailable; otherwise every
+                // later render would believe a loader still owns it and the image would never retry.
                 if let Ok(mut set) = in_flight().lock() {
-                    set.remove(&fetch_url);
+                    set.remove(url);
                 }
-            });
+            }
         }
     }
 }
