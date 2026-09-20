@@ -1,20 +1,13 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, App, Bounds, Div, ElementId, Empty, Global,
-    HorizontalRevealEdge, Hsla, MouseButton, Pixels, SharedString, Stateful, div, hsla, prelude::*,
-    px, relative, rgb,
+    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, SharedString, Stateful,
+    div, hsla, prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
 
 type SliderCallback = Rc<dyn Fn(f32, &mut App)>;
-
-#[derive(Clone, Copy, Debug)]
-pub struct SliderProgressAnimation {
-    pub epoch: u64,
-    pub duration: Duration,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SliderStyle {
@@ -171,16 +164,7 @@ impl InteractiveSliderState {
     }
 
     pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
-        interactive_slider_state(self, ratio, style, None)
-    }
-
-    pub fn render_animated_progress(
-        &self,
-        ratio: f32,
-        style: SliderStyle,
-        animation: SliderProgressAnimation,
-    ) -> Stateful<Div> {
-        interactive_slider_state(self, ratio, style, Some(animation))
+        interactive_slider_state(self, ratio, style)
     }
 }
 
@@ -245,56 +229,19 @@ fn vertical_ratio(position_y: Pixels, bounds: Bounds<Pixels>, thumb_size: Pixels
     (1.0 - local / usable_height).clamp(0.0, 1.0)
 }
 
-fn horizontal_track(
-    ratio: f32,
-    height: Pixels,
-    style: SliderStyle,
-    animation: Option<SliderProgressAnimation>,
-    animation_lane: u64,
-) -> Div {
-    let ratio = ratio.clamp(0.0, 1.0);
-    let fill = if let Some(animation) = animation
-        && ratio < 1.0
-        && !animation.duration.is_zero()
-    {
-        div()
-            .h_full()
-            .w_full()
-            .rounded_full()
-            .bg(style.filled_color)
-            .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("slider-playback-progress"),
-                    animation
-                        .epoch
-                        .wrapping_mul(4)
-                        .wrapping_add(animation_lane),
-                ),
-                Animation::new(animation.duration).with_property(
-                    AnimationProperty::horizontal_reveal(
-                        HorizontalRevealEdge::Left,
-                        ratio,
-                        1.0,
-                    ),
-                ),
-                |element, _| element,
-            )
-            .into_any_element()
-    } else {
-        div()
-            .h_full()
-            .w(relative(ratio))
-            .rounded_full()
-            .bg(style.filled_color)
-            .into_any_element()
-    };
-
+fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
     div()
         .w_full()
         .h(height)
         .rounded_full()
         .bg(style.track_bg)
-        .child(fill)
+        .child(
+            div()
+                .h_full()
+                .w(relative(ratio.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(style.filled_color),
+        )
 }
 
 fn slider_visual_with_group(
@@ -302,7 +249,6 @@ fn slider_visual_with_group(
     ratio: f32,
     style: SliderStyle,
     hover_group: SharedString,
-    progress_animation: Option<SliderProgressAnimation>,
 ) -> Div {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
     let interaction_height = px((f32::from(style.thumb_size) * style.hover_thumb_scale)
@@ -335,13 +281,7 @@ fn slider_visual_with_group(
         } else {
             layer.items_center()
         };
-        layer.child(horizontal_track(
-            clamped_ratio,
-            style.track_height,
-            style,
-            progress_animation,
-            0,
-        ))
+        layer.child(horizontal_track(clamped_ratio, style.track_height, style))
     };
     let hover_track_layer = if style.edge_overlay {
         div()
@@ -355,13 +295,7 @@ fn slider_visual_with_group(
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
             .transition(theme::hover_transition())
-            .child(horizontal_track(
-                clamped_ratio,
-                style.hover_track_height,
-                style,
-                progress_animation,
-                1,
-            ))
+            .child(horizontal_track(clamped_ratio, style.hover_track_height, style))
     } else {
         div()
             .absolute()
@@ -371,21 +305,10 @@ fn slider_visual_with_group(
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
             .transition(theme::hover_transition())
-            .child(horizontal_track(
-                clamped_ratio,
-                style.hover_track_height,
-                style,
-                progress_animation,
-                1,
-            ))
+            .child(horizontal_track(clamped_ratio, style.hover_track_height, style))
     };
 
-    let thumb_layer = if progress_animation.is_some() {
-        // During renderer-owned playback progress the rail moves continuously without view
-        // rebuilds. A layout-positioned thumb would freeze at the anchor ratio, so keep the
-        // interaction hit area but hide that stale visual until the user seeks/pauses.
-        div().absolute().inset_0()
-    } else if style.edge_overlay {
+    let thumb_layer = if style.edge_overlay {
         div()
             .absolute()
             .left(px(-f32::from(half_thumb)))
@@ -427,7 +350,7 @@ fn slider_visual_with_group(
 
 fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Div {
     let hover_group = SharedString::from(format!("slider-hover-{id}"));
-    slider_visual_with_group(id, ratio, style, hover_group, None)
+    slider_visual_with_group(id, ratio, style, hover_group)
 }
 
 fn vertical_slider_visual(id: ElementId, ratio: f32, height: Pixels, style: SliderStyle) -> Div {
@@ -531,7 +454,6 @@ fn interactive_slider_state(
     state: &InteractiveSliderState,
     ratio: f32,
     style: SliderStyle,
-    progress_animation: Option<SliderProgressAnimation>,
 ) -> Stateful<Div> {
     let id = state.id.clone();
     let drag_id = state.id.clone();
@@ -553,7 +475,6 @@ fn interactive_slider_state(
         ratio,
         style,
         state.hover_group.clone(),
-        progress_animation,
     )
         .on_children_prepainted(move |children_bounds, _window, _cx| {
             bounds_for_children.set(children_bounds.first().copied());
