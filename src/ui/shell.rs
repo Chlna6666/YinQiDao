@@ -1067,6 +1067,43 @@ impl MusicApp {
         cx.notify();
     }
 
+    fn finish_stage_transition_if_due(
+        &mut self,
+        now: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.stage_animating {
+            return;
+        }
+        let Some(started_at) = self.stage_transition_started_at else {
+            return;
+        };
+        if now.saturating_duration_since(started_at) < self.stage_transition_duration {
+            return;
+        }
+
+        self.stage_progress = self.stage_transition_to;
+        self.stage_animating = false;
+        self.stage_transition_started_at = None;
+        self.stage_transition_start_armed = false;
+        if self.stage_progress <= 0.001 {
+            self.finalize_stage_close_route(cx);
+        }
+    }
+
+    fn schedule_stage_transition_deadline(&self, window: &Window, cx: &mut Context<Self>) {
+        if !self.stage_animating {
+            return;
+        }
+        let Some(started_at) = self.stage_transition_started_at else {
+            return;
+        };
+        let deadline = started_at + self.stage_transition_duration;
+        if deadline > std::time::Instant::now() {
+            window.request_invalidation_for(cx.entity_id(), deadline, cx);
+        }
+    }
+
     fn arm_stage_transition_after_present(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.stage_animating
             || self.stage_transition_started_at.is_some()
@@ -1091,46 +1128,20 @@ impl MusicApp {
                 }
 
                 this.stage_transition_start_armed = false;
-                this.stage_transition_started_at = Some(std::time::Instant::now());
-                let duration = this.stage_transition_duration;
+                let started_at = std::time::Instant::now();
+                this.stage_transition_started_at = Some(started_at);
                 cx.notify();
-                Some(duration)
+                Some((started_at, this.stage_transition_duration))
             });
 
-            let Some(duration) = started else {
+            let Some((started_at, duration)) = started else {
                 return;
             };
 
-            // `with_animation` creates the scene animation during paint. Wait for that first
-            // animated frame to finish as well before starting the completion timer. This can make
-            // the logical state live for at most one extra presented frame, but can never cut a
-            // renderer animation short because a cold frame took longer than expected.
-            let finish_entity = entity.clone();
-            window.on_next_frame(move |_window, cx| {
-                finish_entity.update(cx, |this, cx| {
-                    if this.stage_transition_epoch != epoch || !this.stage_animating {
-                        return;
-                    }
-                    cx.spawn(async move |this, cx| -> Result<()> {
-                        Timer::after(duration).await;
-                        this.update(cx, |this, cx| {
-                            if this.stage_transition_epoch != epoch || !this.stage_animating {
-                                return;
-                            }
-                            this.stage_progress = this.stage_transition_to;
-                            this.stage_animating = false;
-                            this.stage_transition_started_at = None;
-                            this.stage_transition_start_armed = false;
-                            if this.stage_progress <= 0.001 {
-                                this.finalize_stage_close_route(cx);
-                            }
-                            cx.notify();
-                        })?;
-                        Ok(())
-                    })
-                    .detach();
-                });
-            });
+            // GPUI owns the completion wake-up as well. The logical Stage state is finalized from
+            // the render turn triggered by this entity-scoped deadline, so renderer animation,
+            // hit-testing and route teardown cannot race a detached Timer task.
+            window.request_invalidation_for(entity.entity_id(), started_at + duration, cx);
         });
     }
 
@@ -4666,6 +4677,8 @@ impl Render for MusicApp {
         self.ensure_plugin_sessions_restored(cx);
 
         let now = std::time::Instant::now();
+        self.finish_stage_transition_if_due(now, cx);
+        self.schedule_stage_transition_deadline(window, cx);
 
         // Route restoration may request the Stage before this frame's surface decision. Resolve it
         // first so the very same frame constructs the drawer and only then arms its presentation
