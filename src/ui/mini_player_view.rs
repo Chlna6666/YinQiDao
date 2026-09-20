@@ -105,6 +105,18 @@ pub(super) fn view(
         view
     });
 
+    let mini_clock_visible = !app.stage_open;
+    let drag_progress_ratio = app.drag_progress_ratio;
+    playback_progress.update(cx, |progress, cx| {
+        progress.sync(
+            app.engine.clone(),
+            app.snapshot.state,
+            mini_clock_visible,
+            drag_progress_ratio,
+            cx,
+        );
+    });
+
     let track = app.snapshot.current_track.as_ref();
     let track_id = track.map(|track| track.id);
     let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
