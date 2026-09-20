@@ -418,8 +418,10 @@ impl Render for StageControlsView {
                         let changed = app.stage_controls_hovered != *hovered;
                         app.stage_controls_hovered = *hovered;
                         if changed && app.stage_suppress_wake_until.is_none() {
+                            // Hover state only affects Stage chrome idle policy. The dock already
+                            // owns this event and remains visible locally, so there is no reason to
+                            // rebuild the MusicApp root.
                             app.stage_last_user_activity = Instant::now();
-                            app_cx.notify();
                         }
                     });
                 }
