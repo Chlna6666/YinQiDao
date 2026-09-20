@@ -35,6 +35,8 @@ fn settings_scroll_handle(cx: &mut Context<MusicApp>) -> gpui::ScrollHandle {
 
 pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyElement {
     let scroll = settings_scroll_handle(cx);
+    let active_tab_at_render = settings_active_tab(&scroll);
+    let scroll_for_boundary = scroll.clone();
 
     div()
         .id("settings-page")
@@ -73,7 +75,13 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
                 .pt_5()
                 .pb_8()
                 .gap_8()
-                .on_scroll_wheel(cx.listener(|_this, _, _, cx| cx.notify()))
+                .on_scroll_wheel(cx.listener(move |_this, _, _, cx| {
+                    // GPUI owns the physical scroll offset. Rebuild the settings tree only when
+                    // the sticky tab selection actually crosses into another logical section.
+                    if settings_active_tab(&scroll_for_boundary) != active_tab_at_render {
+                        cx.notify();
+                    }
+                }))
                 .child(audio_device_group(app, cx))
                 .child(smart_audio_group(app, cx))
                 .child(eq_group(app, cx))
@@ -90,8 +98,8 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         .into_any_element()
 }
 
-fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> impl IntoElement {
-    let active = match scroll.top_item() {
+fn settings_active_tab(scroll: &gpui::ScrollHandle) -> usize {
+    match scroll.top_item() {
         0 | 1 => 0,
         2 => 1,
         3 => 2,
@@ -100,7 +108,11 @@ fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> imp
         6 => 5,
         7..=9 => 6,
         _ => 7,
-    };
+    }
+}
+
+fn settings_tabs(scroll: &gpui::ScrollHandle, cx: &mut Context<MusicApp>) -> impl IntoElement {
+    let active = settings_active_tab(scroll);
     let tabs = [
         ("音频", 0usize),
         ("EQ", 2),
