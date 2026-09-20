@@ -2436,8 +2436,10 @@ impl MusicApp {
 
         self.online_track_buffering = Some(source.source_id.clone());
         self.status = format!("正在切换在线音频：{title} · {artist}");
-        self.snapshot.state = PlaybackState::Loading;
-        cx.notify();
+        // Keep PlayerSnapshot authoritative to the currently audible AudioEngine state while the
+        // next remote source is still being resolved/materialized. Buffering is a separate request
+        // state, not a transport state for audio that has not been accepted yet.
+        self.notify_online_playlist_surface(cx);
 
         if let Some(cover_url) = &cover_url {
             crate::ui::image_cache::fetch_detached(cover_url);
@@ -2763,6 +2765,18 @@ impl MusicApp {
                 .cloned(),
         );
         crate::ui::image_cache::prefetch_urls(urls, cx);
+    }
+
+    fn notify_online_playlist_surface(&mut self, cx: &mut Context<Self>) {
+        if self.page == AppPage::OnlinePlaylist
+            && let Some(page) = self.online_playlist_page.clone()
+        {
+            page.update(cx, |_, page_cx| page_cx.notify());
+            return;
+        }
+        // The page entity is materialized by the root. Fall back only during the first navigation
+        // frame; steady-state playlist interactions stay isolated to OnlinePlaylistPage.
+        cx.notify();
     }
 
     pub(crate) fn show_online_playlist_detail(
