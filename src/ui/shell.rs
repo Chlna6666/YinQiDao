@@ -4325,6 +4325,10 @@ impl MusicApp {
             DragTarget::Progress => {
                 self.seeking = true;
                 self.drag_progress_ratio = Some(ratio);
+                // Shared drag state is semantic input for StageLyrics only. Do not invalidate the
+                // MusicApp root for pointer-frequency samples; update the retained lyric view
+                // directly so scrubbing remains synchronized without waking heavy pages.
+                stage_lyrics::sync_if_created(self, cx);
             }
             DragTarget::Volume => {
                 self.volume_dragging = true;
@@ -4332,7 +4336,6 @@ impl MusicApp {
             }
         }
         self.stage_last_user_activity = std::time::Instant::now();
-        cx.notify();
     }
 
     pub(crate) fn update_drag_ratio(
@@ -4347,20 +4350,19 @@ impl MusicApp {
             DragTarget::Progress => {
                 let changed = self
                     .drag_progress_ratio
-                    .is_none_or(|c| (c - ratio).abs() >= 0.0005);
+                    .is_none_or(|current| (current - ratio).abs() >= 0.0015);
                 if changed {
                     self.drag_progress_ratio = Some(ratio);
-                    cx.notify();
+                    stage_lyrics::sync_if_created(self, cx);
                     return true;
                 }
             }
             DragTarget::Volume => {
                 let changed = self
                     .drag_volume_ratio
-                    .is_none_or(|c| (c - ratio).abs() >= 0.001);
+                    .is_none_or(|current| (current - ratio).abs() >= 0.002);
                 if changed {
                     self.drag_volume_ratio = Some(ratio);
-                    cx.notify();
                     return true;
                 }
             }
@@ -4389,12 +4391,16 @@ impl MusicApp {
     }
 
     pub(crate) fn clear_drag(&mut self, cx: &mut Context<Self>) {
+        let was_progress = self.drag_target == Some(DragTarget::Progress);
         self.drag_target = None;
         self.drag_progress_ratio = None;
         self.drag_volume_ratio = None;
         self.seeking = false;
         self.volume_dragging = false;
         self.sync_transport_surfaces(cx);
+        if was_progress {
+            stage_lyrics::sync_if_created(self, cx);
+        }
     }
 
     pub(crate) fn seek_to_ms(&mut self, position_ms: u64, cx: &mut Context<Self>) {
