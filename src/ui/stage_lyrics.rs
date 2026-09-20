@@ -7,7 +7,8 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
     IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString,
-    Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
+    Transition, TransitionProperty, WeakEntity, Window, div, hsla, linear_color_stop,
+    linear_gradient, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -22,16 +23,20 @@ use super::{shell::MusicApp, theme::themed_icon};
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_LIST_PADDING_TOP: f32 = 96.0;
-const LYRIC_LIST_PADDING_BOTTOM: f32 = 112.0;
-const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(430);
-const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(260);
-const LYRIC_ROW_STAGGER_MS: u64 = 32;
-const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 5;
-const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const LYRIC_LIST_PADDING_TOP: f32 = 18.0;
+const LYRIC_LIST_PADDING_BOTTOM: f32 = 22.0;
+const LYRIC_EDGE_FADE_TOP: f32 = 92.0;
+const LYRIC_EDGE_FADE_BOTTOM: f32 = 118.0;
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
+const LYRIC_ROW_MOTION_DURATION: Duration = Duration::from_millis(240);
+const LYRIC_ROW_STAGGER_MS: u64 = 28;
+const LYRIC_ROW_MAX_STAGGER_ROWS: usize = 6;
+const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(210);
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
-const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 2;
+// Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
+// edge depth never snaps while translation is still cascading.
+const LYRIC_DEPTH_TRANSITION_RADIUS: usize = 6;
 
 #[derive(Default)]
 struct StageLyricsViewCache {
@@ -163,6 +168,10 @@ pub(super) struct StageLyricsView {
     scroll_target: Option<usize>,
     scroll_animation: Option<LyricScrollAnimation>,
     motion_epoch: u64,
+    // Initial stage/source materialization is aligned offscreen first. It must never reuse the
+    // normal line-change FLIP animation, otherwise the first active lyric visibly starts near the
+    // top edge and then flies into the focus slot.
+    anchor_bootstrap_pending: bool,
     stage_active: bool,
     scrubbing: bool,
 }
@@ -193,6 +202,7 @@ impl StageLyricsView {
             scroll_target: None,
             scroll_animation: None,
             motion_epoch: 0,
+            anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
         }
@@ -250,6 +260,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.scroll_target = None;
             self.cancel_scroll_animation();
+            self.anchor_bootstrap_pending = stage_active;
             changed = true;
         }
         if transport_changed && !source_changed {
@@ -294,12 +305,15 @@ impl StageLyricsView {
             self.focus_started_at = None;
             if stage_active {
                 // Re-entering Stage must not reuse an old retained word timeline that may have kept
-                // aging while its scene subtree was absent.
+                // aging while its scene subtree was absent. Align the current line invisibly first;
+                // only subsequent semantic line changes get the Apple-style cascade.
                 self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+                self.anchor_bootstrap_pending = self.active_index.is_some();
                 if !self.is_reading() {
                     self.scroll_target = self.active_index;
                 }
             } else {
+                self.anchor_bootstrap_pending = false;
                 self.cancel_scroll_animation();
             }
             changed = true;
@@ -319,10 +333,11 @@ impl StageLyricsView {
 
         if source_changed && let Some(active) = self.active_index {
             self.list_state.scroll_to(ListOffset {
-                item_ix: active.saturating_sub(2),
+                item_ix: active.saturating_sub(4),
                 offset_in_item: px(0.0),
             });
             self.scroll_target = Some(active);
+            self.anchor_bootstrap_pending = stage_active;
         }
 
         if changed {
@@ -339,7 +354,15 @@ impl StageLyricsView {
         if self.active_index == active {
             return false;
         }
-        self.focus_from_index = self.active_index;
+
+        let previous = self.active_index;
+        if previous.is_none() && self.stage_active {
+            // First materialization is positioning, not a lyric hand-off.
+            self.focus_from_index = None;
+            self.anchor_bootstrap_pending = active.is_some();
+        } else {
+            self.focus_from_index = previous;
+        }
         self.focus_started_at = None;
         self.active_index = active;
         self.hovered_index = None;
@@ -523,10 +546,16 @@ impl StageLyricsView {
                 .focus_from_index
                 .is_some_and(|previous| previous.abs_diff(target) <= 2);
 
-            if !adjacent_handoff {
+            if self.anchor_bootstrap_pending {
+                self.list_state.scroll_to(ListOffset {
+                    item_ix: target.saturating_sub(4),
+                    offset_in_item: px(0.0),
+                });
+                self.cancel_scroll_animation();
+            } else if !adjacent_handoff {
                 // Large seeks may legitimately jump the virtual list close to the destination.
                 self.list_state.scroll_to(ListOffset {
-                    item_ix: target.saturating_sub(2),
+                    item_ix: target.saturating_sub(3),
                     offset_in_item: px(0.0),
                 });
                 self.cancel_scroll_animation();
@@ -534,7 +563,7 @@ impl StageLyricsView {
 
             // Normal playback must never call scroll_to_reveal_item here. That mutates logical
             // scroll immediately and causes the whole lyric field to jump before the hand-off
-            // animation starts. Keep the old focus/depth and wait one frame for the overdraw row.
+            // animation starts. Bootstrap stays invisible until this target has real geometry.
             if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
                 window.request_animation_frame();
             }
@@ -555,6 +584,19 @@ impl StageLyricsView {
             f32::from(line_bounds.center().y) + LYRIC_LIST_PADDING_TOP;
         let diff = painted_line_center - anchor_y;
         let now = window.animation_time();
+
+        if self.anchor_bootstrap_pending {
+            if diff.abs() > SCROLL_SETTLE_PX {
+                self.list_state.scroll_by(px(diff));
+            }
+            self.scroll_target = None;
+            self.hovered_index = None;
+            self.focus_from_index = None;
+            self.focus_started_at = None;
+            self.anchor_bootstrap_pending = false;
+            self.cancel_scroll_animation();
+            return;
+        }
         if diff.abs() <= SCROLL_SETTLE_PX {
             self.scroll_target = None;
             if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
@@ -683,7 +725,8 @@ impl Render for StageLyricsView {
         .size_full()
         .pt(px(LYRIC_LIST_PADDING_TOP))
         .pb(px(LYRIC_LIST_PADDING_BOTTOM))
-        .pr(px(8.0));
+        .pr(px(8.0))
+        .opacity(if self.anchor_bootstrap_pending { 0.0 } else { 1.0 });
 
         let lyrics = lyrics.into_any_element();
 
@@ -702,6 +745,32 @@ impl Render for StageLyricsView {
                     .update(cx, |app, cx| app.wake_stage_controls(cx));
             }))
             .child(lyrics)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .top(px(0.0))
+                    .h(px(LYRIC_EDGE_FADE_TOP))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.28), 0.0),
+                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 1.0),
+                    )),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .h(px(LYRIC_EDGE_FADE_BOTTOM))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 0.0),
+                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.34), 1.0),
+                    )),
+            )
     }
 }
 
@@ -763,7 +832,12 @@ fn render_lyric_row(
     .opacity(resolved_alpha);
 
     if near_focus && focus_started && !hovered {
-        text = text.transition(lyric_depth_transition());
+        text = text.transition(lyric_depth_transition(lyric_row_stagger_delay(
+            index,
+            active,
+            previous_active,
+            scroll_from_y,
+        )));
     }
     let text = text.into_any_element();
 
@@ -838,6 +912,7 @@ fn render_lyric_row(
             row,
             index,
             active,
+            focus_from_index,
             scroll_animating,
             scroll_from_y,
             motion_epoch,
@@ -947,24 +1022,29 @@ fn lyric_edge_envelope(index: usize, active: usize) -> (f32, f32) {
     }
 
     if index < active {
-        // The focus anchor is above vertical center, so top-edge falloff begins sooner.
+        // Keep real lyric content underneath the top fade slab. The old envelope multiplied far
+        // rows down to ~1% opacity before they reached the viewport edge, which produced the
+        // screenshot-visible empty band.
         match active - index {
             1 | 2 => (1.0, 0.0),
-            3 => (0.88, 0.20),
-            4 => (0.62, 0.55),
-            5 => (0.34, 1.05),
-            6 => (0.14, 1.65),
-            _ => (0.04, 2.20),
+            3 => (0.94, 0.10),
+            4 => (0.82, 0.35),
+            5 => (0.68, 0.75),
+            6 => (0.52, 1.20),
+            7 => (0.36, 1.80),
+            _ => (0.22, 2.45),
         }
     } else {
-        // The lower half has more visual room; fade one row later.
+        // The lower half has more visual room and the transport dock overlays it, so keep one more
+        // line readable before the physical bottom fade takes over.
         match index - active {
             1 | 2 | 3 => (1.0, 0.0),
-            4 => (0.84, 0.20),
-            5 => (0.58, 0.55),
-            6 => (0.30, 1.05),
-            7 => (0.12, 1.65),
-            _ => (0.04, 2.20),
+            4 => (0.92, 0.10),
+            5 => (0.80, 0.30),
+            6 => (0.66, 0.65),
+            7 => (0.50, 1.10),
+            8 => (0.34, 1.70),
+            _ => (0.22, 2.40),
         }
     }
 }
@@ -1211,9 +1291,10 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 
-fn lyric_depth_transition() -> Transition {
+fn lyric_depth_transition(delay: Duration) -> Transition {
     Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
-        .ease(Easing::InOutCubic)
+        .delay(delay)
+        .ease(Easing::OutQuint)
         .properties([
             TransitionProperty::Opacity,
             TransitionProperty::Blur,
@@ -1223,15 +1304,24 @@ fn lyric_depth_transition() -> Transition {
 fn lyric_row_motion_spec(delay: Duration) -> AnimationSpec {
     AnimationSpec::new(LYRIC_ROW_MOTION_DURATION)
         .delay(delay)
-        .ease(Easing::OutCubic)
+        .ease(Easing::OutQuint)
 }
 
 #[inline]
-fn lyric_row_stagger_delay(index: usize, active: usize, from_y: f32) -> Duration {
+fn lyric_row_stagger_delay(
+    index: usize,
+    active: usize,
+    previous_active: Option<usize>,
+    from_y: f32,
+) -> Duration {
+    let leader = previous_active.unwrap_or(active);
     let trailing_distance = if from_y >= 0.0 {
-        index.saturating_sub(active)
+        // Normal forward playback: old active starts immediately, the promoted new active follows,
+        // then every lower row starts on its own compositor timestamp.
+        index.saturating_sub(leader)
     } else {
-        active.saturating_sub(index)
+        // Reverse seek mirrors the same cascade direction.
+        leader.saturating_sub(index)
     }
     .min(LYRIC_ROW_MAX_STAGGER_ROWS);
 
@@ -1242,6 +1332,7 @@ fn apply_lyric_row_motion(
     row: gpui::Stateful<gpui::Div>,
     index: usize,
     active: usize,
+    previous_active: Option<usize>,
     animating: bool,
     from_y: f32,
     motion_epoch: u64,
@@ -1250,7 +1341,7 @@ fn apply_lyric_row_motion(
         return row.into_any_element();
     }
 
-    let delay = lyric_row_stagger_delay(index, active, from_y);
+    let delay = lyric_row_stagger_delay(index, active, previous_active, from_y);
     let key = motion_epoch
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)
         .wrapping_add(index as u64);
@@ -1312,29 +1403,30 @@ mod tests {
 
         let upper = lyric_edge_envelope(5, 10);
         let lower = lyric_edge_envelope(16, 10);
-        assert!(upper.0 < 0.5 && upper.1 > 1.0);
-        assert!(lower.0 < 0.5 && lower.1 > 1.0);
+        assert!(upper.0 > 0.5 && upper.1 > 0.5);
+        assert!(lower.0 > 0.5 && lower.1 > 0.5);
 
         let far_upper = lyric_edge_envelope(1, 10);
-        assert!(far_upper.0 <= 0.04 && far_upper.1 >= 2.0);
+        assert!(far_upper.0 >= 0.20 && far_upper.1 >= 2.0);
     }
 
     #[test]
-    fn row_scroll_stagger_uses_distinct_renderer_delays() {
+    fn row_scroll_stagger_promotes_from_previous_active() {
+        let previous = Some(9);
         assert_eq!(
-            lyric_row_stagger_delay(10, 10, 80.0),
+            lyric_row_stagger_delay(9, 10, previous, 80.0),
             Duration::ZERO
         );
         assert_eq!(
-            lyric_row_stagger_delay(11, 10, 80.0),
+            lyric_row_stagger_delay(10, 10, previous, 80.0),
             Duration::from_millis(LYRIC_ROW_STAGGER_MS)
         );
         assert_eq!(
-            lyric_row_stagger_delay(13, 10, 80.0),
+            lyric_row_stagger_delay(12, 10, previous, 80.0),
             Duration::from_millis(LYRIC_ROW_STAGGER_MS * 3)
         );
         assert_eq!(
-            lyric_row_stagger_delay(20, 10, 80.0),
+            lyric_row_stagger_delay(20, 10, previous, 80.0),
             Duration::from_millis(
                 LYRIC_ROW_STAGGER_MS * LYRIC_ROW_MAX_STAGGER_ROWS as u64
             )
