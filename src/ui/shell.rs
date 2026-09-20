@@ -14,7 +14,7 @@ use gpui::{
     CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
     KeyDownEvent, Render, SharedString, Subscription, Timer, TransformOrigin, WeakEntity, Window,
     WindowBounds,
-    WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
+    WindowOptions, div, hsla, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
