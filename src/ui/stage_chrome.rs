@@ -16,7 +16,12 @@ fn idle_hidden(app: &MusicApp) -> bool {
 /// Whether the retained stage chrome should target full visibility.
 #[inline]
 pub(super) fn target_visible(app: &MusicApp) -> bool {
-    app.stage_open && app.stage_suppress_wake_until.is_none() && !idle_hidden(app)
+    // During close, the whole Stage surface already owns the fade/scale transition. Keep chrome at
+    // its current visual strength until that surface exits; otherwise dock/titlebar opacity is
+    // multiplied by the parent fade and appears to disappear a frame group before the background.
+    (app.stage_open || app.stage_animating)
+        && app.stage_suppress_wake_until.is_none()
+        && !idle_hidden(app)
 }
 
 /// Whether the stage should reserve the next explicit interaction for waking chrome.
