@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    app_runtime_events, home, library as library_page, player,
+    app_runtime_events, home, library as library_page, mini_player_view, player,
     player::NowPlaying,
     route::{self, AppRoute},
     settings as settings_page, stage_chrome, stage_controls, theme,
@@ -3792,6 +3792,27 @@ impl MusicApp {
         .detach();
     }
 
+    fn sync_transport_surfaces(&mut self, cx: &mut Context<MusicApp>) {
+        let playing = self.snapshot.state == PlaybackState::Playing;
+
+        if let (Some(progress), Some(time)) =
+            (self.playback_progress.clone(), self.playback_time.clone())
+        {
+            // MiniPlayerView::view is a cached entity synchronizer. Calling it here updates only the
+            // retained transport surface; it does not rebuild the MusicApp shell.
+            let _ = mini_player_view::view(self, cx, progress, time.clone());
+            time.update(cx, |_, cx| cx.notify());
+        }
+
+        if self.stage_prepared || self.stage_open || self.stage_animating {
+            let _ = stage_controls::view(self, cx);
+        }
+
+        if let Some(fluid) = self.fluid_background.clone() {
+            fluid.update(cx, |view, cx| view.set_playing(playing, cx));
+        }
+    }
+
     pub(crate) fn sync_audio_snapshot_event(&mut self, cx: &mut Context<MusicApp>) {
         let Some(engine) = self.engine.clone() else {
             return;
@@ -3808,7 +3829,7 @@ impl MusicApp {
         let previous_repeat = self.snapshot.repeat;
         let previous_shuffle = self.snapshot.shuffle;
         let previous_error = self.snapshot.error.clone();
-        let deferred_stage_transport_notify = self.transport_root_notify_pending;
+        let transport_ack_pending = self.transport_root_notify_pending;
         self.transport_root_notify_pending = false;
 
         self.snapshot = engine.snapshot();
@@ -3820,8 +3841,8 @@ impl MusicApp {
             (Some(previous), Some(current)) => !previous.ptr_eq(current),
             _ => true,
         };
-        let root_visible_change = previous_state != self.snapshot.state
-            || track_changed
+        let playback_state_changed = previous_state != self.snapshot.state;
+        let root_visible_change = track_changed
             || !Arc::ptr_eq(&previous_queue, &self.snapshot.queue)
             || previous_duration_ms != self.snapshot.duration_ms
             || (previous_volume - self.snapshot.volume).abs() > 0.0005
@@ -3887,7 +3908,11 @@ impl MusicApp {
         }
 
         self.update_system_media_async(cx);
-        if root_visible_change || deferred_stage_transport_notify {
+
+        if playback_state_changed || transport_ack_pending {
+            self.sync_transport_surfaces(cx);
+        }
+        if root_visible_change {
             cx.notify();
         }
     }
