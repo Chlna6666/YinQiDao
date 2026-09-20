@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat, IntoElement,
-    ObjectFit, Render, SharedString, StatefulInteractiveElement as _, WeakEntity, Window, div,
-    hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
+    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -28,6 +28,10 @@ struct MiniPlayerViewCache {
 }
 
 impl Global for MiniPlayerViewCache {}
+
+const MINI_PLAYBACK_TIME_WIDTH: f32 = 104.0;
+const MINI_PLAYBACK_TIME_HEIGHT: f32 = 18.0;
+const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MiniPlayerRenderKey {
@@ -356,7 +360,7 @@ impl Render for MiniPlayerView {
                                         }
                                     })),
                             )
-                            .child(self.playback_time.clone()),
+                            .child(cached_playback_time(self.playback_time.clone())),
                     )
                     .child(
                         div()
@@ -490,8 +494,32 @@ impl Render for MiniPlayerView {
                             ),
                     ),
             )
-            .child(self.playback_progress.clone())
+            .child(cached_playback_progress(self.playback_progress.clone()))
     }
+}
+
+fn cached_playback_time(view: Entity<PlaybackTime>) -> AnyView {
+    AnyView::from(view)
+        .cached(
+            StyleRefinement::default()
+                .w(px(MINI_PLAYBACK_TIME_WIDTH))
+                .min_w(px(MINI_PLAYBACK_TIME_WIDTH))
+                .h(px(MINI_PLAYBACK_TIME_HEIGHT)),
+        )
+        .reuse_on_window_refresh()
+}
+
+fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyView {
+    AnyView::from(view)
+        .cached(
+            StyleRefinement::default()
+                .absolute()
+                .left(px(0.0))
+                .right(px(0.0))
+                .top(px(0.0))
+                .h(px(MINI_PROGRESS_INTERACTION_HEIGHT)),
+        )
+        .reuse_on_window_refresh()
 }
 
 fn mini_volume_slider(parent: WeakEntity<MusicApp>) -> InteractiveSliderState {
