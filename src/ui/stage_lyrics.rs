@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, FillMode, Global, HorizontalRevealEdge,
-    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Subscription,
+    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer,
     Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
 };
 use lucide_gpui::icon;
@@ -201,6 +201,7 @@ pub(super) struct StageLyricsView {
     anchor_bootstrap_pending: bool,
     stage_active: bool,
     scrubbing: bool,
+    geometry_retry_scheduled: bool,
     _ui_subscription: Subscription,
 }
 
@@ -242,6 +243,7 @@ impl StageLyricsView {
             anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
+            geometry_retry_scheduled: false,
             _ui_subscription: ui_subscription,
         }
     }
@@ -663,7 +665,29 @@ impl StageLyricsView {
         }
     }
 
-    fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &Context<Self>) {
+    fn schedule_geometry_retry(&mut self, cx: &mut Context<Self>) {
+        if self.geometry_retry_scheduled {
+            return;
+        }
+        self.geometry_retry_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            Timer::after(LYRIC_SAMPLE_INTERVAL).await;
+            let _ = this.update(cx, |this, cx| {
+                this.geometry_retry_scheduled = false;
+                if this.stage_active && this.has_timeline && this.scroll_target.is_some() {
+                    // StageLyrics is cached with reuse_on_window_refresh(). A window-only deadline
+                    // can therefore repaint the parent while reusing this stale child forever.
+                    // Notify the retained lyric entity itself after ListState has had one prepaint
+                    // pass so viewport/item geometry can materialize without reopening a global
+                    // animation-frame loop.
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_timeline || !self.stage_active || self.is_reading() {
             return;
         }
@@ -674,10 +698,7 @@ impl StageLyricsView {
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
             if self.anchor_bootstrap_pending && !window.is_minimized() {
-                window.request_invalidation_at(
-                    Instant::now() + LYRIC_SAMPLE_INTERVAL,
-                    cx,
-                );
+                self.schedule_geometry_retry(cx);
             }
             return;
         }
@@ -704,12 +725,10 @@ impl StageLyricsView {
 
             // Normal playback must never call scroll_to_reveal_item here. That mutates logical
             // scroll immediately and causes the whole lyric field to jump before the hand-off
-            // animation starts. Bootstrap stays invisible until this target has real geometry.
+            // animation starts. Retry only this retained lyrics entity after ListState has
+            // completed another prepaint pass and can expose target geometry.
             if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
-                window.request_invalidation_at(
-                    Instant::now() + LYRIC_SAMPLE_INTERVAL,
-                    cx,
-                );
+                self.schedule_geometry_retry(cx);
             }
             return;
         };
