@@ -42,7 +42,7 @@ pub(crate) struct WasmtimeComponentAdapter {
     runtime: Arc<PluginWasmtimeRuntime>,
     components: Arc<PluginComponentRegistry>,
     host: Arc<RwLock<PluginHostState>>,
-    compiled_cache: LazyCompiledComponentCache<wasmtime::component::Component>,
+    compiled_cache: Arc<LazyCompiledComponentCache<wasmtime::component::Component>>,
     ui_limits: UiSchemaLimits,
 }
 
@@ -57,7 +57,7 @@ impl WasmtimeComponentAdapter {
             runtime,
             components,
             host,
-            compiled_cache: LazyCompiledComponentCache::new(max_compiled_components),
+            compiled_cache: Arc::new(LazyCompiledComponentCache::new(max_compiled_components)),
             ui_limits: UiSchemaLimits::default(),
         }
     }
@@ -77,14 +77,21 @@ impl WasmtimeComponentAdapter {
                 .ok_or_else(|| anyhow!("未在 catalog 中发现插件: {plugin_id}"))?
         };
 
-        let snapshot = self.components.snapshot(&plugin)?;
+        // Component snapshot validation performs filesystem metadata/read work, while
+        // Component::from_binary may spend significant CPU compiling a cold guest. Neither belongs
+        // on the shared async workers that also drive plugin HTTP/lyrics/stream futures.
+        let components = self.components.clone();
+        let compiled_cache = self.compiled_cache.clone();
         let engine = self.runtime.engine().clone();
-        let component = self
-            .compiled_cache
-            .get_or_try_compile(&snapshot, |snapshot| {
+        let component = tokio::task::spawn_blocking(move || -> Result<_> {
+            let snapshot = components.snapshot(&plugin)?;
+            compiled_cache.get_or_try_compile(&snapshot, |snapshot| {
                 wasmtime::component::Component::from_binary(&engine, &snapshot.bytes)
                     .map_err(|error| anyhow!("编译插件 Component 失败: {error}"))
-            })?;
+            })
+        })
+        .await
+        .map_err(|error| anyhow!("插件 Component 编译任务异常退出: {error}"))??;
 
         let mut store = self.runtime.store(plugin_id)?;
         let linker = self.runtime.linker()?;
