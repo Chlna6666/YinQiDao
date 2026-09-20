@@ -3938,12 +3938,13 @@ impl MusicApp {
             _ => true,
         };
         let playback_state_changed = previous_state != self.snapshot.state;
+        let duration_changed = previous_duration_ms != self.snapshot.duration_ms;
         let volume_changed = (previous_volume - self.snapshot.volume).abs() > 0.0005;
+        let repeat_changed = previous_repeat != self.snapshot.repeat;
+        let shuffle_changed = previous_shuffle != self.snapshot.shuffle;
+        let queue_changed = previous_queue.as_ref() != self.snapshot.queue.as_ref();
         let root_visible_change = track_changed
-            || !Arc::ptr_eq(&previous_queue, &self.snapshot.queue)
-            || previous_duration_ms != self.snapshot.duration_ms
-            || previous_repeat != self.snapshot.repeat
-            || previous_shuffle != self.snapshot.shuffle
+            || queue_changed
             || previous_error.as_deref() != self.snapshot.error.as_deref();
 
         if self.drag_target.is_none() {
@@ -4007,10 +4008,13 @@ impl MusicApp {
 
         if playback_state_changed || transport_ack_pending {
             self.sync_transport_surfaces(cx);
-        } else if volume_changed {
-            // Volume ACK only changes retained transport controls. Rebuilding MusicApp here made a
-            // 60 Hz drag stream wake the entire shell even though no page geometry depends on it.
-            self.sync_transport_control_surfaces(cx);
+        } else {
+            if volume_changed || repeat_changed || shuffle_changed {
+                self.sync_transport_control_surfaces(cx);
+            }
+            if duration_changed {
+                self.notify_transport_position_surfaces(cx);
+            }
         }
         if root_visible_change {
             cx.notify();
