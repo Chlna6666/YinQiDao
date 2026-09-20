@@ -694,16 +694,16 @@ impl Render for StageLyricsView {
         let karaoke_epoch = self.karaoke_epoch;
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
-        let visual_list_state = self.list_state.clone();
         let viewport_bounds = self.list_state.viewport_bounds();
         let lines = self.lines.clone();
-        let view = cx.entity().downgrade();
-        let parent = self.parent.clone();
 
-        let lyrics = list(self.list_state.clone(), move |index, _window, _cx| {
-            let (edge_progress, previous_edge_progress) = visual_list_state
-                .bounds_for_item(index)
-                .map(|bounds| {
+        // Snapshot ListState geometry before constructing/rendering the List element. The list
+        // renderer mutably borrows its internal RefCell while invoking item callbacks, so querying
+        // bounds_for_item() from inside that callback would re-borrow the same RefCell and panic.
+        // Previous-frame measured geometry is exactly what FLIP/fade needs as the visual source.
+        let row_edge_progress = (0..lines.len())
+            .map(|index| {
+                self.list_state.bounds_for_item(index).map(|bounds| {
                     // ListState item bounds omit style padding.top while paint includes it.
                     let target_center_y =
                         f32::from(bounds.center().y) + LYRIC_LIST_PADDING_TOP;
@@ -713,7 +713,26 @@ impl Render for StageLyricsView {
                         lyric_viewport_edge_progress(previous_center_y, viewport_bounds),
                     )
                 })
-                .unwrap_or((0.0, 0.0));
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let row_edge_progress: Arc<[Option<(f32, f32)>]> = row_edge_progress.into();
+
+        let view = cx.entity().downgrade();
+        let parent = self.parent.clone();
+
+        let lyrics = list(self.list_state.clone(), move |index, _window, _cx| {
+            let (edge_progress, previous_edge_progress) = row_edge_progress
+                .get(index)
+                .and_then(|progress| *progress)
+                .unwrap_or_else(|| {
+                    // A newly materialized overdraw row has no previous-frame bounds yet. Use a
+                    // conservative distance fallback for this one frame; once measured, the next
+                    // render uses exact viewport geometry.
+                    let distance = index.abs_diff(active) as f32;
+                    let fallback = smoothstep01((distance - 3.0) / 5.0);
+                    (fallback, fallback)
+                });
 
             render_lyric_row(
                 &lines[index],
