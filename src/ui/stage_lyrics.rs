@@ -36,7 +36,7 @@ const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 // Blur/opacity now use the Nova GPU driver. Keep enough neighboring rows in the same hand-off so
 // edge depth never snaps while translation is still cascading.
-const LYRIC_BLUR_TRANSITION_RADIUS: usize = 2;
+const LYRIC_BLUR_TRANSITION_RADIUS: usize = 1;
 const LYRIC_OPACITY_TRANSITION_RADIUS: usize = 9;
 
 #[derive(Default)]
@@ -698,8 +698,14 @@ impl Render for StageLyricsView {
         let hovered_index = self.hovered_index;
         let focus_from_index = self.focus_from_index;
         let viewport_bounds = self.list_state.viewport_bounds();
-        let viewport_height = f32::from(viewport_bounds.size.height);
-        let (list_padding_top, list_padding_bottom) = lyric_list_spacers(viewport_height);
+        let measured_viewport_height = f32::from(viewport_bounds.size.height);
+        let provisional_viewport_height = if measured_viewport_height > 1.0 {
+            measured_viewport_height
+        } else {
+            f32::from(window.viewport_size().height)
+        };
+        let (list_padding_top, list_padding_bottom) =
+            lyric_list_spacers(provisional_viewport_height);
         let lines = self.lines.clone();
 
         // Snapshot ListState geometry before constructing/rendering the List element. The list
@@ -779,8 +785,7 @@ impl Render for StageLyricsView {
         .size_full()
         .pt(px(list_padding_top))
         .pb(px(list_padding_bottom))
-        .pr(px(8.0))
-        .opacity(if self.anchor_bootstrap_pending { 0.0 } else { 1.0 });
+        .pr(px(8.0));
 
         let lyrics = lyrics.into_any_element();
 
@@ -876,11 +881,12 @@ fn render_lyric_row(
     .opacity(resolved_alpha);
 
     if focus_started && !hovered {
-        let delay = lyric_row_stagger_delay(index, active, previous_active, scroll_from_y);
+        // Keep the depth field continuous. Stagger belongs to physical row translation only;
+        // delaying opacity/blur per row made the hand-off read as a sequence of discrete steps.
         if animate_blur {
-            text = text.transition(lyric_depth_transition(delay));
+            text = text.transition(lyric_depth_transition());
         } else if animate_opacity {
-            text = text.transition(lyric_opacity_transition(delay));
+            text = text.transition(lyric_opacity_transition());
         }
     }
     let text = text.into_any_element();
@@ -1362,22 +1368,18 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 
-fn lyric_depth_transition(delay: Duration) -> Transition {
+fn lyric_depth_transition() -> Transition {
     Transition::new(LYRIC_DEPTH_TRANSITION_DURATION)
-        .delay(delay)
-        .fill_mode(FillMode::Both)
-        .ease(Easing::OutCubic)
+        .ease(Easing::InOutCubic)
         .properties([
             TransitionProperty::Opacity,
             TransitionProperty::Blur,
         ])
 }
 
-fn lyric_opacity_transition(delay: Duration) -> Transition {
+fn lyric_opacity_transition() -> Transition {
     Transition::new(LYRIC_OPACITY_TRANSITION_DURATION)
-        .delay(delay)
-        .fill_mode(FillMode::Both)
-        .ease(Easing::OutCubic)
+        .ease(Easing::InOutCubic)
         .properties([TransitionProperty::Opacity])
 }
 
@@ -1610,8 +1612,8 @@ mod tests {
     #[test]
     fn lyric_transition_cost_is_limited_to_nearby_blur_rows() {
         assert!(lyric_blur_transition_bound(12, 12, Some(11), false));
-        assert!(lyric_blur_transition_bound(10, 12, Some(11), false));
-        assert!(!lyric_blur_transition_bound(8, 12, Some(11), false));
+        assert!(lyric_blur_transition_bound(11, 12, Some(11), false));
+        assert!(!lyric_blur_transition_bound(9, 12, Some(11), false));
 
         // Opacity is compositor-cheap and may cover the full visible focus neighborhood.
         assert!(lyric_opacity_transition_bound(8, 12, Some(11), false));
