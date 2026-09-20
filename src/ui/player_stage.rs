@@ -73,6 +73,44 @@ impl StageCoverRenderData {
     }
 }
 
+pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
+    let existing = cx
+        .try_global::<StagePlayerViewCache>()
+        .and_then(|cache| cache.view.clone());
+    let Some(stage) = existing else {
+        return;
+    };
+
+    let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
+    let artwork = track_id.and_then(|id| app.artworks.get(&id).cloned());
+    let key = StagePlayerRenderKey {
+        track_id,
+        artwork_ptr: artwork.as_ref().map_or(0, |bytes| bytes.as_ptr() as usize),
+        artwork_len: artwork.as_ref().map_or(0, |bytes| bytes.len()),
+    };
+    let playing = app.snapshot.state == PlaybackState::Playing;
+
+    stage.update(cx, |stage, cx| {
+        let mut changed = false;
+        if stage.key != key {
+            stage.key = key;
+            stage.cover = StageCoverRenderData::from_track(
+                app.snapshot.current_track.as_ref(),
+                artwork,
+            );
+            changed = true;
+        }
+        if stage.playing != playing {
+            stage.playing = playing;
+            let fluid = stage.fluid_background.clone();
+            fluid.update(cx, |view, cx| view.set_playing(playing, cx));
+        }
+        if changed {
+            cx.notify();
+        }
+    });
+}
+
 pub(super) fn render(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
