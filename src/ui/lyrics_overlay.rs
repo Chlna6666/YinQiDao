@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationProperty, Context, GpuMesh3d, GpuMesh3dDrawParameters,
     GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex, HorizontalRevealEdge,
-    IntoElement, Subscription, Task, Timer, TransformOrigin, WeakEntity, WgslShaderSource, Window,
+    IntoElement, Subscription, TransformOrigin, WeakEntity, WgslShaderSource, Window,
     WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
@@ -28,8 +28,6 @@ pub(crate) struct DesktopLyricsView {
     parent: WeakEntity<MusicApp>,
     _parent_subscription: Option<Subscription>,
     bounds_subscription: Option<Subscription>,
-    clock_task: Option<Task<()>>,
-    clock_armed: bool,
     hovered: bool,
     settings_open: bool,
     display_key: Option<(TrackId, usize)>,
@@ -42,11 +40,9 @@ pub(crate) struct DesktopLyricsView {
 impl DesktopLyricsView {
     pub(crate) fn new(parent: WeakEntity<MusicApp>, cx: &mut Context<Self>) -> Self {
         let parent_subscription = parent.upgrade().map(|parent_entity| {
-            cx.observe(&parent_entity, |this, _parent, cx| {
-                // GPUI Task cancellation is drop-driven. Any structural player/config/seek update
-                // cancels the old lyric deadline so the next render can arm the exact new boundary.
-                this.clock_task = None;
-                this.clock_armed = false;
+            cx.observe(&parent_entity, |_this, _parent, cx| {
+                // Structural transport/config changes re-render this View immediately. The next
+                // render computes a new GPUI deadline; stale deadlines are coalesced per entity.
                 cx.notify();
             })
         });
@@ -54,8 +50,6 @@ impl DesktopLyricsView {
             parent,
             _parent_subscription: parent_subscription,
             bounds_subscription: None,
-            clock_task: None,
-            clock_armed: false,
             hovered: false,
             settings_open: false,
             display_key: None,
@@ -80,34 +74,22 @@ impl DesktopLyricsView {
             }));
     }
 
-    fn ensure_transport_clock(&mut self, cx: &mut Context<Self>) {
-        if self.clock_armed {
-            return;
-        }
+    fn schedule_transport_deadline(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(parent) = self.parent.upgrade() else {
-            self.clock_task = None;
             return;
         };
         let Some(delay) = parent.read(cx).desktop_lyrics_next_boundary_delay() else {
-            self.clock_task = None;
             return;
         };
 
-        self.clock_armed = true;
-        self.clock_task = Some(cx.spawn(async move |this, cx| {
-            Timer::after(delay).await;
-            let _ = this.update(cx, |this, cx| {
-                this.clock_armed = false;
-                cx.notify();
-            });
-        }));
+        window.request_invalidation_at(Instant::now() + delay, cx);
     }
 }
 
 impl gpui::Render for DesktopLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_bounds_observer(window, cx);
-        self.ensure_transport_clock(cx);
+        self.schedule_transport_deadline(window, cx);
 
         let Some(parent) = self.parent.upgrade() else {
             return div().size_full().into_any_element();
