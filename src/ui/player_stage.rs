@@ -132,7 +132,7 @@ pub(super) fn render(
         }
         let view_events = ui_events.clone();
         let view = cx.new(move |cx| {
-            let ui_subscription = cx.subscribe(&view_events, |stage, _bridge, event, cx| {
+            let ui_subscription = cx.subscribe(&view_events, |stage: &mut StagePlayerView, _bridge, event, cx| {
                 if let AppUiEvent::PlaybackStateChanged(state) = *event {
                     let playing = state == PlaybackState::Playing;
                     if stage.playing != playing {

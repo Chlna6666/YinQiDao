@@ -5,24 +5,17 @@ use std::{
 
 use gpui::{
     Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render, Subscription,
-    StatefulInteractiveElement as _, WeakEntity, Window, div, hsla, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb,
+    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
-use crate::{
-    audio::{AudioEngine, PlayerCommand},
-    model::{AppPage, LibraryTab, PlaybackState, RepeatMode},
-};
+use crate::{audio::AudioEngine, model::PlaybackState};
 
 use super::{
     app_ui_events::{self, AppUiEvent, AppUiEventBridge},
     components::{SliderStyle, slider::InteractiveSliderState},
     shell::MusicApp,
-    theme::{
-        self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
-        elegant_gradient_for, press_transition, themed_icon,
-    },
+    theme::{self, TEXT_TERTIARY, TEXT_WHITE, elegant_gradient_for, themed_icon},
 };
 
 const MINI_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);

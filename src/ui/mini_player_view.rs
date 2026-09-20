@@ -203,7 +203,7 @@ pub(super) struct MiniPlayerView {
 }
 
 impl Render for MiniPlayerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let is_playing = self.key.playback_state == PlaybackState::Playing;
         let parent = self.parent.clone();
         let slider_volume = self.slider_volume;

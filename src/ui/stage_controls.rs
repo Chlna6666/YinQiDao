@@ -414,7 +414,7 @@ impl Render for StageControlsView {
             .on_hover({
                 let parent = parent.clone();
                 move |hovered: &bool, _, cx| {
-                    let _ = parent.update(cx, |app, app_cx| {
+                    let _ = parent.update(cx, |app, _app_cx| {
                         let changed = app.stage_controls_hovered != *hovered;
                         app.stage_controls_hovered = *hovered;
                         if changed && app.stage_suppress_wake_until.is_none() {

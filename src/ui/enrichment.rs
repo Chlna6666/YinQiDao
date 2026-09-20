@@ -241,13 +241,10 @@ impl MusicApp {
             this.update(cx, |this, cx| {
                 this.enrichment_loading.remove(&track_id);
                 this.enrichment_done.insert(track_id);
-                let mut lyrics_changed = false;
                 let mut artwork_changed = false;
                 let mut metadata_changed = false;
                 match outcome {
                     Ok(outcome) => {
-                        lyrics_changed =
-                            outcome.result.lyrics.is_some() || outcome.cached_lyrics.is_some();
                         artwork_changed = outcome.artwork.is_some();
                         metadata_changed = outcome.result.metadata.is_some();
 
