@@ -39,6 +39,7 @@ use super::{
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
 const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
+const ONLINE_SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(250);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // Hidden Stage preparation must never compete with the transport's startup window. The audible
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
@@ -234,6 +235,7 @@ pub struct MusicApp {
     pub(crate) online_search_results: Vec<crate::plugin::abi::RemoteTrack>,
     pub(crate) online_search_loading: bool,
     pub(crate) online_search_route: Option<crate::plugin::abi::PluginRoute>,
+    online_search_generation: u64,
     pub(crate) recent_plays: Vec<TrackId>,
     pub(crate) online_playback_meta: HashMap<
         TrackId,
@@ -843,6 +845,7 @@ impl MusicApp {
             online_search_results: Vec::new(),
             online_search_loading: false,
             online_search_route: None,
+            online_search_generation: 0,
             recent_plays: Vec::new(),
             online_playback_meta: initial_online_playback_meta,
             online_track_buffering: None,
@@ -2200,7 +2203,11 @@ impl MusicApp {
         }
         let query = self.search.clone();
         self.trigger_online_search(query, cx);
-        cx.notify();
+        if self.page == AppPage::Library && self.library_page.is_some() {
+            self.notify_library_surface(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn apply_scan(&mut self, report: ScanReport, cx: &mut Context<MusicApp>) {
@@ -3642,63 +3649,84 @@ impl MusicApp {
     }
 
     pub(crate) fn trigger_online_search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.online_search_generation = self.online_search_generation.wrapping_add(1);
+        let generation = self.online_search_generation;
+
         if !self.has_online_plugins {
             self.online_search_results.clear();
             self.online_search_loading = false;
-            cx.notify();
+            self.online_search_route = None;
+            self.notify_library_surface(cx);
             return;
         }
+
         let trimmed = query.trim().to_string();
         if trimmed.is_empty() {
             self.online_search_results.clear();
             self.online_search_loading = false;
-            cx.notify();
+            self.online_search_route = None;
+            self.notify_library_surface(cx);
             return;
         }
+
         self.online_search_loading = true;
-        cx.notify();
+        self.notify_library_surface(cx);
 
-        let task = Tokio::spawn_result(cx, async move {
-            let Some(frontend) = crate::plugin::frontend::global() else {
-                return Ok(None);
-            };
-            let plan = frontend.plan(
-                crate::plugin::abi::ServiceKind::Search,
-                &crate::plugin::abi::RoutingPolicy::default(),
-            )?;
-            if plan.eligible_routes.is_empty() {
-                return Ok(None);
+        cx.spawn(async move |this, cx| -> Result<()> {
+            Timer::after(ONLINE_SEARCH_DEBOUNCE_DELAY).await;
+
+            let is_current = this.update(cx, |app, _cx| {
+                app.online_search_generation == generation
+            })?;
+            if !is_current {
+                return Ok(());
             }
-            let route = plan.eligible_routes[0].clone();
-            let search_res = frontend
-                .search(&trimmed, 30, &crate::plugin::abi::RoutingPolicy::default())
-                .await?;
-            let tracks = search_res
-                .batches
-                .into_iter()
-                .flat_map(|b| b.tracks)
-                .collect::<Vec<_>>();
-            Ok(Some((route, tracks)))
-        });
 
-        cx.spawn(async move |this, cx| {
-            if let Ok(Some((route, tracks))) = task.await {
-                let _ = this.update(cx, |app, cx| {
-                    let urls = tracks.iter().filter_map(|t| t.cover_url.clone()).collect();
-                    crate::ui::image_cache::prefetch_urls(urls, cx);
+            let task = Tokio::spawn_result(cx, async move {
+                let Some(frontend) = crate::plugin::frontend::global() else {
+                    return Ok(None);
+                };
+                let plan = frontend.plan(
+                    crate::plugin::abi::ServiceKind::Search,
+                    &crate::plugin::abi::RoutingPolicy::default(),
+                )?;
+                if plan.eligible_routes.is_empty() {
+                    return Ok(None);
+                }
+                let route = plan.eligible_routes[0].clone();
+                let search_res = frontend
+                    .search(&trimmed, 30, &crate::plugin::abi::RoutingPolicy::default())
+                    .await?;
+                let tracks = search_res
+                    .batches
+                    .into_iter()
+                    .flat_map(|batch| batch.tracks)
+                    .collect::<Vec<_>>();
+                Ok(Some((route, tracks)))
+            });
 
-                    app.online_search_route = Some(route);
-                    app.online_search_results = tracks;
-                    app.online_search_loading = false;
-                    app.bump_ui_content_revision();
-                    cx.notify();
-                });
-            } else {
-                let _ = this.update(cx, |app, cx| {
-                    app.online_search_loading = false;
-                    cx.notify();
-                });
-            }
+            let result = task.await;
+            this.update(cx, |app, cx| {
+                if app.online_search_generation != generation {
+                    return;
+                }
+
+                match result {
+                    Ok(Some((route, tracks))) => {
+                        let urls = tracks.iter().filter_map(|track| track.cover_url.clone()).collect();
+                        crate::ui::image_cache::prefetch_urls(urls, cx);
+                        app.online_search_route = Some(route);
+                        app.online_search_results = tracks;
+                    }
+                    _ => {
+                        app.online_search_route = None;
+                        app.online_search_results.clear();
+                    }
+                }
+                app.online_search_loading = false;
+                app.notify_library_surface(cx);
+            })?;
+            Ok(())
         })
         .detach();
     }
