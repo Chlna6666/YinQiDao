@@ -1962,8 +1962,11 @@ impl MusicApp {
     pub(crate) fn seek_relative(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
         let duration = self.snapshot.duration_ms as i64;
         let next = (self.snapshot.position_ms as i64 + delta_ms).clamp(0, duration.max(0)) as u64;
+        self.snapshot.position_ms = next;
+        self.position_ms = next;
+        self.config.position_ms = next;
         self.send(PlayerCommand::Seek(Duration::from_millis(next)));
-        cx.notify();
+        self.notify_transport_position_surfaces(cx);
     }
 
     pub(crate) fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
@@ -1972,23 +1975,26 @@ impl MusicApp {
             RepeatMode::All => RepeatMode::One,
             RepeatMode::One => RepeatMode::Off,
         };
+        self.snapshot.repeat = self.config.repeat;
         self.send(PlayerCommand::SetRepeat(self.config.repeat));
         self.save_config();
-        cx.notify();
+        self.sync_transport_control_surfaces(cx);
     }
 
     pub(crate) fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.config.shuffle = !self.config.shuffle;
+        self.snapshot.shuffle = self.config.shuffle;
         self.send(PlayerCommand::SetShuffle(self.config.shuffle));
         self.save_config();
-        cx.notify();
+        self.sync_transport_control_surfaces(cx);
     }
 
     pub(crate) fn adjust_volume(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.config.volume = (self.config.volume + delta).clamp(0.0, 1.0);
+        self.pending_volume_ratio = Some(self.config.volume);
         self.send(PlayerCommand::SetVolume(self.config.volume));
         self.save_config();
-        cx.notify();
+        self.sync_transport_control_surfaces(cx);
     }
 
     pub(crate) fn apply_eq(&mut self, preset: EqPreset, cx: &mut Context<Self>) {
@@ -3864,24 +3870,42 @@ impl MusicApp {
         .detach();
     }
 
-    fn sync_transport_surfaces(&mut self, cx: &mut Context<MusicApp>) {
-        let playing = self.snapshot.state == PlaybackState::Playing;
-
+    fn sync_transport_control_surfaces(&mut self, cx: &mut Context<MusicApp>) {
         if let (Some(progress), Some(time)) =
             (self.playback_progress.clone(), self.playback_time.clone())
         {
             // MiniPlayerView::view is a cached entity synchronizer. Calling it here updates only the
             // retained transport surface; it does not rebuild the MusicApp shell.
-            let _ = mini_player_view::view(self, cx, progress, time.clone());
-            time.update(cx, |_, cx| cx.notify());
+            let _ = mini_player_view::view(self, cx, progress, time);
         }
 
         if self.stage_prepared || self.stage_open || self.stage_animating {
             let _ = stage_controls::view(self, cx);
         }
+    }
+
+    fn sync_transport_surfaces(&mut self, cx: &mut Context<MusicApp>) {
+        let playing = self.snapshot.state == PlaybackState::Playing;
+        self.sync_transport_control_surfaces(cx);
+
+        if let Some(time) = self.playback_time.clone() {
+            time.update(cx, |_, cx| cx.notify());
+        }
 
         if let Some(fluid) = self.fluid_background.clone() {
             fluid.update(cx, |view, cx| view.set_playing(playing, cx));
+        }
+    }
+
+    fn notify_transport_position_surfaces(&mut self, cx: &mut Context<MusicApp>) {
+        if let Some(progress) = self.playback_progress.clone() {
+            progress.update(cx, |_, cx| cx.notify());
+        }
+        if let Some(time) = self.playback_time.clone() {
+            time.update(cx, |_, cx| cx.notify());
+        }
+        if self.stage_prepared || self.stage_open || self.stage_animating {
+            let _ = stage_controls::view(self, cx);
         }
     }
 
@@ -3986,14 +4010,7 @@ impl MusicApp {
         } else if volume_changed {
             // Volume ACK only changes retained transport controls. Rebuilding MusicApp here made a
             // 60 Hz drag stream wake the entire shell even though no page geometry depends on it.
-            if let (Some(progress), Some(time)) =
-                (self.playback_progress.clone(), self.playback_time.clone())
-            {
-                let _ = mini_player_view::view(self, cx, progress, time);
-            }
-            if self.stage_prepared || self.stage_open || self.stage_animating {
-                let _ = stage_controls::view(self, cx);
-            }
+            self.sync_transport_control_surfaces(cx);
         }
         if root_visible_change {
             cx.notify();
