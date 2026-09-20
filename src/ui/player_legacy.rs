@@ -55,6 +55,7 @@ pub(super) struct PlaybackProgress {
     drag_ratio_bits: Option<u32>,
     local_drag_ratio: Option<f32>,
     timer_started: bool,
+    slider: Option<InteractiveSliderState>,
 }
 
 impl PlaybackProgress {
@@ -74,7 +75,62 @@ impl PlaybackProgress {
             drag_ratio_bits: None,
             local_drag_ratio: None,
             timer_started: false,
+            slider: None,
         }
+    }
+
+    fn ensure_slider(&mut self, cx: &mut Context<Self>) {
+        if self.slider.is_some() {
+            return;
+        }
+
+        let parent = self.parent.clone();
+        let this = cx.weak_entity();
+        self.slider = Some(InteractiveSliderState::new(
+            "mini-progress-track",
+            {
+                let parent = parent.clone();
+                let this = this.clone();
+                move |ratio, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.local_drag_ratio = None;
+                        cx.notify();
+                    });
+                    let _ = parent.update(cx, |app, app_cx| {
+                        app.seek_to_ratio(ratio, app_cx);
+                    });
+                }
+            },
+            {
+                let this = this.clone();
+                move |ratio, cx| {
+                    let ratio = ratio.clamp(0.0, 1.0);
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .local_drag_ratio
+                            .is_some_and(|current| (current - ratio).abs() < 0.001)
+                        {
+                            return;
+                        }
+                        this.local_drag_ratio = Some(ratio);
+                        cx.notify();
+                    });
+                }
+            },
+            {
+                let parent = parent.clone();
+                let this = this.clone();
+                move |ratio, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.local_drag_ratio = None;
+                        cx.notify();
+                    });
+                    let _ = parent.update(cx, |app, app_cx| {
+                        app.seek_to_ratio(ratio, app_cx);
+                    });
+                }
+            },
+        ));
     }
 
     pub(super) fn sync(
@@ -178,52 +234,11 @@ impl Render for PlaybackProgress {
             }
         });
 
-        let parent = self.parent.clone();
-        let this = cx.weak_entity();
-        let slider = InteractiveSliderState::new(
-            "mini-progress-track",
-            {
-                let parent = parent.clone();
-                let this = this.clone();
-                move |ratio, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.local_drag_ratio = None;
-                        cx.notify();
-                    });
-                    let _ = parent.update(cx, |app, app_cx| {
-                        app.seek_to_ratio(ratio, app_cx);
-                    });
-                }
-            },
-            {
-                let this = this.clone();
-                move |ratio, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        if this
-                            .local_drag_ratio
-                            .is_some_and(|current| (current - ratio).abs() < 0.001)
-                        {
-                            return;
-                        }
-                        this.local_drag_ratio = Some(ratio.clamp(0.0, 1.0));
-                        cx.notify();
-                    });
-                }
-            },
-            {
-                let parent = parent.clone();
-                let this = this.clone();
-                move |ratio, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.local_drag_ratio = None;
-                        cx.notify();
-                    });
-                    let _ = parent.update(cx, |app, app_cx| {
-                        app.seek_to_ratio(ratio, app_cx);
-                    });
-                }
-            },
-        );
+        self.ensure_slider(cx);
+        let slider = self
+            .slider
+            .as_ref()
+            .expect("mini progress slider must be initialized");
 
         // A multi-minute renderer animation keeps the entire window in PresentationAnimation
         // mode for the whole song. At high refresh rates that still generates/presents frames
