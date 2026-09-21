@@ -247,6 +247,7 @@ impl StageLyricsView {
             }
             AppUiEvent::ProgressChanged { position_ms, ratio } => {
                 let scrubbing = ratio.is_some();
+                let was_scrubbing = self.scrubbing;
                 let mut changed = false;
                 if self.scrubbing != scrubbing {
                     self.scrubbing = scrubbing;
@@ -267,6 +268,18 @@ impl StageLyricsView {
                     self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
                 }
                 changed |= active_changed || word_changed;
+                if was_scrubbing && !scrubbing {
+                    // Final seek is a new transport anchor, not a continuation of the pointer
+                    // preview. Drop preview-era cascade state and let normal playback sampling
+                    // resume from exactly the committed lyric.
+                    self.focus_from_index = None;
+                    self.focus_started_at = None;
+                    self.last_scroll_frame = None;
+                    self.scroll_target = self.active_index;
+                    self.hovered_index = None;
+                    self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
+                    changed = true;
+                }
                 if changed {
                     cx.notify();
                 }

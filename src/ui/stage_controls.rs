@@ -32,7 +32,7 @@ const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
-const STAGE_TRANSPORT_HEIGHT: f32 = 32.0;
+const STAGE_TRANSPORT_HEIGHT: f32 = 48.0;
 const STAGE_PROGRESS_HEIGHT: f32 = 30.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -390,45 +390,15 @@ impl Render for StageControlsView {
         let volume = self.volume_drag_ratio.unwrap_or(self.volume);
         let parent = self.parent.clone();
 
-        // Opacity is a GPU visual transition in the pinned GPUI fork. The View only renders at the
-        // semantic endpoints; the renderer interpolates the dock without a per-frame CPU RAF.
-        div()
-            .id("stage-bottom-dock")
-            // Own an explicit blocking hitbox above the lyric/background surface. Without this,
-            // GPUI can resolve the retained sibling behind this Entity for mouse input even though
-            // the dock is painted later and visually on top.
-            .occlude()
+        let transport_buttons = div()
+            .id("stage-transport-buttons")
             .w_full()
+            .h(px(48.0))
             .flex_none()
-            .opacity(visibility)
-            .transition(stage_chrome_fade_transition())
             .flex()
             .items_center()
-            .gap_5()
-            .px_6()
-            .py_3()
-            .rounded_2xl()
-            .bg(hsla(0.0, 0.0, 0.0, 0.40))
-            .border_1()
-            .border_color(hsla(0.0, 0.0, 1.0, 0.10))
-            .on_hover({
-                let parent = parent.clone();
-                move |hovered: &bool, _, cx| {
-                    let _ = parent.update(cx, |app, _app_cx| {
-                        let changed = app.stage_controls_hovered != *hovered;
-                        app.stage_controls_hovered = *hovered;
-                        if changed && app.stage_suppress_wake_until.is_none() {
-                            // Hover state only affects Stage chrome idle policy. The dock already
-                            // owns this event and remains visible locally, so there is no reason to
-                            // rebuild the MusicApp root.
-                            app.stage_last_user_activity = Instant::now();
-                        }
-                    });
-                }
-            })
-            // Keep the transport on a fixed retained-layout boundary. Its second/progress clocks
-            // may update independently without invalidating the whole Stage controls row.
-            .child(cached_stage_transport(self.transport.clone()))
+            .justify_center()
+            .gap_4()
             .child(control_button("stage-prev-btn", icon!(skip_back), {
                 let parent = parent.clone();
                 move |_, _, cx| {
@@ -442,14 +412,16 @@ impl Render for StageControlsView {
             .child(
                 div()
                     .id("stage-play-btn")
-                    .size(px(46.0))
+                    .size(px(48.0))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
                     .bg(ACCENT_RED)
-                    .active(|style| style.scale(0.95))
+                    .hover(|style| style.opacity(0.92))
+                    .active(|style| style.scale(0.94))
+                    .transition(theme::press_transition())
                     .child(themed_icon(
                         if playing { icon!(pause) } else { icon!(play) },
                         22.0,
@@ -475,70 +447,110 @@ impl Render for StageControlsView {
                         app.next(app_cx);
                     });
                 }
-            }))
+            }));
+
+        let volume_row = div()
+            .id("stage-volume-row")
+            .w_full()
+            .h(px(24.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
             .child(
                 div()
-                    .id("stage-volume-group")
+                    .id("stage-volume-mute")
+                    .size(px(24.0))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
+                    .justify_center()
                     .rounded_full()
-                    .bg(hsla(0.0, 0.0, 1.0, 0.08))
-                    .child(
-                        div()
-                            .id("stage-volume-mute")
-                            .cursor_pointer()
-                            .child(themed_icon(
-                                if volume <= 0.001 {
-                                    icon!(volume_x)
-                                } else if volume < 0.5 {
-                                    icon!(volume_1)
-                                } else {
-                                    icon!(volume_2)
-                                },
-                                16.0,
-                                hsla(0.0, 0.0, 1.0, 0.82),
-                            ))
-                            .on_mouse_down(gpui::MouseButton::Left, {
-                                let parent = parent.clone();
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let _ = parent.update(cx, |app, app_cx| {
-                                        app.wake_stage_controls_immediately(app_cx);
-                                        app.pending_volume_ratio = None;
-                                        app.toggle_mute(app_cx);
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        self.volume_slider
-                            .as_ref()
-                            .expect("stage volume slider must be initialized")
-                            .render(volume, SliderStyle::stage_volume())
-                            .w(px(72.0))
-                            .on_scroll_wheel({
-                                let parent = parent.clone();
-                                move |event: &gpui::ScrollWheelEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    let delta = event.delta.pixel_delta(px(48.0)).y;
-                                    let _ = parent.update(cx, |app, app_cx| {
-                                        if delta < px(0.0) {
-                                            app.adjust_volume(0.04, app_cx);
-                                        } else if delta > px(0.0) {
-                                            app.adjust_volume(-0.04, app_cx);
-                                        }
-                                        app.wake_stage_controls_immediately(app_cx);
-                                    });
-                                }
-                            }),
-                    ),
+                    .cursor_pointer()
+                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.10)))
+                    .child(themed_icon(
+                        if volume <= 0.001 {
+                            icon!(volume_x)
+                        } else if volume < 0.5 {
+                            icon!(volume_1)
+                        } else {
+                            icon!(volume_2)
+                        },
+                        14.0,
+                        hsla(0.0, 0.0, 1.0, 0.72),
+                    ))
+                    .on_mouse_down(gpui::MouseButton::Left, {
+                        let parent = parent.clone();
+                        move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = parent.update(cx, |app, app_cx| {
+                                app.wake_stage_controls_immediately(app_cx);
+                                app.pending_volume_ratio = None;
+                                app.toggle_mute(app_cx);
+                            });
+                        }
+                    }),
             )
+            .child(
+                self.volume_slider
+                    .as_ref()
+                    .expect("stage volume slider must be initialized")
+                    .render(volume, SliderStyle::stage_volume())
+                    .flex_1()
+                    .min_w(px(80.0))
+                    .on_scroll_wheel({
+                        let parent = parent.clone();
+                        move |event: &gpui::ScrollWheelEvent, _, cx| {
+                            cx.stop_propagation();
+                            let delta = event.delta.pixel_delta(px(48.0)).y;
+                            let _ = parent.update(cx, |app, app_cx| {
+                                if delta < px(0.0) {
+                                    app.adjust_volume(0.04, app_cx);
+                                } else if delta > px(0.0) {
+                                    app.adjust_volume(-0.04, app_cx);
+                                }
+                                app.wake_stage_controls_immediately(app_cx);
+                            });
+                        }
+                    }),
+            )
+            .child(themed_icon(
+                icon!(volume_2),
+                14.0,
+                hsla(0.0, 0.0, 1.0, 0.46),
+            ));
+
+        // Apple Music-style distribution: progress/time, playback controls, and volume are separate
+        // rows. Slider hit-testing never shares a flex row with clock labels or transport buttons.
+        div()
+            .id("stage-bottom-dock")
+            .w_full()
+            .flex_none()
+            .opacity(visibility)
+            .transition(stage_chrome_fade_transition())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .on_hover({
+                let parent = parent.clone();
+                move |hovered: &bool, _, cx| {
+                    let _ = parent.update(cx, |app, _app_cx| {
+                        let changed = app.stage_controls_hovered != *hovered;
+                        app.stage_controls_hovered = *hovered;
+                        if changed && app.stage_suppress_wake_until.is_none() {
+                            app.stage_last_user_activity = Instant::now();
+                        }
+                    });
+                }
+            })
+            .child(cached_stage_transport(self.transport.clone()))
+            .child(transport_buttons)
+            .child(volume_row)
             .into_any_element()
     }
 }
+
 
 pub(super) struct StageTitlebarView {
     parent: WeakEntity<MusicApp>,
@@ -935,26 +947,28 @@ impl Render for StageTransportView {
         }
 
         div()
+            .w_full()
+            .h_full()
             .flex()
-            .flex_1()
-            .min_w(px(0.0))
-            .items_center()
-            .gap_5()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
-                    .child(format_time(position)),
-            )
+            .flex_col()
+            .gap_1()
             .child(cached_stage_progress(progress))
             .child(
                 div()
+                    .w_full()
+                    .h(px(14.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.68))
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.62))
+                    .child(format_time(position))
                     .child(format_remaining_time(position, duration_ms)),
             )
     }
 }
+
 
 struct StageProgressView {
     parent: WeakEntity<MusicApp>,
@@ -1060,40 +1074,51 @@ impl StageProgressView {
         }
 
         let parent = self.parent.clone();
-        let click_parent = parent.clone();
-        let drag_parent = parent.clone();
+        let press_parent = parent.clone();
         let commit_parent = parent;
-        let this_click = cx.entity().downgrade();
-        let this_drag = this_click.clone();
-        let this_commit = this_click.clone();
-        let ui_events = self.ui_events.clone();
+        let this_press = cx.entity().downgrade();
+        let this_drag = this_press.clone();
+        let this_commit = this_press.clone();
+        let press_events = self.ui_events.clone();
+        let drag_events = self.ui_events.clone();
 
         self.slider = Some(InteractiveSliderState::new(
             "stage-progress-track",
             move |ratio, cx| {
-                let _ = this_click.update(cx, |this, cx| {
-                    this.local_dragging = false;
-                    this.drag_progress_ratio = None;
+                let ratio = ratio.clamp(0.0, 1.0);
+                let result = this_press.update(cx, |this, cx| {
+                    this.local_dragging = true;
+                    this.drag_progress_ratio = Some(ratio);
+                    this.last_preview_emit_at = Instant::now();
+                    let duration_ms = this
+                        .engine
+                        .as_ref()
+                        .map_or(0, |engine| engine.progress().2);
+                    let position_ms = (duration_ms as f32 * ratio).round() as u64;
                     cx.notify();
+                    AppUiEvent::ProgressChanged {
+                        position_ms,
+                        ratio: Some(ratio),
+                    }
                 });
-                let _ = click_parent.update(cx, |app, app_cx| {
-                    app.seeking = false;
-                    app.wake_stage_controls_immediately(app_cx);
-                    app.seek_to_ratio(ratio, app_cx);
+                if let Ok(event) = result {
+                    app_ui_events::emit_from_app(&press_events, event, cx);
+                }
+                let _ = press_parent.update(cx, |app, _app_cx| {
+                    app.seeking = true;
+                    app.stage_last_user_activity = Instant::now();
                 });
             },
             move |ratio, cx| {
                 let ratio = ratio.clamp(0.0, 1.0);
                 let result = this_drag.update(cx, |this, cx| {
-                    if this.local_dragging
-                        && this
-                            .drag_progress_ratio
-                            .is_some_and(|current| (current - ratio).abs() < 0.0015)
+                    if this
+                        .drag_progress_ratio
+                        .is_some_and(|current| (current - ratio).abs() < 0.0015)
                     {
                         return None;
                     }
 
-                    let began = !this.local_dragging;
                     this.local_dragging = true;
                     this.drag_progress_ratio = Some(ratio);
                     let now = Instant::now();
@@ -1103,7 +1128,7 @@ impl StageProgressView {
                     cx.notify();
 
                     if !should_emit {
-                        return Some((None, began));
+                        return None;
                     }
                     this.last_preview_emit_at = now;
                     let duration_ms = this
@@ -1111,38 +1136,30 @@ impl StageProgressView {
                         .as_ref()
                         .map_or(0, |engine| engine.progress().2);
                     let position_ms = (duration_ms as f32 * ratio).round() as u64;
-                    Some((
-                        Some(AppUiEvent::ProgressChanged {
-                            position_ms,
-                            ratio: Some(ratio),
-                        }),
-                        began,
-                    ))
+                    Some(AppUiEvent::ProgressChanged {
+                        position_ms,
+                        ratio: Some(ratio),
+                    })
                 });
 
-                let Ok(Some((event, began))) = result else {
-                    return;
-                };
-                if began {
-                    let _ = drag_parent.update(cx, |app, _app_cx| {
-                        app.seeking = true;
-                        app.stage_last_user_activity = Instant::now();
-                    });
-                }
-                if let Some(event) = event {
-                    app_ui_events::emit_from_app(&ui_events, event, cx);
+                if let Ok(Some(event)) = result {
+                    app_ui_events::emit_from_app(&drag_events, event, cx);
                 }
             },
             move |ratio, cx| {
+                let ratio = ratio.clamp(0.0, 1.0);
                 let _ = this_commit.update(cx, |this, cx| {
                     this.local_dragging = false;
                     this.drag_progress_ratio = None;
                     cx.notify();
                 });
                 let _ = commit_parent.update(cx, |app, app_cx| {
+                    // One final seek at release. The ProgressChanged(ratio=None) emitted by
+                    // seek_to_ratio closes the scrub lifecycle for lyrics and clocks.
                     app.seeking = false;
-                    app.wake_stage_controls_immediately(app_cx);
+                    app.stage_last_user_activity = Instant::now();
                     app.seek_to_ratio(ratio, app_cx);
+                    app.wake_stage_controls_immediately(app_cx);
                 });
             },
         ));
@@ -1187,8 +1204,8 @@ impl Render for StageProgressView {
             .as_ref()
             .expect("stage progress slider must be initialized")
             .render(progress_ratio, SliderStyle::stage_progress())
-            .flex_1()
-            .min_w(px(80.0))
+            .w_full()
+            .h_full()
             .into_any_element()
     }
 }
@@ -1197,8 +1214,8 @@ fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyView {
     AnyView::from(view)
         .cached(
             StyleRefinement::default()
-                .flex_1()
-                .min_w(px(0.0))
+                .w_full()
+                .flex_none()
                 .h(px(STAGE_TRANSPORT_HEIGHT)),
         )
         .reuse_on_window_refresh()
@@ -1208,8 +1225,8 @@ fn cached_stage_progress(view: Entity<StageProgressView>) -> AnyView {
     AnyView::from(view)
         .cached(
             StyleRefinement::default()
-                .flex_1()
-                .min_w(px(80.0))
+                .w_full()
+                .flex_none()
                 .h(px(STAGE_PROGRESS_HEIGHT)),
         )
         .reuse_on_window_refresh()

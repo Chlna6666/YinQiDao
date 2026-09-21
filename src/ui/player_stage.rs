@@ -217,7 +217,7 @@ impl Render for StagePlayerView {
             .cached(
                 StyleRefinement::default()
                     .w_full()
-                    .h(px(72.0)),
+                    .h(px(132.0)),
             )
             .reuse_on_window_refresh();
         div()
@@ -247,20 +247,22 @@ impl Render for StagePlayerView {
                             .min_h(px(0.0))
                             .gap_12()
                             .items_center()
-                            // The transport dock is an overlay, not a layout sibling. Lyrics keep
-                            // painting to the bottom edge and remain visible underneath the
-                            // translucent dock like Apple Music, while the dock's occlude() hitbox
-                            // still owns pointer input above the lyric surface.
-                            .child(stage_cover(&self.cover))
-                            .child(lyrics)
+                            // Apple Music-style split: artwork/metadata/transport form the
+                            // complete left playback column; lyrics own the right column.
                             .child(
                                 div()
-                                    .absolute()
-                                    .left(px(0.0))
-                                    .right(px(0.0))
-                                    .bottom(px(0.0))
+                                    .w(px(380.0))
+                                    .h_full()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_4()
+                                    .child(stage_cover(&self.cover))
                                     .child(controls),
-                            ),
+                            )
+                            .child(lyrics),
                     ),
             )
     }
@@ -307,7 +309,7 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
         .child(cover);
 
     div()
-        .w(px(380.0))
+        .w_full()
         .flex_none()
         .flex()
         .flex_col()
