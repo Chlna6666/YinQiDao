@@ -122,8 +122,7 @@ impl SliderStyle {
 
 #[derive(Debug, Default, PartialEq)]
 struct SliderInteractionState {
-    pressed_id: Option<ElementId>,
-    dragging: bool,
+    active_drag_id: Option<ElementId>,
 }
 
 impl Global for SliderInteractionState {}
@@ -141,86 +140,28 @@ struct SliderDrag {
     on_change: SliderCallback,
 }
 
-#[derive(Clone)]
-pub struct InteractiveSliderState {
-    id: ElementId,
-    hover_group: SharedString,
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    on_click: SliderCallback,
-    on_drag: SliderCallback,
-    on_drag_end: SliderCallback,
+fn is_active_drag(id: &ElementId, cx: &App) -> bool {
+    cx.try_global::<SliderInteractionState>()
+        .is_some_and(|state| state.active_drag_id.as_ref() == Some(id))
 }
 
-impl InteractiveSliderState {
-    pub fn new(
-        id: impl Into<ElementId>,
-        on_click: impl Fn(f32, &mut App) + 'static,
-        on_drag: impl Fn(f32, &mut App) + 'static,
-        on_drag_end: impl Fn(f32, &mut App) + 'static,
-    ) -> Self {
-        let id = id.into();
-        let hover_group = SharedString::from(format!("slider-hover-{id}"));
-        Self {
-            id,
-            hover_group,
-            bounds: Rc::new(Cell::new(None)),
-            on_click: Rc::new(on_click),
-            on_drag: Rc::new(on_drag),
-            on_drag_end: Rc::new(on_drag_end),
-        }
-    }
-
-    pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
-        interactive_slider_state(self, ratio, style)
-    }
-}
-
-fn begin_pointer_press_state(state: &mut SliderInteractionState, id: &ElementId) {
-    state.pressed_id = Some(id.clone());
-    state.dragging = false;
-}
-
-fn mark_pointer_dragging_state(state: &mut SliderInteractionState, id: &ElementId) -> bool {
-    if state.pressed_id.as_ref() != Some(id) {
-        return false;
-    }
-    state.dragging = true;
-    true
-}
-
-fn end_pointer_press_state(state: &mut SliderInteractionState, id: &ElementId) -> Option<bool> {
-    if state.pressed_id.as_ref() != Some(id) {
-        return None;
-    }
-    let dragging = state.dragging;
-    state.pressed_id = None;
-    state.dragging = false;
-    Some(dragging)
-}
-
-fn begin_pointer_press(id: &ElementId, cx: &mut App) {
+fn begin_active_drag(id: &ElementId, cx: &mut App) {
     if !cx.has_global::<SliderInteractionState>() {
         cx.set_global(SliderInteractionState::default());
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        begin_pointer_press_state(state, id);
+        state.active_drag_id = Some(id.clone());
     });
 }
 
-fn mark_pointer_dragging(id: &ElementId, cx: &mut App) -> bool {
-    if !cx.has_global::<SliderInteractionState>() {
+fn end_active_drag(id: &ElementId, cx: &mut App) -> bool {
+    if !is_active_drag(id, cx) {
         return false;
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        mark_pointer_dragging_state(state, id)
-    })
-}
-
-fn end_pointer_press(id: &ElementId, cx: &mut App) -> Option<bool> {
-    if !cx.has_global::<SliderInteractionState>() {
-        return None;
-    }
-    cx.update_global(|state: &mut SliderInteractionState, _cx| end_pointer_press_state(state, id))
+        state.active_drag_id = None;
+    });
+    true
 }
 
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
@@ -504,7 +445,7 @@ fn interactive_slider_state(
             // Match the proven BMCBL slider semantics: a track press updates immediately, while
             // subsequent drag samples stay in the preview callback and mouse-up commits the drag.
             cx.stop_propagation();
-            begin_pointer_press(&id_for_down, cx);
+            begin_active_drag(&id_for_down, cx);
             if let Some(bounds) = bounds_for_down.get() {
                 (click_for_down)(
                     horizontal_ratio(event.position.x, bounds, style.thumb_size),
@@ -513,35 +454,31 @@ fn interactive_slider_state(
             }
         })
         .on_mouse_down_out(move |_event, _window, cx| {
-            let _ = end_pointer_press(&id_for_down_out, cx);
+            let _ = end_active_drag(&id_for_down_out, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
+            if !end_active_drag(&id_for_up, cx) {
                 return;
-            };
+            }
             let Some(bounds) = bounds_for_up.get() else {
                 return;
             };
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
-            if was_dragging {
-                (drag_for_up)(ratio, cx);
-            }
+            (drag_for_up)(ratio, cx);
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
-            let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
+            if !end_active_drag(&id_for_up_out, cx) {
+                return;
+            }
+            let Some(bounds) = bounds_for_up_out.get() else {
                 return;
             };
-            if was_dragging {
-                let Some(bounds) = bounds_for_up_out.get() else {
-                    return;
-                };
-                (drag_for_up_out)(
-                    horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
-            }
+            (drag_for_up_out)(
+                horizontal_ratio(event.position.x, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_drag_move::<SliderDrag>(move |event, _window, cx| {
             // Do not let high-frequency drag motion bubble into stage-drawer-root's generic
@@ -551,10 +488,7 @@ fn interactive_slider_state(
                 let drag = event.drag(cx);
                 (drag.id.clone(), drag.axis, drag.on_change.clone())
             };
-            if drag_id != id_for_drag {
-                return;
-            }
-            if !mark_pointer_dragging(&drag_id, cx) {
+            if drag_id != id_for_drag || !is_active_drag(&drag_id, cx) {
                 return;
             }
             let value = match axis {
@@ -611,52 +545,45 @@ pub fn interactive_vertical_slider(
             let Some(bounds) = bounds_for_down.get() else {
                 return;
             };
-            begin_pointer_press(&id_for_down, cx);
+            begin_active_drag(&id_for_down, cx);
             (change_for_down)(
                 vertical_ratio(event.position.y, bounds, style.thumb_size),
                 cx,
             );
         })
         .on_mouse_down_out(move |_event, _window, cx| {
-            let _ = end_pointer_press(&id_for_down_out, cx);
+            let _ = end_active_drag(&id_for_down_out, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
-            let Some(was_dragging) = end_pointer_press(&id_for_up, cx) else {
+            if !end_active_drag(&id_for_up, cx) {
                 return;
-            };
+            }
             let Some(bounds) = bounds_for_up.get() else {
                 return;
             };
-            if was_dragging {
-                (change_for_up)(
-                    vertical_ratio(event.position.y, bounds, style.thumb_size),
-                    cx,
-                );
-            }
+            (change_for_up)(
+                vertical_ratio(event.position.y, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
-            let Some(was_dragging) = end_pointer_press(&id_for_up_out, cx) else {
+            if !end_active_drag(&id_for_up_out, cx) {
                 return;
-            };
+            }
             let Some(bounds) = bounds_for_up_out.get() else {
                 return;
             };
-            if was_dragging {
-                (change_for_up_out)(
-                    vertical_ratio(event.position.y, bounds, style.thumb_size),
-                    cx,
-                );
-            }
+            (change_for_up_out)(
+                vertical_ratio(event.position.y, bounds, style.thumb_size),
+                cx,
+            );
         })
         .on_drag_move::<SliderDrag>(move |event, _window, cx| {
             let (drag_id, on_change) = {
                 let drag = event.drag(cx);
                 (drag.id.clone(), drag.on_change.clone())
             };
-            if drag_id != id_for_drag {
-                return;
-            }
-            if !mark_pointer_dragging(&drag_id, cx) {
+            if drag_id != id_for_drag || !is_active_drag(&drag_id, cx) {
                 return;
             }
             (on_change)(
@@ -712,18 +639,4 @@ mod tests {
         assert!(cell.get().is_none());
     }
 
-    #[test]
-    fn click_release_clears_binding_before_next_drag() {
-        let mut state = SliderInteractionState::default();
-        let id = ElementId::from("progress");
-
-        begin_pointer_press_state(&mut state, &id);
-        assert_eq!(end_pointer_press_state(&mut state, &id), Some(false));
-        assert_eq!(state, SliderInteractionState::default());
-
-        begin_pointer_press_state(&mut state, &id);
-        assert!(mark_pointer_dragging_state(&mut state, &id));
-        assert_eq!(end_pointer_press_state(&mut state, &id), Some(true));
-        assert_eq!(state, SliderInteractionState::default());
-    }
 }
