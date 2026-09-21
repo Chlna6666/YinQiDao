@@ -13,7 +13,7 @@ use lucide_gpui::icon;
 
 use crate::{
     audio::{AudioEngine, PlayerCommand},
-    model::PlaybackState,
+    model::{PlaybackState, RepeatMode},
 };
 
 use super::{
@@ -24,7 +24,7 @@ use super::{
     },
     shell::MusicApp,
     stage_chrome,
-    theme::{self, ACCENT_RED, format_remaining_time, format_time, themed_icon},
+    theme::{self, format_remaining_time, format_time, themed_icon},
 };
 
 const STAGE_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -238,6 +238,8 @@ pub(super) struct StageControlsView {
     stage_active: bool,
     fade: StageChromeFade,
     playback_state: PlaybackState,
+    shuffle: bool,
+    repeat: RepeatMode,
     volume: f32,
     last_volume_command_at: Instant,
     last_volume_command: f32,
@@ -269,6 +271,8 @@ impl StageControlsView {
             stage_active: false,
             fade: StageChromeFade::new(true),
             playback_state: PlaybackState::Paused,
+            shuffle: false,
+            repeat: RepeatMode::Off,
             volume: 1.0,
             last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
             last_volume_command: 1.0,
@@ -344,6 +348,8 @@ impl StageControlsView {
     fn sync_from_app(&mut self, app: &MusicApp, stage_active: bool, cx: &mut Context<Self>) {
         let target_visible = stage_chrome::target_visible(app);
         let playback_state = app.snapshot.state;
+        let shuffle = app.snapshot.shuffle;
+        let repeat = app.snapshot.repeat;
         let engine_changed = match (&self.engine, &app.engine) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
             (None, None) => false,
@@ -355,6 +361,8 @@ impl StageControlsView {
         let changed = engine_changed
             || self.stage_active != stage_active
             || self.playback_state != playback_state
+            || self.shuffle != shuffle
+            || self.repeat != repeat
             || volume_changed;
         let fade_changed = self.fade.set_target(target_visible);
 
@@ -363,6 +371,8 @@ impl StageControlsView {
         }
         self.stage_active = stage_active;
         self.playback_state = playback_state;
+        self.shuffle = shuffle;
+        self.repeat = repeat;
         if self.volume_drag_ratio.is_none() {
             self.volume = app_volume;
         }
@@ -386,6 +396,8 @@ impl Render for StageControlsView {
             self.fade.value()
         };
         let playing = self.playback_state == PlaybackState::Playing;
+        let shuffle = self.shuffle;
+        let repeat = self.repeat;
         self.ensure_volume_slider(cx);
         let volume = self.volume_drag_ratio.unwrap_or(self.volume);
         let parent = self.parent.clone();
@@ -393,12 +405,27 @@ impl Render for StageControlsView {
         let transport_buttons = div()
             .id("stage-transport-buttons")
             .w_full()
-            .h(px(48.0))
+            .h(px(52.0))
             .flex_none()
             .flex()
             .items_center()
-            .justify_center()
-            .gap_4()
+            .justify_between()
+            .px_3()
+            .child(stage_mode_button(
+                "stage-shuffle-btn",
+                icon!(shuffle),
+                shuffle,
+                {
+                    let parent = parent.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = parent.update(cx, |app, app_cx| {
+                            app.wake_stage_controls_immediately(app_cx);
+                            app.toggle_shuffle(app_cx);
+                        });
+                    }
+                },
+            ))
             .child(control_button("stage-prev-btn", icon!(skip_back), {
                 let parent = parent.clone();
                 move |_, _, cx| {
@@ -412,20 +439,19 @@ impl Render for StageControlsView {
             .child(
                 div()
                     .id("stage-play-btn")
-                    .size(px(48.0))
+                    .size(px(50.0))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .bg(ACCENT_RED)
-                    .hover(|style| style.opacity(0.92))
-                    .active(|style| style.scale(0.94))
+                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.08)))
+                    .active(|style| style.scale(0.90))
                     .transition(theme::press_transition())
                     .child(themed_icon(
                         if playing { icon!(pause) } else { icon!(play) },
-                        22.0,
-                        hsla(0.0, 0.0, 1.0, 1.0),
+                        30.0,
+                        hsla(0.0, 0.0, 1.0, 0.96),
                     ))
                     .on_mouse_down(gpui::MouseButton::Left, {
                         let parent = parent.clone();
@@ -447,7 +473,25 @@ impl Render for StageControlsView {
                         app.next(app_cx);
                     });
                 }
-            }));
+            }))
+            .child(stage_mode_button(
+                "stage-repeat-btn",
+                match repeat {
+                    RepeatMode::Off | RepeatMode::All => icon!(repeat),
+                    RepeatMode::One => icon!(repeat_1),
+                },
+                repeat != RepeatMode::Off,
+                {
+                    let parent = parent.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = parent.update(cx, |app, app_cx| {
+                            app.wake_stage_controls_immediately(app_cx);
+                            app.cycle_repeat(app_cx);
+                        });
+                    }
+                },
+            ));
 
         let volume_row = div()
             .id("stage-volume-row")
@@ -475,8 +519,8 @@ impl Render for StageControlsView {
                         } else {
                             icon!(volume_2)
                         },
-                        14.0,
-                        hsla(0.0, 0.0, 1.0, 0.72),
+                        12.0,
+                        hsla(0.0, 0.0, 1.0, 0.62),
                     ))
                     .on_mouse_down(gpui::MouseButton::Left, {
                         let parent = parent.clone();
@@ -515,8 +559,8 @@ impl Render for StageControlsView {
             )
             .child(themed_icon(
                 icon!(volume_2),
-                14.0,
-                hsla(0.0, 0.0, 1.0, 0.46),
+                12.0,
+                hsla(0.0, 0.0, 1.0, 0.62),
             ));
 
         // Apple Music-style distribution: progress/time, playback controls, and volume are separate
@@ -529,9 +573,9 @@ impl Render for StageControlsView {
             .transition(stage_chrome_fade_transition())
             .flex()
             .flex_col()
-            .gap_2()
-            .px_3()
-            .py_2()
+            .gap_1p5()
+            .px_1()
+            .py_1()
             .on_hover({
                 let parent = parent.clone();
                 move |hovered: &bool, _, cx| {
@@ -962,7 +1006,7 @@ impl Render for StageTransportView {
                     .items_center()
                     .justify_between()
                     .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.62))
+                    .text_color(hsla(0.0, 0.0, 1.0, 0.58))
                     .child(format_time(position))
                     .child(format_remaining_time(position, duration_ms)),
             )
@@ -1247,15 +1291,45 @@ fn control_button(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .size(px(36.0))
+        .size(px(44.0))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.15)))
-        .active(|style| style.scale(0.92))
-        .child(themed_icon(icon, 20.0, hsla(0.0, 0.0, 1.0, 0.85)))
+        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.08)))
+        .active(|style| style.scale(0.90))
+        .transition(theme::press_transition())
+        .child(themed_icon(icon, 27.0, hsla(0.0, 0.0, 1.0, 0.94)))
+        .on_mouse_down(gpui::MouseButton::Left, listener)
+}
+
+fn stage_mode_button(
+    id: &'static str,
+    icon: &'static str,
+    active: bool,
+    listener: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(30.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.06)))
+        .active(|style| style.scale(0.90))
+        .transition(theme::press_transition())
+        .child(themed_icon(
+            icon,
+            15.0,
+            if active {
+                hsla(0.0, 0.0, 1.0, 0.92)
+            } else {
+                hsla(0.0, 0.0, 1.0, 0.48)
+            },
+        ))
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 

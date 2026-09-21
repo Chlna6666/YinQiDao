@@ -61,13 +61,13 @@ impl SliderStyle {
 
     pub fn stage_progress() -> Self {
         Self {
-            track_height: px(5.0),
-            hover_track_height: px(7.5),
-            thumb_size: px(13.0),
-            hover_thumb_scale: 1.25,
+            track_height: px(4.0),
+            hover_track_height: px(6.0),
+            thumb_size: px(10.0),
+            hover_thumb_scale: 1.20,
             interaction_height: px(30.0),
-            track_bg: hsla(0.0, 0.0, 1.0, 0.20),
-            filled_color: theme::ACCENT_RED.into(),
+            track_bg: hsla(0.0, 0.0, 1.0, 0.26),
+            filled_color: hsla(0.0, 0.0, 1.0, 0.96),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: None,
             edge_overlay: false,
@@ -76,13 +76,13 @@ impl SliderStyle {
 
     pub fn stage_volume() -> Self {
         Self {
-            track_height: px(5.0),
-            hover_track_height: px(7.0),
-            thumb_size: px(11.0),
-            hover_thumb_scale: 1.25,
+            track_height: px(4.0),
+            hover_track_height: px(5.5),
+            thumb_size: px(9.0),
+            hover_thumb_scale: 1.20,
             interaction_height: px(22.0),
-            track_bg: hsla(0.0, 0.0, 1.0, 0.20),
-            filled_color: theme::ACCENT_RED.into(),
+            track_bg: hsla(0.0, 0.0, 1.0, 0.24),
+            filled_color: hsla(0.0, 0.0, 1.0, 0.90),
             thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
             thumb_border: None,
             edge_overlay: false,

@@ -216,8 +216,8 @@ impl Render for StagePlayerView {
         let controls = AnyView::from(self.controls.clone())
             .cached(
                 StyleRefinement::default()
-                    .w_full()
-                    .h(px(132.0)),
+                    .w(px(320.0))
+                    .h(px(158.0)),
             )
             .reuse_on_window_refresh();
         div()
@@ -300,7 +300,7 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
     // Keep the card identity stable and fully opaque; track/artwork changes only replace its child.
     let cover_card = div()
         .id("stage-cover-card")
-        .size(px(280.0))
+        .size(px(300.0))
         .rounded_2xl()
         .overflow_hidden()
         .border_1()
@@ -319,32 +319,32 @@ fn stage_cover(data: &StageCoverRenderData) -> impl IntoElement {
         .child(cover_card)
         .child(
             div()
+                .w(px(300.0))
                 .flex()
                 .flex_col()
-                .items_center()
-                .gap_1p5()
+                .items_start()
+                .gap_1()
                 .child(
                     div()
-                        .max_w(px(360.0))
-                        .text_2xl()
+                        .w_full()
+                        .text_xl()
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_center()
                         .truncate()
                         .child(data.title.clone()),
                 )
                 .child(
                     div()
-                        .max_w(px(360.0))
-                        .text_base()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.72))
+                        .w_full()
+                        .text_sm()
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.70))
                         .truncate()
                         .child(data.artist.clone()),
                 )
                 .child(
                     div()
-                        .max_w(px(360.0))
+                        .w_full()
                         .text_sm()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.42))
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.38))
                         .truncate()
                         .child(data.album.clone()),
                 ),
