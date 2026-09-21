@@ -1140,17 +1140,111 @@ fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SustainedWordEmphasis {
+    glow_alpha: f32,
+    glow_blur_px: f32,
+    scale: f32,
+    lift_px: f32,
+}
+
 #[inline]
-fn sustained_word_highlight(reveal_progress: f32, is_current_word: bool) -> f32 {
-    if !is_current_word {
-        return 0.0;
+fn is_cjk_text(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x3040..=0x30ff
+                | 0x3400..=0x4dbf
+                | 0x4e00..=0x9fff
+                | 0xac00..=0xd7af
+                | 0xf900..=0xfaff
+        )
+    })
+}
+
+#[inline]
+fn should_emphasize_sustained_word(word: &StageLyricWord) -> bool {
+    let Some(duration_ms) = word.duration_ms else {
+        return false;
+    };
+    if duration_ms < 1_000 {
+        return false;
     }
 
-    // Apple Music-like behavior: the sweep owns the early part of the syllable. Once most of the
-    // glyph has been revealed, a soft bloom fades in and stays while the same syllable is being
-    // sustained. The semantic current-word boundary removes it, not a second wall-clock timer.
-    let t = ((reveal_progress.clamp(0.0, 1.0) - 0.72) / 0.28).clamp(0.0, 1.0);
+    let text = word.text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if is_cjk_text(text) {
+        return true;
+    }
+
+    // AMLL intentionally keeps emphasis on short Latin words/syllables so a long phrase does not
+    // scale and glow as one oversized block.
+    let chars = text.chars().count();
+    (2..=7).contains(&chars)
+}
+
+#[inline]
+fn emphasis_envelope(progress: f32) -> f32 {
+    let p = progress.clamp(0.0, 1.0);
+    let t = if p <= 0.5 {
+        p / 0.5
+    } else {
+        (1.0 - p) / 0.5
+    }
+    .clamp(0.0, 1.0);
+
+    // Smooth rise and fall with zero velocity at both ends.
     t * t * (3.0 - 2.0 * t)
+}
+
+fn sustained_word_emphasis(
+    word: &StageLyricWord,
+    reveal_progress: f32,
+    is_current_word: bool,
+    is_last_word: bool,
+) -> SustainedWordEmphasis {
+    if !is_current_word || !should_emphasize_sustained_word(word) {
+        return SustainedWordEmphasis {
+            scale: 1.0,
+            ..SustainedWordEmphasis::default()
+        };
+    }
+
+    let duration_ms = word.duration_ms.unwrap_or(1_000).max(1_000) as f32;
+    let envelope = emphasis_envelope(reveal_progress);
+
+    // Match AMLL's duration-sensitive character-emphasis shape: short qualifying sustains stay
+    // subtle while very long notes gain progressively more bloom and motion.
+    let amount_ratio = duration_ms / 2_000.0;
+    let mut amount = if amount_ratio > 1.0 {
+        amount_ratio.sqrt()
+    } else {
+        amount_ratio.powi(3)
+    } * 0.6;
+
+    let blur_ratio = duration_ms / 3_000.0;
+    let mut blur = if blur_ratio > 1.0 {
+        blur_ratio.sqrt()
+    } else {
+        blur_ratio.powi(3)
+    } * 0.5;
+
+    if is_last_word {
+        amount *= 1.6;
+        blur *= 1.5;
+    }
+
+    amount = amount.min(1.2);
+    blur = blur.min(0.8);
+
+    SustainedWordEmphasis {
+        glow_alpha: (envelope * blur * 0.95).clamp(0.0, 0.78),
+        glow_blur_px: 3.0 + blur * 6.0,
+        scale: 1.0 + envelope * 0.10 * amount,
+        lift_px: envelope * 0.70 * amount,
+    }
 }
 
 fn karaoke_word(
@@ -1158,11 +1252,17 @@ fn karaoke_word(
     _index: usize,
     reveal_progress: f32,
     is_current_word: bool,
+    is_last_word: bool,
     _karaoke_epoch: u64,
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
-    let sustain_highlight = sustained_word_highlight(progress, is_current_word);
+    let emphasis = sustained_word_emphasis(
+        word,
+        progress,
+        is_current_word,
+        is_last_word,
+    );
     let base = div()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
@@ -1181,12 +1281,12 @@ fn karaoke_word(
         .h_full()
         .w(relative(progress))
         .overflow_hidden()
-        .opacity(sustain_highlight * 0.72)
+        .opacity(emphasis.glow_alpha)
         .child(
             div()
                 .whitespace_nowrap()
-                .text_color(hsla(0.0, 0.0, 1.0, 0.90))
-                .blur(px(4.5))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+                .blur(px(emphasis.glow_blur_px))
                 .child(word.text.clone()),
         );
 
@@ -1203,6 +1303,8 @@ fn karaoke_word(
 
     div()
         .relative()
+        .top(px(-emphasis.lift_px))
+        .scale(emphasis.scale)
         .flex_none()
         .whitespace_nowrap()
         .child(base)
@@ -1256,9 +1358,8 @@ fn stage_primary_lyric(
                     }
                     _ => 0.0,
                 };
-                // The current word keeps a soft bloom after its sweep reaches 100%. It remains
-                // highlighted through a sustained vocal until the authored next-word boundary
-                // advances current_word.
+                // Long authored syllables get a separate emphasis envelope while their karaoke
+                // mask continues to reveal; short syllables remain a plain mask sweep.
                 (progress, DIM_ALPHA, animate && current_word == Some(index))
             }
         };
@@ -1268,6 +1369,7 @@ fn stage_primary_lyric(
             index,
             progress,
             word_animate,
+            index + 1 == line.words.len(),
             karaoke_epoch,
             base_alpha,
         ));
@@ -1411,19 +1513,58 @@ mod tests {
     }
 
     #[test]
-    fn sustained_highlight_appears_after_most_of_the_word_is_revealed() {
-        assert_eq!(sustained_word_highlight(0.50, true), 0.0);
-        assert_eq!(sustained_word_highlight(0.72, true), 0.0);
+    fn sustained_emphasis_requires_a_genuinely_long_syllable() {
+        let short = StageLyricWord {
+            timestamp_ms: 0,
+            duration_ms: Some(900),
+            byte_start: 0,
+            byte_end: 1,
+            text: SharedString::from("啊"),
+        };
+        let long = StageLyricWord {
+            duration_ms: Some(1_800),
+            ..short.clone()
+        };
 
-        let late = sustained_word_highlight(0.90, true);
-        assert!(late > 0.0 && late < 1.0);
-        assert_eq!(sustained_word_highlight(1.0, true), 1.0);
+        assert!(!should_emphasize_sustained_word(&short));
+        assert!(should_emphasize_sustained_word(&long));
     }
 
     #[test]
-    fn sustained_highlight_exists_only_for_the_semantic_current_word() {
-        assert_eq!(sustained_word_highlight(1.0, false), 0.0);
-        assert_eq!(sustained_word_highlight(0.90, false), 0.0);
+    fn sustained_emphasis_peaks_during_the_long_note_not_after_it() {
+        let word = StageLyricWord {
+            timestamp_ms: 0,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 1,
+            text: SharedString::from("啊"),
+        };
+
+        let start = sustained_word_emphasis(&word, 0.0, true, false);
+        let middle = sustained_word_emphasis(&word, 0.5, true, false);
+        let end = sustained_word_emphasis(&word, 1.0, true, false);
+
+        assert_eq!(start.glow_alpha, 0.0);
+        assert!(middle.glow_alpha > 0.0);
+        assert!(middle.scale > 1.0);
+        assert!(middle.lift_px > 0.0);
+        assert_eq!(end.glow_alpha, 0.0);
+        assert_eq!(end.scale, 1.0);
+    }
+
+    #[test]
+    fn sustained_emphasis_is_disabled_after_current_word_advances() {
+        let word = StageLyricWord {
+            timestamp_ms: 0,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 1,
+            text: SharedString::from("啊"),
+        };
+        let profile = sustained_word_emphasis(&word, 0.5, false, false);
+        assert_eq!(profile.glow_alpha, 0.0);
+        assert_eq!(profile.scale, 1.0);
+        assert_eq!(profile.lift_px, 0.0);
     }
 
     #[test]
