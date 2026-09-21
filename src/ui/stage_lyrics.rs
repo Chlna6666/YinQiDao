@@ -5,9 +5,8 @@ use std::{
 
 use gpui::{
     AnimationExt as _, AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity,
-    Global, IntoElement,
-    ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer, Transition,
-    TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px, relative,
+    Global, IntoElement, Render, SharedString, Subscription, Transition, TransitionProperty,
+    WeakEntity, Window, div, hsla, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -24,51 +23,18 @@ use super::{
 };
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
-const LIST_OVERDRAW_PX: f32 = 360.0;
 const LYRIC_ANCHOR_RATIO: f32 = 0.43;
-const LYRIC_LIST_MIN_PADDING_TOP: f32 = 8.0;
-const LYRIC_LIST_MIN_PADDING_BOTTOM: f32 = 10.0;
-// GPUI List does not materialize items when vertical padding consumes the viewport.
-// Keep a small real content band so anchor spacers still leave paintable list space.
-const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(90);
 const PLAYBACK_STACK_HISTORY_ROWS: usize = 4;
 const PLAYBACK_STACK_FUTURE_ROWS: usize = 7;
-const PLAYBACK_STACK_ROW_PITCH_PX: f32 = 78.0;
+const PLAYBACK_STACK_ROW_PITCH_PX: f32 = 82.0;
 const PLAYBACK_STACK_ROW_CENTER_OFFSET_PX: f32 = 31.0;
-const SCROLL_EASING_RATE: f32 = 9.5;
-const SCROLL_SETTLE_PX: f32 = 0.30;
+const READING_STACK_HISTORY_ROWS: usize = 5;
+const READING_STACK_FUTURE_ROWS: usize = 7;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
-const LYRIC_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
-
-#[derive(Clone, Copy, Debug)]
-struct LyricHistoryHandoff {
-    from_index: usize,
-    to_index: usize,
-    first_visible_index: usize,
-    visible_rows: usize,
-    started_at: Instant,
-    visual_delta_y: f32,
-    layout_scroll_delta: f32,
-    target_spacer_px: f32,
-}
-
-impl LyricHistoryHandoff {
-    #[inline]
-    fn duration(self) -> Duration {
-        Duration::from_secs_f32(
-            LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * self.visible_rows.max(1) as f32,
-        )
-    }
-
-    #[inline]
-    fn finished(self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started_at) >= self.duration()
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 struct LyricPlaybackStackHandoff {
@@ -219,7 +185,6 @@ pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageLy
 pub(super) struct StageLyricsView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
-    list_state: ListState,
     lines: Arc<[StageLyricLine]>,
     track_id: Option<TrackId>,
     source_ptr: usize,
@@ -235,18 +200,10 @@ pub(super) struct StageLyricsView {
     karaoke_epoch: u64,
     transport_generation: u64,
     reading_until: Option<Instant>,
-    scroll_target: Option<usize>,
-    last_scroll_frame: Option<Instant>,
-    history_handoff: Option<LyricHistoryHandoff>,
+    reading_center_index: Option<usize>,
     playback_stack_handoff: Option<LyricPlaybackStackHandoff>,
-    leading_spacer_px: f32,
-    // Initial stage/source materialization is aligned offscreen first. It must never reuse the
-    // normal line-change FLIP animation, otherwise the first active lyric visibly starts near the
-    // top edge and then flies into the focus slot.
-    anchor_bootstrap_pending: bool,
     stage_active: bool,
     scrubbing: bool,
-    geometry_retry_scheduled: bool,
     _ui_subscription: Subscription,
 }
 
@@ -266,7 +223,6 @@ impl StageLyricsView {
         Self {
             parent,
             engine,
-            list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX)),
             lines: Arc::from(Vec::<StageLyricLine>::new()),
             track_id: None,
             source_ptr: 0,
@@ -282,15 +238,10 @@ impl StageLyricsView {
             karaoke_epoch: 0,
             transport_generation,
             reading_until: None,
-            scroll_target: None,
-            last_scroll_frame: None,
-            history_handoff: None,
+            reading_center_index: None,
             playback_stack_handoff: None,
-            leading_spacer_px: LYRIC_LIST_MIN_PADDING_TOP,
-            anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
-            geometry_retry_scheduled: false,
             _ui_subscription: ui_subscription,
         }
     }
@@ -308,38 +259,36 @@ impl StageLyricsView {
                 let scrubbing = ratio.is_some();
                 let was_scrubbing = self.scrubbing;
                 let mut changed = false;
+
                 if self.scrubbing != scrubbing {
                     self.scrubbing = scrubbing;
                     self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
                     changed = true;
                 }
-
-                let previous_word = self.active_word_index;
                 if self.position_ms != position_ms {
                     self.position_ms = position_ms;
                     changed = true;
                 }
+
+                let previous_word = self.active_word_index;
                 let active_changed = self.update_active_index();
-                let next_word = self.compute_active_word_index();
-                let word_changed = previous_word != next_word;
-                self.active_word_index = next_word;
+                self.active_word_index = self.compute_active_word_index();
+                let word_changed = previous_word != self.active_word_index;
                 if !active_changed && word_changed {
                     self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
                 }
                 changed |= active_changed || word_changed;
+
                 if was_scrubbing && !scrubbing {
-                    // Final seek is a new transport anchor, not a continuation of the pointer
-                    // preview. Drop preview-era cascade state and let normal playback sampling
-                    // resume from exactly the committed lyric.
                     self.focus_from_index = None;
                     self.focus_started_at = None;
-                    self.last_scroll_frame = None;
-                    self.history_handoff = None;
                     self.playback_stack_handoff = None;
-                    self.scroll_target = self.active_index;
+                    self.reading_until = None;
+                    self.reading_center_index = None;
                     self.hovered_index = None;
                     changed = true;
                 }
+
                 if changed {
                     cx.notify();
                 }
@@ -356,6 +305,7 @@ impl StageLyricsView {
         if engine_changed {
             self.engine = app.engine.clone();
         }
+
         let transport_generation = self
             .engine
             .as_ref()
@@ -385,14 +335,15 @@ impl StageLyricsView {
         } else {
             plain_source.map_or((0, 0), |text| (text.as_ptr() as usize, text.len()))
         };
+
         let source_changed = self.track_id != track_id
             || self.source_ptr != source_ptr
             || self.source_len != source_len
             || self.has_timeline != has_timeline;
         let playback_state_changed = self.playback_state != app.snapshot.state;
         let stage_active_changed = self.stage_active != stage_active;
-
         let mut changed = engine_changed;
+
         if source_changed {
             self.track_id = track_id;
             self.source_ptr = source_ptr;
@@ -416,26 +367,20 @@ impl StageLyricsView {
                     .unwrap_or_default()
                     .into()
             };
-            self.list_state.reset(self.lines.len());
             self.active_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
-            self.playback_stack_handoff = None;
             self.active_word_index = None;
             self.hovered_index = None;
-            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             self.reading_until = None;
-            self.scroll_target = None;
-            self.cancel_scroll_animation();
-            self.leading_spacer_px = LYRIC_LIST_MIN_PADDING_TOP;
-            self.anchor_bootstrap_pending = stage_active && has_timeline;
+            self.reading_center_index = None;
+            self.playback_stack_handoff = None;
             self.scrubbing = false;
+            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }
+
         if transport_changed && !source_changed {
-            // Seek/restore commands update AudioEngine's optimistic position immediately. A separate
-            // generation lets the compositor timeline restart even when the target stays inside the
-            // same authored word and therefore does not change active_word_index.
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }
@@ -454,36 +399,24 @@ impl StageLyricsView {
         if position_changed {
             self.position_ms = position_ms;
         }
+
         if playback_state_changed {
             self.playback_state = app.snapshot.state;
-            // Karaoke owns an independent epoch: pausing/resuming must not retrigger the active-line
-            // focus scale animation. Only the word sweep restarts from the exact transport sample.
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
         }
+
         if stage_active_changed {
             self.stage_active = stage_active;
-            // Stage removal drops retained scene state. Do not keep an old focus source around:
-            // otherwise reopening can recreate an already-finished hand-off from a stale line.
             self.focus_from_index = None;
             self.focus_started_at = None;
+            self.playback_stack_handoff = None;
+            self.hovered_index = None;
             if stage_active {
-                // Re-entering Stage must not reuse an old retained word timeline that may have kept
-                // aging while its scene subtree was absent. Align the current line invisibly first;
-                // only subsequent semantic line changes get the Apple-style cascade.
                 self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
-                self.anchor_bootstrap_pending = self.active_index.is_some();
-                if !self.is_reading() {
-                    self.scroll_target = self.active_index;
-                }
             } else {
                 self.reading_until = None;
-                self.scroll_target = None;
-                self.hovered_index = None;
-                self.playback_stack_handoff = None;
-                self.anchor_bootstrap_pending = false;
-                self.cancel_scroll_animation();
-                self.leading_spacer_px = LYRIC_LIST_MIN_PADDING_TOP;
+                self.reading_center_index = None;
             }
             changed = true;
         }
@@ -496,18 +429,7 @@ impl StageLyricsView {
         if word_changed {
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
-        if active_changed || word_changed {
-            changed = true;
-        }
-
-        if source_changed && self.has_timeline && let Some(active) = self.active_index {
-            self.list_state.scroll_to(ListOffset {
-                item_ix: active.saturating_sub(4),
-                offset_in_item: px(0.0),
-            });
-            self.scroll_target = Some(active);
-            self.anchor_bootstrap_pending = stage_active;
-        }
+        changed |= active_changed || word_changed;
 
         if changed {
             cx.notify();
@@ -526,50 +448,41 @@ impl StageLyricsView {
         } else {
             Some(0)
         };
+
         if self.active_index == active {
             return false;
         }
 
         let previous = self.active_index;
-        if previous.is_none() && self.stage_active {
-            // First materialization is positioning, not a lyric hand-off.
-            self.focus_from_index = None;
-            self.focus_started_at = None;
-            self.playback_stack_handoff = None;
-            self.anchor_bootstrap_pending = active.is_some();
-        } else {
-            self.focus_from_index = previous;
-            self.focus_started_at = previous.map(|_| Instant::now());
+        self.focus_from_index = previous;
+        self.focus_started_at = previous.map(|_| Instant::now());
 
-            self.playback_stack_handoff = match (previous, active) {
-                (Some(from_active), Some(to_active))
-                    if self.stage_active
-                        && !self.is_reading()
-                        && to_active == from_active.saturating_add(1) =>
-                {
-                    let first_index = from_active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS);
-                    let last_index = to_active
-                        .saturating_add(PLAYBACK_STACK_FUTURE_ROWS)
-                        .min(self.lines.len().saturating_sub(1));
-                    Some(LyricPlaybackStackHandoff {
-                        from_active,
-                        to_active,
-                        first_index,
-                        last_index,
-                        started_at: Instant::now(),
-                    })
-                }
-                _ => None,
-            };
-        }
+        self.playback_stack_handoff = match (previous, active) {
+            (Some(from_active), Some(to_active))
+                if self.stage_active
+                    && !self.is_reading()
+                    && to_active == from_active.saturating_add(1) =>
+            {
+                let first_index = from_active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS);
+                let last_index = to_active
+                    .saturating_add(PLAYBACK_STACK_FUTURE_ROWS)
+                    .min(self.lines.len().saturating_sub(1));
+                Some(LyricPlaybackStackHandoff {
+                    from_active,
+                    to_active,
+                    first_index,
+                    last_index,
+                    started_at: Instant::now(),
+                })
+            }
+            _ => None,
+        };
+
         self.active_index = active;
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
-            // Automatic playback uses the dedicated absolute stack. ListState is reserved for
-            // reading/manual browsing and must not reposition the playback surface.
-            self.scroll_target = None;
-            self.history_handoff = None;
+            self.reading_center_index = None;
         }
         true
     }
@@ -598,10 +511,10 @@ impl StageLyricsView {
                 .partition_point(|line| line.timestamp_ms <= position_ms)
                 .saturating_sub(1),
         );
-
         let mut next_timestamp = active
             .and_then(|index| self.lines.get(index + 1))
             .map(|line| line.timestamp_ms);
+
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
             && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
@@ -616,28 +529,6 @@ impl StageLyricsView {
                 .saturating_sub(position_ms)
                 .max(TRANSPORT_MIN_SLEEP),
         ))
-    }
-
-    fn karaoke_should_sample(&self) -> bool {
-        if !self.transport_should_run() || self.scrubbing || self.is_reading() {
-            return false;
-        }
-        let Some(line) = self.active_index.and_then(|index| self.lines.get(index)) else {
-            return false;
-        };
-        if !line.enhanced_complete {
-            return false;
-        }
-        let Some(word_index) = self.active_word_index else {
-            return false;
-        };
-        let Some(word) = line.words.get(word_index) else {
-            return false;
-        };
-        let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
-            return false;
-        };
-        self.position_ms < word.timestamp_ms.saturating_add(duration_ms)
     }
 
     fn refresh_transport(&mut self) {
@@ -664,45 +555,45 @@ impl StageLyricsView {
     #[inline]
     fn is_reading(&self) -> bool {
         !self.has_timeline
-            || self.reading_until
-            .is_some_and(|until| until > Instant::now())
+            || self
+                .reading_until
+                .is_some_and(|until| until > Instant::now())
     }
 
-    fn cancel_scroll_animation(&mut self) {
-        self.last_scroll_frame = None;
-        self.history_handoff = None;
-    }
-
-
-    fn begin_reading_mode(&mut self, cx: &mut Context<Self>) {
+    fn begin_reading_mode(&mut self, wheel_delta_y: f32, cx: &mut Context<Self>) {
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
-        // Reading mode deliberately flattens the depth field. Drop any in-flight automatic
-        // hand-off so returning to playback never replays a stale old->new focus animation.
         self.focus_from_index = None;
         self.focus_started_at = None;
         self.active_word_index = None;
-        self.scroll_target = None;
-        self.hovered_index = None;
         self.playback_stack_handoff = None;
-        if let Some(active) = self.active_index {
-            self.list_state.scroll_to(ListOffset {
-                item_ix: active.saturating_sub(4),
-                offset_in_item: px(0.0),
-            });
-        }
-        self.cancel_scroll_animation();
+        self.hovered_index = None;
+
+        let max_index = self.lines.len().saturating_sub(1);
+        let base = self
+            .reading_center_index
+            .or(self.active_index)
+            .unwrap_or(0)
+            .min(max_index);
+        self.reading_center_index = Some(if wheel_delta_y < 0.0 {
+            base.saturating_add(1).min(max_index)
+        } else if wheel_delta_y > 0.0 {
+            base.saturating_sub(1)
+        } else {
+            base
+        });
         cx.notify();
     }
 
     fn expire_deadlines(&mut self, now: Instant) {
         if self.reading_until.is_some_and(|until| until <= now) {
             self.reading_until = None;
+            self.reading_center_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
             self.active_word_index = self.compute_active_word_index();
-            self.scroll_target = self.active_index;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
+
         if self
             .focus_started_at
             .is_some_and(|started_at| started_at + LYRIC_FOCUS_TRANSITION_DURATION <= now)
@@ -710,6 +601,7 @@ impl StageLyricsView {
             self.focus_from_index = None;
             self.focus_started_at = None;
         }
+
         if self
             .playback_stack_handoff
             .is_some_and(|handoff| handoff.finished(now))
@@ -725,9 +617,6 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(now + delay, cx);
         }
-        // Continuous karaoke/focus/scroll geometry is driven by the retained layout-animation
-        // target in render(). Do not also arm a timer cadence here: two independent clocks caused
-        // coalesced samples and made short serial slots appear as jumps.
         if let Some(until) = self.reading_until
             && until > now
         {
@@ -740,236 +629,6 @@ impl StageLyricsView {
             }
         }
     }
-
-    fn schedule_geometry_retry(&mut self, cx: &mut Context<Self>) {
-        if self.geometry_retry_scheduled {
-            return;
-        }
-        self.geometry_retry_scheduled = true;
-        cx.spawn(async move |this, cx| {
-            Timer::after(LYRIC_SAMPLE_INTERVAL).await;
-            let _ = this.update(cx, |this, cx| {
-                this.geometry_retry_scheduled = false;
-                if this.stage_active && !this.lines.is_empty() {
-                    // StageLyrics is cached with reuse_on_window_refresh(). A window-only deadline
-                    // can therefore repaint the parent while reusing this stale child forever.
-                    // Notify the retained lyric entity itself after ListState has had one prepaint
-                    // pass so viewport/item geometry can materialize without reopening a global
-                    // animation-frame loop.
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn visible_row_span(
-        &self,
-        viewport: gpui::Bounds<gpui::Pixels>,
-    ) -> Option<(usize, usize)> {
-        let viewport_top = f32::from(viewport.origin.y);
-        let viewport_bottom = viewport_top + f32::from(viewport.size.height);
-        let mut first = None;
-        let mut last = None;
-
-        for index in 0..self.lines.len() {
-            let Some(bounds) = self.list_state.bounds_for_item(index) else {
-                continue;
-            };
-            // ListState item bounds omit the List padding. Convert to the painted row bounds and
-            // reject retained overdraw outside the actual lyric viewport.
-            let row_top = f32::from(bounds.top()) + self.leading_spacer_px;
-            let row_bottom = f32::from(bounds.bottom()) + self.leading_spacer_px;
-            if row_bottom > viewport_top + 0.5 && row_top < viewport_bottom - 0.5 {
-                if first.is_none() {
-                    first = Some(index);
-                }
-                last = Some(index);
-            }
-        }
-
-        Some((first?, last?))
-    }
-
-    fn commit_history_handoff(&mut self, handoff: LyricHistoryHandoff) {
-        if handoff.layout_scroll_delta.abs() > 0.001 {
-            self.list_state.scroll_by(px(handoff.layout_scroll_delta));
-        }
-        self.leading_spacer_px = handoff.target_spacer_px;
-        self.history_handoff = None;
-        self.last_scroll_frame = None;
-        self.hovered_index = None;
-
-        // If transport stayed on this authored hand-off, it is fully settled. If playback advanced
-        // again while old rows were still leaving, keep the newer target queued; the next render
-        // starts its own hand-off only after this one has actually completed.
-        if self.scroll_target == Some(handoff.to_index) {
-            self.scroll_target = None;
-        }
-    }
-
-    fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.has_timeline || !self.stage_active || self.is_reading() {
-            self.last_scroll_frame = None;
-            self.history_handoff = None;
-            return;
-        }
-        let Some(target) = self.scroll_target else {
-            self.last_scroll_frame = None;
-            return;
-        };
-
-        let viewport = self.list_state.viewport_bounds();
-        if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
-            self.last_scroll_frame = None;
-            if !window.is_minimized() {
-                self.schedule_geometry_retry(cx);
-            }
-            return;
-        }
-
-        let now = window.animation_time();
-
-        // Do not coalesce a newer lyric into an in-flight transition. Finish the old historical
-        // rows first, then process the next target. This preserves the user's required
-        // top-old-line -> next-old-line ordering even when authored timestamps are close.
-        if let Some(handoff) = self.history_handoff {
-            if handoff.finished(now) {
-                self.commit_history_handoff(handoff);
-                if self.scroll_target.is_some() {
-                    cx.notify();
-                }
-            } else {
-                self.hovered_index = None;
-                window.request_animation_frame();
-            }
-            return;
-        }
-
-        let Some(line_bounds) = self.list_state.bounds_for_item(target) else {
-            let adjacent_handoff = self
-                .focus_from_index
-                .is_some_and(|previous| previous.abs_diff(target) <= 2);
-
-            if self.anchor_bootstrap_pending {
-                self.list_state.scroll_to(ListOffset {
-                    item_ix: target.saturating_sub(4),
-                    offset_in_item: px(0.0),
-                });
-            } else if !adjacent_handoff {
-                self.list_state.scroll_to(ListOffset {
-                    item_ix: target.saturating_sub(3),
-                    offset_in_item: px(0.0),
-                });
-            } else {
-                self.list_state.scroll_to_reveal_item(target);
-            }
-            self.last_scroll_frame = None;
-            self.schedule_geometry_retry(cx);
-            return;
-        };
-
-        let viewport_top = f32::from(viewport.origin.y);
-        let viewport_height = f32::from(viewport.size.height);
-        let scroll_top_px =
-            -f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
-        let active_prefix_height =
-            (f32::from(line_bounds.origin.y) - viewport_top + scroll_top_px).max(0.0);
-        let desired_leading_spacer = lyric_leading_spacer_for_active(
-            viewport_height,
-            active_prefix_height,
-            f32::from(line_bounds.size.height),
-        );
-        let anchor_y = viewport_top + viewport_height * LYRIC_ANCHOR_RATIO;
-        let painted_line_center =
-            f32::from(line_bounds.center().y) + self.leading_spacer_px;
-        let diff = painted_line_center - anchor_y;
-
-        if self.anchor_bootstrap_pending {
-            self.leading_spacer_px = desired_leading_spacer;
-            let bootstrap_diff =
-                f32::from(line_bounds.center().y) + self.leading_spacer_px - anchor_y;
-            if bootstrap_diff.abs() > SCROLL_SETTLE_PX {
-                self.list_state.scroll_by(px(bootstrap_diff));
-            }
-            self.scroll_target = None;
-            self.hovered_index = None;
-            self.focus_from_index = None;
-            self.focus_started_at = None;
-            self.anchor_bootstrap_pending = false;
-            self.last_scroll_frame = None;
-            return;
-        }
-
-        if diff.abs() <= SCROLL_SETTLE_PX
-            && (self.leading_spacer_px - desired_leading_spacer).abs() <= SCROLL_SETTLE_PX
-        {
-            self.leading_spacer_px = desired_leading_spacer;
-            self.scroll_target = None;
-            self.last_scroll_frame = None;
-            return;
-        }
-
-        let previous = self
-            .focus_from_index
-            .filter(|previous| target == previous.saturating_add(1));
-
-        if let Some(previous) = previous {
-            let (first_visible_index, last_visible_index) = self
-                .visible_row_span(viewport)
-                .unwrap_or((previous.min(target), previous.max(target)));
-            let visible_rows = last_visible_index
-                .saturating_sub(first_visible_index)
-                .saturating_add(1)
-                .max(1);
-            let spacer_delta = desired_leading_spacer - self.leading_spacer_px;
-
-            self.history_handoff = Some(LyricHistoryHandoff {
-                from_index: previous,
-                to_index: target,
-                first_visible_index,
-                visible_rows,
-                started_at: now,
-                // Freeze the real ListState and move every painted row in strict screen order.
-                // Focus/karaoke already follows transport independently, so the active row having
-                // its own positional slot cannot block playback semantics.
-                visual_delta_y: -diff,
-                layout_scroll_delta: diff + spacer_delta,
-                target_spacer_px: desired_leading_spacer,
-            });
-            self.last_scroll_frame = None;
-            self.hovered_index = None;
-            window.request_animation_frame();
-            return;
-        }
-
-        // Large seek / reverse navigation / reading-mode recovery: use direct smooth positioning,
-        // not the authored forward-history queue.
-        let dt = self
-            .last_scroll_frame
-            .map(|last| now.saturating_duration_since(last))
-            .unwrap_or(Duration::from_micros(8_333));
-        self.last_scroll_frame = Some(now);
-        let factor = lyric_scroll_step_factor(dt);
-
-        let desired_visual_delta = -diff * factor;
-        let spacer_remaining = desired_leading_spacer - self.leading_spacer_px;
-        let spacer_step = if spacer_remaining.signum() == desired_visual_delta.signum() {
-            desired_visual_delta.signum()
-                * spacer_remaining.abs().min(desired_visual_delta.abs())
-        } else {
-            0.0
-        };
-        self.leading_spacer_px += spacer_step;
-
-        let residual_visual_delta = desired_visual_delta - spacer_step;
-        if residual_visual_delta.abs() > 0.001 {
-            self.list_state.scroll_by(px(-residual_visual_delta));
-        }
-        self.hovered_index = None;
-        window.request_animation_frame();
-    }
-
 }
 
 impl Render for StageLyricsView {
@@ -977,6 +636,7 @@ impl Render for StageLyricsView {
         let frame_now = window.animation_time();
         self.expire_deadlines(frame_now);
         self.refresh_transport();
+        self.schedule_deadlines(window, cx);
 
         if self.lines.is_empty() {
             return div()
@@ -990,8 +650,6 @@ impl Render for StageLyricsView {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                // Generic pointer wake is owned by stage-drawer-root. Lyric-row actions below
-                // explicitly wake after stop_propagation, so interactive seeking remains intact.
                 .child(themed_icon(icon!(music), 36.0, hsla(0.0, 0.0, 1.0, 0.25)))
                 .child(
                     div()
@@ -1007,237 +665,122 @@ impl Render for StageLyricsView {
                 );
         }
 
-        self.schedule_deadlines(window, cx);
-
-        let active = self.active_index.unwrap_or(0);
-        let has_timeline = self.has_timeline;
-        let active_word_index = self.active_word_index;
-        let position_ms = self.position_ms;
+        let active = self
+            .active_index
+            .unwrap_or(0)
+            .min(self.lines.len().saturating_sub(1));
         let reading_mode = self.is_reading();
-        let karaoke_running = self.stage_active
-            && self.playback_state == PlaybackState::Playing
-            && !self.scrubbing
-            && !reading_mode;
-        let scroll_animating =
-            self.scroll_target.is_some() && !reading_mode && !self.anchor_bootstrap_pending;
-        let focus_started_at = self.focus_started_at;
-        let history_handoff = self.history_handoff;
-        let focus_animating = focus_started_at.is_some();
-        // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
-        // automatic scroll used to make every line equally sharp during the transition, producing
-        // visible "flat" frame from the immersive comparison. Only explicit reading mode removes
-        // depth so manual browsing stays crisp.
-        let depth_blur_active = !reading_mode;
-        let text_id = "lyric-text";
+        let center_index = if reading_mode {
+            self.reading_center_index.unwrap_or(active)
+        } else {
+            active
+        }
+        .min(self.lines.len().saturating_sub(1));
 
-        if !reading_mode {
-            let mut handoff = self.playback_stack_handoff;
-            if handoff.is_some_and(|handoff| handoff.finished(frame_now)) {
-                self.playback_stack_handoff = None;
-                handoff = None;
-            }
+        let handoff = (!reading_mode)
+            .then_some(self.playback_stack_handoff)
+            .flatten()
+            .filter(|handoff| !handoff.finished(frame_now));
 
-            let viewport_height = f32::from(window.viewport_size().height).max(1.0);
-            let anchor_y = viewport_height * LYRIC_ANCHOR_RATIO;
-            let first_index = handoff
+        let first_index = if reading_mode {
+            center_index.saturating_sub(READING_STACK_HISTORY_ROWS)
+        } else {
+            handoff
                 .map(|handoff| handoff.first_index)
-                .unwrap_or_else(|| active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS));
-            let last_index = handoff
+                .unwrap_or_else(|| active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS))
+        };
+        let last_index = if reading_mode {
+            center_index
+                .saturating_add(READING_STACK_FUTURE_ROWS)
+                .min(self.lines.len().saturating_sub(1))
+        } else {
+            handoff
                 .map(|handoff| handoff.last_index)
                 .unwrap_or_else(|| {
                     active
                         .saturating_add(PLAYBACK_STACK_FUTURE_ROWS)
                         .min(self.lines.len().saturating_sub(1))
-                });
-            let from_active = handoff.map_or(active, |handoff| handoff.from_active);
-            let to_active = active;
-            let lines = self.lines.clone();
-            let focus_from_index = self.focus_from_index;
-            let focus_started_at = self.focus_started_at;
-            let active_word_index = self.active_word_index;
-            let position_ms = self.position_ms;
-            let karaoke_epoch = self.karaoke_epoch;
-            let karaoke_running = self.stage_active
-                && self.playback_state == PlaybackState::Playing
-                && !self.scrubbing;
-            let view = cx.entity().downgrade();
-            let parent = self.parent.clone();
-
-            let mut stack = div()
-                .id("stage-lyrics-playback-stack")
-                .relative()
-                .size_full();
-
-            for index in first_index..=last_index {
-                let rank = index.saturating_sub(first_index);
-                let progress = handoff.map_or(1.0, |handoff| {
-                    lyric_history_slot_progress(rank, handoff.started_at, frame_now)
-                });
-                let from_y = playback_stack_row_top(index, from_active, anchor_y);
-                let to_y = playback_stack_row_top(index, to_active, anchor_y);
-                let y = from_y + (to_y - from_y) * progress;
-                let edge_progress = playback_stack_edge_progress(y, viewport_height);
-                let exit_alpha = if index == first_index && handoff.is_some() {
-                    1.0 - progress
-                } else {
-                    1.0
-                };
-
-                let row = render_lyric_row(
-                    &lines[index],
-                    index,
-                    active,
-                    focus_from_index,
-                    focus_started_at,
-                    None,
-                    frame_now,
-                    edge_progress,
-                    edge_progress,
-                    active_word_index,
-                    position_ms,
-                    false,
-                    karaoke_running,
-                    true,
-                    text_id,
-                    false,
-                    handoff.is_none(),
-                    karaoke_epoch,
-                    view.clone(),
-                    parent.clone(),
-                );
-
-                stack = stack.child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .right(px(0.0))
-                        .top(px(y))
-                        .opacity(exit_alpha)
-                        .child(row),
-                );
-            }
-
-            let realtime_layout_animating =
-                handoff.is_some() || focus_started_at.is_some() || karaoke_running;
-            let stack = stack
-                .with_layout_animation_target(realtime_layout_animating)
-                .into_any_element();
-
-            return div()
-                .id("stage-lyrics-view")
-                .relative()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .overflow_hidden()
-                .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _, cx| {
-                    this.begin_reading_mode(cx);
-                    let _ = this
-                        .parent
-                        .update(cx, |app, cx| app.wake_stage_controls(cx));
-                }))
-                .child(stack);
-        }
-        let karaoke_epoch = self.karaoke_epoch;
-        let hovered_index = self.hovered_index;
-        let focus_from_index = self.focus_from_index;
-        let viewport_bounds = self.list_state.viewport_bounds();
-        let measured_viewport_height = f32::from(viewport_bounds.size.height);
-        if measured_viewport_height <= 1.0 && self.stage_active && !window.is_minimized() {
-            self.schedule_geometry_retry(cx);
-        }
-        // First-pass StageLyrics bounds are not known yet. Using the whole window height here can
-        // make List padding larger than the actual right-column viewport, which makes GPUI paint no
-        // rows at all. Start with minimum padding, then refine from the measured List viewport.
-        let layout_viewport_height = if measured_viewport_height > 1.0 {
-            measured_viewport_height
-        } else {
-            0.0
-        };
-        let (list_padding_top, list_padding_bottom) =
-            lyric_list_spacers(layout_viewport_height, self.leading_spacer_px);
-        let lines = self.lines.clone();
-
-        // Snapshot ListState geometry before constructing/rendering the List element. The list
-        // renderer mutably borrows its internal RefCell while invoking item callbacks, so querying
-        // bounds_for_item() from inside that callback would re-borrow the same RefCell and panic.
-        // Previous-frame measured geometry is exactly what FLIP/fade needs as the visual source.
-        const EDGE_GEOMETRY_RADIUS: usize = 16;
-        let edge_snapshot_start = active.saturating_sub(EDGE_GEOMETRY_RADIUS);
-        let edge_snapshot_end = active
-            .saturating_add(EDGE_GEOMETRY_RADIUS + 1)
-            .min(lines.len());
-        let row_edge_progress: Arc<[Option<(f32, f32)>]> = if reading_mode {
-            Arc::from([])
-        } else {
-            (edge_snapshot_start..edge_snapshot_end)
-                .map(|index| {
-                    self.list_state.bounds_for_item(index).map(|bounds| {
-                        // ListState item bounds omit style padding.top while paint includes it.
-                        let target_center_y =
-                            f32::from(bounds.center().y) + list_padding_top;
-                        let edge =
-                            lyric_viewport_edge_progress(target_center_y, viewport_bounds);
-                        (edge, edge)
-                    })
                 })
-                .collect::<Vec<_>>()
-                .into()
         };
 
+        let viewport_height = f32::from(window.viewport_size().height).max(1.0);
+        let anchor_y = viewport_height * LYRIC_ANCHOR_RATIO;
+        let focus_from_index = self.focus_from_index;
+        let focus_started_at = self.focus_started_at;
+        let active_word_index = self.active_word_index;
+        let position_ms = self.position_ms;
+        let karaoke_epoch = self.karaoke_epoch;
+        let karaoke_running = !reading_mode
+            && self.stage_active
+            && self.playback_state == PlaybackState::Playing
+            && !self.scrubbing;
+        let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
 
-        let lyrics = list(self.list_state.clone(), move |index, _window, _cx| {
-            let (edge_progress, previous_edge_progress) = if reading_mode {
-                (0.0, 0.0)
+        let mut stack = div()
+            .id("stage-lyrics-visible-stack")
+            .relative()
+            .size_full();
+
+        for index in first_index..=last_index {
+            let (y, exit_alpha) = if let Some(handoff) = handoff {
+                let rank = index.saturating_sub(handoff.first_index);
+                let progress = lyric_row_slot_progress(rank, handoff.started_at, frame_now);
+                let from_y = playback_stack_row_top(index, handoff.from_active, anchor_y);
+                let to_y = playback_stack_row_top(index, handoff.to_active, anchor_y);
+                (
+                    from_y + (to_y - from_y) * progress,
+                    if index == handoff.first_index {
+                        1.0 - progress
+                    } else {
+                        1.0
+                    },
+                )
             } else {
-                index
-                    .checked_sub(edge_snapshot_start)
-                    .and_then(|offset| row_edge_progress.get(offset))
-                    .and_then(|progress| *progress)
-                    .unwrap_or_else(|| {
-                        // A newly materialized overdraw row has no previous-frame bounds yet. Use
-                        // a conservative one-frame fallback; once measured, the next render uses
-                        // exact viewport geometry.
-                        let distance = index.abs_diff(active) as f32;
-                        let fallback = smoothstep01((distance - 3.0) / 5.0);
-                        (fallback, fallback)
-                    })
+                (
+                    playback_stack_row_top(index, center_index, anchor_y),
+                    1.0,
+                )
             };
 
-            render_lyric_row(
+            let edge_progress = playback_stack_edge_progress(y, viewport_height);
+            let row = render_lyric_row(
                 &lines[index],
                 index,
                 active,
                 focus_from_index,
                 focus_started_at,
-                history_handoff,
                 frame_now,
                 edge_progress,
-                previous_edge_progress,
+                edge_progress,
                 active_word_index,
                 position_ms,
                 reading_mode,
                 karaoke_running,
-                depth_blur_active,
-                text_id,
-                hovered_index == Some(index),
-                has_timeline && !(scroll_animating || focus_animating),
+                !reading_mode,
+                "lyric-text",
+                self.hovered_index == Some(index),
+                reading_mode || handoff.is_none(),
                 karaoke_epoch,
                 view.clone(),
                 parent.clone(),
-            )
-        })
-        .size_full()
-        .pt(px(list_padding_top))
-        .pb(px(list_padding_bottom))
-        .pr(px(8.0));
+            );
+
+            stack = stack.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .top(px(y))
+                    .opacity(exit_alpha)
+                    .child(row),
+            );
+        }
 
         let realtime_layout_animating =
-            self.history_handoff.is_some() || scroll_animating || focus_animating || karaoke_running;
-        let lyrics = lyrics
+            handoff.is_some() || focus_started_at.is_some() || karaoke_running;
+        let stack = stack
             .with_layout_animation_target(realtime_layout_animating)
             .into_any_element();
 
@@ -1249,13 +792,16 @@ impl Render for StageLyricsView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _, cx| {
-                this.begin_reading_mode(cx);
-                let _ = this
-                    .parent
-                    .update(cx, |app, cx| app.wake_stage_controls(cx));
-            }))
-            .child(lyrics)
+            .on_scroll_wheel(cx.listener(
+                |this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    let delta = event.delta.pixel_delta(px(48.0)).y;
+                    this.begin_reading_mode(f32::from(delta), cx);
+                    let _ = this
+                        .parent
+                        .update(cx, |app, cx| app.wake_stage_controls(cx));
+                },
+            ))
+            .child(stack)
     }
 }
 
@@ -1266,7 +812,6 @@ fn render_lyric_row(
     active: usize,
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
-    history_handoff: Option<LyricHistoryHandoff>,
     frame_now: Instant,
     edge_progress: f32,
     previous_edge_progress: f32,
@@ -1327,17 +872,6 @@ fn render_lyric_row(
     };
     let mut resolved_alpha = if hovered { 1.0 } else { resolved_alpha };
     let resolved_blur = if hovered { 0.0 } else { resolved_blur };
-
-    let history_progress = history_handoff
-        .and_then(|handoff| lyric_history_progress_for_row(index, handoff, frame_now));
-    if let (Some(handoff), Some(progress)) = (history_handoff, history_progress)
-        && index == handoff.first_visible_index
-    {
-        // The oldest displayed lyric owns the exit. Fade it while it moves through the top clip;
-        // every following visible row has a distinct later slot, so no two painted rows share the
-        // same movement progress.
-        resolved_alpha *= 1.0 - progress;
-    }
 
     let text = lyric_text_layer(
         line,
@@ -1420,7 +954,7 @@ fn render_lyric_row(
     }
 
     if !interactive {
-        return apply_history_row_handoff(row, index, history_handoff, frame_now);
+        return row.into_any_element();
     }
 
     let local = view;
@@ -1435,7 +969,7 @@ fn render_lyric_row(
             this.active_index = Some(index);
             this.active_word_index = this.compute_active_word_index();
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
-            this.scroll_target = Some(index);
+            this.reading_center_index = Some(index);
             cx.notify();
         });
         let _ = parent.update(cx, |app, cx| {
@@ -1444,7 +978,7 @@ fn render_lyric_row(
         });
     });
 
-    apply_history_row_handoff(row, index, history_handoff, frame_now)
+    row.into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1494,58 +1028,6 @@ fn lyric_text_layer(
 fn smoothstep01(value: f32) -> f32 {
     let t = value.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-#[inline]
-fn lyric_leading_spacer_for_active(
-    viewport_height: f32,
-    content_prefix_height: f32,
-    active_line_height: f32,
-) -> f32 {
-    if !viewport_height.is_finite() || viewport_height <= 1.0 {
-        return LYRIC_LIST_MIN_PADDING_TOP;
-    }
-    let anchor = viewport_height * LYRIC_ANCHOR_RATIO;
-    let centered_boundary_space =
-        anchor - content_prefix_height.max(0.0) - active_line_height.max(0.0) * 0.5;
-    centered_boundary_space.max(LYRIC_LIST_MIN_PADDING_TOP)
-}
-
-#[inline]
-fn lyric_list_spacers(viewport_height: f32, leading_spacer_px: f32) -> (f32, f32) {
-    if !viewport_height.is_finite() || viewport_height <= 1.0 {
-        return (
-            LYRIC_LIST_MIN_PADDING_TOP,
-            LYRIC_LIST_MIN_PADDING_BOTTOM,
-        );
-    }
-
-    let padding_budget = (viewport_height - LYRIC_LIST_CONTENT_RESERVE_PX).max(0.0);
-    let top = leading_spacer_px
-        .max(LYRIC_LIST_MIN_PADDING_TOP)
-        .min((padding_budget - LYRIC_LIST_MIN_PADDING_BOTTOM).max(0.0));
-    let desired_bottom =
-        (viewport_height * (1.0 - LYRIC_ANCHOR_RATIO)).max(LYRIC_LIST_MIN_PADDING_BOTTOM);
-    let bottom = desired_bottom.min((padding_budget - top).max(0.0));
-    (top, bottom)
-}
-
-#[inline]
-fn lyric_viewport_edge_progress(
-    row_center_y: f32,
-    viewport: gpui::Bounds<gpui::Pixels>,
-) -> f32 {
-    let top = f32::from(viewport.origin.y);
-    let height = f32::from(viewport.size.height).max(1.0);
-    let bottom = top + height;
-    let y = row_center_y.clamp(top, bottom);
-
-    let top_visibility =
-        smoothstep01((y - top) / LYRIC_VIEWPORT_FADE_TOP_PX.max(1.0));
-    let bottom_visibility =
-        smoothstep01((bottom - y) / LYRIC_VIEWPORT_FADE_BOTTOM_PX.max(1.0));
-
-    1.0 - top_visibility.min(bottom_visibility)
 }
 
 fn lyric_visual_profile(
@@ -1714,8 +1196,7 @@ fn stage_primary_lyric(
     }
 
     // Every enhanced line keeps the same fragment/container tree before, during and after a line
-    // hand-off. Retained List rows therefore never replace a plain text subtree with a karaoke
-    // subtree on the same frame that ListState is moving.
+    // hand-off, so retained text primitives never switch shape at a word or line boundary.
     const DIM_ALPHA: f32 = 0.46;
     const STATIC_ALPHA: f32 = 1.0;
 
@@ -1788,7 +1269,7 @@ fn lyric_focus_progress(started_at: Instant, now: Instant) -> f32 {
 }
 
 #[inline]
-fn lyric_history_slot_progress(rank: usize, started_at: Instant, now: Instant) -> f32 {
+fn lyric_row_slot_progress(rank: usize, started_at: Instant, now: Instant) -> f32 {
     let elapsed = now.saturating_duration_since(started_at);
     let slot_start =
         Duration::from_secs_f32(LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * rank as f32);
@@ -1802,39 +1283,6 @@ fn lyric_history_slot_progress(rank: usize, started_at: Instant, now: Instant) -
     let t = (local.as_secs_f32() / LYRIC_ROW_SERIAL_SLOT.as_secs_f32()).clamp(0.0, 1.0);
     // Smooth endpoints make each old row visibly settle before the next row starts.
     t * t * (3.0 - 2.0 * t)
-}
-
-#[inline]
-fn lyric_history_progress_for_row(
-    index: usize,
-    handoff: LyricHistoryHandoff,
-    now: Instant,
-) -> Option<f32> {
-    if index < handoff.first_visible_index {
-        return None;
-    }
-    let last_rank = handoff.visible_rows.saturating_sub(1);
-    let rank = index
-        .saturating_sub(handoff.first_visible_index)
-        .min(last_rank);
-    Some(lyric_history_slot_progress(rank, handoff.started_at, now))
-}
-
-fn apply_history_row_handoff(
-    row: gpui::Stateful<gpui::Div>,
-    index: usize,
-    handoff: Option<LyricHistoryHandoff>,
-    now: Instant,
-) -> gpui::AnyElement {
-    let Some(handoff) = handoff else {
-        return row.into_any_element();
-    };
-    let Some(progress) = lyric_history_progress_for_row(index, handoff, now) else {
-        return row.into_any_element();
-    };
-    row.relative()
-        .top(px(handoff.visual_delta_y * progress))
-        .into_any_element()
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1862,13 +1310,6 @@ fn format_lyric_time(ms: u64) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}.{millis:03}")
     }
-}
-
-
-#[inline]
-fn lyric_scroll_step_factor(dt: Duration) -> f32 {
-    let seconds = dt.as_secs_f32().clamp(1.0 / 500.0, 0.05);
-    1.0 - (-SCROLL_EASING_RATE * seconds).exp()
 }
 
 
@@ -1907,46 +1348,29 @@ mod tests {
         let start = Instant::now();
         let half = LYRIC_ROW_SERIAL_SLOT / 2;
 
-        let first_mid = lyric_history_slot_progress(0, start, start + half);
+        let first_mid = lyric_row_slot_progress(0, start, start + half);
         assert!(first_mid > 0.0 && first_mid < 1.0);
-        assert_eq!(lyric_history_slot_progress(1, start, start + half), 0.0);
+        assert_eq!(lyric_row_slot_progress(1, start, start + half), 0.0);
 
         let second_mid = start + LYRIC_ROW_SERIAL_SLOT + half;
-        assert_eq!(lyric_history_slot_progress(0, start, second_mid), 1.0);
-        assert!(lyric_history_slot_progress(1, start, second_mid) > 0.0);
-        assert_eq!(lyric_history_slot_progress(2, start, second_mid), 0.0);
+        assert_eq!(lyric_row_slot_progress(0, start, second_mid), 1.0);
+        assert!(lyric_row_slot_progress(1, start, second_mid) > 0.0);
+        assert_eq!(lyric_row_slot_progress(2, start, second_mid), 0.0);
 
         let third_mid = start + LYRIC_ROW_SERIAL_SLOT * 2 + half;
-        assert_eq!(lyric_history_slot_progress(1, start, third_mid), 1.0);
-        assert!(lyric_history_slot_progress(2, start, third_mid) > 0.0);
-        assert_eq!(lyric_history_slot_progress(3, start, third_mid), 0.0);
+        assert_eq!(lyric_row_slot_progress(1, start, third_mid), 1.0);
+        assert!(lyric_row_slot_progress(2, start, third_mid) > 0.0);
+        assert_eq!(lyric_row_slot_progress(3, start, third_mid), 0.0);
     }
 
     #[test]
-    fn active_and_future_rows_have_distinct_positional_slots() {
-        let start = Instant::now();
-        let handoff = LyricHistoryHandoff {
-            from_index: 5,
-            to_index: 6,
-            first_visible_index: 3,
-            visible_rows: 6,
-            started_at: start,
-            visual_delta_y: -80.0,
-            layout_scroll_delta: 80.0,
-            target_spacer_px: 24.0,
-        };
-
-        let active_slot = 6usize.saturating_sub(handoff.first_visible_index);
-        let future_slot = 7usize.saturating_sub(handoff.first_visible_index);
-        let sample = start
-            + Duration::from_secs_f32(LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * active_slot as f32)
-            + LYRIC_ROW_SERIAL_SLOT / 2;
-
-        let active = lyric_history_progress_for_row(6, handoff, sample).unwrap();
-        let future = lyric_history_progress_for_row(7, handoff, sample).unwrap();
-        assert!(active > 0.0 && active < 1.0);
-        assert_eq!(future, 0.0);
-        assert!(future_slot > active_slot);
+    fn immersive_lyrics_render_only_a_small_visible_window() {
+        let active = 10usize;
+        let first = active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS);
+        let last = active.saturating_add(PLAYBACK_STACK_FUTURE_ROWS);
+        assert_eq!(first, 6);
+        assert_eq!(last, 17);
+        assert_eq!(last - first + 1, 12);
     }
 
     #[test]
@@ -1991,76 +1415,6 @@ mod tests {
         assert!(active.1 < row1.1);
         assert!(row1.1 < row2.1);
         assert!(row2.1 < row3.1);
-    }
-
-    #[test]
-    fn leading_spacer_exists_only_until_real_history_reaches_the_anchor() {
-        let at_start = lyric_leading_spacer_for_active(600.0, 0.0, 80.0);
-        let after_two_rows = lyric_leading_spacer_for_active(600.0, 180.0, 80.0);
-        let with_enough_history = lyric_leading_spacer_for_active(600.0, 320.0, 80.0);
-
-        assert!(at_start > after_two_rows);
-        assert!(after_two_rows > LYRIC_LIST_MIN_PADDING_TOP);
-        assert_eq!(with_enough_history, LYRIC_LIST_MIN_PADDING_TOP);
-    }
-
-    #[test]
-    fn list_spacers_do_not_reserve_a_permanent_top_gap() {
-        let (top, bottom) = lyric_list_spacers(600.0, LYRIC_LIST_MIN_PADDING_TOP);
-        assert_eq!(top, LYRIC_LIST_MIN_PADDING_TOP);
-        assert!(bottom > LYRIC_LIST_MIN_PADDING_BOTTOM);
-        assert!(top + bottom < 600.0);
-
-        let (fallback_top, fallback_bottom) =
-            lyric_list_spacers(0.0, LYRIC_LIST_MIN_PADDING_TOP);
-        assert_eq!(fallback_top, LYRIC_LIST_MIN_PADDING_TOP);
-        assert_eq!(fallback_bottom, LYRIC_LIST_MIN_PADDING_BOTTOM);
-    }
-
-    #[test]
-    fn viewport_edge_progress_tracks_actual_top_and_bottom_distance() {
-        let viewport = gpui::Bounds::new(
-            gpui::point(px(0.0), px(100.0)),
-            gpui::size(px(500.0), px(600.0)),
-        );
-
-        let top_edge = lyric_viewport_edge_progress(100.0, viewport);
-        let top_inside = lyric_viewport_edge_progress(230.0, viewport);
-        let center = lyric_viewport_edge_progress(400.0, viewport);
-        let bottom_inside = lyric_viewport_edge_progress(545.0, viewport);
-        let bottom_edge = lyric_viewport_edge_progress(700.0, viewport);
-
-        assert!(top_edge > top_inside);
-        assert!(top_inside > center);
-        assert!(bottom_edge > bottom_inside);
-        assert!(bottom_inside > center);
-        assert_eq!(center, 0.0);
-    }
-
-    #[test]
-    fn visual_profile_becomes_transparent_and_blurred_toward_edges() {
-        let active = lyric_visual_profile(10, 10, 0.0, false, true);
-        let top_mid = lyric_visual_profile(6, 10, 0.45, false, true);
-        let top_edge = lyric_visual_profile(2, 10, 0.95, false, true);
-        let bottom_mid = lyric_visual_profile(15, 10, 0.45, false, true);
-        let bottom_edge = lyric_visual_profile(19, 10, 0.95, false, true);
-
-        assert_eq!(active, (1.0, 0.0));
-        assert!(active.0 > top_mid.0 && top_mid.0 > top_edge.0);
-        assert!(active.0 > bottom_mid.0 && bottom_mid.0 > bottom_edge.0);
-        assert!(top_mid.1 >= 0.0 && top_edge.1 >= 0.0);
-        assert!(bottom_mid.1 >= 0.0 && bottom_edge.1 >= 0.0);
-    }
-
-    #[test]
-    fn layout_scroll_step_is_frame_rate_independent_and_bounded() {
-        let at_120 = lyric_scroll_step_factor(Duration::from_micros(8_333));
-        let at_60 = lyric_scroll_step_factor(Duration::from_micros(16_667));
-        let at_slow_frame = lyric_scroll_step_factor(Duration::from_millis(50));
-
-        assert!(at_120 > 0.0 && at_120 < 1.0);
-        assert!(at_60 > at_120 && at_60 < 1.0);
-        assert!(at_slow_frame > at_60 && at_slow_frame < 1.0);
     }
 
     #[test]
