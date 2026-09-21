@@ -5,9 +5,9 @@ use std::{
 
 use gpui::{
     AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge,
-    IntoElement, ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer,
-    Transition, TransitionProperty, WeakEntity, Window, div, hsla, list, point, prelude::*, px,
+    Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, ListAlignment,
+    ListOffset, ListState, Render, SharedString, Subscription, Timer, Transition,
+    TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -34,7 +34,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_SCROLL_MOTION_DURATION: Duration = Duration::from_millis(360);
+const SCROLL_EASING_RATE: f32 = 12.5;
 const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
 const SCROLL_SETTLE_PX: f32 = 0.30;
@@ -125,24 +125,6 @@ impl StageLyricLine {
     }
 }
 
-#[derive(Clone, Copy)]
-struct LyricScrollAnimation {
-    from_y: f32,
-    started_at: Instant,
-}
-
-impl LyricScrollAnimation {
-    fn progress_at(self, now: Instant) -> f32 {
-        let elapsed = now.saturating_duration_since(self.started_at);
-        lyric_scroll_motion_spec()
-            .sample_elapsed(elapsed)
-            .eased_progress
-    }
-
-    fn offset_at(self, now: Instant) -> f32 {
-        self.from_y * (1.0 - self.progress_at(now))
-    }
-}
 
 pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
     let existing = cx
@@ -194,8 +176,7 @@ pub(super) struct StageLyricsView {
     transport_generation: u64,
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
-    scroll_animation: Option<LyricScrollAnimation>,
-    motion_epoch: u64,
+    last_scroll_frame: Option<Instant>,
     // Initial stage/source materialization is aligned offscreen first. It must never reuse the
     // normal line-change FLIP animation, otherwise the first active lyric visibly starts near the
     // top edge and then flies into the focus slot.
@@ -239,8 +220,7 @@ impl StageLyricsView {
             transport_generation,
             reading_until: None,
             scroll_target: None,
-            scroll_animation: None,
-            motion_epoch: 0,
+            last_scroll_frame: None,
             anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
@@ -579,26 +559,9 @@ impl StageLyricsView {
     }
 
     fn cancel_scroll_animation(&mut self) {
-        self.scroll_animation = None;
+        self.last_scroll_frame = None;
     }
 
-    fn current_scroll_animation_offset(&self, now: Instant) -> f32 {
-        self.scroll_animation
-            .map_or(0.0, |animation| animation.offset_at(now))
-    }
-
-    fn start_scroll_animation(&mut self, from_y: f32, started_at: Instant) {
-        if !from_y.is_finite() || from_y.abs() <= SCROLL_SETTLE_PX {
-            self.cancel_scroll_animation();
-            return;
-        }
-
-        self.motion_epoch = self.motion_epoch.wrapping_add(1);
-        self.scroll_animation = Some(LyricScrollAnimation {
-            from_y,
-            started_at,
-        });
-    }
 
     fn begin_reading_mode(&mut self, cx: &mut Context<Self>) {
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
@@ -629,12 +592,6 @@ impl StageLyricsView {
             self.focus_from_index = None;
             self.focus_started_at = None;
         }
-        if self
-            .scroll_animation
-            .is_some_and(|animation| animation.started_at + LYRIC_SCROLL_MOTION_DURATION <= now)
-        {
-            self.scroll_animation = None;
-        }
     }
 
     fn schedule_deadlines(&self, window: &mut Window, cx: &Context<Self>) {
@@ -644,9 +601,7 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(now + delay, cx);
         }
-        if self.karaoke_should_sample()
-            || self.scroll_animation.is_some()
-            || self.focus_started_at.is_some()
+        if self.karaoke_should_sample() || self.focus_started_at.is_some()
         {
             window.request_invalidation_at(now + LYRIC_SAMPLE_INTERVAL, cx);
         }
@@ -654,12 +609,6 @@ impl StageLyricsView {
             && until > now
         {
             window.request_invalidation_at(until, cx);
-        }
-        if let Some(animation) = self.scroll_animation {
-            let deadline = animation.started_at + LYRIC_HANDOFF_DURATION;
-            if deadline > now {
-                window.request_invalidation_at(deadline, cx);
-            }
         }
         if let Some(started_at) = self.focus_started_at {
             let deadline = started_at + LYRIC_HANDOFF_DURATION;
@@ -693,15 +642,18 @@ impl StageLyricsView {
 
     fn prepare_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_timeline || !self.stage_active || self.is_reading() {
+            self.last_scroll_frame = None;
             return;
         }
         let Some(target) = self.scroll_target else {
+            self.last_scroll_frame = None;
             return;
         };
 
         let viewport = self.list_state.viewport_bounds();
         if f32::from(viewport.size.height) <= 0.5 || window.is_minimized() {
-            if self.anchor_bootstrap_pending && !window.is_minimized() {
+            self.last_scroll_frame = None;
+            if !window.is_minimized() {
                 self.schedule_geometry_retry(cx);
             }
             return;
@@ -717,23 +669,16 @@ impl StageLyricsView {
                     item_ix: target.saturating_sub(4),
                     offset_in_item: px(0.0),
                 });
-                self.cancel_scroll_animation();
             } else if !adjacent_handoff {
-                // Large seeks may legitimately jump the virtual list close to the destination.
                 self.list_state.scroll_to(ListOffset {
                     item_ix: target.saturating_sub(3),
                     offset_in_item: px(0.0),
                 });
-                self.cancel_scroll_animation();
+            } else {
+                self.list_state.scroll_to_reveal_item(target);
             }
-
-            // Normal playback must never call scroll_to_reveal_item here. That mutates logical
-            // scroll immediately and causes the whole lyric field to jump before the hand-off
-            // animation starts. Retry only this retained lyrics entity after ListState has
-            // completed another prepaint pass and can expose target geometry.
-            if !window.is_minimized() && f32::from(viewport.size.height) > 1.0 {
-                self.schedule_geometry_retry(cx);
-            }
+            self.last_scroll_frame = None;
+            self.schedule_geometry_retry(cx);
             return;
         };
 
@@ -741,10 +686,6 @@ impl StageLyricsView {
         let viewport_height = f32::from(viewport.size.height);
         let (list_padding_top, _) = lyric_list_spacers(viewport_height);
         let anchor_y = viewport_top + viewport_height * LYRIC_ANCHOR_RATIO;
-
-        // GPUI ListState::bounds_for_item reports item geometry without style padding.top, while
-        // List prepaint starts the first item after that padding. Treat the dynamic top padding as a
-        // real leading spacer so item 0 can live at the same playback anchor as every later line.
         let painted_line_center =
             f32::from(line_bounds.center().y) + list_padding_top;
         let diff = painted_line_center - anchor_y;
@@ -759,42 +700,41 @@ impl StageLyricsView {
             self.focus_from_index = None;
             self.focus_started_at = None;
             self.anchor_bootstrap_pending = false;
-            self.cancel_scroll_animation();
+            self.last_scroll_frame = None;
             return;
         }
+
         if diff.abs() <= SCROLL_SETTLE_PX {
             self.scroll_target = None;
+            self.last_scroll_frame = None;
             if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
                 self.focus_started_at = Some(now);
-                self.motion_epoch = self.motion_epoch.wrapping_add(1);
             }
             return;
         }
 
-        let carry = self.current_scroll_animation_offset(now);
-        let before = f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
-        self.list_state.scroll_by(px(diff));
-        let after = f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
-        let applied = before - after;
-        self.scroll_target = None;
+        if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
+            self.focus_started_at = Some(now);
+        }
+
+        let dt = self
+            .last_scroll_frame
+            .map(|last| now.saturating_duration_since(last))
+            .unwrap_or(Duration::from_micros(8_333));
+        self.last_scroll_frame = Some(now);
+
+        // List virtualization happens in prepaint. Move the real logical ListState each frame so
+        // visible rows are selected at their actual intermediate positions rather than trying to
+        // reconstruct discarded rows later in paint with a transform.
+        let factor = lyric_scroll_step_factor(dt);
+        self.list_state.scroll_by(px(diff * factor));
         self.hovered_index = None;
 
-        if applied.abs() <= SCROLL_SETTLE_PX {
-            self.cancel_scroll_animation();
-            if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
-                self.focus_started_at = Some(now);
-                self.motion_epoch = self.motion_epoch.wrapping_add(1);
-            }
-            return;
-        }
-
-        // Focus/depth and list motion begin from the same platform-frame timestamp. Starting the
-        // focus earlier (before ListState had target bounds) produced the video-visible state where
-        // the next line became clear while the list was still parked at the old anchor.
-        let started_at = self.focus_started_at.unwrap_or(now);
-        self.focus_started_at = Some(started_at);
-        self.start_scroll_animation(carry + applied, started_at);
+        // In this GPUI fork a View-local RAF notifies only StageLyricsView. The rest of the Stage
+        // remains retained while this virtual list performs the required layout/prepaint update.
+        window.request_animation_frame();
     }
+
 }
 
 impl Render for StageLyricsView {
@@ -844,11 +784,8 @@ impl Render for StageLyricsView {
             && self.playback_state == PlaybackState::Playing
             && !self.scrubbing
             && !reading_mode;
-        let scroll_animation = self.scroll_animation;
-        let scroll_animating = scroll_animation.is_some();
-        let scroll_from_y = scroll_animation.map_or(0.0, |scroll| scroll.from_y);
-        let scroll_progress = scroll_animation.map_or(1.0, |scroll| scroll.progress_at(frame_now));
-        let motion_epoch = self.motion_epoch;
+        let scroll_animating =
+            self.scroll_target.is_some() && !reading_mode && !self.anchor_bootstrap_pending;
         let focus_started_at = self.focus_started_at;
         let focus_animating = focus_started_at.is_some();
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
@@ -895,11 +832,9 @@ impl Render for StageLyricsView {
                         // ListState item bounds omit style padding.top while paint includes it.
                         let target_center_y =
                             f32::from(bounds.center().y) + list_padding_top;
-                        let previous_center_y = target_center_y + scroll_from_y;
-                        (
-                            lyric_viewport_edge_progress(target_center_y, viewport_bounds),
-                            lyric_viewport_edge_progress(previous_center_y, viewport_bounds),
-                        )
+                        let edge =
+                            lyric_viewport_edge_progress(target_center_y, viewport_bounds);
+                        (edge, edge)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -954,28 +889,7 @@ impl Render for StageLyricsView {
         .pb(px(list_padding_bottom))
         .pr(px(8.0));
 
-        // Commit one logical scroll per lyric boundary, then visually preserve the previous frame
-        // with a single inverse translation on the entire lyric surface. This keeps every row's
-        // spacing rigid while the column moves upward as one Apple Music-style hand-off.
-        let lyrics = if let Some(scroll) = scroll_animation {
-            lyrics
-                .composite_layer()
-                .with_stable_sampled_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("stage-lyrics-scroll-motion"),
-                        motion_epoch,
-                    ),
-                    AnimationProperty::translation(
-                        point(px(0.0), px(scroll.from_y)),
-                        point(px(0.0), px(0.0)),
-                    ),
-                    scroll_progress,
-                    scroll_progress < 1.0,
-                )
-                .into_any_element()
-        } else {
-            lyrics.into_any_element()
-        };
+        let lyrics = lyrics.into_any_element();
 
         div()
             .id("stage-lyrics-view")
@@ -1515,8 +1429,10 @@ fn format_lyric_time(ms: u64) -> String {
 }
 
 
-fn lyric_scroll_motion_spec() -> AnimationSpec {
-    AnimationSpec::new(LYRIC_SCROLL_MOTION_DURATION).ease(Easing::OutQuint)
+#[inline]
+fn lyric_scroll_step_factor(dt: Duration) -> f32 {
+    let seconds = dt.as_secs_f32().clamp(1.0 / 500.0, 0.05);
+    1.0 - (-SCROLL_EASING_RATE * seconds).exp()
 }
 
 
@@ -1617,30 +1533,14 @@ mod tests {
     }
 
     #[test]
-    fn scroll_motion_starts_at_old_geometry_and_settles() {
-        let spec = lyric_scroll_motion_spec();
-        let start = spec.sample_elapsed(Duration::ZERO);
-        let middle = spec.sample_elapsed(LYRIC_SCROLL_MOTION_DURATION / 2);
-        let end = spec.sample_elapsed(LYRIC_SCROLL_MOTION_DURATION);
-        assert_eq!(start.eased_progress, 0.0);
-        assert!(middle.eased_progress > 0.0 && middle.eased_progress < 1.0);
-        assert_eq!(end.eased_progress, 1.0);
-    }
+    fn layout_scroll_step_is_frame_rate_independent_and_bounded() {
+        let at_120 = lyric_scroll_step_factor(Duration::from_micros(8_333));
+        let at_60 = lyric_scroll_step_factor(Duration::from_micros(16_667));
+        let at_slow_frame = lyric_scroll_step_factor(Duration::from_millis(50));
 
-    #[test]
-    fn scroll_animation_keeps_continuity_and_settles() {
-        let start = Instant::now();
-        let animation = LyricScrollAnimation {
-            from_y: 120.0,
-            started_at: start,
-        };
-        assert!((animation.offset_at(start) - 120.0).abs() < 0.001);
-        let halfway = animation.offset_at(start + LYRIC_SCROLL_MOTION_DURATION / 2);
-        assert!(halfway > 0.0 && halfway < 120.0);
-        assert!(animation
-            .offset_at(start + LYRIC_SCROLL_MOTION_DURATION)
-            .abs()
-            < 0.001);
+        assert!(at_120 > 0.0 && at_120 < 1.0);
+        assert!(at_60 > at_120 && at_60 < 1.0);
+        assert!(at_slow_frame > at_60 && at_slow_frame < 1.0);
     }
 
     #[test]
