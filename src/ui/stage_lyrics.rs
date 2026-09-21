@@ -177,6 +177,7 @@ pub(super) struct StageLyricsView {
     reading_until: Option<Instant>,
     scroll_target: Option<usize>,
     last_scroll_frame: Option<Instant>,
+    leading_spacer_px: f32,
     // Initial stage/source materialization is aligned offscreen first. It must never reuse the
     // normal line-change FLIP animation, otherwise the first active lyric visibly starts near the
     // top edge and then flies into the focus slot.
@@ -221,6 +222,7 @@ impl StageLyricsView {
             reading_until: None,
             scroll_target: None,
             last_scroll_frame: None,
+            leading_spacer_px: LYRIC_LIST_MIN_PADDING_TOP,
             anchor_bootstrap_pending: false,
             stage_active: false,
             scrubbing: false,
@@ -346,6 +348,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.scroll_target = None;
             self.cancel_scroll_animation();
+            self.leading_spacer_px = LYRIC_LIST_MIN_PADDING_TOP;
             self.anchor_bootstrap_pending = stage_active && has_timeline;
             self.scrubbing = false;
             changed = true;
@@ -400,6 +403,7 @@ impl StageLyricsView {
                 self.hovered_index = None;
                 self.anchor_bootstrap_pending = false;
                 self.cancel_scroll_animation();
+                self.leading_spacer_px = LYRIC_LIST_MIN_PADDING_TOP;
             }
             changed = true;
         }
@@ -684,16 +688,27 @@ impl StageLyricsView {
 
         let viewport_top = f32::from(viewport.origin.y);
         let viewport_height = f32::from(viewport.size.height);
-        let (list_padding_top, _) = lyric_list_spacers(viewport_height);
+        let scroll_top_px =
+            -f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
+        let active_prefix_height =
+            (f32::from(line_bounds.origin.y) - viewport_top + scroll_top_px).max(0.0);
+        let desired_leading_spacer = lyric_leading_spacer_for_active(
+            viewport_height,
+            active_prefix_height,
+            f32::from(line_bounds.size.height),
+        );
         let anchor_y = viewport_top + viewport_height * LYRIC_ANCHOR_RATIO;
         let painted_line_center =
-            f32::from(line_bounds.center().y) + list_padding_top;
+            f32::from(line_bounds.center().y) + self.leading_spacer_px;
         let diff = painted_line_center - anchor_y;
         let now = window.animation_time();
 
         if self.anchor_bootstrap_pending {
-            if diff.abs() > SCROLL_SETTLE_PX {
-                self.list_state.scroll_by(px(diff));
+            self.leading_spacer_px = desired_leading_spacer;
+            let bootstrap_diff =
+                f32::from(line_bounds.center().y) + self.leading_spacer_px - anchor_y;
+            if bootstrap_diff.abs() > SCROLL_SETTLE_PX {
+                self.list_state.scroll_by(px(bootstrap_diff));
             }
             self.scroll_target = None;
             self.hovered_index = None;
@@ -704,7 +719,10 @@ impl StageLyricsView {
             return;
         }
 
-        if diff.abs() <= SCROLL_SETTLE_PX {
+        if diff.abs() <= SCROLL_SETTLE_PX
+            && (self.leading_spacer_px - desired_leading_spacer).abs() <= SCROLL_SETTLE_PX
+        {
+            self.leading_spacer_px = desired_leading_spacer;
             self.scroll_target = None;
             self.last_scroll_frame = None;
             if self.focus_from_index.is_some() && self.focus_started_at.is_none() {
@@ -722,16 +740,23 @@ impl StageLyricsView {
             .map(|last| now.saturating_duration_since(last))
             .unwrap_or(Duration::from_micros(8_333));
         self.last_scroll_frame = Some(now);
-
-        // List virtualization happens in prepaint. Move the real logical ListState each frame so
-        // visible rows are selected at their actual intermediate positions rather than trying to
-        // reconstruct discarded rows later in paint with a transform.
         let factor = lyric_scroll_step_factor(dt);
-        self.list_state.scroll_by(px(diff * factor));
-        self.hovered_index = None;
 
-        // In this GPUI fork a View-local RAF notifies only StageLyricsView. The rest of the Stage
-        // remains retained while this virtual list performs the required layout/prepaint update.
+        let desired_visual_delta = -diff * factor;
+        let spacer_remaining = desired_leading_spacer - self.leading_spacer_px;
+        let spacer_step = if spacer_remaining.signum() == desired_visual_delta.signum() {
+            desired_visual_delta.signum()
+                * spacer_remaining.abs().min(desired_visual_delta.abs())
+        } else {
+            0.0
+        };
+        self.leading_spacer_px += spacer_step;
+
+        let residual_visual_delta = desired_visual_delta - spacer_step;
+        if residual_visual_delta.abs() > 0.001 {
+            self.list_state.scroll_by(px(-residual_visual_delta));
+        }
+        self.hovered_index = None;
         window.request_animation_frame();
     }
 
@@ -811,7 +836,7 @@ impl Render for StageLyricsView {
             0.0
         };
         let (list_padding_top, list_padding_bottom) =
-            lyric_list_spacers(layout_viewport_height);
+            lyric_list_spacers(layout_viewport_height, self.leading_spacer_px);
         let lines = self.lines.clone();
 
         // Snapshot ListState geometry before constructing/rendering the List element. The list
@@ -1133,7 +1158,22 @@ fn smoothstep01(value: f32) -> f32 {
 }
 
 #[inline]
-fn lyric_list_spacers(viewport_height: f32) -> (f32, f32) {
+fn lyric_leading_spacer_for_active(
+    viewport_height: f32,
+    content_prefix_height: f32,
+    active_line_height: f32,
+) -> f32 {
+    if !viewport_height.is_finite() || viewport_height <= 1.0 {
+        return LYRIC_LIST_MIN_PADDING_TOP;
+    }
+    let anchor = viewport_height * LYRIC_ANCHOR_RATIO;
+    let centered_boundary_space =
+        anchor - content_prefix_height.max(0.0) - active_line_height.max(0.0) * 0.5;
+    centered_boundary_space.max(LYRIC_LIST_MIN_PADDING_TOP)
+}
+
+#[inline]
+fn lyric_list_spacers(viewport_height: f32, leading_spacer_px: f32) -> (f32, f32) {
     if !viewport_height.is_finite() || viewport_height <= 1.0 {
         return (
             LYRIC_LIST_MIN_PADDING_TOP,
@@ -1141,19 +1181,13 @@ fn lyric_list_spacers(viewport_height: f32) -> (f32, f32) {
         );
     }
 
-    // GPUI List prepaint clears every item when viewport_height <= top + bottom. Reserve a real
-    // content band and spend the remaining height on the first/last-line anchor spacers.
     let padding_budget = (viewport_height - LYRIC_LIST_CONTENT_RESERVE_PX).max(0.0);
-    let minimum_padding = LYRIC_LIST_MIN_PADDING_TOP + LYRIC_LIST_MIN_PADDING_BOTTOM;
-    if padding_budget <= minimum_padding {
-        let top = padding_budget * LYRIC_ANCHOR_RATIO;
-        return (top, padding_budget - top);
-    }
-
-    let top = (viewport_height * LYRIC_ANCHOR_RATIO)
+    let top = leading_spacer_px
         .max(LYRIC_LIST_MIN_PADDING_TOP)
-        .min(padding_budget - LYRIC_LIST_MIN_PADDING_BOTTOM);
-    let bottom = padding_budget - top;
+        .min((padding_budget - LYRIC_LIST_MIN_PADDING_BOTTOM).max(0.0));
+    let desired_bottom =
+        (viewport_height * (1.0 - LYRIC_ANCHOR_RATIO)).max(LYRIC_LIST_MIN_PADDING_BOTTOM);
+    let bottom = desired_bottom.min((padding_budget - top).max(0.0));
     (top, bottom)
 }
 
@@ -1486,13 +1520,25 @@ mod tests {
     }
 
     #[test]
-    fn list_spacers_allow_edge_lines_to_use_the_playback_anchor() {
-        let (top, bottom) = lyric_list_spacers(600.0);
-        assert!((top - 600.0 * LYRIC_ANCHOR_RATIO).abs() < 0.01);
-        assert!((top + bottom - (600.0 - LYRIC_LIST_CONTENT_RESERVE_PX)).abs() < 0.01);
+    fn leading_spacer_exists_only_until_real_history_reaches_the_anchor() {
+        let at_start = lyric_leading_spacer_for_active(600.0, 0.0, 80.0);
+        let after_two_rows = lyric_leading_spacer_for_active(600.0, 180.0, 80.0);
+        let with_enough_history = lyric_leading_spacer_for_active(600.0, 320.0, 80.0);
+
+        assert!(at_start > after_two_rows);
+        assert!(after_two_rows > LYRIC_LIST_MIN_PADDING_TOP);
+        assert_eq!(with_enough_history, LYRIC_LIST_MIN_PADDING_TOP);
+    }
+
+    #[test]
+    fn list_spacers_do_not_reserve_a_permanent_top_gap() {
+        let (top, bottom) = lyric_list_spacers(600.0, LYRIC_LIST_MIN_PADDING_TOP);
+        assert_eq!(top, LYRIC_LIST_MIN_PADDING_TOP);
+        assert!(bottom > LYRIC_LIST_MIN_PADDING_BOTTOM);
         assert!(top + bottom < 600.0);
 
-        let (fallback_top, fallback_bottom) = lyric_list_spacers(0.0);
+        let (fallback_top, fallback_bottom) =
+            lyric_list_spacers(0.0, LYRIC_LIST_MIN_PADDING_TOP);
         assert_eq!(fallback_top, LYRIC_LIST_MIN_PADDING_TOP);
         assert_eq!(fallback_bottom, LYRIC_LIST_MIN_PADDING_BOTTOM);
     }
