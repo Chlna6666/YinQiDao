@@ -1649,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn lyric_depth_profile_is_continuous_and_monotonic() {
+    fn semantic_focus_changes_alpha_but_not_viewport_blur() {
         let active = lyric_focus_profile(0, false, true);
         let near = lyric_focus_profile(1, false, true);
         let middle = lyric_focus_profile(3, false, true);
@@ -1657,20 +1657,19 @@ mod tests {
 
         assert_eq!(active, (1.0, 0.0));
         assert!(active.0 > near.0 && near.0 > middle.0 && middle.0 >= far.0);
-        assert!(active.1 < near.1);
-        assert!(near.1 <= middle.1 || middle.1 == 0.0);
-        assert!(far.1 <= middle.1);
+        assert_eq!(near.1, 0.0);
+        assert_eq!(middle.1, 0.0);
+        assert_eq!(far.1, 0.0);
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
-        assert_eq!(lyric_focus_profile(2, false, false).1, 0.0);
     }
 
     #[test]
-    fn focus_band_visibly_fades_each_adjacent_row() {
-        let active = lyric_visual_profile(10, 10, 0.0, false, true);
-        let row1 = lyric_visual_profile(11, 10, 0.0, false, true);
-        let row2 = lyric_visual_profile(12, 10, 0.0, false, true);
-        let row3 = lyric_visual_profile(13, 10, 0.0, false, true);
-        let row4 = lyric_visual_profile(14, 10, 0.0, false, true);
+    fn focus_band_controls_alpha_while_physical_y_controls_blur() {
+        let active = lyric_visual_profile(10, 10, 0.0, 0.0, false, true);
+        let row1 = lyric_visual_profile(11, 10, 0.0, 0.0, false, true);
+        let row2 = lyric_visual_profile(12, 10, 0.0, 0.0, false, true);
+        let row3 = lyric_visual_profile(13, 10, 0.0, 0.0, false, true);
+        let row4 = lyric_visual_profile(14, 10, 0.0, 0.0, false, true);
 
         assert!(active.0 > 0.99);
         assert!(row1.0 < 0.70);
@@ -1681,9 +1680,16 @@ mod tests {
         assert!(row1.0 > row2.0);
         assert!(row2.0 > row3.0);
         assert!(row3.0 > row4.0);
-        assert!(active.1 < row1.1);
-        assert!(row1.1 < row2.1);
-        assert!(row2.1 < row3.1);
+
+        // All rows are physically in the clear center band in this synthetic profile.
+        assert_eq!(active.1, 0.0);
+        assert_eq!(row1.1, 0.0);
+        assert_eq!(row2.1, 0.0);
+
+        let upper = lyric_visual_profile(10, 10, 0.0, 0.65, false, true);
+        let edge = lyric_visual_profile(10, 10, 0.0, 1.0, false, true);
+        assert!(upper.1 > 0.0);
+        assert!(edge.1 > upper.1);
     }
 
     #[test]
