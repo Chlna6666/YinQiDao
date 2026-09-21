@@ -34,7 +34,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(220);
-const LYRIC_HISTORY_ROW_SLOT: Duration = Duration::from_millis(104);
+const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(90);
 const SCROLL_EASING_RATE: f32 = 9.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
@@ -45,7 +45,7 @@ struct LyricHistoryHandoff {
     from_index: usize,
     to_index: usize,
     first_visible_index: usize,
-    history_rows: usize,
+    visible_rows: usize,
     started_at: Instant,
     visual_delta_y: f32,
     layout_scroll_delta: f32,
@@ -56,7 +56,7 @@ impl LyricHistoryHandoff {
     #[inline]
     fn duration(self) -> Duration {
         Duration::from_secs_f32(
-            LYRIC_HISTORY_ROW_SLOT.as_secs_f32() * self.history_rows.max(1) as f32,
+            LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * self.visible_rows.max(1) as f32,
         )
     }
 
@@ -687,25 +687,32 @@ impl StageLyricsView {
         .detach();
     }
 
-    fn first_visible_history_index(
+    fn visible_row_span(
         &self,
-        previous_active: usize,
         viewport: gpui::Bounds<gpui::Pixels>,
-    ) -> usize {
+    ) -> Option<(usize, usize)> {
         let viewport_top = f32::from(viewport.origin.y);
-        for index in 0..=previous_active.min(self.lines.len().saturating_sub(1)) {
+        let viewport_bottom = viewport_top + f32::from(viewport.size.height);
+        let mut first = None;
+        let mut last = None;
+
+        for index in 0..self.lines.len() {
             let Some(bounds) = self.list_state.bounds_for_item(index) else {
                 continue;
             };
-            // ListState bounds omit list padding.top; apply the current spacer to test the actual
-            // painted row. The first row whose bottom is still inside the viewport is the old lyric
-            // that must leave first.
+            // ListState item bounds omit the List padding. Convert to the painted row bounds and
+            // reject retained overdraw outside the actual lyric viewport.
+            let row_top = f32::from(bounds.top()) + self.leading_spacer_px;
             let row_bottom = f32::from(bounds.bottom()) + self.leading_spacer_px;
-            if row_bottom > viewport_top + 0.5 {
-                return index;
+            if row_bottom > viewport_top + 0.5 && row_top < viewport_bottom - 0.5 {
+                if first.is_none() {
+                    first = Some(index);
+                }
+                last = Some(index);
             }
         }
-        previous_active
+
+        Some((first?, last?))
     }
 
     fn commit_history_handoff(&mut self, handoff: LyricHistoryHandoff) {
@@ -832,8 +839,10 @@ impl StageLyricsView {
             .filter(|previous| target == previous.saturating_add(1));
 
         if let Some(previous) = previous {
-            let first_visible_index = self.first_visible_history_index(previous, viewport);
-            let history_rows = previous
+            let (first_visible_index, last_visible_index) = self
+                .visible_row_span(viewport)
+                .unwrap_or((previous.min(target), previous.max(target)));
+            let visible_rows = last_visible_index
                 .saturating_sub(first_visible_index)
                 .saturating_add(1)
                 .max(1);
@@ -843,11 +852,11 @@ impl StageLyricsView {
                 from_index: previous,
                 to_index: target,
                 first_visible_index,
-                history_rows,
+                visible_rows,
                 started_at: now,
-                // The final real layout changes every row by exactly -diff. Only historical rows
-                // receive separate slots. The new active/future stack follows the final old row,
-                // so the current lyric is never an extra blocking slot.
+                // Freeze the real ListState and move every painted row in strict screen order.
+                // Focus/karaoke already follows transport independently, so the active row having
+                // its own positional slot cannot block playback semantics.
                 visual_delta_y: -diff,
                 layout_scroll_delta: diff + spacer_delta,
                 target_spacer_px: desired_leading_spacer,
@@ -1140,7 +1149,8 @@ fn render_lyric_row(
         && index == handoff.first_visible_index
     {
         // The oldest displayed lyric owns the exit. Fade it while it moves through the top clip;
-        // lower historical rows wait for their own slots instead of moving as one rigid block.
+        // every following visible row has a distinct later slot, so no two painted rows share the
+        // same movement progress.
         resolved_alpha *= 1.0 - progress;
     }
 
@@ -1578,15 +1588,15 @@ fn lyric_focus_progress(started_at: Instant, now: Instant) -> f32 {
 fn lyric_history_slot_progress(rank: usize, started_at: Instant, now: Instant) -> f32 {
     let elapsed = now.saturating_duration_since(started_at);
     let slot_start =
-        Duration::from_secs_f32(LYRIC_HISTORY_ROW_SLOT.as_secs_f32() * rank as f32);
+        Duration::from_secs_f32(LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * rank as f32);
     if elapsed <= slot_start {
         return 0.0;
     }
     let local = elapsed.saturating_sub(slot_start);
-    if local >= LYRIC_HISTORY_ROW_SLOT {
+    if local >= LYRIC_ROW_SERIAL_SLOT {
         return 1.0;
     }
-    let t = (local.as_secs_f32() / LYRIC_HISTORY_ROW_SLOT.as_secs_f32()).clamp(0.0, 1.0);
+    let t = (local.as_secs_f32() / LYRIC_ROW_SERIAL_SLOT.as_secs_f32()).clamp(0.0, 1.0);
     // Smooth endpoints make each old row visibly settle before the next row starts.
     t * t * (3.0 - 2.0 * t)
 }
@@ -1600,14 +1610,10 @@ fn lyric_history_progress_for_row(
     if index < handoff.first_visible_index {
         return None;
     }
-    let last_rank = handoff.history_rows.saturating_sub(1);
-    let rank = if index <= handoff.from_index {
-        index.saturating_sub(handoff.first_visible_index).min(last_rank)
-    } else {
-        // Current/future lyrics are not extra serial slots. They follow the final historical row,
-        // so playback focus is never blocked waiting for the active line's own movement.
-        last_rank
-    };
+    let last_rank = handoff.visible_rows.saturating_sub(1);
+    let rank = index
+        .saturating_sub(handoff.first_visible_index)
+        .min(last_rank);
     Some(lyric_history_slot_progress(rank, handoff.started_at, now))
 }
 
@@ -1677,40 +1683,50 @@ mod tests {
     }
 
     #[test]
-    fn historical_rows_are_strictly_serial() {
+    fn visible_rows_are_strictly_serial() {
         let start = Instant::now();
-        let half = LYRIC_HISTORY_ROW_SLOT / 2;
+        let half = LYRIC_ROW_SERIAL_SLOT / 2;
 
-        let top_mid = lyric_history_slot_progress(0, start, start + half);
-        let second_waiting = lyric_history_slot_progress(1, start, start + half);
-        assert!(top_mid > 0.0 && top_mid < 1.0);
-        assert_eq!(second_waiting, 0.0);
+        let first_mid = lyric_history_slot_progress(0, start, start + half);
+        assert!(first_mid > 0.0 && first_mid < 1.0);
+        assert_eq!(lyric_history_slot_progress(1, start, start + half), 0.0);
 
-        let second_mid = start + LYRIC_HISTORY_ROW_SLOT + half;
+        let second_mid = start + LYRIC_ROW_SERIAL_SLOT + half;
         assert_eq!(lyric_history_slot_progress(0, start, second_mid), 1.0);
         assert!(lyric_history_slot_progress(1, start, second_mid) > 0.0);
         assert_eq!(lyric_history_slot_progress(2, start, second_mid), 0.0);
+
+        let third_mid = start + LYRIC_ROW_SERIAL_SLOT * 2 + half;
+        assert_eq!(lyric_history_slot_progress(1, start, third_mid), 1.0);
+        assert!(lyric_history_slot_progress(2, start, third_mid) > 0.0);
+        assert_eq!(lyric_history_slot_progress(3, start, third_mid), 0.0);
     }
 
     #[test]
-    fn current_and_future_rows_do_not_add_blocking_slots() {
+    fn active_and_future_rows_have_distinct_positional_slots() {
         let start = Instant::now();
         let handoff = LyricHistoryHandoff {
             from_index: 5,
             to_index: 6,
             first_visible_index: 3,
-            history_rows: 3,
+            visible_rows: 6,
             started_at: start,
             visual_delta_y: -80.0,
             layout_scroll_delta: 80.0,
             target_spacer_px: 24.0,
         };
-        let sample = start + LYRIC_HISTORY_ROW_SLOT * 2 + LYRIC_HISTORY_ROW_SLOT / 2;
-        let previous = lyric_history_progress_for_row(5, handoff, sample).unwrap();
+
+        let active_slot = 6usize.saturating_sub(handoff.first_visible_index);
+        let future_slot = 7usize.saturating_sub(handoff.first_visible_index);
+        let sample = start
+            + Duration::from_secs_f32(LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * active_slot as f32)
+            + LYRIC_ROW_SERIAL_SLOT / 2;
+
         let active = lyric_history_progress_for_row(6, handoff, sample).unwrap();
         let future = lyric_history_progress_for_row(7, handoff, sample).unwrap();
-        assert_eq!(previous, active);
-        assert_eq!(active, future);
+        assert!(active > 0.0 && active < 1.0);
+        assert_eq!(future, 0.0);
+        assert!(future_slot > active_slot);
     }
 
     #[test]
