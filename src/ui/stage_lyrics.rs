@@ -33,11 +33,13 @@ const LYRIC_LIST_MIN_PADDING_BOTTOM: f32 = 10.0;
 const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
-const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
-const LYRIC_ROW_CASCADE_DURATION: Duration = Duration::from_millis(280);
-const LYRIC_ROW_CASCADE_STAGGER_MS: u64 = 18;
+const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(640);
+const LYRIC_ROW_CASCADE_DURATION: Duration = Duration::from_millis(360);
+const LYRIC_ROW_CASCADE_STAGGER_MS: u64 = 46;
 const LYRIC_ROW_CASCADE_MAX_ROWS: usize = 5;
-const SCROLL_EASING_RATE: f32 = 12.5;
+const LYRIC_ROW_CASCADE_BASE_LAG_PX: f32 = 20.0;
+const LYRIC_ROW_CASCADE_LAG_STEP_PX: f32 = 8.0;
+const SCROLL_EASING_RATE: f32 = 9.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
 const LYRIC_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -1480,9 +1482,58 @@ fn lyric_row_handoff_progress(
         return 0.0;
     }
     AnimationSpec::new(LYRIC_ROW_CASCADE_DURATION)
-        .ease(Easing::OutQuint)
+        .ease(Easing::CubicBezier {
+            x1: 0.22,
+            y1: 1.0,
+            x2: 0.36,
+            y2: 1.0,
+        })
         .sample_elapsed(elapsed - delay)
         .eased_progress
+}
+
+#[inline]
+fn lyric_row_cascade_envelope(
+    index: usize,
+    active: usize,
+    previous_active: Option<usize>,
+    started_at: Instant,
+    now: Instant,
+) -> f32 {
+    let Some(previous) = previous_active else {
+        return 0.0;
+    };
+    if previous.abs_diff(active) > 2 {
+        return 0.0;
+    }
+
+    let forward = active >= previous;
+    let rank = if forward {
+        index.saturating_sub(previous)
+    } else {
+        previous.saturating_sub(index)
+    }
+    .min(LYRIC_ROW_CASCADE_MAX_ROWS);
+    if rank == 0 {
+        return 0.0;
+    }
+
+    let delay = Duration::from_millis(rank as u64 * LYRIC_ROW_CASCADE_STAGGER_MS);
+    let elapsed = now.saturating_duration_since(started_at);
+    if elapsed <= delay {
+        return 0.0;
+    }
+    let local = elapsed.saturating_sub(delay).as_secs_f32()
+        / LYRIC_ROW_CASCADE_DURATION.as_secs_f32();
+    if local >= 1.0 {
+        return 0.0;
+    }
+
+    // Zero at both ends prevents the row from jumping when the hand-off starts. The middle of the
+    // pulse temporarily counters part of ListState's upward motion, so later rows visibly lag and
+    // then catch up one by one instead of the whole lyric column moving as a rigid block.
+    let t = local.clamp(0.0, 1.0);
+    (std::f32::consts::PI * t).sin().max(0.0)
 }
 
 fn apply_lyric_row_cascade(
@@ -1513,20 +1564,22 @@ fn apply_lyric_row_cascade(
         return row.into_any_element();
     }
 
-    let progress =
-        lyric_row_handoff_progress(index, active, Some(previous), started_at, frame_now);
     let rank = if forward {
         index.saturating_sub(previous)
     } else {
         previous.saturating_sub(index)
     }
-    .min(LYRIC_ROW_CASCADE_MAX_ROWS) as f32;
+    .min(LYRIC_ROW_CASCADE_MAX_ROWS);
+    if rank == 0 {
+        return row.into_any_element();
+    }
+
+    let envelope =
+        lyric_row_cascade_envelope(index, active, Some(previous), started_at, frame_now);
     let direction = if forward { 1.0 } else { -1.0 };
-    let from_y = if index == previous {
-        0.0
-    } else {
-        direction * (7.0 + rank * 2.5)
-    };
+    let lag_px = direction
+        * (LYRIC_ROW_CASCADE_BASE_LAG_PX
+            + (rank.saturating_sub(1) as f32 * LYRIC_ROW_CASCADE_LAG_STEP_PX));
     let key = line_handoff_epoch
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)
         .wrapping_add(index as u64);
@@ -1537,10 +1590,10 @@ fn apply_lyric_row_cascade(
             key,
         ),
         AnimationProperty::translation(
-            point(px(0.0), px(from_y)),
             point(px(0.0), px(0.0)),
+            point(px(0.0), px(lag_px)),
         ),
-        progress,
+        envelope,
         frame_now < started_at + LYRIC_HANDOFF_DURATION,
     )
     .into_any_element()
@@ -1595,13 +1648,39 @@ mod tests {
     }
 
     #[test]
-    fn row_handoff_staggers_following_rows() {
+    fn row_handoff_staggers_following_rows_by_multiple_frames() {
         let start = Instant::now();
-        let old = lyric_row_handoff_progress(4, 5, Some(4), start, start + Duration::from_millis(40));
-        let active = lyric_row_handoff_progress(5, 5, Some(4), start, start + Duration::from_millis(40));
-        let next = lyric_row_handoff_progress(6, 5, Some(4), start, start + Duration::from_millis(40));
+        let sample = start + Duration::from_millis(115);
+        let old = lyric_row_handoff_progress(4, 5, Some(4), start, sample);
+        let active = lyric_row_handoff_progress(5, 5, Some(4), start, sample);
+        let next = lyric_row_handoff_progress(6, 5, Some(4), start, sample);
         assert!(old > active);
-        assert!(active >= next);
+        assert!(active > next);
+    }
+
+    #[test]
+    fn row_cascade_has_no_boundary_jump_and_visible_midflight_lag() {
+        let start = Instant::now();
+        assert_eq!(
+            lyric_row_cascade_envelope(5, 5, Some(4), start, start),
+            0.0
+        );
+        let before_delay = start + Duration::from_millis(LYRIC_ROW_CASCADE_STAGGER_MS - 1);
+        assert_eq!(
+            lyric_row_cascade_envelope(5, 5, Some(4), start, before_delay),
+            0.0
+        );
+        let mid = start
+            + Duration::from_millis(LYRIC_ROW_CASCADE_STAGGER_MS)
+            + LYRIC_ROW_CASCADE_DURATION / 2;
+        assert!(lyric_row_cascade_envelope(5, 5, Some(4), start, mid) > 0.95);
+        let settled = start
+            + Duration::from_millis(LYRIC_ROW_CASCADE_STAGGER_MS)
+            + LYRIC_ROW_CASCADE_DURATION;
+        assert_eq!(
+            lyric_row_cascade_envelope(5, 5, Some(4), start, settled),
+            0.0
+        );
     }
 
     #[test]
