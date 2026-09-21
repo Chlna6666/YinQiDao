@@ -1186,12 +1186,6 @@ fn should_emphasize_sustained_word(word: &StageLyricWord) -> bool {
 }
 
 #[inline]
-fn smoothstep01(value: f32) -> f32 {
-    let t = value.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-#[inline]
 fn sustained_time_envelope(
     word: &StageLyricWord,
     position_ms: u64,
