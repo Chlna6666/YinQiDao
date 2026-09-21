@@ -35,7 +35,7 @@ impl Global for MiniPlayerViewCache {}
 
 const MINI_PLAYBACK_TIME_WIDTH: f32 = 104.0;
 const MINI_PLAYBACK_TIME_HEIGHT: f32 = 18.0;
-const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 12.0;
+const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 30.0;
 const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -325,9 +325,14 @@ impl Render for PlaybackTime {
         let display_position = preview_position_ms.unwrap_or(position_ms);
 
         div()
+            .w_full()
+            .h_full()
             .flex()
+            .flex_none()
             .items_center()
+            .justify_center()
             .gap_1()
+            .whitespace_nowrap()
             .text_xs()
             .text_color(TEXT_TERTIARY)
             .child(theme::format_time(display_position))

@@ -33,7 +33,7 @@ const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
 const STAGE_TRANSPORT_HEIGHT: f32 = 32.0;
-const STAGE_PROGRESS_HEIGHT: f32 = 17.0;
+const STAGE_PROGRESS_HEIGHT: f32 = 30.0;
 
 #[derive(Clone, Copy, Debug)]
 struct StageChromeFade {
