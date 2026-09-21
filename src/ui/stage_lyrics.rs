@@ -4,7 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity, Global, IntoElement,
+    AnimationExt as _, AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity,
+    Global, IntoElement,
     ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer, Transition,
     TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px, relative,
 };
@@ -33,7 +34,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(560);
-const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(148);
+const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(168);
 const SCROLL_EASING_RATE: f32 = 9.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
@@ -646,10 +647,9 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(now + delay, cx);
         }
-        if self.karaoke_should_sample() || self.focus_started_at.is_some()
-        {
-            window.request_invalidation_at(now + LYRIC_SAMPLE_INTERVAL, cx);
-        }
+        // Continuous karaoke/focus/scroll geometry is driven by the retained layout-animation
+        // target in render(). Do not also arm a timer cadence here: two independent clocks caused
+        // coalesced samples and made short serial slots appear as jumps.
         if let Some(until) = self.reading_until
             && until > now
         {
@@ -1054,7 +1054,11 @@ impl Render for StageLyricsView {
         .pb(px(list_padding_bottom))
         .pr(px(8.0));
 
-        let lyrics = lyrics.into_any_element();
+        let realtime_layout_animating =
+            serial_handoff.is_some() || scroll_animating || focus_animating || karaoke_running;
+        let lyrics = lyrics
+            .with_layout_animation_target(realtime_layout_animating)
+            .into_any_element();
 
         div()
             .id("stage-lyrics-view")
@@ -1608,15 +1612,11 @@ fn lyric_row_serial_progress(rank: usize, started_at: Instant, now: Instant) -> 
     if local >= LYRIC_ROW_SERIAL_SLOT {
         return 1.0;
     }
-    AnimationSpec::new(LYRIC_ROW_SERIAL_SLOT)
-        .ease(Easing::CubicBezier {
-            x1: 0.20,
-            y1: 0.86,
-            x2: 0.28,
-            y2: 1.0,
-        })
-        .sample_elapsed(local)
-        .eased_progress
+    let t = (local.as_secs_f32() / LYRIC_ROW_SERIAL_SLOT.as_secs_f32())
+        .clamp(0.0, 1.0);
+    // Quintic smootherstep: zero velocity and zero acceleration at both endpoints. Because the
+    // next rank's slot starts only after this slot ends, there is no temporal overlap.
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
 #[inline]
@@ -1741,22 +1741,23 @@ mod tests {
         let p75 = lyric_row_serial_progress(0, start, start + three_quarters);
         assert!(0.0 < p25 && p25 < p50 && p50 < p75 && p75 < 1.0);
 
-        // Strict sequencing: line 1 does not begin until line 0 is completely settled.
+        // No overlap before the exact boundary.
         assert_eq!(
             lyric_row_serial_progress(1, start, start + three_quarters),
             0.0
         );
-        let second_mid = start + LYRIC_ROW_SERIAL_SLOT + half;
-        assert_eq!(
-            lyric_row_serial_progress(0, start, second_mid),
-            1.0
-        );
+
+        // At the exact boundary row 0 is settled, while row 1 has not moved yet.
+        let boundary = start + LYRIC_ROW_SERIAL_SLOT;
+        assert_eq!(lyric_row_serial_progress(0, start, boundary), 1.0);
+        assert_eq!(lyric_row_serial_progress(1, start, boundary), 0.0);
+
+        // Only after the boundary may the next row move; row 2 must still remain untouched.
+        let second_mid = boundary + half;
         let second = lyric_row_serial_progress(1, start, second_mid);
         assert!(0.0 < second && second < 1.0);
-        assert_eq!(
-            lyric_row_serial_progress(2, start, second_mid),
-            0.0
-        );
+        assert_eq!(lyric_row_serial_progress(0, start, second_mid), 1.0);
+        assert_eq!(lyric_row_serial_progress(2, start, second_mid), 0.0);
     }
 
     #[test]
