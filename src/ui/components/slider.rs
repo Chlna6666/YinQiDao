@@ -140,6 +140,40 @@ struct SliderDrag {
     on_change: SliderCallback,
 }
 
+#[derive(Clone)]
+pub struct InteractiveSliderState {
+    id: ElementId,
+    hover_group: SharedString,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    on_click: SliderCallback,
+    on_drag: SliderCallback,
+    on_drag_end: SliderCallback,
+}
+
+impl InteractiveSliderState {
+    pub fn new(
+        id: impl Into<ElementId>,
+        on_click: impl Fn(f32, &mut App) + 'static,
+        on_drag: impl Fn(f32, &mut App) + 'static,
+        on_drag_end: impl Fn(f32, &mut App) + 'static,
+    ) -> Self {
+        let id = id.into();
+        let hover_group = SharedString::from(format!("slider-hover-{id}"));
+        Self {
+            id,
+            hover_group,
+            bounds: Rc::new(Cell::new(None)),
+            on_click: Rc::new(on_click),
+            on_drag: Rc::new(on_drag),
+            on_drag_end: Rc::new(on_drag_end),
+        }
+    }
+
+    pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
+        interactive_slider_state(self, ratio, style)
+    }
+}
+
 fn is_active_drag(id: &ElementId, cx: &App) -> bool {
     cx.try_global::<SliderInteractionState>()
         .is_some_and(|state| state.active_drag_id.as_ref() == Some(id))
