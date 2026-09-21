@@ -34,8 +34,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(560);
-const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(92);
-const LYRIC_ROW_SERIAL_MAX_ROWS: usize = 5;
+const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(108);
 const SCROLL_EASING_RATE: f32 = 9.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
@@ -45,6 +44,7 @@ const LYRIC_SAMPLE_INTERVAL: Duration = Duration::from_micros(16_667);
 struct LyricSerialHandoff {
     from_index: usize,
     to_index: usize,
+    first_visible_index: usize,
     started_at: Instant,
     visual_delta_y: f32,
     layout_scroll_delta: f32,
@@ -635,9 +635,10 @@ impl StageLyricsView {
             self.scroll_target = self.active_index;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
-        if self
-            .focus_started_at
-            .is_some_and(|started_at| started_at + LYRIC_HANDOFF_DURATION <= now)
+        if self.serial_handoff.is_none()
+            && self
+                .focus_started_at
+                .is_some_and(|started_at| started_at + LYRIC_HANDOFF_DURATION <= now)
         {
             self.focus_from_index = None;
             self.focus_started_at = None;
@@ -660,7 +661,9 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(until, cx);
         }
-        if let Some(started_at) = self.focus_started_at {
+        if self.serial_handoff.is_none()
+            && let Some(started_at) = self.focus_started_at
+        {
             let deadline = started_at + LYRIC_HANDOFF_DURATION;
             if deadline > now {
                 window.request_invalidation_at(deadline, cx);
@@ -688,6 +691,34 @@ impl StageLyricsView {
             });
         })
         .detach();
+    }
+
+    fn visible_serial_span(
+        &self,
+        viewport: gpui::Bounds<gpui::Pixels>,
+    ) -> Option<(usize, usize)> {
+        let viewport_top = f32::from(viewport.origin.y);
+        let viewport_bottom = viewport_top + f32::from(viewport.size.height);
+        let mut first = None;
+        let mut last = None;
+
+        for index in 0..self.lines.len() {
+            let Some(bounds) = self.list_state.bounds_for_item(index) else {
+                continue;
+            };
+            let row_top = f32::from(bounds.origin.y) + self.leading_spacer_px;
+            let row_bottom = row_top + f32::from(bounds.size.height);
+            if row_bottom > viewport_top + 0.5 && row_top < viewport_bottom - 0.5 {
+                if first.is_none() {
+                    first = Some(index);
+                }
+                last = Some(index);
+            }
+        }
+
+        let first = first?;
+        let last = last?;
+        Some((first, last.saturating_sub(first).saturating_add(1)))
     }
 
     fn commit_serial_handoff(&mut self, handoff: LyricSerialHandoff) {
@@ -818,18 +849,15 @@ impl StageLyricsView {
 
             let spacer_delta = desired_leading_spacer - self.leading_spacer_px;
             let layout_scroll_delta = diff + spacer_delta;
-            let available_rows = if target >= previous {
-                self.lines.len().saturating_sub(previous)
-            } else {
-                previous.saturating_add(1)
-            };
-            let row_count = available_rows
-                .min(LYRIC_ROW_SERIAL_MAX_ROWS)
-                .max(2);
+            let (first_visible_index, visible_row_count) = self
+                .visible_serial_span(viewport)
+                .unwrap_or((previous.min(target), previous.abs_diff(target).saturating_add(1)));
+            let row_count = visible_row_count.max(1);
 
             self.serial_handoff = Some(LyricSerialHandoff {
                 from_index: previous,
                 to_index: target,
+                first_visible_index,
                 started_at: now,
                 // Final layout moves every row by -diff. Animate that exact displacement one row
                 // at a time while the logical ListState is frozen, then commit layout atomically.
@@ -1114,6 +1142,7 @@ fn render_lyric_row(
                 index,
                 active,
                 previous_active,
+                serial_handoff,
                 started_at,
                 frame_now,
             );
@@ -1572,15 +1601,10 @@ fn stage_primary_lyric(
 #[inline]
 fn lyric_row_serial_rank(
     index: usize,
-    previous: usize,
-    active: usize,
+    first_visible_index: usize,
     row_count: usize,
 ) -> Option<usize> {
-    let rank = if active >= previous {
-        index.checked_sub(previous)?
-    } else {
-        previous.checked_sub(index)?
-    };
+    let rank = index.checked_sub(first_visible_index)?;
     (rank < row_count).then_some(rank)
 }
 
@@ -1592,14 +1616,17 @@ fn lyric_row_serial_progress(rank: usize, started_at: Instant, now: Instant) -> 
     if elapsed <= slot_start {
         return 0.0;
     }
-
     let local = elapsed.saturating_sub(slot_start);
     if local >= LYRIC_ROW_SERIAL_SLOT {
         return 1.0;
     }
-
     AnimationSpec::new(LYRIC_ROW_SERIAL_SLOT)
-        .ease(Easing::InOutCubic)
+        .ease(Easing::CubicBezier {
+            x1: 0.18,
+            y1: 0.82,
+            x2: 0.24,
+            y2: 1.0,
+        })
         .sample_elapsed(local)
         .eased_progress
 }
@@ -1609,21 +1636,24 @@ fn lyric_row_handoff_progress(
     index: usize,
     active: usize,
     previous_active: Option<usize>,
+    serial_handoff: Option<LyricSerialHandoff>,
     started_at: Instant,
     now: Instant,
 ) -> f32 {
     let Some(previous) = previous_active else {
         return 1.0;
     };
-    if previous.abs_diff(active) != 1 {
-        return 1.0;
+    if let Some(handoff) = serial_handoff
+        && handoff.from_index == previous
+        && handoff.to_index == active
+    {
+        return lyric_row_serial_rank(index, handoff.first_visible_index, handoff.row_count)
+            .map_or(1.0, |rank| lyric_row_serial_progress(rank, started_at, now));
     }
-    let Some(rank) =
-        lyric_row_serial_rank(index, previous, active, LYRIC_ROW_SERIAL_MAX_ROWS)
-    else {
-        return 1.0;
-    };
-    lyric_row_serial_progress(rank, started_at, now)
+    AnimationSpec::new(LYRIC_HANDOFF_DURATION)
+        .ease(Easing::InOutCubic)
+        .sample_elapsed(now.saturating_duration_since(started_at))
+        .eased_progress
 }
 
 fn apply_lyric_row_serial_handoff(
@@ -1649,7 +1679,7 @@ fn apply_lyric_row_serial_handoff(
     }
 
     let Some(rank) =
-        lyric_row_serial_rank(index, previous, active, handoff.row_count)
+        lyric_row_serial_rank(index, handoff.first_visible_index, handoff.row_count)
     else {
         return row.into_any_element();
     };
@@ -1725,30 +1755,26 @@ mod tests {
     fn row_handoff_is_strictly_serial_without_overlap() {
         let start = Instant::now();
         let half_slot = LYRIC_ROW_SERIAL_SLOT / 2;
+        let top_mid = lyric_row_serial_progress(0, start, start + half_slot);
+        let second_before = lyric_row_serial_progress(1, start, start + half_slot);
+        assert!(top_mid > 0.0 && top_mid < 1.0);
+        assert_eq!(second_before, 0.0);
 
-        let old_mid = lyric_row_serial_progress(0, start, start + half_slot);
-        let active_before = lyric_row_serial_progress(1, start, start + half_slot);
-        assert!(old_mid > 0.0 && old_mid < 1.0);
-        assert_eq!(active_before, 0.0);
-
-        let active_mid =
-            lyric_row_serial_progress(1, start, start + LYRIC_ROW_SERIAL_SLOT + half_slot);
-        let old_done =
-            lyric_row_serial_progress(0, start, start + LYRIC_ROW_SERIAL_SLOT + half_slot);
-        let next_before =
-            lyric_row_serial_progress(2, start, start + LYRIC_ROW_SERIAL_SLOT + half_slot);
-        assert_eq!(old_done, 1.0);
-        assert!(active_mid > 0.0 && active_mid < 1.0);
-        assert_eq!(next_before, 0.0);
+        let sample = start + LYRIC_ROW_SERIAL_SLOT + half_slot;
+        assert_eq!(lyric_row_serial_progress(0, start, sample), 1.0);
+        assert!(lyric_row_serial_progress(1, start, sample) > 0.0);
+        assert_eq!(lyric_row_serial_progress(2, start, sample), 0.0);
     }
 
     #[test]
-    fn serial_rank_orders_old_active_then_following_lines() {
-        assert_eq!(lyric_row_serial_rank(4, 4, 5, 5), Some(0));
-        assert_eq!(lyric_row_serial_rank(5, 4, 5, 5), Some(1));
-        assert_eq!(lyric_row_serial_rank(6, 4, 5, 5), Some(2));
-        assert_eq!(lyric_row_serial_rank(8, 4, 5, 5), Some(4));
-        assert_eq!(lyric_row_serial_rank(9, 4, 5, 5), None);
+    fn serial_rank_starts_at_first_displayed_old_lyric() {
+        assert_eq!(lyric_row_serial_rank(3, 3, 6), Some(0));
+        assert_eq!(lyric_row_serial_rank(4, 3, 6), Some(1));
+        assert_eq!(lyric_row_serial_rank(6, 3, 6), Some(3));
+        assert_eq!(lyric_row_serial_rank(8, 3, 6), Some(5));
+        assert_eq!(lyric_row_serial_rank(9, 3, 6), None);
+        assert_eq!(lyric_row_serial_rank(0, 0, 4), Some(0));
+        assert_eq!(lyric_row_serial_rank(1, 0, 4), Some(1));
     }
 
     #[test]
