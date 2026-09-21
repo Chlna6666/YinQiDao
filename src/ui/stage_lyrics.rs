@@ -5,9 +5,9 @@ use std::{
 
 use gpui::{
     AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, ListAlignment,
-    ListOffset, ListState, Render, SharedString, Subscription, Timer, Transition,
-    TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px,
+    Context, Easing, ElementId, Entity, Global, IntoElement, ListAlignment, ListOffset, ListState,
+    Render, SharedString, Subscription, Timer, Transition, TransitionProperty, WeakEntity, Window,
+    div, hsla, list, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -34,6 +34,9 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(410);
+const LYRIC_ROW_CASCADE_DURATION: Duration = Duration::from_millis(280);
+const LYRIC_ROW_CASCADE_STAGGER_MS: u64 = 18;
+const LYRIC_ROW_CASCADE_MAX_ROWS: usize = 5;
 const SCROLL_EASING_RATE: f32 = 12.5;
 const LYRIC_DEPTH_TRANSITION_DURATION: Duration = Duration::from_millis(190);
 const LYRIC_OPACITY_TRANSITION_DURATION: Duration = Duration::from_millis(230);
@@ -170,6 +173,7 @@ pub(super) struct StageLyricsView {
     active_index: Option<usize>,
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
+    line_handoff_epoch: u64,
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
@@ -215,6 +219,7 @@ impl StageLyricsView {
             active_index: None,
             focus_from_index: None,
             focus_started_at: None,
+            line_handoff_epoch: 0,
             active_word_index: None,
             hovered_index: None,
             karaoke_epoch: 0,
@@ -342,6 +347,7 @@ impl StageLyricsView {
             self.active_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
+            self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
             self.active_word_index = None;
             self.hovered_index = None;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -460,6 +466,7 @@ impl StageLyricsView {
         }
         self.focus_started_at = None;
         self.active_index = active;
+        self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
@@ -812,6 +819,7 @@ impl Render for StageLyricsView {
         let scroll_animating =
             self.scroll_target.is_some() && !reading_mode && !self.anchor_bootstrap_pending;
         let focus_started_at = self.focus_started_at;
+        let line_handoff_epoch = self.line_handoff_epoch;
         let focus_animating = focus_started_at.is_some();
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // automatic scroll used to make every line equally sharp during the transition, producing
@@ -893,6 +901,7 @@ impl Render for StageLyricsView {
                 active,
                 focus_from_index,
                 focus_started_at,
+                line_handoff_epoch,
                 frame_now,
                 edge_progress,
                 previous_edge_progress,
@@ -941,6 +950,7 @@ fn render_lyric_row(
     active: usize,
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
+    line_handoff_epoch: u64,
     frame_now: Instant,
     edge_progress: f32,
     previous_edge_progress: f32,
@@ -988,15 +998,15 @@ fn render_lyric_row(
     // This keeps the same visual interpolation but caps work at the StageLyricsView cadence.
     let (resolved_alpha, resolved_blur) = match (previous_profile, focus_started_at) {
         (Some(previous), Some(started_at)) => {
-            let elapsed = frame_now.saturating_duration_since(started_at);
-            let alpha_t = AnimationSpec::new(LYRIC_OPACITY_TRANSITION_DURATION)
-                .ease(Easing::InOutCubic)
-                .sample_elapsed(elapsed)
-                .eased_progress;
-            let blur_t = AnimationSpec::new(LYRIC_DEPTH_TRANSITION_DURATION)
-                .ease(Easing::InOutCubic)
-                .sample_elapsed(elapsed)
-                .eased_progress;
+            let row_t = lyric_row_handoff_progress(
+                index,
+                active,
+                previous_active,
+                started_at,
+                frame_now,
+            );
+            let alpha_t = row_t;
+            let blur_t = row_t;
             (
                 previous.0 + (target_alpha - previous.0) * alpha_t,
                 previous.1 + (target_blur - previous.1) * blur_t,
@@ -1089,7 +1099,15 @@ fn render_lyric_row(
     }
 
     if !interactive {
-        return row.into_any_element();
+        return apply_lyric_row_cascade(
+            row,
+            index,
+            active,
+            previous_active,
+            focus_started_at,
+            frame_now,
+            line_handoff_epoch,
+        );
     }
 
     let local = view;
@@ -1102,6 +1120,7 @@ fn render_lyric_row(
             this.focus_from_index = this.active_index;
             this.focus_started_at = None;
             this.active_index = Some(index);
+            this.line_handoff_epoch = this.line_handoff_epoch.wrapping_add(1);
             this.active_word_index = this.compute_active_word_index();
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
@@ -1113,7 +1132,15 @@ fn render_lyric_row(
         });
     });
 
-    row.into_any_element()
+    apply_lyric_row_cascade(
+        row,
+        index,
+        active,
+        previous_active,
+        focus_started_at,
+        frame_now,
+        line_handoff_epoch,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1329,10 +1356,10 @@ fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
 
 fn karaoke_word(
     word: &StageLyricWord,
-    index: usize,
+    _index: usize,
     reveal_progress: f32,
-    animate: bool,
-    karaoke_epoch: u64,
+    _animate: bool,
+    _karaoke_epoch: u64,
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
@@ -1340,43 +1367,20 @@ fn karaoke_word(
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
         .child(word.text.clone());
+
+    // The reveal stays one retained layout subtree for Future -> Active -> Past. Changing the
+    // width of an absolute clip avoids scene-animation bind/unbind barriers at word boundaries,
+    // which caused a one-frame primitive replay flash while the virtual List was also prepainting.
     let overlay = div()
         .absolute()
         .left(px(0.0))
         .top(px(0.0))
         .h_full()
-        .w_full()
+        .w(relative(progress))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-        .child(word.text.clone());
-
-    let overlay = if progress <= 0.0 {
-        // Keep the exact same word container at line boundaries; only the bright overlay is hidden.
-        overlay.opacity(0.0).into_any_element()
-    } else if progress < 1.0 {
-        let key = karaoke_epoch
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(word.timestamp_ms.rotate_left(17))
-            .wrapping_add(index as u64);
-        overlay
-            .with_stable_sampled_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("stage-lyric-word-reveal"),
-                    key,
-                ),
-                AnimationProperty::horizontal_reveal(
-                    HorizontalRevealEdge::Left,
-                    0.0,
-                    1.0,
-                ),
-                progress,
-                animate,
-            )
-            .into_any_element()
-    } else {
-        overlay.into_any_element()
-    };
+        .child(div().whitespace_nowrap().child(word.text.clone()));
 
     div()
         .relative()
@@ -1450,6 +1454,100 @@ fn stage_primary_lyric(
     row.into_any_element()
 }
 
+#[inline]
+fn lyric_row_handoff_progress(
+    index: usize,
+    active: usize,
+    previous_active: Option<usize>,
+    started_at: Instant,
+    now: Instant,
+) -> f32 {
+    let Some(previous) = previous_active else {
+        return 1.0;
+    };
+    if previous.abs_diff(active) > 2 {
+        return 1.0;
+    }
+
+    let forward = active >= previous;
+    let rank = if forward {
+        index.saturating_sub(previous)
+    } else {
+        previous.saturating_sub(index)
+    }
+    .min(LYRIC_ROW_CASCADE_MAX_ROWS);
+    let delay = Duration::from_millis(rank as u64 * LYRIC_ROW_CASCADE_STAGGER_MS);
+    let elapsed = now.saturating_duration_since(started_at);
+    if elapsed <= delay {
+        return 0.0;
+    }
+    AnimationSpec::new(LYRIC_ROW_CASCADE_DURATION)
+        .ease(Easing::OutQuint)
+        .sample_elapsed(elapsed - delay)
+        .eased_progress
+}
+
+fn apply_lyric_row_cascade(
+    row: gpui::Stateful<gpui::Div>,
+    index: usize,
+    active: usize,
+    previous_active: Option<usize>,
+    started_at: Option<Instant>,
+    frame_now: Instant,
+    line_handoff_epoch: u64,
+) -> gpui::AnyElement {
+    let (Some(previous), Some(started_at)) = (previous_active, started_at) else {
+        return row.into_any_element();
+    };
+    if previous.abs_diff(active) > 2 {
+        return row.into_any_element();
+    }
+
+    let forward = active >= previous;
+    let in_band = if forward {
+        index >= previous.saturating_sub(1)
+            && index <= active.saturating_add(LYRIC_ROW_CASCADE_MAX_ROWS)
+    } else {
+        index <= previous.saturating_add(1)
+            && index.saturating_add(LYRIC_ROW_CASCADE_MAX_ROWS) >= active
+    };
+    if !in_band {
+        return row.into_any_element();
+    }
+
+    let progress =
+        lyric_row_handoff_progress(index, active, Some(previous), started_at, frame_now);
+    let rank = if forward {
+        index.saturating_sub(previous)
+    } else {
+        previous.saturating_sub(index)
+    }
+    .min(LYRIC_ROW_CASCADE_MAX_ROWS) as f32;
+    let direction = if forward { 1.0 } else { -1.0 };
+    let from_y = if index == previous {
+        0.0
+    } else {
+        direction * (7.0 + rank * 2.5)
+    };
+    let key = line_handoff_epoch
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(index as u64);
+
+    row.with_stable_sampled_animation(
+        ElementId::NamedInteger(
+            SharedString::new_static("stage-lyric-row-cascade"),
+            key,
+        ),
+        AnimationProperty::translation(
+            point(px(0.0), px(from_y)),
+            point(px(0.0), px(0.0)),
+        ),
+        progress,
+        frame_now < started_at + LYRIC_HANDOFF_DURATION,
+    )
+    .into_any_element()
+}
+
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
     if line.words.is_empty() || line.text.is_empty() {
         return false;
@@ -1496,6 +1594,16 @@ mod tests {
         // Both states are rendered through karaoke_word(); the semantic state changes reveal only,
         // not the retained element shape. This assertion guards the explicit state model itself.
         assert_eq!(KaraokeLineState::Static, KaraokeLineState::Static);
+    }
+
+    #[test]
+    fn row_handoff_staggers_following_rows() {
+        let start = Instant::now();
+        let old = lyric_row_handoff_progress(4, 5, Some(4), start, start + Duration::from_millis(40));
+        let active = lyric_row_handoff_progress(5, 5, Some(4), start, start + Duration::from_millis(40));
+        let next = lyric_row_handoff_progress(6, 5, Some(4), start, start + Duration::from_millis(40));
+        assert!(old > active);
+        assert!(active >= next);
     }
 
     #[test]
