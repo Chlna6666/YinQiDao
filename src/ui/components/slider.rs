@@ -432,7 +432,6 @@ fn interactive_slider_state(
             bounds_for_children.set(children_bounds.first().copied());
         })
         .id(id)
-        .occlude()
         .on_drag(
             SliderDrag {
                 id: drag_id,
@@ -532,7 +531,6 @@ pub fn interactive_vertical_slider(
             bounds.set(children_bounds.first().copied());
         })
         .id(id)
-        .occlude()
         .on_drag(
             SliderDrag {
                 id: drag_id,
