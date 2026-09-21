@@ -27,10 +27,11 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(220);
-const LYRIC_ROW_MOVE_DURATION: Duration = Duration::from_millis(170);
-// smoothstep(0.8042) ~= 0.90, so the following row starts when the previous row has completed
-// roughly 90% of its visible displacement instead of waiting for a hard 100% boundary.
-const LYRIC_ROW_STAGGER_TIME_RATIO: f32 = 0.8042;
+const LYRIC_ROW_MOVE_DURATION: Duration = Duration::from_millis(210);
+const LYRIC_ROW_NEXT_START_PROGRESS: f32 = 0.80;
+// The row motion uses ease-out cubic. Raw t ~= 0.4152 maps to 80% visible displacement, so the
+// following row starts while the previous row is already settling through its final 20%.
+const LYRIC_ROW_STAGGER_TIME_RATIO: f32 = 0.4152;
 const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 4.25;
 const LYRIC_VIEWPORT_CLEAR_BAND_MIN_PX: f32 = 82.0;
 const LYRIC_VIEWPORT_CLEAR_BAND_MAX_PX: f32 = 112.0;
@@ -737,7 +738,7 @@ impl Render for StageLyricsView {
                 (
                     from_y + (to_y - from_y) * progress,
                     if index == handoff.first_index {
-                        1.0 - progress
+                        lyric_top_exit_alpha(progress)
                     } else {
                         1.0
                     },
@@ -1440,6 +1441,14 @@ fn lyric_focus_progress(started_at: Instant, now: Instant) -> f32 {
 }
 
 #[inline]
+fn lyric_row_ease(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    // Ease-out cubic gives the upward move a decisive start and a long, soft settling tail. This
+    // avoids the evenly-paced "moving blocks" feel from smoothstep while keeping exact endpoints.
+    1.0 - (1.0 - t).powi(3)
+}
+
+#[inline]
 fn lyric_row_start_delay(rank: usize) -> Duration {
     Duration::from_secs_f32(
         LYRIC_ROW_MOVE_DURATION.as_secs_f32()
@@ -1461,8 +1470,17 @@ fn lyric_row_slot_progress(rank: usize, started_at: Instant, now: Instant) -> f3
         return 1.0;
     }
 
-    let t = (local.as_secs_f32() / LYRIC_ROW_MOVE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-    smoothstep01(t)
+    let raw =
+        (local.as_secs_f32() / LYRIC_ROW_MOVE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    lyric_row_ease(raw)
+}
+
+#[inline]
+fn lyric_top_exit_alpha(progress: f32) -> f32 {
+    // Fade slightly faster than the final positional tail so the old top line is visually out of
+    // the way while the next row starts at the 80% hand-off point.
+    let fade = smoothstep01((progress / LYRIC_ROW_NEXT_START_PROGRESS).clamp(0.0, 1.0));
+    1.0 - fade
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1524,18 +1542,42 @@ mod tests {
     }
 
     #[test]
-    fn next_row_starts_when_previous_is_about_ninety_percent_complete() {
+    fn next_row_starts_when_previous_is_about_eighty_percent_complete() {
         let start = Instant::now();
         let second_start = start + lyric_row_start_delay(1);
 
         let first_at_handoff = lyric_row_slot_progress(0, start, second_start);
         let second_at_handoff = lyric_row_slot_progress(1, start, second_start);
-        assert!((first_at_handoff - 0.90).abs() < 0.015);
+        assert!((first_at_handoff - LYRIC_ROW_NEXT_START_PROGRESS).abs() < 0.015);
         assert_eq!(second_at_handoff, 0.0);
 
         let after = second_start + Duration::from_millis(10);
         assert!(lyric_row_slot_progress(1, start, after) > 0.0);
         assert!(lyric_row_slot_progress(0, start, after) > first_at_handoff);
+    }
+
+    #[test]
+    fn upward_row_ease_moves_fast_then_settles_softly() {
+        let p25 = lyric_row_ease(0.25);
+        let p50 = lyric_row_ease(0.50);
+        let p75 = lyric_row_ease(0.75);
+
+        assert!(p25 > 0.50);
+        assert!(p50 > p25);
+        assert!(p75 > p50);
+        assert!(1.0 - p75 < p75 - p50);
+        assert_eq!(lyric_row_ease(0.0), 0.0);
+        assert_eq!(lyric_row_ease(1.0), 1.0);
+    }
+
+    #[test]
+    fn top_line_is_gone_by_the_eighty_percent_handoff() {
+        assert!(lyric_top_exit_alpha(0.50) > 0.0);
+        assert_eq!(
+            lyric_top_exit_alpha(LYRIC_ROW_NEXT_START_PROGRESS),
+            0.0
+        );
+        assert_eq!(lyric_top_exit_alpha(1.0), 0.0);
     }
 
     #[test]
