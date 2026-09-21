@@ -1674,11 +1674,11 @@ fn apply_lyric_row_serial_handoff(
     let progress = lyric_row_serial_progress(rank, started_at, frame_now);
     let offset_y = handoff.visual_delta_y * progress;
 
-    // This must be a real layout-position sample, not a retained SceneAnimation translation.
-    // StageLyricsView is invalidated at LYRIC_SAMPLE_INTERVAL while focus_started_at is active, so
-    // List::render_item rebuilds every visible row with a new offset each frame. That guarantees
-    // actual intermediate Y positions on screen instead of the one-frame jumps seen in captures.
-    row.top(px(offset_y)).into_any_element()
+    // A top offset only affects positioned rows. Keep normal flow sizing, but make the row
+    // relatively positioned so the caller-sampled offset becomes a real per-frame Y displacement.
+    // Without relative positioning the intermediate samples are ignored and only final ListState
+    // commit is visible, which looks like a hard jump.
+    row.relative().top(px(offset_y)).into_any_element()
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1727,6 +1727,14 @@ mod tests {
         // Both states are rendered through karaoke_word(); the semantic state changes reveal only,
         // not the retained element shape. This assertion guards the explicit state model itself.
         assert_eq!(KaraokeLineState::Static, KaraokeLineState::Static);
+    }
+
+    #[test]
+    fn serial_row_motion_has_intermediate_progress() {
+        let start = Instant::now();
+        let half = LYRIC_ROW_SERIAL_SLOT / 2;
+        let progress = lyric_row_serial_progress(0, start, start + half);
+        assert!(progress > 0.0 && progress < 1.0);
     }
 
     #[test]
