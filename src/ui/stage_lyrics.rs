@@ -1140,15 +1140,29 @@ fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
     (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0)
 }
 
+#[inline]
+fn sustained_word_highlight(reveal_progress: f32, is_current_word: bool) -> f32 {
+    if !is_current_word {
+        return 0.0;
+    }
+
+    // Apple Music-like behavior: the sweep owns the early part of the syllable. Once most of the
+    // glyph has been revealed, a soft bloom fades in and stays while the same syllable is being
+    // sustained. The semantic current-word boundary removes it, not a second wall-clock timer.
+    let t = ((reveal_progress.clamp(0.0, 1.0) - 0.72) / 0.28).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn karaoke_word(
     word: &StageLyricWord,
     _index: usize,
     reveal_progress: f32,
-    _animate: bool,
+    is_current_word: bool,
     _karaoke_epoch: u64,
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
+    let sustain_highlight = sustained_word_highlight(progress, is_current_word);
     let base = div()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
@@ -1157,6 +1171,25 @@ fn karaoke_word(
     // The reveal stays one retained layout subtree for Future -> Active -> Past. Changing the
     // width of an absolute clip avoids scene-animation bind/unbind barriers at word boundaries,
     // which caused a one-frame primitive replay flash while the virtual List was also prepainting.
+    // Keep the glow subtree permanently mounted. Only opacity and clip width change, so an
+    // Active -> held/sustained -> Past transition never swaps text primitives and cannot cause the
+    // one-frame flash that existed in the old karaoke implementation.
+    let glow = div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .h_full()
+        .w(relative(progress))
+        .overflow_hidden()
+        .opacity(sustain_highlight * 0.72)
+        .child(
+            div()
+                .whitespace_nowrap()
+                .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                .blur(px(4.5))
+                .child(word.text.clone()),
+        );
+
     let overlay = div()
         .absolute()
         .left(px(0.0))
@@ -1173,6 +1206,7 @@ fn karaoke_word(
         .flex_none()
         .whitespace_nowrap()
         .child(base)
+        .child(glow)
         .child(overlay)
         .into_any_element()
 }
@@ -1222,6 +1256,9 @@ fn stage_primary_lyric(
                     }
                     _ => 0.0,
                 };
+                // The current word keeps a soft bloom after its sweep reaches 100%. It remains
+                // highlighted through a sustained vocal until the authored next-word boundary
+                // advances current_word.
                 (progress, DIM_ALPHA, animate && current_word == Some(index))
             }
         };
@@ -1371,6 +1408,22 @@ mod tests {
         assert_eq!(first, 6);
         assert_eq!(last, 17);
         assert_eq!(last - first + 1, 12);
+    }
+
+    #[test]
+    fn sustained_highlight_appears_after_most_of_the_word_is_revealed() {
+        assert_eq!(sustained_word_highlight(0.50, true), 0.0);
+        assert_eq!(sustained_word_highlight(0.72, true), 0.0);
+
+        let late = sustained_word_highlight(0.90, true);
+        assert!(late > 0.0 && late < 1.0);
+        assert_eq!(sustained_word_highlight(1.0, true), 1.0);
+    }
+
+    #[test]
+    fn sustained_highlight_exists_only_for_the_semantic_current_word() {
+        assert_eq!(sustained_word_highlight(1.0, false), 0.0);
+        assert_eq!(sustained_word_highlight(0.90, false), 0.0);
     }
 
     #[test]
