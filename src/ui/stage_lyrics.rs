@@ -1186,22 +1186,45 @@ fn should_emphasize_sustained_word(word: &StageLyricWord) -> bool {
 }
 
 #[inline]
-fn emphasis_envelope(progress: f32) -> f32 {
-    let p = progress.clamp(0.0, 1.0);
-    let t = if p <= 0.5 {
-        p / 0.5
-    } else {
-        (1.0 - p) / 0.5
-    }
-    .clamp(0.0, 1.0);
-
-    // Smooth rise and fall with zero velocity at both ends.
+fn smoothstep01(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn sustained_time_envelope(
+    word: &StageLyricWord,
+    position_ms: u64,
+) -> f32 {
+    let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
+        return 0.0;
+    };
+    let start_ms = word.timestamp_ms;
+    let end_ms = start_ms.saturating_add(duration_ms);
+    if position_ms < start_ms || position_ms >= end_ms {
+        return 0.0;
+    }
+
+    let elapsed_ms = position_ms.saturating_sub(start_ms);
+    let remaining_ms = end_ms.saturating_sub(position_ms);
+
+    // Long-note emphasis is clock-driven, not mask-driven. Give it a short attack, keep the bloom
+    // through the sustained body, and release only near the authored syllable end.
+    let attack_ms = (duration_ms as f32 * 0.18).clamp(120.0, 260.0) as u64;
+    let release_ms = (duration_ms as f32 * 0.20).clamp(140.0, 300.0) as u64;
+
+    if elapsed_ms < attack_ms {
+        smoothstep01(elapsed_ms as f32 / attack_ms.max(1) as f32)
+    } else if remaining_ms < release_ms {
+        smoothstep01(remaining_ms as f32 / release_ms.max(1) as f32)
+    } else {
+        1.0
+    }
 }
 
 fn sustained_word_emphasis(
     word: &StageLyricWord,
-    reveal_progress: f32,
+    position_ms: u64,
     is_current_word: bool,
     is_last_word: bool,
 ) -> SustainedWordEmphasis {
@@ -1213,7 +1236,7 @@ fn sustained_word_emphasis(
     }
 
     let duration_ms = word.duration_ms.unwrap_or(1_000).max(1_000) as f32;
-    let envelope = emphasis_envelope(reveal_progress);
+    let envelope = sustained_time_envelope(word, position_ms);
 
     // Match AMLL's duration-sensitive character-emphasis shape: short qualifying sustains stay
     // subtle while very long notes gain progressively more bloom and motion.
@@ -1251,6 +1274,7 @@ fn karaoke_word(
     word: &StageLyricWord,
     _index: usize,
     reveal_progress: f32,
+    position_ms: u64,
     is_current_word: bool,
     is_last_word: bool,
     _karaoke_epoch: u64,
@@ -1259,7 +1283,7 @@ fn karaoke_word(
     let progress = reveal_progress.clamp(0.0, 1.0);
     let emphasis = sustained_word_emphasis(
         word,
-        progress,
+        position_ms,
         is_current_word,
         is_last_word,
     );
@@ -1368,6 +1392,7 @@ fn stage_primary_lyric(
             word,
             index,
             progress,
+            position_ms,
             word_animate,
             index + 1 == line.words.len(),
             karaoke_epoch,
@@ -1515,7 +1540,7 @@ mod tests {
     #[test]
     fn sustained_emphasis_requires_a_genuinely_long_syllable() {
         let short = StageLyricWord {
-            timestamp_ms: 0,
+            timestamp_ms: 1_000,
             duration_ms: Some(900),
             byte_start: 0,
             byte_end: 1,
@@ -1531,25 +1556,47 @@ mod tests {
     }
 
     #[test]
-    fn sustained_emphasis_peaks_during_the_long_note_not_after_it() {
+    fn sustained_emphasis_uses_authored_word_time_not_reveal_state() {
         let word = StageLyricWord {
-            timestamp_ms: 0,
+            timestamp_ms: 1_000,
             duration_ms: Some(2_000),
             byte_start: 0,
             byte_end: 1,
             text: SharedString::from("啊"),
         };
 
-        let start = sustained_word_emphasis(&word, 0.0, true, false);
-        let middle = sustained_word_emphasis(&word, 0.5, true, false);
-        let end = sustained_word_emphasis(&word, 1.0, true, false);
+        assert_eq!(sustained_time_envelope(&word, 999), 0.0);
+        assert_eq!(sustained_time_envelope(&word, 1_000), 0.0);
 
-        assert_eq!(start.glow_alpha, 0.0);
+        let attack = sustained_time_envelope(&word, 1_180);
+        let sustain = sustained_time_envelope(&word, 2_000);
+        let release = sustained_time_envelope(&word, 2_850);
+
+        assert!(attack > 0.0 && attack < 1.0);
+        assert_eq!(sustain, 1.0);
+        assert!(release > 0.0 && release < 1.0);
+        assert_eq!(sustained_time_envelope(&word, 3_000), 0.0);
+    }
+
+    #[test]
+    fn sustained_emphasis_stays_visible_during_the_hold_and_releases_near_end() {
+        let word = StageLyricWord {
+            timestamp_ms: 5_000,
+            duration_ms: Some(3_000),
+            byte_start: 0,
+            byte_end: 1,
+            text: SharedString::from("啊"),
+        };
+
+        let middle = sustained_word_emphasis(&word, 6_500, true, false);
+        let near_end = sustained_word_emphasis(&word, 7_900, true, false);
+        let ended = sustained_word_emphasis(&word, 8_000, true, false);
+
         assert!(middle.glow_alpha > 0.0);
         assert!(middle.scale > 1.0);
-        assert!(middle.lift_px > 0.0);
-        assert_eq!(end.glow_alpha, 0.0);
-        assert_eq!(end.scale, 1.0);
+        assert!(near_end.glow_alpha < middle.glow_alpha);
+        assert_eq!(ended.glow_alpha, 0.0);
+        assert_eq!(ended.scale, 1.0);
     }
 
     #[test]
@@ -1561,7 +1608,7 @@ mod tests {
             byte_end: 1,
             text: SharedString::from("啊"),
         };
-        let profile = sustained_word_emphasis(&word, 0.5, false, false);
+        let profile = sustained_word_emphasis(&word, 1_000, false, false);
         assert_eq!(profile.glow_alpha, 0.0);
         assert_eq!(profile.scale, 1.0);
         assert_eq!(profile.lift_px, 0.0);
