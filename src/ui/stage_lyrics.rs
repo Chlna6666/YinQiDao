@@ -4,10 +4,9 @@ use std::{
 };
 
 use gpui::{
-    AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _,
-    Context, Easing, ElementId, Entity, Global, IntoElement, ListAlignment, ListOffset, ListState,
-    Render, SharedString, Subscription, Timer, Transition, TransitionProperty, WeakEntity, Window,
-    div, hsla, list, point, prelude::*, px, relative,
+    AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity, Global, IntoElement,
+    ListAlignment, ListOffset, ListState, Render, SharedString, Subscription, Timer, Transition,
+    TransitionProperty, WeakEntity, Window, div, hsla, list, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -34,7 +33,7 @@ const LYRIC_LIST_CONTENT_RESERVE_PX: f32 = 2.0;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_HANDOFF_DURATION: Duration = Duration::from_millis(560);
-const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(108);
+const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(148);
 const SCROLL_EASING_RATE: f32 = 9.5;
 const SCROLL_SETTLE_PX: f32 = 0.30;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
@@ -195,7 +194,6 @@ pub(super) struct StageLyricsView {
     active_index: Option<usize>,
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
-    line_handoff_epoch: u64,
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
@@ -242,7 +240,6 @@ impl StageLyricsView {
             active_index: None,
             focus_from_index: None,
             focus_started_at: None,
-            line_handoff_epoch: 0,
             active_word_index: None,
             hovered_index: None,
             karaoke_epoch: 0,
@@ -302,7 +299,6 @@ impl StageLyricsView {
                     self.serial_handoff = None;
                     self.scroll_target = self.active_index;
                     self.hovered_index = None;
-                    self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
                     changed = true;
                 }
                 if changed {
@@ -385,7 +381,6 @@ impl StageLyricsView {
             self.active_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
-            self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
             self.active_word_index = None;
             self.hovered_index = None;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
@@ -504,7 +499,6 @@ impl StageLyricsView {
         }
         self.focus_started_at = None;
         self.active_index = active;
-        self.line_handoff_epoch = self.line_handoff_epoch.wrapping_add(1);
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
@@ -957,7 +951,6 @@ impl Render for StageLyricsView {
             self.scroll_target.is_some() && !reading_mode && !self.anchor_bootstrap_pending;
         let focus_started_at = self.focus_started_at;
         let serial_handoff = self.serial_handoff;
-        let line_handoff_epoch = self.line_handoff_epoch;
         let focus_animating = focus_started_at.is_some();
         // Automatic line hand-off keeps the depth field active. Disabling blur for the whole
         // automatic scroll used to make every line equally sharp during the transition, producing
@@ -1040,7 +1033,6 @@ impl Render for StageLyricsView {
                 focus_from_index,
                 focus_started_at,
                 serial_handoff,
-                line_handoff_epoch,
                 frame_now,
                 edge_progress,
                 previous_edge_progress,
@@ -1090,7 +1082,6 @@ fn render_lyric_row(
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
     serial_handoff: Option<LyricSerialHandoff>,
-    line_handoff_epoch: u64,
     frame_now: Instant,
     edge_progress: f32,
     previous_edge_progress: f32,
@@ -1248,7 +1239,6 @@ fn render_lyric_row(
             focus_started_at,
             serial_handoff,
             frame_now,
-            line_handoff_epoch,
         );
     }
 
@@ -1262,7 +1252,6 @@ fn render_lyric_row(
             this.focus_from_index = this.active_index;
             this.focus_started_at = None;
             this.active_index = Some(index);
-            this.line_handoff_epoch = this.line_handoff_epoch.wrapping_add(1);
             this.active_word_index = this.compute_active_word_index();
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.scroll_target = Some(index);
@@ -1282,7 +1271,6 @@ fn render_lyric_row(
         focus_started_at,
         serial_handoff,
         frame_now,
-        line_handoff_epoch,
     )
 }
 
@@ -1622,9 +1610,9 @@ fn lyric_row_serial_progress(rank: usize, started_at: Instant, now: Instant) -> 
     }
     AnimationSpec::new(LYRIC_ROW_SERIAL_SLOT)
         .ease(Easing::CubicBezier {
-            x1: 0.18,
-            y1: 0.82,
-            x2: 0.24,
+            x1: 0.20,
+            y1: 0.86,
+            x2: 0.28,
             y2: 1.0,
         })
         .sample_elapsed(local)
@@ -1664,7 +1652,6 @@ fn apply_lyric_row_serial_handoff(
     started_at: Option<Instant>,
     serial_handoff: Option<LyricSerialHandoff>,
     frame_now: Instant,
-    line_handoff_epoch: u64,
 ) -> gpui::AnyElement {
     let (Some(previous), Some(started_at), Some(handoff)) =
         (previous_active, started_at, serial_handoff)
@@ -1683,24 +1670,15 @@ fn apply_lyric_row_serial_handoff(
     else {
         return row.into_any_element();
     };
-    let progress = lyric_row_serial_progress(rank, started_at, frame_now);
-    let key = line_handoff_epoch
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(index as u64);
 
-    row.with_stable_sampled_animation(
-        ElementId::NamedInteger(
-            SharedString::new_static("stage-lyric-row-serial"),
-            key,
-        ),
-        AnimationProperty::translation(
-            point(px(0.0), px(0.0)),
-            point(px(0.0), px(handoff.visual_delta_y)),
-        ),
-        progress,
-        !handoff.finished(frame_now),
-    )
-    .into_any_element()
+    let progress = lyric_row_serial_progress(rank, started_at, frame_now);
+    let offset_y = handoff.visual_delta_y * progress;
+
+    // This must be a real layout-position sample, not a retained SceneAnimation translation.
+    // StageLyricsView is invalidated at LYRIC_SAMPLE_INTERVAL while focus_started_at is active, so
+    // List::render_item rebuilds every visible row with a new offset each frame. That guarantees
+    // actual intermediate Y positions on screen instead of the one-frame jumps seen in captures.
+    row.top(px(offset_y)).into_any_element()
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1752,18 +1730,33 @@ mod tests {
     }
 
     #[test]
-    fn row_handoff_is_strictly_serial_without_overlap() {
+    fn row_handoff_is_strictly_serial_and_smooth_inside_each_slot() {
         let start = Instant::now();
-        let half_slot = LYRIC_ROW_SERIAL_SLOT / 2;
-        let top_mid = lyric_row_serial_progress(0, start, start + half_slot);
-        let second_before = lyric_row_serial_progress(1, start, start + half_slot);
-        assert!(top_mid > 0.0 && top_mid < 1.0);
-        assert_eq!(second_before, 0.0);
+        let quarter = LYRIC_ROW_SERIAL_SLOT / 4;
+        let half = LYRIC_ROW_SERIAL_SLOT / 2;
+        let three_quarters = quarter * 3;
 
-        let sample = start + LYRIC_ROW_SERIAL_SLOT + half_slot;
-        assert_eq!(lyric_row_serial_progress(0, start, sample), 1.0);
-        assert!(lyric_row_serial_progress(1, start, sample) > 0.0);
-        assert_eq!(lyric_row_serial_progress(2, start, sample), 0.0);
+        let p25 = lyric_row_serial_progress(0, start, start + quarter);
+        let p50 = lyric_row_serial_progress(0, start, start + half);
+        let p75 = lyric_row_serial_progress(0, start, start + three_quarters);
+        assert!(0.0 < p25 && p25 < p50 && p50 < p75 && p75 < 1.0);
+
+        // Strict sequencing: line 1 does not begin until line 0 is completely settled.
+        assert_eq!(
+            lyric_row_serial_progress(1, start, start + three_quarters),
+            0.0
+        );
+        let second_mid = start + LYRIC_ROW_SERIAL_SLOT + half;
+        assert_eq!(
+            lyric_row_serial_progress(0, start, second_mid),
+            1.0
+        );
+        let second = lyric_row_serial_progress(1, start, second_mid);
+        assert!(0.0 < second && second < 1.0);
+        assert_eq!(
+            lyric_row_serial_progress(2, start, second_mid),
+            0.0
+        );
     }
 
     #[test]
