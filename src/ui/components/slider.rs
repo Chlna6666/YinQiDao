@@ -458,6 +458,7 @@ fn interactive_slider_state(
     let id = state.id.clone();
     let drag_id = state.id.clone();
     let bounds_for_children = state.bounds.clone();
+    let bounds_for_down = state.bounds.clone();
     let bounds_for_up = state.bounds.clone();
     let bounds_for_up_out = state.bounds.clone();
     let id_for_down = state.id.clone();
@@ -465,7 +466,7 @@ fn interactive_slider_state(
     let id_for_up = state.id.clone();
     let id_for_up_out = state.id.clone();
     let id_for_drag = state.id.clone();
-    let click_for_up = state.on_click.clone();
+    let click_for_down = state.on_click.clone();
     let drag_for_up = state.on_drag_end.clone();
     let drag_for_up_out = state.on_drag_end.clone();
     let on_drag = state.on_drag.clone();
@@ -489,12 +490,17 @@ fn interactive_slider_state(
             },
             |_: &SliderDrag, _, _, cx| cx.new(|_| Empty),
         )
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            // Press only captures the pointer. A click commits on mouse-up, while a drag remains
-            // entirely local until its drag-end callback. This avoids an eager seek/volume update
-            // on the first frame of a drag gesture.
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            // Match the proven BMCBL slider semantics: a track press updates immediately, while
+            // subsequent drag samples stay in the preview callback and mouse-up commits the drag.
             cx.stop_propagation();
             begin_pointer_press(&id_for_down, cx);
+            if let Some(bounds) = bounds_for_down.get() {
+                (click_for_down)(
+                    horizontal_ratio(event.position.x, bounds, style.thumb_size),
+                    cx,
+                );
+            }
         })
         .on_mouse_down_out(move |_event, _window, cx| {
             let _ = end_pointer_press(&id_for_down_out, cx);
@@ -510,8 +516,6 @@ fn interactive_slider_state(
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
             if was_dragging {
                 (drag_for_up)(ratio, cx);
-            } else {
-                (click_for_up)(ratio, cx);
             }
         })
         .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
