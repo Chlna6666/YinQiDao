@@ -27,7 +27,13 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.43;
 const LYRIC_VIEWPORT_FADE_TOP_PX: f32 = 128.0;
 const LYRIC_VIEWPORT_FADE_BOTTOM_PX: f32 = 150.0;
 const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(220);
-const LYRIC_ROW_SERIAL_SLOT: Duration = Duration::from_millis(90);
+const LYRIC_ROW_MOVE_DURATION: Duration = Duration::from_millis(170);
+// smoothstep(0.8042) ~= 0.90, so the following row starts when the previous row has completed
+// roughly 90% of its visible displacement instead of waiting for a hard 100% boundary.
+const LYRIC_ROW_STAGGER_TIME_RATIO: f32 = 0.8042;
+const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 4.25;
+const LYRIC_VIEWPORT_CLEAR_BAND_MIN_PX: f32 = 82.0;
+const LYRIC_VIEWPORT_CLEAR_BAND_MAX_PX: f32 = 112.0;
 const PLAYBACK_STACK_HISTORY_ROWS: usize = 4;
 const PLAYBACK_STACK_FUTURE_ROWS: usize = 7;
 const PLAYBACK_STACK_ROW_PITCH_PX: f32 = 82.0;
@@ -56,9 +62,8 @@ impl LyricPlaybackStackHandoff {
 
     #[inline]
     fn duration(self) -> Duration {
-        Duration::from_secs_f32(
-            LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * self.row_count() as f32,
-        )
+        let last_rank = self.row_count().saturating_sub(1);
+        lyric_row_start_delay(last_rank) + LYRIC_ROW_MOVE_DURATION
     }
 
     #[inline]
@@ -745,6 +750,8 @@ impl Render for StageLyricsView {
             };
 
             let edge_progress = playback_stack_edge_progress(y, viewport_height);
+            let viewport_blur_progress =
+                playback_stack_blur_progress(y, viewport_height);
             let row = render_lyric_row(
                 &lines[index],
                 index,
@@ -754,6 +761,7 @@ impl Render for StageLyricsView {
                 frame_now,
                 edge_progress,
                 edge_progress,
+                viewport_blur_progress,
                 active_word_index,
                 position_ms,
                 reading_mode,
@@ -815,6 +823,7 @@ fn render_lyric_row(
     frame_now: Instant,
     edge_progress: f32,
     previous_edge_progress: f32,
+    viewport_blur_progress: f32,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -831,6 +840,7 @@ fn render_lyric_row(
         index,
         active,
         edge_progress,
+        viewport_blur_progress,
         reading_mode,
         depth_blur_active,
     );
@@ -851,6 +861,7 @@ fn render_lyric_row(
             index,
             previous,
             previous_edge_progress,
+            viewport_blur_progress,
             reading_mode,
             depth_blur_active,
         )
@@ -1034,6 +1045,7 @@ fn lyric_visual_profile(
     index: usize,
     active: usize,
     edge_progress: f32,
+    viewport_blur_progress: f32,
     reading_mode: bool,
     depth_blur_active: bool,
 ) -> (f32, f32) {
@@ -1041,22 +1053,17 @@ fn lyric_visual_profile(
         return (1.0, 0.0);
     }
 
+    // Semantic focus controls brightness only. Blur is a physical viewport effect and therefore
+    // must not follow index distance from the active lyric.
     let distance = index.abs_diff(active) as f32;
-    let (focus_alpha, focus_blur) = lyric_focus_falloff(distance);
+    let focus_alpha = lyric_focus_alpha(distance);
     let edge = smoothstep01(edge_progress);
 
-    // Physical viewport edge owns the final fade. Near the actual clip boundary the glyphs become
-    // almost transparent instead of merely blurred, so no bright half-line appears at top/bottom.
     let edge_alpha = 1.0 + (0.035 - 1.0) * edge;
     let alpha = (focus_alpha * edge_alpha).clamp(0.012, 1.0);
 
     let blur = if depth_blur_active {
-        // Keep element-blur captures local to the focus neighborhood. Past roughly three rows the
-        // text is already dim enough that opacity alone produces the edge-depth cue, while dropping
-        // the Gaussian pass avoids a stack of offscreen blur layers during every hand-off.
-        let blur_gate = 1.0 - smoothstep01((distance - 2.0) / 1.8);
-        let edge_blur = 0.75 * edge;
-        ((focus_blur + edge_blur) * blur_gate).min(2.35)
+        LYRIC_VIEWPORT_MAX_BLUR_PX * viewport_blur_progress.clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -1065,36 +1072,22 @@ fn lyric_visual_profile(
 }
 
 #[inline]
-fn lyric_focus_falloff(distance: f32) -> (f32, f32) {
+fn lyric_focus_alpha(distance: f32) -> f32 {
     let d = distance.max(0.0);
-
-    // Start fading immediately after the focused row. The previous smoothstep curve left row ±1 at
-    // almost 90% opacity, which is why several rows still read as one equally-bright block.
-    // This rational curve remains continuous but gives a clearly separated depth stack:
-    // d=1 ≈ 0.66 alpha, d=2 ≈ 0.40, d=3 ≈ 0.29.
     let attenuation = 1.0 / (1.0 + 0.70 * d * d);
-    let alpha = 0.18 + 0.82 * attenuation;
-
-    let blur_progress = 1.0 - 1.0 / (1.0 + 0.55 * d * d);
-    let blur_gate = 1.0 - smoothstep01((d - 2.0) / 1.8);
-    let blur = 2.05 * blur_progress * blur_gate;
-
-    (alpha.clamp(0.0, 1.0), blur.max(0.0))
+    (0.18 + 0.82 * attenuation).clamp(0.0, 1.0)
 }
 
-// Keep the standalone focus profile helper for reading-mode and regression tests. It uses the same
-// continuous curve as the compositor profile but without viewport-edge attenuation.
+// Standalone helper retained for tests/reading semantics. Focus depth no longer owns blur.
 fn lyric_focus_profile(
     distance: usize,
     reading_mode: bool,
-    depth_blur_active: bool,
+    _depth_blur_active: bool,
 ) -> (f32, f32) {
     if reading_mode {
         return (1.0, 0.0);
     }
-
-    let (alpha, blur) = lyric_focus_falloff(distance as f32);
-    (alpha, if depth_blur_active { blur } else { 0.0 })
+    (lyric_focus_alpha(distance as f32), 0.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1419,6 +1412,26 @@ fn playback_stack_edge_progress(row_top: f32, viewport_height: f32) -> f32 {
 }
 
 #[inline]
+fn playback_stack_blur_progress(row_top: f32, viewport_height: f32) -> f32 {
+    if !viewport_height.is_finite() || viewport_height <= 1.0 {
+        return 0.0;
+    }
+
+    let row_center = row_top + PLAYBACK_STACK_ROW_CENTER_OFFSET_PX;
+    let viewport_center = viewport_height * 0.5;
+    let clear_half = (viewport_height * 0.13)
+        .clamp(LYRIC_VIEWPORT_CLEAR_BAND_MIN_PX, LYRIC_VIEWPORT_CLEAR_BAND_MAX_PX);
+    let distance = (row_center - viewport_center).abs();
+
+    if distance <= clear_half {
+        return 0.0;
+    }
+
+    let fade_distance = (viewport_height * 0.5 - clear_half).max(1.0);
+    smoothstep01((distance - clear_half) / fade_distance)
+}
+
+#[inline]
 fn lyric_focus_progress(started_at: Instant, now: Instant) -> f32 {
     AnimationSpec::new(LYRIC_FOCUS_TRANSITION_DURATION)
         .ease(Easing::OutCubic)
@@ -1427,20 +1440,29 @@ fn lyric_focus_progress(started_at: Instant, now: Instant) -> f32 {
 }
 
 #[inline]
+fn lyric_row_start_delay(rank: usize) -> Duration {
+    Duration::from_secs_f32(
+        LYRIC_ROW_MOVE_DURATION.as_secs_f32()
+            * LYRIC_ROW_STAGGER_TIME_RATIO
+            * rank as f32,
+    )
+}
+
+#[inline]
 fn lyric_row_slot_progress(rank: usize, started_at: Instant, now: Instant) -> f32 {
     let elapsed = now.saturating_duration_since(started_at);
-    let slot_start =
-        Duration::from_secs_f32(LYRIC_ROW_SERIAL_SLOT.as_secs_f32() * rank as f32);
+    let slot_start = lyric_row_start_delay(rank);
     if elapsed <= slot_start {
         return 0.0;
     }
+
     let local = elapsed.saturating_sub(slot_start);
-    if local >= LYRIC_ROW_SERIAL_SLOT {
+    if local >= LYRIC_ROW_MOVE_DURATION {
         return 1.0;
     }
-    let t = (local.as_secs_f32() / LYRIC_ROW_SERIAL_SLOT.as_secs_f32()).clamp(0.0, 1.0);
-    // Smooth endpoints make each old row visibly settle before the next row starts.
-    t * t * (3.0 - 2.0 * t)
+
+    let t = (local.as_secs_f32() / LYRIC_ROW_MOVE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    smoothstep01(t)
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -1502,23 +1524,35 @@ mod tests {
     }
 
     #[test]
-    fn visible_rows_are_strictly_serial() {
+    fn next_row_starts_when_previous_is_about_ninety_percent_complete() {
         let start = Instant::now();
-        let half = LYRIC_ROW_SERIAL_SLOT / 2;
+        let second_start = start + lyric_row_start_delay(1);
 
-        let first_mid = lyric_row_slot_progress(0, start, start + half);
-        assert!(first_mid > 0.0 && first_mid < 1.0);
-        assert_eq!(lyric_row_slot_progress(1, start, start + half), 0.0);
+        let first_at_handoff = lyric_row_slot_progress(0, start, second_start);
+        let second_at_handoff = lyric_row_slot_progress(1, start, second_start);
+        assert!((first_at_handoff - 0.90).abs() < 0.015);
+        assert_eq!(second_at_handoff, 0.0);
 
-        let second_mid = start + LYRIC_ROW_SERIAL_SLOT + half;
-        assert_eq!(lyric_row_slot_progress(0, start, second_mid), 1.0);
-        assert!(lyric_row_slot_progress(1, start, second_mid) > 0.0);
-        assert_eq!(lyric_row_slot_progress(2, start, second_mid), 0.0);
+        let after = second_start + Duration::from_millis(10);
+        assert!(lyric_row_slot_progress(1, start, after) > 0.0);
+        assert!(lyric_row_slot_progress(0, start, after) > first_at_handoff);
+    }
 
-        let third_mid = start + LYRIC_ROW_SERIAL_SLOT * 2 + half;
-        assert_eq!(lyric_row_slot_progress(1, start, third_mid), 1.0);
-        assert!(lyric_row_slot_progress(2, start, third_mid) > 0.0);
-        assert_eq!(lyric_row_slot_progress(3, start, third_mid), 0.0);
+    #[test]
+    fn viewport_blur_has_a_clear_center_band_and_grows_toward_both_edges() {
+        let height = 720.0;
+        let center_top = height * 0.5 - PLAYBACK_STACK_ROW_CENTER_OFFSET_PX;
+        assert_eq!(playback_stack_blur_progress(center_top, height), 0.0);
+
+        let upper_mid = playback_stack_blur_progress(180.0, height);
+        let upper_edge = playback_stack_blur_progress(20.0, height);
+        let lower_mid = playback_stack_blur_progress(480.0, height);
+        let lower_edge = playback_stack_blur_progress(660.0, height);
+
+        assert!(upper_mid > 0.0 && upper_mid < upper_edge);
+        assert!(lower_mid > 0.0 && lower_mid < lower_edge);
+        assert!(upper_edge > 0.75);
+        assert!(lower_edge > 0.75);
     }
 
     #[test]
