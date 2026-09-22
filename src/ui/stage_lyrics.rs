@@ -617,27 +617,16 @@ impl StageLyricsView {
             .and_then(|index| self.lines.get(index + 1))
             .map(|line| line.timestamp_ms);
 
+        // Normal authored words are pre-scheduled as delayed renderer-owned reveals for the whole
+        // active line. Rust only wakes at a future word boundary when CPU semantics are still
+        // required: a duration-less fragment must snap visible, or a sustained word must start its
+        // attack/hold/release emphasis envelope.
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
+            && let Some(word_timestamp) = next_cpu_word_timestamp(line, position_ms)
         {
             next_timestamp =
                 Some(next_timestamp.map_or(word_timestamp, |current| current.min(word_timestamp)));
-        }
-
-        // The renderer-owned reveal can finish without rerendering this View. Wake exactly at the
-        // authored end so the retained tree commits its terminal state even for the final word.
-        if !self.is_reading()
-            && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_index) = active_enhanced_word_index(line, position_ms)
-            && let Some(word) = line.words.get(word_index)
-            && let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0)
-        {
-            let word_end = word.timestamp_ms.saturating_add(duration_ms);
-            if word_end > position_ms {
-                next_timestamp =
-                    Some(next_timestamp.map_or(word_end, |current| current.min(word_end)));
-            }
         }
 
         if !self.is_reading()
@@ -1394,15 +1383,15 @@ fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option
         .checked_sub(1)
 }
 
-fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
+fn next_cpu_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
     if !line.enhanced_complete {
         return None;
     }
+
     line.words
-        .get(
-            line.words
-                .partition_point(|word| word.timestamp_ms <= position_ms),
-        )
+        .iter()
+        .skip(line.words.partition_point(|word| word.timestamp_ms <= position_ms))
+        .find(|word| word.duration_ms.is_none() || should_emphasize_sustained_word(word))
         .map(|word| word.timestamp_ms)
 }
 
@@ -1543,10 +1532,12 @@ fn karaoke_reveal_layer(
 
     if animate
         && progress < 1.0
-        && let Some(remaining) = word_reveal_remaining_duration(word, position_ms)
+        && let Some((delay, duration)) = word_reveal_animation_timing(word, position_ms)
     {
         let animation = Animation::from_spec(
-            AnimationSpec::new(remaining).ease(Easing::Linear),
+            AnimationSpec::new(duration)
+                .delay(delay)
+                .ease(Easing::Linear),
         )
         .with_property(AnimationProperty::horizontal_reveal(
             HorizontalRevealEdge::Left,
@@ -1569,13 +1560,27 @@ fn karaoke_reveal_layer(
     layer.w(relative(progress)).into_any_element()
 }
 
-fn word_reveal_remaining_duration(
+fn word_reveal_animation_timing(
     word: &StageLyricWord,
     position_ms: u64,
-) -> Option<Duration> {
+) -> Option<(Duration, Duration)> {
     let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
     let end_ms = word.timestamp_ms.saturating_add(duration_ms);
-    (position_ms < end_ms).then(|| Duration::from_millis(end_ms - position_ms))
+    if position_ms >= end_ms {
+        return None;
+    }
+
+    if position_ms < word.timestamp_ms {
+        return Some((
+            Duration::from_millis(word.timestamp_ms - position_ms),
+            Duration::from_millis(duration_ms),
+        ));
+    }
+
+    Some((
+        Duration::ZERO,
+        Duration::from_millis(end_ms - position_ms),
+    ))
 }
 
 fn sustained_attack_release_ms(word: &StageLyricWord) -> Option<(u64, u64)> {
@@ -1685,7 +1690,7 @@ fn karaoke_word(
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
-    let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
+    let reveal_animate = word_reveal_animation_timing(word, position_ms).is_some();
     let base = div()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
@@ -1700,12 +1705,13 @@ fn karaoke_word(
         index,
         progress,
         position_ms,
-        animate,
+        reveal_animate,
         karaoke_epoch,
         "lyric-word-reveal",
     );
 
     let peak = sustained_word_peak_emphasis(word, is_last_word);
+    let animate = is_current_word && reveal_animate;
     let sustained = is_current_word && peak.glow_alpha > 0.0;
     let static_emphasis = sustained_word_emphasis(
         word,
@@ -1860,16 +1866,19 @@ fn stage_primary_lyric(
             KaraokeLineState::Past => (1.0, DIM_ALPHA, false),
             KaraokeLineState::Future => (0.0, DIM_ALPHA, false),
             KaraokeLineState::Active => {
-                let progress = match current_word {
-                    Some(current) if index < current => 1.0,
-                    Some(current) if index == current => {
-                        word_reveal_progress(word, position_ms)
-                    }
-                    _ => 0.0,
-                };
-                // Long authored syllables get a separate emphasis envelope while their karaoke
-                // mask continues to reveal; short syllables remain a plain mask sweep.
-                (progress, DIM_ALPHA, animate && current_word == Some(index))
+                let progress = word_reveal_progress(word, position_ms);
+                // The whole active line is committed once. Known-duration future words carry their
+                // authored start as an animation delay, so word boundaries no longer wake the View.
+                // Sustained words still get a semantic wake at their start for the glow envelope.
+                let scheduled_reveal = word
+                    .duration_ms
+                    .is_some_and(|duration| duration > 0)
+                    && position_ms < word.timestamp_ms.saturating_add(word.duration_ms.unwrap_or(0));
+                (
+                    progress,
+                    DIM_ALPHA,
+                    animate && (current_word == Some(index) || scheduled_reveal),
+                )
             }
         };
 
