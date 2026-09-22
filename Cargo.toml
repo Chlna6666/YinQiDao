@@ -19,6 +19,10 @@ members = [
     "crates/audio-codec-avs3",
 ]
 
+[workspace.dependencies]
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189", default-features = false }
+gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189" }
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
@@ -73,7 +77,7 @@ yinqidao-audio-spatial = { path = "crates/audio-spatial" }
 yinqidao-codec-core = { path = "crates/audio-codec-core" }
 yinqidao-codec-avs3 = { path = "crates/audio-codec-avs3" }
 
-gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189" }
+gpui_tokio = { workspace = true }
 souvlaki = "0.8.3"
 gpui-router = "0.3.0"
 rayon = "1.10"
@@ -81,7 +85,7 @@ qrcode = { version = "0.14.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189", default-features = false, features = [
+gpui = { workspace = true, features = [
     "windows-manifest",
     "nova-gfx-dx12",
     "nova-gfx-vulkan",
@@ -89,12 +93,12 @@ gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.g
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189", default-features = false, features = [
+gpui = { workspace = true, features = [
     "nova-gfx-metal",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "980ed1f2ddc001318c9d96038159d8b14a4f2189", default-features = false, features = [
+gpui = { workspace = true, features = [
     "nova-gfx-vulkan",
     "wayland",
     "x11",
