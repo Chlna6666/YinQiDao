@@ -625,6 +625,21 @@ impl StageLyricsView {
                 Some(next_timestamp.map_or(word_timestamp, |current| current.min(word_timestamp)));
         }
 
+        // The renderer-owned reveal can finish without rerendering this View. Wake exactly at the
+        // authored end so the retained tree commits its terminal state even for the final word.
+        if !self.is_reading()
+            && let Some(line) = active.and_then(|index| self.lines.get(index))
+            && let Some(word_index) = active_enhanced_word_index(line, position_ms)
+            && let Some(word) = line.words.get(word_index)
+            && let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0)
+        {
+            let word_end = word.timestamp_ms.saturating_add(duration_ms);
+            if word_end > position_ms {
+                next_timestamp =
+                    Some(next_timestamp.map_or(word_end, |current| current.min(word_end)));
+            }
+        }
+
         if !self.is_reading()
             && let Some(line) = active.and_then(|index| self.lines.get(index))
             && let Some(word_index) = active_enhanced_word_index(line, position_ms)

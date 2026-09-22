@@ -385,8 +385,7 @@ impl StageControlsView {
 
 impl Render for StageControlsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        let animating = self.fade.advance(now);
+        let animating = self.fade.advance(window.animation_time());
         if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }
@@ -632,8 +631,7 @@ impl StageTitlebarView {
 
 impl Render for StageTitlebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        let animating = self.fade.advance(now);
+        let animating = self.fade.advance(window.animation_time());
         if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }

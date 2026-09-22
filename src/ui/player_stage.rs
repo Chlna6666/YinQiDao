@@ -25,7 +25,6 @@ use super::{
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 
 const STAGE_CHROME_LAYOUT_DURATION: Duration = Duration::from_millis(300);
-const STAGE_CHROME_LAYOUT_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const STAGE_LEFT_VISIBLE_WIDTH_PX: f32 = 340.0;
 const STAGE_LEFT_HIDDEN_WIDTH_PX: f32 = 250.0;
 const STAGE_CONTROLS_SLOT_HEIGHT_PX: f32 = 158.0;
@@ -334,12 +333,10 @@ struct StagePlayerView {
 }
 
 impl Render for StagePlayerView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        let layout_animating = self.chrome_layout.advance(now);
-        if layout_animating {
-            window.request_invalidation_at(now + STAGE_CHROME_LAYOUT_FRAME_INTERVAL, cx);
-        }
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // with_layout_animation_target already schedules the next platform presentation frame.
+        // Sample the shared frame clock instead of running a second fixed 60 Hz timer.
+        let layout_animating = self.chrome_layout.advance(window.animation_time());
 
         let visible_progress = self.chrome_layout.value();
         let viewport_height = f32::from(window.viewport_size().height).max(1.0);
