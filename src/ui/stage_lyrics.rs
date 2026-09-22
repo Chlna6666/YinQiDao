@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnimationExt as _, AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity,
     Global, IntoElement, Render, SharedString, Subscription, TransformOrigin, Transition,
-    TransitionProperty, WeakEntity, Window, div, hsla, prelude::*, px, relative,
+    TransitionProperty, WeakEntity, Window, bounds_observer, div, hsla, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -23,7 +23,7 @@ use super::{
 };
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
-const LYRIC_ANCHOR_RATIO: f32 = 0.43;
+const LYRIC_ANCHOR_RATIO: f32 = 0.32;
 
 // QueMusic/Apple-like focus channels are intentionally independent from row motion.
 const LYRIC_FOCUS_ALPHA_DURATION: Duration = Duration::from_millis(320);
@@ -55,9 +55,7 @@ const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 8.0;
 
 const PLAYBACK_STACK_HISTORY_ROWS: usize = 4;
 const PLAYBACK_STACK_FUTURE_ROWS: usize = 7;
-const PLAYBACK_STACK_ROW_MIN_HEIGHT_PX: f32 = 82.0;
-const PLAYBACK_STACK_ROW_CONTENT_SPACING_PX: f32 = 16.0;
-const PLAYBACK_STACK_ROW_CENTER_OFFSET_PX: f32 = 31.0;
+const PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX: f32 = 82.0;
 const READING_STACK_HISTORY_ROWS: usize = 5;
 const READING_STACK_FUTURE_ROWS: usize = 7;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
@@ -222,7 +220,8 @@ pub(super) struct StageLyricsView {
     playback_stack_handoff: Option<LyricPlaybackStackHandoff>,
     row_heights: Vec<f32>,
     row_prefix_sum: Vec<f32>,
-    row_geometry_width: f32,
+    viewport_width: f32,
+    viewport_height: f32,
     stage_active: bool,
     scrubbing: bool,
     _ui_subscription: Subscription,
@@ -263,7 +262,8 @@ impl StageLyricsView {
             playback_stack_handoff: None,
             row_heights: Vec::new(),
             row_prefix_sum: vec![0.0],
-            row_geometry_width: 0.0,
+            viewport_width: 0.0,
+            viewport_height: 0.0,
             stage_active: false,
             scrubbing: false,
             _ui_subscription: ui_subscription,
@@ -399,10 +399,7 @@ impl StageLyricsView {
             self.reading_until = None;
             self.reading_center_index = None;
             self.playback_stack_handoff = None;
-            self.row_heights.clear();
-            self.row_prefix_sum.clear();
-            self.row_prefix_sum.push(0.0);
-            self.row_geometry_width = 0.0;
+            self.reset_row_geometry();
             self.scrubbing = false;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             changed = true;
@@ -464,27 +461,48 @@ impl StageLyricsView {
         }
     }
 
-    fn ensure_row_geometry(&mut self, wrap_width: f32, window: &Window) {
-        let width = wrap_width.max(1.0);
-        let cache_valid = self.row_heights.len() == self.lines.len()
-            && self.row_prefix_sum.len() == self.lines.len().saturating_add(1)
-            && (self.row_geometry_width - width).abs() <= 1.0;
-        if cache_valid {
+    fn reset_row_geometry(&mut self) {
+        self.row_heights.clear();
+        self.row_heights
+            .resize(self.lines.len(), PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+        self.rebuild_row_prefix_sum();
+    }
+
+    fn rebuild_row_prefix_sum(&mut self) {
+        self.row_prefix_sum.clear();
+        self.row_prefix_sum.reserve(self.row_heights.len() + 1);
+        self.row_prefix_sum.push(0.0);
+        let mut total = 0.0;
+        for height in self.row_heights.iter().copied() {
+            total += height.max(1.0);
+            self.row_prefix_sum.push(total);
+        }
+    }
+
+    fn update_row_height(&mut self, index: usize, height: f32, cx: &mut Context<Self>) {
+        if !height.is_finite() || height <= 1.0 || index >= self.row_heights.len() {
             return;
         }
-
-        self.row_heights.clear();
-        self.row_prefix_sum.clear();
-        self.row_prefix_sum.push(0.0);
-        self.row_geometry_width = width;
-
-        let mut prefix = 0.0;
-        for line in self.lines.iter() {
-            let height = measured_stage_line_height(line, width, window);
-            self.row_heights.push(height);
-            prefix += height;
-            self.row_prefix_sum.push(prefix);
+        if (self.row_heights[index] - height).abs() <= 0.5 {
+            return;
         }
+        self.row_heights[index] = height;
+        self.rebuild_row_prefix_sum();
+        cx.notify();
+    }
+
+    fn update_viewport_size(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
+        if !width.is_finite() || !height.is_finite() || width <= 1.0 || height <= 1.0 {
+            return;
+        }
+        if (self.viewport_width - width).abs() <= 0.5
+            && (self.viewport_height - height).abs() <= 0.5
+        {
+            return;
+        }
+        self.viewport_width = width;
+        self.viewport_height = height;
+        cx.notify();
     }
 
     fn update_active_index(&mut self) -> bool {
@@ -756,10 +774,17 @@ impl Render for StageLyricsView {
                 })
         };
 
-        let viewport_height = f32::from(window.viewport_size().height).max(1.0);
-        let viewport_width = f32::from(window.viewport_size().width).max(1.0);
-        let wrap_width = stage_lyrics_text_wrap_width(viewport_width);
-        self.ensure_row_geometry(wrap_width, window);
+        let fallback_viewport = window.viewport_size();
+        let viewport_width = if self.viewport_width > 1.0 {
+            self.viewport_width
+        } else {
+            f32::from(fallback_viewport.width).max(1.0)
+        };
+        let viewport_height = if self.viewport_height > 1.0 {
+            self.viewport_height
+        } else {
+            f32::from(fallback_viewport.height).max(1.0)
+        };
         let anchor_y = viewport_height * LYRIC_ANCHOR_RATIO;
         let focus_from_index = self.focus_from_index;
         let focus_started_at = self.focus_started_at;
@@ -770,6 +795,13 @@ impl Render for StageLyricsView {
             && self.stage_active
             && self.playback_state == PlaybackState::Playing
             && !self.scrubbing;
+        let motion_spring_value = handoff.map_or(0.0, |handoff| {
+            lyric_motion_spring_value(
+                handoff.from_active,
+                handoff.to_active,
+                &self.row_prefix_sum,
+            )
+        });
         let lines = self.lines.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
@@ -784,6 +816,7 @@ impl Render for StageLyricsView {
                 let progress = lyric_row_motion_progress(
                     index,
                     handoff.to_active,
+                    motion_spring_value,
                     handoff.started_at,
                     frame_now,
                 );
@@ -791,14 +824,12 @@ impl Render for StageLyricsView {
                     index,
                     handoff.from_active,
                     &self.row_prefix_sum,
-                    &self.row_heights,
                     anchor_y,
                 );
                 let to_y = playback_stack_row_top(
                     index,
                     handoff.to_active,
                     &self.row_prefix_sum,
-                    &self.row_heights,
                     anchor_y,
                 );
                 from_y + (to_y - from_y) * progress
@@ -807,7 +838,6 @@ impl Render for StageLyricsView {
                     index,
                     center_index,
                     &self.row_prefix_sum,
-                    &self.row_heights,
                     anchor_y,
                 )
             };
@@ -816,7 +846,7 @@ impl Render for StageLyricsView {
                 .row_heights
                 .get(index)
                 .copied()
-                .unwrap_or(PLAYBACK_STACK_ROW_MIN_HEIGHT_PX);
+                .unwrap_or(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
             let (viewport_alpha, viewport_blur) =
                 playback_stack_viewport_profile(y, row_height, viewport_height);
             let row = render_lyric_row(
@@ -841,13 +871,24 @@ impl Render for StageLyricsView {
                 parent.clone(),
             );
 
+            let row_measure_view = cx.entity().downgrade();
+            let row_measure = bounds_observer(move |bounds, _window, cx| {
+                let height = f32::from(bounds.size.height);
+                let _ = row_measure_view.update(cx, |this, cx| {
+                    this.update_row_height(index, height, cx);
+                });
+            })
+            .absolute()
+            .inset_0();
+
             stack = stack.child(
                 div()
                     .absolute()
                     .left(px(0.0))
                     .right(px(0.0))
                     .top(px(y))
-                    .child(row),
+                    .child(row)
+                    .child(row_measure),
             );
         }
 
@@ -856,6 +897,17 @@ impl Render for StageLyricsView {
         let stack = stack
             .with_layout_animation_target(realtime_layout_animating)
             .into_any_element();
+
+        let viewport_measure_view = cx.entity().downgrade();
+        let viewport_measure = bounds_observer(move |bounds, _window, cx| {
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let _ = viewport_measure_view.update(cx, |this, cx| {
+                this.update_viewport_size(width, height, cx);
+            });
+        })
+        .absolute()
+        .inset_0();
 
         div()
             .id("stage-lyrics-view")
@@ -874,6 +926,7 @@ impl Render for StageLyricsView {
                         .update(cx, |app, cx| app.wake_stage_controls(cx));
                 },
             ))
+            .child(viewport_measure)
             .child(stack)
     }
 }
@@ -1472,77 +1525,46 @@ fn stage_primary_lyric(
 
 
 #[inline]
-fn stage_lyrics_text_wrap_width(viewport_width: f32) -> f32 {
-    // Stage: 32px * 2 outer padding + 380px left column + 48px gap + 16/104px row padding.
-    (viewport_width - 612.0).clamp(260.0, 920.0)
-}
-
-fn measured_text_line_count(
-    text: &SharedString,
-    font_size: f32,
-    wrap_width: f32,
-    window: &Window,
-) -> usize {
-    if text.is_empty() {
-        return 1;
-    }
-    let run = window.text_style().to_run(text.len());
-    window
-        .text_system()
-        .shape_text(
-            text.clone(),
-            px(font_size),
-            &[run],
-            Some(px(wrap_width.max(1.0))),
-            None,
-        )
-        .map(|lines| lines.len().max(1))
-        .unwrap_or(1)
-}
-
-fn measured_stage_line_height(
-    line: &StageLyricLine,
-    wrap_width: f32,
-    window: &Window,
-) -> f32 {
-    let primary_lines = measured_text_line_count(&line.text, 28.0, wrap_width, window);
-    let primary_height = primary_lines as f32 * 34.0;
-
-    let translation_height = line.translation.as_ref().map_or(0.0, |translation| {
-        measured_text_line_count(translation, 17.0, wrap_width, window) as f32 * 22.0 + 4.0
-    });
-
-    // 11px top/bottom padding + 10px row margin + the same loose breathing room QueMusic gives
-    // each delegate via lineSpacing. A one-line untranslated lyric therefore stays near 82px.
-    (primary_height + translation_height + 32.0 + PLAYBACK_STACK_ROW_CONTENT_SPACING_PX)
-        .max(PLAYBACK_STACK_ROW_MIN_HEIGHT_PX)
-}
-
-#[inline]
 fn playback_stack_row_top(
     index: usize,
     active: usize,
     prefix_sum: &[f32],
-    row_heights: &[f32],
     anchor_y: f32,
 ) -> f32 {
     let index_prefix = prefix_sum
         .get(index)
         .copied()
-        .unwrap_or(index as f32 * PLAYBACK_STACK_ROW_MIN_HEIGHT_PX);
+        .unwrap_or(index as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
     let active_prefix = prefix_sum
         .get(active)
         .copied()
-        .unwrap_or(active as f32 * PLAYBACK_STACK_ROW_MIN_HEIGHT_PX);
-    let active_height = row_heights
-        .get(active)
-        .copied()
-        .unwrap_or(PLAYBACK_STACK_ROW_MIN_HEIGHT_PX);
+        .unwrap_or(active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
 
-    anchor_y
-        - PLAYBACK_STACK_ROW_CENTER_OFFSET_PX.min(active_height * 0.5)
-        + index_prefix
-        - active_prefix
+    // QueMusic: prefixSum[i] - prefixSum[currentLine] + lyricContent.height * alignPos.
+    anchor_y + index_prefix - active_prefix
+}
+
+#[inline]
+fn lyric_motion_spring_value(
+    from_active: usize,
+    to_active: usize,
+    prefix_sum: &[f32],
+) -> f32 {
+    let from = prefix_sum
+        .get(from_active)
+        .copied()
+        .unwrap_or(from_active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+    let to = prefix_sum
+        .get(to_active)
+        .copied()
+        .unwrap_or(to_active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+    let anime_height = (to - from).max(0.0);
+
+    if anime_height <= 400.0 {
+        return 0.0;
+    }
+
+    (((anime_height - 400.0) / 20.0).floor() / -200.0).max(-0.50)
 }
 
 #[inline]
@@ -1611,6 +1633,7 @@ fn lyric_row_motion_timing(relative_to_active: isize) -> (Duration, Duration) {
 fn lyric_row_motion_progress(
     index: usize,
     target_active: usize,
+    spring_value: f32,
     started_at: Instant,
     now: Instant,
 ) -> f32 {
@@ -1629,7 +1652,7 @@ fn lyric_row_motion_progress(
     Easing::CubicBezier {
         x1: LYRIC_MOTION_BEZIER_X1,
         y1: LYRIC_MOTION_BEZIER_Y1,
-        x2: LYRIC_MOTION_BEZIER_X2,
+        x2: spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2),
         y2: LYRIC_MOTION_BEZIER_Y2,
     }
     .sample(raw)
@@ -1682,10 +1705,11 @@ mod tests {
         let prefix = [0.0, 82.0, 192.0, 282.0];
         let anchor = 400.0;
 
-        let active_top = playback_stack_row_top(1, 1, &prefix, &heights, anchor);
-        let next_top = playback_stack_row_top(2, 1, &prefix, &heights, anchor);
-        let previous_top = playback_stack_row_top(0, 1, &prefix, &heights, anchor);
+        let active_top = playback_stack_row_top(1, 1, &prefix, anchor);
+        let next_top = playback_stack_row_top(2, 1, &prefix, anchor);
+        let previous_top = playback_stack_row_top(0, 1, &prefix, anchor);
 
+        assert_eq!(active_top, anchor);
         assert!((next_top - active_top - 110.0).abs() < 0.001);
         assert!((active_top - previous_top - 82.0).abs() < 0.001);
     }
@@ -1710,25 +1734,48 @@ mod tests {
     fn quemusic_motion_curve_starts_slow_and_settles_with_soft_overshoot() {
         let start = Instant::now();
         let (delay, duration) = lyric_row_motion_timing(0);
-        let p0 = lyric_row_motion_progress(10, 10, start, start + delay);
+        let p0 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay);
         let p25 = lyric_row_motion_progress(
             10,
             10,
+            0.0,
             start,
             start + delay + duration / 4,
         );
         let p75 = lyric_row_motion_progress(
             10,
             10,
+            0.0,
             start,
             start + delay + duration * 3 / 4,
         );
-        let p100 = lyric_row_motion_progress(10, 10, start, start + delay + duration);
+        let p100 =
+            lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration);
 
         assert_eq!(p0, 0.0);
         assert!(p25 > 0.0);
         assert!(p75 > p25);
         assert_eq!(p100, 1.0);
+    }
+
+    #[test]
+    fn quemusic_alignment_uses_thirty_two_percent_of_local_lyrics_viewport() {
+        let viewport_height = 600.0;
+        let prefix = [0.0, 82.0, 164.0];
+        let anchor = viewport_height * LYRIC_ANCHOR_RATIO;
+        assert_eq!(LYRIC_ANCHOR_RATIO, 0.32);
+        assert!((playback_stack_row_top(1, 1, &prefix, anchor) - 192.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn quemusic_dynamic_spring_only_changes_for_large_line_jumps() {
+        let short_prefix = [0.0, 82.0, 164.0];
+        assert_eq!(lyric_motion_spring_value(0, 1, &short_prefix), 0.0);
+
+        let tall_prefix = [0.0, 510.0, 1020.0];
+        let spring = lyric_motion_spring_value(0, 1, &tall_prefix);
+        assert!(spring < 0.0);
+        assert!(spring >= -0.50);
     }
 
     #[test]
