@@ -4,9 +4,10 @@ use std::{
 };
 
 use gpui::{
-    AnimationExt as _, AnimationSpec, BorrowAppContext as _, Context, Easing, ElementId, Entity,
-    Global, IntoElement, Render, SharedString, Subscription, TransformOrigin, Transition,
-    TransitionProperty, WeakEntity, Window, bounds_observer, div, hsla, prelude::*, px, relative,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _, Context,
+    Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render, SharedString,
+    Subscription, TransformOrigin, Transition, TransitionProperty, WeakEntity, Window,
+    bounds_observer, div, hsla, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -217,6 +218,7 @@ pub(super) struct StageLyricsView {
     active_word_index: Option<usize>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
+    motion_epoch: u64,
     transport_generation: u64,
     reading_until: Option<Instant>,
     reading_center_index: Option<usize>,
@@ -260,6 +262,7 @@ impl StageLyricsView {
             active_word_index: None,
             hovered_index: None,
             karaoke_epoch: 0,
+            motion_epoch: 0,
             transport_generation,
             reading_until: None,
             reading_center_index: None,
@@ -407,6 +410,7 @@ impl StageLyricsView {
             self.reset_row_geometry();
             self.scrubbing = false;
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
             changed = true;
         }
 
@@ -549,6 +553,7 @@ impl StageLyricsView {
         }
 
         let previous = self.active_index;
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.focus_from_index = previous;
         self.focus_started_at = previous.map(|_| Instant::now());
 
@@ -618,6 +623,19 @@ impl StageLyricsView {
         {
             next_timestamp =
                 Some(next_timestamp.map_or(word_timestamp, |current| current.min(word_timestamp)));
+        }
+
+        if !self.is_reading()
+            && let Some(line) = active.and_then(|index| self.lines.get(index))
+            && let Some(word_index) = active_enhanced_word_index(line, position_ms)
+            && let Some(word) = line.words.get(word_index)
+            && let Some(release_timestamp) = sustained_release_timestamp(word)
+            && release_timestamp > position_ms
+        {
+            next_timestamp = Some(
+                next_timestamp
+                    .map_or(release_timestamp, |current| current.min(release_timestamp)),
+            );
         }
 
         let timestamp = next_timestamp?;
@@ -720,9 +738,13 @@ impl StageLyricsView {
             window.request_invalidation_at(until, cx);
         }
         if let Some(started_at) = self.focus_started_at {
-            let deadline = started_at + LYRIC_FOCUS_TRANSITION_DURATION;
-            if deadline > now {
-                window.request_invalidation_at(deadline, cx);
+            let alpha_deadline = started_at + LYRIC_FOCUS_ALPHA_DURATION;
+            if alpha_deadline > now {
+                window.request_invalidation_at(alpha_deadline, cx);
+            }
+            let scale_deadline = started_at + LYRIC_FOCUS_TRANSITION_DURATION;
+            if scale_deadline > now {
+                window.request_invalidation_at(scale_deadline, cx);
             }
         }
     }
@@ -812,25 +834,11 @@ impl Render for StageLyricsView {
         let active_word_index = self.active_word_index;
         let position_ms = self.position_ms;
         let karaoke_epoch = self.karaoke_epoch;
+        let motion_epoch = self.motion_epoch;
         let karaoke_running = !reading_mode
             && self.stage_active
             && self.playback_state == PlaybackState::Playing
             && !self.scrubbing;
-        let karaoke_frame_active = karaoke_running
-            && active_word_index
-                .and_then(|word_index| {
-                    self.lines
-                        .get(active)
-                        .and_then(|line| line.words.get(word_index))
-                })
-                .and_then(|word| {
-                    word.duration_ms
-                        .map(|duration_ms| (word.timestamp_ms, duration_ms))
-                })
-                .is_some_and(|(timestamp_ms, duration_ms)| {
-                    position_ms >= timestamp_ms
-                        && position_ms < timestamp_ms.saturating_add(duration_ms)
-                });
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
             lyric_motion_spring_value(
                 handoff.from_active,
@@ -848,14 +856,7 @@ impl Render for StageLyricsView {
             .size_full();
 
         for index in first_index..=last_index {
-            let y = if let Some(handoff) = handoff {
-                let progress = lyric_row_motion_progress(
-                    index,
-                    handoff.to_active,
-                    motion_spring_value,
-                    handoff.started_at,
-                    frame_now,
-                );
+            let (y, row_motion) = if let Some(handoff) = handoff {
                 let from_y = playback_stack_row_top(
                     index,
                     handoff.from_active,
@@ -868,13 +869,22 @@ impl Render for StageLyricsView {
                     &self.row_prefix_sum,
                     anchor_y,
                 );
-                from_y + (to_y - from_y) * progress
+                let relative = index as isize - handoff.to_active as isize;
+                let (delay, duration) = lyric_row_motion_timing(relative);
+                let offset_y = from_y - to_y;
+                (
+                    to_y,
+                    (offset_y.abs() > 0.01).then_some((offset_y, delay, duration)),
+                )
             } else {
-                playback_stack_row_top(
-                    index,
-                    center_index,
-                    &self.row_prefix_sum,
-                    anchor_y,
+                (
+                    playback_stack_row_top(
+                        index,
+                        center_index,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    ),
+                    None,
                 )
             };
 
@@ -892,6 +902,7 @@ impl Render for StageLyricsView {
                 focus_from_index,
                 focus_started_at,
                 frame_now,
+                motion_epoch,
                 viewport_alpha,
                 viewport_blur,
                 active_word_index,
@@ -933,14 +944,38 @@ impl Render for StageLyricsView {
                 );
             }
 
+            let row_slot = if let Some((offset_y, delay, duration)) = row_motion {
+                let animation = Animation::from_spec(
+                    AnimationSpec::new(duration)
+                        .delay(delay)
+                        .ease(Easing::CubicBezier {
+                            x1: LYRIC_MOTION_BEZIER_X1,
+                            y1: LYRIC_MOTION_BEZIER_Y1,
+                            x2: motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2),
+                            y2: LYRIC_MOTION_BEZIER_Y2,
+                        }),
+                )
+                .with_property(AnimationProperty::translation(
+                    point(px(0.0), px(offset_y)),
+                    point(px(0.0), px(0.0)),
+                ));
+                row_slot
+                    .with_animation(
+                        ElementId::NamedInteger(
+                            SharedString::new_static("lyric-row-motion"),
+                            lyric_animation_instance_id(motion_epoch, index),
+                        ),
+                        animation,
+                        |element, _| element,
+                    )
+                    .into_any_element()
+            } else {
+                row_slot.into_any_element()
+            };
             stack = stack.child(row_slot);
         }
 
-        let realtime_layout_animating =
-            handoff.is_some() || focus_started_at.is_some() || karaoke_frame_active;
-        let stack = stack
-            .with_layout_animation_target(realtime_layout_animating)
-            .into_any_element();
+        let stack = stack.into_any_element();
 
         let viewport_measure_view = cx.entity().downgrade();
         let viewport_measure = bounds_observer(move |bounds, _window, cx| {
@@ -983,6 +1018,7 @@ fn render_lyric_row(
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
     frame_now: Instant,
+    motion_epoch: u64,
     viewport_alpha: f32,
     viewport_blur: f32,
     active_word_index: Option<usize>,
@@ -1032,27 +1068,30 @@ fn render_lyric_row(
         .map(|previous| lyric_focus_scale(index, previous, reading_mode))
         .unwrap_or(target_scale);
 
-    // QueMusic animates focus opacity (~320ms) and the subtle 1.00 -> 1.02 scale (~640ms)
-    // independently from positional motion. Viewport blur remains tied only to the row's Y.
-    let resolved_alpha = match (previous_profile, focus_started_at) {
-        (Some(previous), Some(started_at)) => {
-            let t = lyric_focus_alpha_progress(started_at, frame_now);
-            previous.0 + (target_alpha - previous.0) * t
-        }
-        (Some(previous), None) => previous.0,
-        (None, _) => target_alpha,
+    // Focus is presentation-only. Keep final text geometry in the retained tree and let Nova own
+    // the 320ms opacity and 640ms scale timelines instead of rerendering all visible lyric rows.
+    let target_alpha = if hovered { 1.0 } else { target_alpha };
+    let previous_alpha = if hovered {
+        1.0
+    } else {
+        previous_profile.map_or(target_alpha, |previous| previous.0)
     };
-    let resolved_scale = match focus_started_at {
-        Some(started_at) if previous_active.is_some() => {
-            let t = lyric_focus_scale_progress(started_at, frame_now);
-            previous_scale + (target_scale - previous_scale) * t
-        }
-        _ => target_scale,
-    };
-    let resolved_alpha = if hovered { 1.0 } else { resolved_alpha };
     let resolved_blur = if hovered { 0.0 } else { target_blur };
+    let focus_transition = previous_active.is_some() && focus_started_at.is_some();
+    let alpha_still_running = focus_started_at
+        .is_some_and(|started_at| frame_now < started_at + LYRIC_FOCUS_ALPHA_DURATION);
+    let animation_base_alpha = if focus_transition {
+        previous_alpha.max(target_alpha)
+    } else {
+        target_alpha
+    };
+    let base_alpha = if focus_transition && alpha_still_running {
+        animation_base_alpha
+    } else {
+        target_alpha
+    };
 
-    let text = lyric_text_layer(
+    let mut text = lyric_text_layer(
         line,
         karaoke_state,
         active_word_index,
@@ -1063,10 +1102,58 @@ fn render_lyric_row(
         text_id,
         index,
     )
-    .opacity(resolved_alpha)
+    .opacity(base_alpha)
     .transform_origin(TransformOrigin::new(0.0, 1.0))
-    .scale(resolved_scale)
+    .scale(target_scale)
     .into_any_element();
+
+    if focus_transition {
+        let animation_id = lyric_animation_instance_id(motion_epoch, index);
+        if (previous_scale - target_scale).abs() > 0.0001 {
+            let target_scale_safe = target_scale.abs().max(0.0001);
+            let animation = Animation::from_spec(
+                AnimationSpec::new(LYRIC_FOCUS_SCALE_DURATION).ease(Easing::InOutCubic),
+            )
+            .with_property(AnimationProperty::scale_opacity(
+                previous_scale / target_scale_safe,
+                1.0,
+                1.0,
+                1.0,
+                TransformOrigin::new(0.0, 1.0),
+            ));
+            text = text
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("lyric-focus-scale"),
+                        animation_id,
+                    ),
+                    animation,
+                    |element, _| element,
+                )
+                .into_any_element();
+        }
+
+        if (previous_alpha - target_alpha).abs() > 0.0001 {
+            let alpha_base = animation_base_alpha.max(0.0001);
+            let animation = Animation::from_spec(
+                AnimationSpec::new(LYRIC_FOCUS_ALPHA_DURATION).ease(Easing::Linear),
+            )
+            .with_property(AnimationProperty::opacity(
+                (previous_alpha / alpha_base).clamp(0.0, 1.0),
+                (target_alpha / alpha_base).clamp(0.0, 1.0),
+            ));
+            text = text
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("lyric-focus-opacity"),
+                        animation_id,
+                    ),
+                    animation,
+                    |element, _| element,
+                )
+                .into_any_element();
+        }
+    }
 
     let mut row = div()
         .id(ElementId::named_usize("lyric-line", index))
@@ -1206,6 +1293,13 @@ fn lyric_text_layer(
         text = text.blur(px(blur_sigma));
     }
     text
+}
+
+#[inline]
+fn lyric_animation_instance_id(epoch: u64, index: usize) -> u64 {
+    epoch
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(index as u64)
 }
 
 #[inline]
@@ -1375,8 +1469,8 @@ fn sustained_time_envelope(
 
     // Long-note emphasis is clock-driven, not mask-driven. Give it a short attack, keep the bloom
     // through the sustained body, and release only near the authored syllable end.
-    let attack_ms = (duration_ms as f32 * 0.18).clamp(120.0, 260.0) as u64;
-    let release_ms = (duration_ms as f32 * 0.20).clamp(140.0, 300.0) as u64;
+    let (attack_ms, release_ms) =
+        sustained_attack_release_ms(word).unwrap_or((120, 140));
 
     if elapsed_ms < attack_ms {
         smoothstep01(elapsed_ms as f32 / attack_ms.max(1) as f32)
@@ -1393,7 +1487,108 @@ fn sustained_word_emphasis(
     is_current_word: bool,
     is_last_word: bool,
 ) -> SustainedWordEmphasis {
-    if !is_current_word || !should_emphasize_sustained_word(word) {
+    if !is_current_word {
+        return SustainedWordEmphasis {
+            scale: 1.0,
+            ..SustainedWordEmphasis::default()
+        };
+    }
+
+    let peak = sustained_word_peak_emphasis(word, is_last_word);
+    if peak.glow_alpha <= 0.0 {
+        return peak;
+    }
+    let envelope = sustained_time_envelope(word, position_ms);
+    SustainedWordEmphasis {
+        glow_alpha: peak.glow_alpha * envelope,
+        glow_blur_px: peak.glow_blur_px,
+        scale: 1.0 + (peak.scale - 1.0) * envelope,
+        lift_px: peak.lift_px * envelope,
+    }
+}
+
+fn karaoke_reveal_layer(
+    content: impl IntoElement + 'static,
+    word: &StageLyricWord,
+    word_index: usize,
+    progress: f32,
+    position_ms: u64,
+    animate: bool,
+    karaoke_epoch: u64,
+    animation_name: &'static str,
+) -> gpui::AnyElement {
+    let progress = progress.clamp(0.0, 1.0);
+    let layer = div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .h_full()
+        .overflow_hidden()
+        .child(content);
+
+    if animate
+        && progress < 1.0
+        && let Some(remaining) = word_reveal_remaining_duration(word, position_ms)
+    {
+        let animation = Animation::from_spec(
+            AnimationSpec::new(remaining).ease(Easing::Linear),
+        )
+        .with_property(AnimationProperty::horizontal_reveal(
+            HorizontalRevealEdge::Left,
+            progress,
+            1.0,
+        ));
+        return layer
+            .w_full()
+            .with_animation(
+                ElementId::NamedInteger(
+                    SharedString::new_static(animation_name),
+                    lyric_animation_instance_id(karaoke_epoch, word_index),
+                ),
+                animation,
+                |element, _| element,
+            )
+            .into_any_element();
+    }
+
+    layer.w(relative(progress)).into_any_element()
+}
+
+fn word_reveal_remaining_duration(
+    word: &StageLyricWord,
+    position_ms: u64,
+) -> Option<Duration> {
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
+    let end_ms = word.timestamp_ms.saturating_add(duration_ms);
+    (position_ms < end_ms).then(|| Duration::from_millis(end_ms - position_ms))
+}
+
+fn sustained_attack_release_ms(word: &StageLyricWord) -> Option<(u64, u64)> {
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
+    Some((
+        (duration_ms as f32 * 0.18).clamp(120.0, 260.0) as u64,
+        (duration_ms as f32 * 0.20).clamp(140.0, 300.0) as u64,
+    ))
+}
+
+fn sustained_release_timestamp(word: &StageLyricWord) -> Option<u64> {
+    if !should_emphasize_sustained_word(word) {
+        return None;
+    }
+    let duration_ms = word.duration_ms?;
+    let (_, release_ms) = sustained_attack_release_ms(word)?;
+    Some(
+        word.timestamp_ms
+            .saturating_add(duration_ms)
+            .saturating_sub(release_ms),
+    )
+}
+
+fn sustained_word_peak_emphasis(
+    word: &StageLyricWord,
+    is_last_word: bool,
+) -> SustainedWordEmphasis {
+    if !should_emphasize_sustained_word(word) {
         return SustainedWordEmphasis {
             scale: 1.0,
             ..SustainedWordEmphasis::default()
@@ -1401,10 +1596,6 @@ fn sustained_word_emphasis(
     }
 
     let duration_ms = word.duration_ms.unwrap_or(1_000).max(1_000) as f32;
-    let envelope = sustained_time_envelope(word, position_ms);
-
-    // Match AMLL's duration-sensitive character-emphasis shape: short qualifying sustains stay
-    // subtle while very long notes gain progressively more bloom and motion.
     let amount_ratio = duration_ms / 2_000.0;
     let mut amount = if amount_ratio > 1.0 {
         amount_ratio.sqrt()
@@ -1428,78 +1619,192 @@ fn sustained_word_emphasis(
     blur = blur.min(0.8);
 
     SustainedWordEmphasis {
-        glow_alpha: (envelope * blur * 0.95).clamp(0.0, 0.78),
+        glow_alpha: (blur * 0.95).clamp(0.0, 0.78),
         glow_blur_px: 3.0 + blur * 6.0,
-        scale: 1.0 + envelope * 0.10 * amount,
-        lift_px: envelope * 0.70 * amount,
+        scale: 1.0 + 0.10 * amount,
+        lift_px: 0.70 * amount,
+    }
+}
+
+fn sustained_animation_segment(
+    word: &StageLyricWord,
+    position_ms: u64,
+) -> Option<(f32, f32, Duration)> {
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
+    let (attack_ms, release_ms) = sustained_attack_release_ms(word)?;
+    let start_ms = word.timestamp_ms;
+    let end_ms = start_ms.saturating_add(duration_ms);
+    if position_ms < start_ms || position_ms >= end_ms {
+        return None;
+    }
+
+    let elapsed_ms = position_ms - start_ms;
+    let remaining_ms = end_ms - position_ms;
+    let envelope = sustained_time_envelope(word, position_ms);
+
+    if elapsed_ms < attack_ms {
+        Some((
+            envelope,
+            1.0,
+            Duration::from_millis((attack_ms - elapsed_ms).max(1)),
+        ))
+    } else if remaining_ms <= release_ms {
+        Some((
+            envelope,
+            0.0,
+            Duration::from_millis(remaining_ms.max(1)),
+        ))
+    } else {
+        None
     }
 }
 
 fn karaoke_word(
     word: &StageLyricWord,
-    _index: usize,
+    index: usize,
     reveal_progress: f32,
     position_ms: u64,
     is_current_word: bool,
     is_last_word: bool,
-    _karaoke_epoch: u64,
+    karaoke_epoch: u64,
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
-    let emphasis = sustained_word_emphasis(
-        word,
-        position_ms,
-        is_current_word,
-        is_last_word,
-    );
+    let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
     let base = div()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
         .child(word.text.clone());
 
-    // The reveal stays one retained layout subtree for Future -> Active -> Past. Changing the
-    // width of an absolute clip avoids scene-animation bind/unbind barriers at word boundaries,
-    // which caused a one-frame primitive replay flash while the virtual List was also prepainting.
-    // Keep the glow subtree permanently mounted. Only opacity and clip width change, so an
-    // Active -> held/sustained -> Past transition never swaps text primitives and cannot cause the
-    // one-frame flash that existed in the old karaoke implementation.
-    let glow = div()
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .h_full()
-        .w(relative(progress))
-        .overflow_hidden()
-        .opacity(emphasis.glow_alpha)
-        .child(
-            div()
-                .whitespace_nowrap()
-                .text_color(hsla(0.0, 0.0, 1.0, 0.92))
-                .blur(px(emphasis.glow_blur_px))
-                .child(word.text.clone()),
-        );
+    let overlay = karaoke_reveal_layer(
+        div()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+            .child(word.text.clone()),
+        word,
+        index,
+        progress,
+        position_ms,
+        animate,
+        karaoke_epoch,
+        "lyric-word-reveal",
+    );
 
-    let overlay = div()
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .h_full()
-        .w(relative(progress))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-        .child(div().whitespace_nowrap().child(word.text.clone()));
+    let peak = sustained_word_peak_emphasis(word, is_last_word);
+    let sustained = is_current_word && peak.glow_alpha > 0.0;
+    let static_emphasis = sustained_word_emphasis(
+        word,
+        position_ms,
+        is_current_word,
+        is_last_word,
+    );
 
-    div()
+    let mut word_root = div()
         .relative()
-        .top(px(-emphasis.lift_px))
-        .scale(emphasis.scale)
         .flex_none()
         .whitespace_nowrap()
-        .child(base)
-        .child(glow)
-        .child(overlay)
-        .into_any_element()
+        .child(base);
+
+    if sustained {
+        let mut glow = div()
+            .whitespace_nowrap()
+            .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+            .blur(px(peak.glow_blur_px))
+            .child(word.text.clone())
+            .into_any_element();
+
+        if animate {
+            if let Some((from_envelope, to_envelope, duration)) =
+                sustained_animation_segment(word, position_ms)
+            {
+                let animation = Animation::from_spec(
+                    AnimationSpec::new(duration).ease(Easing::InOutCubic),
+                )
+                .with_property(AnimationProperty::opacity(
+                    from_envelope.clamp(0.0, 1.0),
+                    to_envelope.clamp(0.0, 1.0),
+                ));
+                glow = glow
+                    .with_animation(
+                        ElementId::NamedInteger(
+                            SharedString::new_static("lyric-word-glow"),
+                            lyric_animation_instance_id(karaoke_epoch, index),
+                        ),
+                        animation,
+                        |element, _| element,
+                    )
+                    .into_any_element();
+            }
+            glow = div()
+                .opacity(peak.glow_alpha)
+                .child(glow)
+                .into_any_element();
+        } else {
+            glow = div()
+                .opacity(static_emphasis.glow_alpha)
+                .child(glow)
+                .into_any_element();
+        }
+
+        word_root = word_root.child(karaoke_reveal_layer(
+            glow,
+            word,
+            index,
+            progress,
+            position_ms,
+            animate,
+            karaoke_epoch,
+            "lyric-word-glow-reveal",
+        ));
+    }
+
+    word_root = word_root.child(overlay);
+
+    if sustained {
+        if animate {
+            if let Some((from_envelope, to_envelope, duration)) =
+                sustained_animation_segment(word, position_ms)
+            {
+                let from_scale = 1.0 + (peak.scale - 1.0) * from_envelope;
+                let to_scale = 1.0 + (peak.scale - 1.0) * to_envelope;
+                let peak_scale = peak.scale.max(0.0001);
+                let animation = Animation::from_spec(
+                    AnimationSpec::new(duration).ease(Easing::InOutCubic),
+                )
+                .with_property(AnimationProperty::scale_opacity(
+                    from_scale / peak_scale,
+                    to_scale / peak_scale,
+                    1.0,
+                    1.0,
+                    TransformOrigin::new(0.0, 1.0),
+                ));
+                return word_root
+                    .top(px(-peak.lift_px))
+                    .scale(peak.scale)
+                    .with_animation(
+                        ElementId::NamedInteger(
+                            SharedString::new_static("lyric-word-emphasis"),
+                            lyric_animation_instance_id(karaoke_epoch, index),
+                        ),
+                        animation,
+                        |element, _| element,
+                    )
+                    .into_any_element();
+            }
+
+            return word_root
+                .top(px(-peak.lift_px))
+                .scale(peak.scale)
+                .into_any_element();
+        }
+
+        return word_root
+            .top(px(-static_emphasis.lift_px))
+            .scale(static_emphasis.scale)
+            .into_any_element();
+    }
+
+    word_root.into_any_element()
 }
 
 fn stage_primary_lyric(
@@ -1661,20 +1966,6 @@ fn playback_stack_viewport_profile(
 }
 
 #[inline]
-fn lyric_focus_alpha_progress(started_at: Instant, now: Instant) -> f32 {
-    let elapsed = now.saturating_duration_since(started_at);
-    (elapsed.as_secs_f32() / LYRIC_FOCUS_ALPHA_DURATION.as_secs_f32()).clamp(0.0, 1.0)
-}
-
-#[inline]
-fn lyric_focus_scale_progress(started_at: Instant, now: Instant) -> f32 {
-    AnimationSpec::new(LYRIC_FOCUS_SCALE_DURATION)
-        .ease(Easing::InOutCubic)
-        .sample_elapsed(now.saturating_duration_since(started_at))
-        .eased_progress
-}
-
-#[inline]
 fn lyric_row_motion_timing(relative_to_active: isize) -> (Duration, Duration) {
     if relative_to_active < -3 {
         return (
@@ -1694,6 +1985,7 @@ fn lyric_row_motion_timing(relative_to_active: isize) -> (Duration, Duration) {
     )
 }
 
+#[cfg(test)]
 #[inline]
 fn lyric_row_motion_progress(
     index: usize,
