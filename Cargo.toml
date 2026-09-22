@@ -20,8 +20,8 @@ members = [
 ]
 
 [workspace.dependencies]
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a0587d931bad7214fcf4fef39bd0ca04718c3a7d", default-features = false }
-gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a0587d931bad7214fcf4fef39bd0ca04718c3a7d" }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "cfe193aef572d0ba2d84243b35456404b1fae7bb", default-features = false }
+gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "cfe193aef572d0ba2d84243b35456404b1fae7bb" }
 
 [dependencies]
 anyhow = "1"
@@ -108,7 +108,7 @@ gpui = { workspace = true, features = [
 # Keep this local bridge until that patch is published by the upstream branch.
 [patch.crates-io]
 gpu-allocator = { path = "vendor/gpu-allocator" }
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a0587d931bad7214fcf4fef39bd0ca04718c3a7d" }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "cfe193aef572d0ba2d84243b35456404b1fae7bb" }
 
 [lints.rust]
 unsafe_code = "warn"
