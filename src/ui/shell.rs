@@ -1214,6 +1214,7 @@ impl MusicApp {
 
     fn sync_stage_chrome_surfaces(&mut self, cx: &mut Context<Self>) {
         if self.stage_prepared || self.stage_open || self.stage_animating {
+            player_stage::sync_chrome_if_created(self, cx);
             let _ = stage_controls::view(self, cx);
             let _ = stage_controls::titlebar_view(self, cx);
         }
