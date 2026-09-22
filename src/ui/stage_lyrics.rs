@@ -754,16 +754,10 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(until, cx);
         }
-        if let Some(started_at) = self.focus_started_at {
-            let alpha_deadline = started_at + LYRIC_FOCUS_ALPHA_DURATION;
-            if alpha_deadline > now {
-                window.request_invalidation_at(alpha_deadline, cx);
-            }
-            let scale_deadline = started_at + LYRIC_FOCUS_TRANSITION_DURATION;
-            if scale_deadline > now {
-                window.request_invalidation_at(scale_deadline, cx);
-            }
-        }
+        // Focus/row transitions are renderer-owned. Do not wake the UI thread merely because a
+        // visual timeline reached its final sample: the retained scene already displays that final
+        // value. Stale focus/handoff bookkeeping is retired on the next semantic render
+        // (word/line boundary, input, pause/seek, etc.).
     }
 }
 
@@ -1186,7 +1180,7 @@ fn render_lyric_row(
                 .into_any_element();
         }
 
-        if (previous_alpha - target_alpha).abs() > 0.0001 {
+        if alpha_still_running && (previous_alpha - target_alpha).abs() > 0.0001 {
             let alpha_base = animation_base_alpha.max(0.0001);
             let animation = Animation::from_spec(
                 AnimationSpec::new(LYRIC_FOCUS_ALPHA_DURATION).ease(Easing::Linear),
