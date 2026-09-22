@@ -1102,6 +1102,7 @@ fn render_lyric_row(
         active_word_index,
         position_ms,
         karaoke_running,
+        should_render_karaoke_detail(index, active, reading_mode),
         karaoke_epoch,
         resolved_blur,
         text_id,
@@ -1261,6 +1262,7 @@ fn lyric_text_layer(
     active_word_index: Option<usize>,
     position_ms: u64,
     karaoke_running: bool,
+    karaoke_detail: bool,
     karaoke_epoch: u64,
     blur_sigma: f32,
     text_id: &'static str,
@@ -1280,6 +1282,7 @@ fn lyric_text_layer(
             active_word_index,
             position_ms,
             karaoke_running,
+            karaoke_detail,
             karaoke_epoch,
         ));
 
@@ -1373,6 +1376,11 @@ enum KaraokeLineState {
     Past,
     Active,
     Future,
+}
+
+#[inline]
+fn should_render_karaoke_detail(index: usize, active: usize, reading_mode: bool) -> bool {
+    !reading_mode && (index == active || index.checked_add(1) == Some(active))
 }
 
 fn active_enhanced_word_index(line: &StageLyricLine, position_ms: u64) -> Option<usize> {
@@ -1672,13 +1680,15 @@ fn karaoke_word(
     is_current_word: bool,
     is_last_word: bool,
     karaoke_epoch: u64,
-    base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
     let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
+    // The stable full-line text below owns layout and the dim glyphs. This transparent copy only
+    // supplies each word's exact inline box for the absolute karaoke overlay, so it cannot change
+    // row height or double the dim alpha.
     let base = div()
         .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
+        .text_color(hsla(0.0, 0.0, 1.0, 0.0))
         .child(word.text.clone());
 
     let overlay = karaoke_reveal_layer(
@@ -1818,26 +1828,40 @@ fn stage_primary_lyric(
     current_word: Option<usize>,
     position_ms: u64,
     animate: bool,
+    karaoke_detail: bool,
     karaoke_epoch: u64,
 ) -> gpui::AnyElement {
-    if !line.enhanced_complete {
-        return div()
-            .w_full()
-            .min_w(px(0.0))
-            .text_size(px(28.0))
-            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-            .child(line.text.clone())
-            .into_any_element();
-    }
-
-    // Every enhanced line keeps the same fragment/container tree before, during and after a line
-    // hand-off, so retained text primitives never switch shape at a word or line boundary.
     const DIM_ALPHA: f32 = 0.46;
     const STATIC_ALPHA: f32 = 1.0;
 
-    let mut row = div()
+    // A single full-line text node always owns wrapping and row height. Non-adjacent rows stop here,
+    // so a 12-row viewport no longer expands every enhanced line into one subtree per authored word.
+    // Old history rows keep their already-completed brightness; current/future rows keep the dim
+    // base that the white karaoke mask reveals over.
+    let base_alpha = match karaoke_state {
+        KaraokeLineState::Static | KaraokeLineState::Past if !karaoke_detail => STATIC_ALPHA,
+        KaraokeLineState::Static => STATIC_ALPHA,
+        KaraokeLineState::Past | KaraokeLineState::Active | KaraokeLineState::Future => DIM_ALPHA,
+    };
+    let base = div()
         .w_full()
         .min_w(px(0.0))
+        .text_size(px(28.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
+        .child(line.text.clone());
+
+    if !line.enhanced_complete || !karaoke_detail {
+        return base.into_any_element();
+    }
+
+    // Only current + previous retain word timing. The overlay is absolute, therefore switching a
+    // line into/out of karaoke detail cannot change intrinsic height or move neighboring rows.
+    let mut overlay = div()
+        .absolute()
+        .left(px(0.0))
+        .right(px(0.0))
+        .top(px(0.0))
         .flex()
         .flex_wrap()
         .items_center()
@@ -1845,25 +1869,22 @@ fn stage_primary_lyric(
         .font_weight(gpui::FontWeight::SEMIBOLD);
 
     for (index, word) in line.words.iter().enumerate() {
-        let (progress, base_alpha, word_animate) = match karaoke_state {
-            KaraokeLineState::Static => (1.0, STATIC_ALPHA, false),
-            KaraokeLineState::Past => (1.0, DIM_ALPHA, false),
-            KaraokeLineState::Future => (0.0, DIM_ALPHA, false),
+        let (progress, word_animate) = match karaoke_state {
+            KaraokeLineState::Static | KaraokeLineState::Past => (1.0, false),
+            KaraokeLineState::Future => (0.0, false),
             KaraokeLineState::Active => {
                 let progress = match current_word {
                     Some(current) if index < current => 1.0,
-                    Some(current) if index == current => {
-                        word_reveal_progress(word, position_ms)
-                    }
+                    Some(current) if index == current => word_reveal_progress(word, position_ms),
                     _ => 0.0,
                 };
                 // Long authored syllables get a separate emphasis envelope while their karaoke
                 // mask continues to reveal; short syllables remain a plain mask sweep.
-                (progress, DIM_ALPHA, animate && current_word == Some(index))
+                (progress, animate && current_word == Some(index))
             }
         };
 
-        row = row.child(karaoke_word(
+        overlay = overlay.child(karaoke_word(
             word,
             index,
             progress,
@@ -1871,11 +1892,16 @@ fn stage_primary_lyric(
             word_animate,
             index + 1 == line.words.len(),
             karaoke_epoch,
-            base_alpha,
         ));
     }
 
-    row.into_any_element()
+    div()
+        .relative()
+        .w_full()
+        .min_w(px(0.0))
+        .child(base)
+        .child(overlay)
+        .into_any_element()
 }
 
 
@@ -2054,11 +2080,13 @@ mod tests {
     use crate::lyrics::LyricWord;
 
     #[test]
-    fn karaoke_line_state_keeps_future_and_active_words_on_same_base_layer() {
-        assert_ne!(KaraokeLineState::Future, KaraokeLineState::Active);
-        // Both states are rendered through karaoke_word(); the semantic state changes reveal only,
-        // not the retained element shape. This assertion guards the explicit state model itself.
-        assert_eq!(KaraokeLineState::Static, KaraokeLineState::Static);
+    fn karaoke_detail_is_limited_to_current_and_previous_rows() {
+        let active = 10;
+        assert!(should_render_karaoke_detail(10, active, false));
+        assert!(should_render_karaoke_detail(9, active, false));
+        assert!(!should_render_karaoke_detail(8, active, false));
+        assert!(!should_render_karaoke_detail(11, active, false));
+        assert!(!should_render_karaoke_detail(10, active, true));
     }
 
     #[test]
