@@ -318,7 +318,13 @@ pub(super) fn render(
         }
     });
 
-    stage.into_any_element()
+    // StageLyrics owns its own retained/cached boundary. Keep the stage shell cached as well so
+    // a lyric-only notify makes StagePlayerView a TraversalAncestor instead of rerendering cover,
+    // metadata, controls, and the whole stage layout. Direct StagePlayer updates (track/chrome
+    // layout/etc.) still invalidate this view and take the normal render path.
+    AnyView::from(stage)
+        .cached(StyleRefinement::default().size_full())
+        .into_any_element()
 }
 
 struct StagePlayerView {
