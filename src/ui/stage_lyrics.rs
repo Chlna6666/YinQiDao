@@ -1685,12 +1685,14 @@ fn karaoke_word(
     reveal_progress: f32,
     position_ms: u64,
     is_current_word: bool,
+    reveal_animate: bool,
     is_last_word: bool,
     karaoke_epoch: u64,
     base_alpha: f32,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
-    let reveal_animate = word_reveal_animation_timing(word, position_ms).is_some();
+    let reveal_animate =
+        reveal_animate && word_reveal_animation_timing(word, position_ms).is_some();
     let base = div()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
@@ -1870,10 +1872,10 @@ fn stage_primary_lyric(
                 // The whole active line is committed once. Known-duration future words carry their
                 // authored start as an animation delay, so word boundaries no longer wake the View.
                 // Sustained words still get a semantic wake at their start for the glow envelope.
-                let scheduled_reveal = word
-                    .duration_ms
-                    .is_some_and(|duration| duration > 0)
-                    && position_ms < word.timestamp_ms.saturating_add(word.duration_ms.unwrap_or(0));
+                let scheduled_reveal = word.duration_ms.is_some_and(|duration| {
+                    duration > 0
+                        && position_ms < word.timestamp_ms.saturating_add(duration)
+                });
                 (
                     progress,
                     DIM_ALPHA,
@@ -1887,6 +1889,7 @@ fn stage_primary_lyric(
             index,
             progress,
             position_ms,
+            current_word == Some(index),
             word_animate,
             index + 1 == line.words.len(),
             karaoke_epoch,
