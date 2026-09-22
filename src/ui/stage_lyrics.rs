@@ -87,6 +87,18 @@ impl LyricPlaybackStackHandoff {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LyricRowVisualMotion {
+    offset_y: f32,
+    delay: Duration,
+    duration: Duration,
+    curve_x2: f32,
+    from_viewport_alpha: f32,
+    to_viewport_alpha: f32,
+    from_viewport_blur: f32,
+    to_viewport_blur: f32,
+}
+
 #[derive(Default)]
 struct StageLyricsViewCache {
     view: Option<Entity<StageLyricsView>>,
@@ -861,45 +873,70 @@ impl Render for StageLyricsView {
             .size_full();
 
         for index in first_index..=last_index {
-            let (y, row_motion) = if let Some(handoff) = handoff {
-                let from_y = playback_stack_row_top(
-                    index,
-                    handoff.from_active,
-                    &self.row_prefix_sum,
-                    anchor_y,
-                );
-                let to_y = playback_stack_row_top(
-                    index,
-                    handoff.to_active,
-                    &self.row_prefix_sum,
-                    anchor_y,
-                );
-                let relative = index as isize - handoff.to_active as isize;
-                let (delay, duration) = lyric_row_motion_timing(relative);
-                let offset_y = from_y - to_y;
-                (
-                    to_y,
-                    (offset_y.abs() > 0.01).then_some((offset_y, delay, duration)),
-                )
-            } else {
-                (
-                    playback_stack_row_top(
-                        index,
-                        center_index,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    ),
-                    None,
-                )
-            };
-
             let row_height = self
                 .row_heights
                 .get(index)
                 .copied()
                 .unwrap_or(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
-            let (viewport_alpha, viewport_blur) =
-                playback_stack_viewport_profile(y, row_height, viewport_height);
+            let hovered = self.hovered_index == Some(index);
+
+            let (y, viewport_alpha, viewport_blur, row_motion) =
+                if let Some(handoff) = handoff {
+                    let from_y = playback_stack_row_top(
+                        index,
+                        handoff.from_active,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    );
+                    let to_y = playback_stack_row_top(
+                        index,
+                        handoff.to_active,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    );
+                    let (mut from_alpha, mut from_blur) =
+                        playback_stack_viewport_profile(from_y, row_height, viewport_height);
+                    let (mut to_alpha, mut to_blur) =
+                        playback_stack_viewport_profile(to_y, row_height, viewport_height);
+                    if hovered {
+                        from_alpha = 1.0;
+                        to_alpha = 1.0;
+                        from_blur = 0.0;
+                        to_blur = 0.0;
+                    }
+
+                    let relative = index as isize - handoff.to_active as isize;
+                    let (delay, duration) = lyric_row_motion_timing(relative);
+                    let offset_y = from_y - to_y;
+                    let curve_x2 =
+                        motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2);
+                    let motion = (offset_y.abs() > 0.01).then_some(LyricRowVisualMotion {
+                        offset_y,
+                        delay,
+                        duration,
+                        curve_x2,
+                        from_viewport_alpha: from_alpha,
+                        to_viewport_alpha: to_alpha,
+                        from_viewport_blur: from_blur,
+                        to_viewport_blur: to_blur,
+                    });
+                    (to_y, to_alpha, to_blur, motion)
+                } else {
+                    let y = playback_stack_row_top(
+                        index,
+                        center_index,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    );
+                    let (mut viewport_alpha, mut viewport_blur) =
+                        playback_stack_viewport_profile(y, row_height, viewport_height);
+                    if reading_mode || hovered {
+                        viewport_alpha = 1.0;
+                        viewport_blur = 0.0;
+                    }
+                    (y, viewport_alpha, viewport_blur, None)
+                };
+
             let row = render_lyric_row(
                 &lines[index],
                 index,
@@ -908,15 +945,15 @@ impl Render for StageLyricsView {
                 focus_started_at,
                 frame_now,
                 motion_epoch,
-                viewport_alpha,
                 viewport_blur,
+                row_motion,
                 active_word_index,
                 position_ms,
                 reading_mode,
                 karaoke_running,
                 !reading_mode,
                 "lyric-text",
-                self.hovered_index == Some(index),
+                hovered,
                 reading_mode || handoff.is_none(),
                 karaoke_epoch,
                 view.clone(),
@@ -949,20 +986,22 @@ impl Render for StageLyricsView {
                 );
             }
 
-            let row_slot = if let Some((offset_y, delay, duration)) = row_motion {
+            let row_slot = if let Some(motion) = row_motion {
                 let animation = Animation::from_spec(
-                    AnimationSpec::new(duration)
-                        .delay(delay)
+                    AnimationSpec::new(motion.duration)
+                        .delay(motion.delay)
                         .ease(Easing::CubicBezier {
                             x1: LYRIC_MOTION_BEZIER_X1,
                             y1: LYRIC_MOTION_BEZIER_Y1,
-                            x2: motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2),
+                            x2: motion.curve_x2,
                             y2: LYRIC_MOTION_BEZIER_Y2,
                         }),
                 )
-                .with_property(AnimationProperty::translation(
-                    point(px(0.0), px(offset_y)),
+                .with_property(AnimationProperty::translation_opacity(
+                    point(px(0.0), px(motion.offset_y)),
                     point(px(0.0), px(0.0)),
+                    motion.from_viewport_alpha,
+                    motion.to_viewport_alpha,
                 ));
                 row_slot
                     .with_animation(
@@ -975,7 +1014,7 @@ impl Render for StageLyricsView {
                     )
                     .into_any_element()
             } else {
-                row_slot.into_any_element()
+                row_slot.opacity(viewport_alpha).into_any_element()
             };
             stack = stack.child(row_slot);
         }
@@ -1024,8 +1063,8 @@ fn render_lyric_row(
     focus_started_at: Option<Instant>,
     frame_now: Instant,
     motion_epoch: u64,
-    viewport_alpha: f32,
     viewport_blur: f32,
+    row_motion: Option<LyricRowVisualMotion>,
     active_word_index: Option<usize>,
     position_ms: u64,
     reading_mode: bool,
@@ -1041,7 +1080,7 @@ fn render_lyric_row(
     let (target_alpha, target_blur) = lyric_visual_profile(
         index,
         active,
-        viewport_alpha,
+        1.0,
         viewport_blur,
         reading_mode,
         depth_blur_active,
@@ -1062,7 +1101,7 @@ fn render_lyric_row(
         lyric_visual_profile(
             index,
             previous,
-            viewport_alpha,
+            1.0,
             viewport_blur,
             reading_mode,
             depth_blur_active,
@@ -1082,6 +1121,14 @@ fn render_lyric_row(
         previous_profile.map_or(target_alpha, |previous| previous.0)
     };
     let resolved_blur = if hovered { 0.0 } else { target_blur };
+    let blur_transition = row_motion.filter(|motion| {
+        (motion.from_viewport_blur - motion.to_viewport_blur).abs() > 0.001
+    });
+    let static_blur = if blur_transition.is_some() {
+        0.0
+    } else {
+        resolved_blur
+    };
     let focus_transition = previous_active.is_some() && focus_started_at.is_some();
     let alpha_still_running = focus_started_at
         .is_some_and(|started_at| frame_now < started_at + LYRIC_FOCUS_ALPHA_DURATION);
@@ -1104,7 +1151,7 @@ fn render_lyric_row(
         karaoke_running,
         should_render_karaoke_detail(index, active, reading_mode),
         karaoke_epoch,
-        resolved_blur,
+        static_blur,
         text_id,
         index,
     )
@@ -1159,6 +1206,33 @@ fn render_lyric_row(
                 )
                 .into_any_element();
         }
+    }
+
+    if let Some(motion) = blur_transition {
+        let animation = Animation::from_spec(
+            AnimationSpec::new(motion.duration)
+                .delay(motion.delay)
+                .ease(Easing::CubicBezier {
+                    x1: LYRIC_MOTION_BEZIER_X1,
+                    y1: LYRIC_MOTION_BEZIER_Y1,
+                    x2: motion.curve_x2,
+                    y2: LYRIC_MOTION_BEZIER_Y2,
+                }),
+        )
+        .with_property(AnimationProperty::blur(
+            px(motion.from_viewport_blur),
+            px(motion.to_viewport_blur),
+        ));
+        text = text
+            .with_animation(
+                ElementId::NamedInteger(
+                    SharedString::new_static("lyric-viewport-blur"),
+                    lyric_animation_instance_id(motion_epoch, index),
+                ),
+                animation,
+                |element, _| element,
+            )
+            .into_any_element();
     }
 
     let mut row = div()
@@ -1328,8 +1402,9 @@ fn lyric_visual_profile(
         return (1.0, 0.0);
     }
 
-    // QueMusic keeps inactive rows around 0.5 opacity and promotes only the current row. The
-    // viewport shader field is a separate multiplier, so semantic focus never decides blur.
+    // QueMusic keeps inactive rows around 0.5 opacity and promotes only the current row. Focus
+    // alpha is independent from the viewport field; callers may pass viewport_alpha=1 when the
+    // row container owns edge fade through renderer translation_opacity. Blur remains text-only.
     let focus_alpha = lyric_focus_alpha(index.abs_diff(active) as f32);
     let alpha = (focus_alpha * viewport_alpha).clamp(0.0, 1.0);
     let blur = if depth_blur_active {
