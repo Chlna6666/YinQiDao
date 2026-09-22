@@ -21,6 +21,7 @@ mod audio;
 mod audio_policy;
 mod desktop_lyrics;
 mod global_shortcuts;
+mod gpui_diagnostics;
 mod gpu;
 mod hotkeys;
 mod library;
@@ -106,6 +107,7 @@ fn main() -> Result<()> {
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, io_handle);
         gpui_router::init(cx);
+        gpui_diagnostics::start(cx);
 
         let mut options = WindowOptions::default();
         let bounds = Bounds::centered(None, size(px(1120.0), px(720.0)), cx);
