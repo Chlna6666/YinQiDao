@@ -34,13 +34,13 @@ const LYRIC_ACTIVE_SCALE: f32 = 1.02;
 const LYRIC_INACTIVE_ALPHA: f32 = 0.50;
 const LYRIC_ACTIVE_ALPHA: f32 = 0.90;
 
-// Keep the QueMusic-style stagger, but make the hand-off responsive enough that focus and geometry
-// still read as one motion. The previous schedule left active/future rows waiting well over 100ms
-// before they started moving, which made dropped frames much easier to perceive.
-const LYRIC_MOTION_DELAY_BASE_MS: f32 = 8.0;
-const LYRIC_MOTION_DELAY_POWER: f32 = 1.15;
-const LYRIC_MOTION_BASE_DURATION_MS: f32 = 360.0;
-const LYRIC_MOTION_DURATION_STEP_MS: f32 = 16.0;
+// Match QueMusic's authored stagger/settle curve exactly. Jitter must be fixed in retained capture
+// and frame traversal rather than by shortening the animation until individual row steps become
+// visually abrupt.
+const LYRIC_MOTION_DELAY_BASE_MS: f32 = 24.0;
+const LYRIC_MOTION_DELAY_POWER: f32 = 1.20;
+const LYRIC_MOTION_BASE_DURATION_MS: f32 = 460.0;
+const LYRIC_MOTION_DURATION_STEP_MS: f32 = 32.0;
 const LYRIC_MOTION_BEZIER_X1: f32 = 0.24;
 const LYRIC_MOTION_BEZIER_Y1: f32 = 0.06;
 const LYRIC_MOTION_BEZIER_X2: f32 = 0.0;
@@ -306,9 +306,6 @@ impl StageLyricsView {
                 let active_changed = self.update_active_index();
                 self.active_word_index = self.compute_active_word_index();
                 let word_changed = previous_word != self.active_word_index;
-                if !active_changed && word_changed {
-                    self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
-                }
                 changed |= active_changed || word_changed;
 
                 if was_scrubbing && !scrubbing {
@@ -460,9 +457,6 @@ impl StageLyricsView {
         let word_changed =
             position_changed && !source_changed && !active_changed && previous_word != next_word;
         self.active_word_index = next_word;
-        if word_changed {
-            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
-        }
         changed |= active_changed || word_changed;
 
         if changed {
@@ -673,13 +667,9 @@ impl StageLyricsView {
             return;
         }
 
-        let previous_word = self.active_word_index;
         self.position_ms = position_ms;
-        let active_changed = self.update_active_index();
+        let _active_changed = self.update_active_index();
         self.active_word_index = self.compute_active_word_index();
-        if !active_changed && previous_word != self.active_word_index {
-            self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
-        }
     }
 
     #[inline]
@@ -2084,6 +2074,19 @@ mod tests {
         assert_eq!(active_top, anchor);
         assert!((next_top - active_top - 110.0).abs() < 0.001);
         assert!((active_top - previous_top - 82.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn quemusic_motion_constants_match_reference_schedule() {
+        assert_eq!(LYRIC_MOTION_DELAY_BASE_MS, 24.0);
+        assert_eq!(LYRIC_MOTION_DELAY_POWER, 1.20);
+        assert_eq!(LYRIC_MOTION_BASE_DURATION_MS, 460.0);
+        assert_eq!(LYRIC_MOTION_DURATION_STEP_MS, 32.0);
+
+        let (delay, duration) = lyric_row_motion_timing(0);
+        let expected_delay_ms = 4.0_f32.powf(1.20) * 24.0;
+        assert!((delay.as_secs_f32() * 1_000.0 - expected_delay_ms).abs() < 0.05);
+        assert!((duration.as_secs_f32() * 1_000.0 - 588.0).abs() < 0.05);
     }
 
     #[test]
