@@ -2348,7 +2348,7 @@ mod tests {
     }
 
     #[test]
-    fn active_enhanced_word_uses_cached_semantic_boundary() {
+    fn cpu_word_deadline_skips_renderer_schedulable_words() {
         let source = LyricLine {
             timestamp_ms: 1_000,
             text: "你好 世界".into(),
@@ -2371,10 +2371,13 @@ mod tests {
         assert_eq!(active_enhanced_word_index(&line, 1_000), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_499), Some(0));
         assert_eq!(active_enhanced_word_index(&line, 1_500), Some(1));
-        assert_eq!(next_enhanced_word_timestamp(&line, 999), Some(1_000));
-        assert_eq!(next_enhanced_word_timestamp(&line, 1_000), Some(1_500));
-        assert_eq!(next_enhanced_word_timestamp(&line, 1_499), Some(1_500));
-        assert_eq!(next_enhanced_word_timestamp(&line, 1_500), None);
+
+        // from_source infers the first segment's 500 ms duration from the next timestamp, so Nova
+        // can pre-schedule it. The duration-less final segment still needs one semantic CPU wake.
+        assert_eq!(next_cpu_word_timestamp(&line, 999), Some(1_500));
+        assert_eq!(next_cpu_word_timestamp(&line, 1_000), Some(1_500));
+        assert_eq!(next_cpu_word_timestamp(&line, 1_499), Some(1_500));
+        assert_eq!(next_cpu_word_timestamp(&line, 1_500), None);
         assert_eq!(line.words[0].duration_ms, Some(500));
         assert_eq!(line.words[1].duration_ms, None);
         assert_eq!(line.words[0].byte_start, 0);
@@ -2382,6 +2385,58 @@ mod tests {
         assert_eq!(line.words[1].byte_start, "你好 ".len());
         assert_eq!(line.words[1].byte_end, line.text.len());
         assert_eq!(line.words[0].text.as_ref(), "你好 ");
+    }
+
+    #[test]
+    fn future_word_reveal_uses_delay_and_authored_duration() {
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(400),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("ABC"),
+        };
+
+        assert_eq!(
+            word_reveal_animation_timing(&word, 800),
+            Some((Duration::from_millis(200), Duration::from_millis(400)))
+        );
+        assert_eq!(
+            word_reveal_animation_timing(&word, 1_100),
+            Some((Duration::ZERO, Duration::from_millis(300)))
+        );
+        assert_eq!(word_reveal_animation_timing(&word, 1_400), None);
+    }
+
+    #[test]
+    fn sustained_future_word_keeps_semantic_cpu_deadline() {
+        let line = StageLyricLine {
+            timestamp_ms: 1_000,
+            text: SharedString::from("短 啊"),
+            translation: None,
+            words: Arc::from([
+                StageLyricWord {
+                    timestamp_ms: 1_000,
+                    duration_ms: Some(300),
+                    byte_start: 0,
+                    byte_end: 3,
+                    text: SharedString::from("短 "),
+                },
+                StageLyricWord {
+                    timestamp_ms: 1_500,
+                    duration_ms: Some(1_800),
+                    byte_start: 3,
+                    byte_end: 6,
+                    text: SharedString::from("啊"),
+                },
+            ]),
+            enhanced_complete: true,
+            time_label: SharedString::new_static(""),
+        };
+
+        assert_eq!(next_cpu_word_timestamp(&line, 999), Some(1_500));
+        assert_eq!(next_cpu_word_timestamp(&line, 1_000), Some(1_500));
+        assert_eq!(next_cpu_word_timestamp(&line, 1_500), None);
     }
 
     #[test]
