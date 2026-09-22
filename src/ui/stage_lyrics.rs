@@ -73,14 +73,6 @@ struct LyricPlaybackStackHandoff {
 
 impl LyricPlaybackStackHandoff {
     #[inline]
-    fn row_count(self) -> usize {
-        self.last_index
-            .saturating_sub(self.first_index)
-            .saturating_add(1)
-            .max(1)
-    }
-
-    #[inline]
     fn duration(self) -> Duration {
         let relative = self.last_index as isize - self.to_active as isize;
         let (delay, duration) = lyric_row_motion_timing(relative);
@@ -1168,15 +1160,12 @@ fn lyric_focus_scale(index: usize, active: usize, reading_mode: bool) -> f32 {
 fn lyric_focus_profile(
     distance: usize,
     reading_mode: bool,
-    depth_blur_active: bool,
+    _depth_blur_active: bool,
 ) -> (f32, f32) {
     if reading_mode {
         return (1.0, 0.0);
     }
-    (
-        lyric_focus_alpha(distance as f32),
-        if depth_blur_active { 0.0 } else { 0.0 },
-    )
+    (lyric_focus_alpha(distance as f32), 0.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1859,48 +1848,29 @@ mod tests {
         assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
     }
 
-    #[test]
-    fn semantic_focus_changes_alpha_but_not_viewport_blur() {
-        let active = lyric_focus_profile(0, false, true);
-        let near = lyric_focus_profile(1, false, true);
-        let middle = lyric_focus_profile(3, false, true);
-        let far = lyric_focus_profile(6, false, true);
 
-        assert_eq!(active, (1.0, 0.0));
-        assert!(active.0 > near.0 && near.0 > middle.0 && middle.0 >= far.0);
-        assert_eq!(near.1, 0.0);
-        assert_eq!(middle.1, 0.0);
-        assert_eq!(far.1, 0.0);
+
+    #[test]
+    fn semantic_focus_is_binary_while_viewport_field_owns_blur() {
+        assert_eq!(
+            lyric_focus_profile(0, false, true),
+            (LYRIC_ACTIVE_ALPHA, 0.0)
+        );
+        assert_eq!(
+            lyric_focus_profile(1, false, true),
+            (LYRIC_INACTIVE_ALPHA, 0.0)
+        );
+        assert_eq!(
+            lyric_focus_profile(5, false, true),
+            (LYRIC_INACTIVE_ALPHA, 0.0)
+        );
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
-    }
 
-    #[test]
-    fn focus_band_controls_alpha_while_physical_y_controls_blur() {
-        let active = lyric_visual_profile(10, 10, 0.0, 0.0, false, true);
-        let row1 = lyric_visual_profile(11, 10, 0.0, 0.0, false, true);
-        let row2 = lyric_visual_profile(12, 10, 0.0, 0.0, false, true);
-        let row3 = lyric_visual_profile(13, 10, 0.0, 0.0, false, true);
-        let row4 = lyric_visual_profile(14, 10, 0.0, 0.0, false, true);
-
-        assert!(active.0 > 0.99);
-        assert!(row1.0 < 0.70);
-        assert!(row2.0 < 0.45);
-        assert!(row3.0 < 0.33);
-        assert!(row4.0 < 0.28);
-        assert!(active.0 > row1.0);
-        assert!(row1.0 > row2.0);
-        assert!(row2.0 > row3.0);
-        assert!(row3.0 > row4.0);
-
-        // All rows are physically in the clear center band in this synthetic profile.
-        assert_eq!(active.1, 0.0);
-        assert_eq!(row1.1, 0.0);
-        assert_eq!(row2.1, 0.0);
-
-        let upper = lyric_visual_profile(10, 10, 0.0, 0.65, false, true);
-        let edge = lyric_visual_profile(10, 10, 0.0, 1.0, false, true);
-        assert!(upper.1 > 0.0);
-        assert!(edge.1 > upper.1);
+        let active = lyric_visual_profile(10, 10, 0.8, 3.0, false, true);
+        let inactive = lyric_visual_profile(12, 10, 0.8, 3.0, false, true);
+        assert!(active.0 > inactive.0);
+        assert_eq!(active.1, 3.0);
+        assert_eq!(inactive.1, 3.0);
     }
 
     #[test]
