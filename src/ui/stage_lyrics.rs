@@ -33,25 +33,28 @@ const LYRIC_ACTIVE_SCALE: f32 = 1.02;
 const LYRIC_INACTIVE_ALPHA: f32 = 0.50;
 const LYRIC_ACTIVE_ALPHA: f32 = 0.90;
 
-// QueMusic PlayerMaxCenter.qml: row delay grows as (d + 4)^1.2 * 24ms and movement duration grows
-// from 460ms by 32ms per row. The easing is its normal adjacent-line BezierSpline
-// [0.24, 0.06, 0.0, 1.03, 1, 1], giving a soft overshooting settle instead of a percentage gate.
-const LYRIC_MOTION_DELAY_BASE_MS: f32 = 24.0;
-const LYRIC_MOTION_DELAY_POWER: f32 = 1.2;
-const LYRIC_MOTION_BASE_DURATION_MS: f32 = 460.0;
-const LYRIC_MOTION_DURATION_STEP_MS: f32 = 32.0;
+// Keep the QueMusic-style stagger, but make the hand-off responsive enough that focus and geometry
+// still read as one motion. The previous schedule left active/future rows waiting well over 100ms
+// before they started moving, which made dropped frames much easier to perceive.
+const LYRIC_MOTION_DELAY_BASE_MS: f32 = 8.0;
+const LYRIC_MOTION_DELAY_POWER: f32 = 1.15;
+const LYRIC_MOTION_BASE_DURATION_MS: f32 = 360.0;
+const LYRIC_MOTION_DURATION_STEP_MS: f32 = 16.0;
 const LYRIC_MOTION_BEZIER_X1: f32 = 0.24;
 const LYRIC_MOTION_BEZIER_Y1: f32 = 0.06;
 const LYRIC_MOTION_BEZIER_X2: f32 = 0.0;
 const LYRIC_MOTION_BEZIER_Y2: f32 = 1.03;
 
-// QueMusic lyricfade.frag viewport field. GPUI currently applies this field per text row rather
-// than as one post-process layer, but it uses the same top/bottom fade and progressive blur model.
-const LYRIC_VIEWPORT_FADE_TOP_RATIO: f32 = 0.15;
-const LYRIC_VIEWPORT_FADE_BOTTOM_RATIO: f32 = 0.30;
-const LYRIC_VIEWPORT_BLUR_TOP_RATIO: f32 = 0.30;
-const LYRIC_VIEWPORT_BLUR_BOTTOM_RATIO: f32 = 0.50;
-const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 8.0;
+// Blur is deliberately an edge-only depth cue. Keep the broad middle band sharp, cap the expensive
+// Gaussian pass at a subtle radius, and quantize sigma so moving rows do not rebuild a new blur
+// effect for every sub-pixel position.
+const LYRIC_VIEWPORT_FADE_TOP_RATIO: f32 = 0.10;
+const LYRIC_VIEWPORT_FADE_BOTTOM_RATIO: f32 = 0.18;
+const LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO: f32 = 0.18;
+const LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO: f32 = 0.78;
+const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 2.50;
+const LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX: f32 = 0.50;
+const LYRIC_VIEWPORT_BLUR_QUANTUM_PX: f32 = 0.25;
 
 const PLAYBACK_STACK_HISTORY_ROWS: usize = 4;
 const PLAYBACK_STACK_FUTURE_ROWS: usize = 7;
@@ -219,6 +222,7 @@ pub(super) struct StageLyricsView {
     reading_center_index: Option<usize>,
     playback_stack_handoff: Option<LyricPlaybackStackHandoff>,
     row_heights: Vec<f32>,
+    row_height_measured: Vec<bool>,
     row_prefix_sum: Vec<f32>,
     viewport_width: f32,
     viewport_height: f32,
@@ -261,6 +265,7 @@ impl StageLyricsView {
             reading_center_index: None,
             playback_stack_handoff: None,
             row_heights: Vec::new(),
+            row_height_measured: Vec::new(),
             row_prefix_sum: vec![0.0],
             viewport_width: 0.0,
             viewport_height: 0.0,
@@ -465,6 +470,8 @@ impl StageLyricsView {
         self.row_heights.clear();
         self.row_heights
             .resize(self.lines.len(), PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+        self.row_height_measured.clear();
+        self.row_height_measured.resize(self.lines.len(), false);
         self.rebuild_row_prefix_sum();
     }
 
@@ -483,25 +490,44 @@ impl StageLyricsView {
         if !height.is_finite() || height <= 1.0 || index >= self.row_heights.len() {
             return;
         }
-        if (self.row_heights[index] - height).abs() <= 0.5 {
-            return;
+
+        let first_measurement = self
+            .row_height_measured
+            .get(index)
+            .is_some_and(|measured| !*measured);
+        if let Some(measured) = self.row_height_measured.get_mut(index) {
+            *measured = true;
         }
-        self.row_heights[index] = height;
-        self.rebuild_row_prefix_sum();
-        cx.notify();
+
+        let height_changed = (self.row_heights[index] - height).abs() > 0.5;
+        if height_changed {
+            self.row_heights[index] = height;
+            self.rebuild_row_prefix_sum();
+        }
+
+        // Remove the one-shot observer after its first stable measurement. During a hand-off this
+        // avoids running an entity update callback for every visible row on every animation frame.
+        if first_measurement || height_changed {
+            cx.notify();
+        }
     }
 
     fn update_viewport_size(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
         if !width.is_finite() || !height.is_finite() || width <= 1.0 || height <= 1.0 {
             return;
         }
-        if (self.viewport_width - width).abs() <= 0.5
-            && (self.viewport_height - height).abs() <= 0.5
-        {
+
+        let width_changed = (self.viewport_width - width).abs() > 0.5;
+        let height_changed = (self.viewport_height - height).abs() > 0.5;
+        if !width_changed && !height_changed {
             return;
         }
+
         self.viewport_width = width;
         self.viewport_height = height;
+        if width_changed {
+            self.row_height_measured.fill(false);
+        }
         cx.notify();
     }
 
@@ -775,11 +801,6 @@ impl Render for StageLyricsView {
         };
 
         let fallback_viewport = window.viewport_size();
-        let viewport_width = if self.viewport_width > 1.0 {
-            self.viewport_width
-        } else {
-            f32::from(fallback_viewport.width).max(1.0)
-        };
         let viewport_height = if self.viewport_height > 1.0 {
             self.viewport_height
         } else {
@@ -795,6 +816,21 @@ impl Render for StageLyricsView {
             && self.stage_active
             && self.playback_state == PlaybackState::Playing
             && !self.scrubbing;
+        let karaoke_frame_active = karaoke_running
+            && active_word_index
+                .and_then(|word_index| {
+                    self.lines
+                        .get(active)
+                        .and_then(|line| line.words.get(word_index))
+                })
+                .and_then(|word| {
+                    word.duration_ms
+                        .map(|duration_ms| (word.timestamp_ms, duration_ms))
+                })
+                .is_some_and(|(timestamp_ms, duration_ms)| {
+                    position_ms >= timestamp_ms
+                        && position_ms < timestamp_ms.saturating_add(duration_ms)
+                });
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
             lyric_motion_spring_value(
                 handoff.from_active,
@@ -871,29 +907,37 @@ impl Render for StageLyricsView {
                 parent.clone(),
             );
 
-            let row_measure_view = cx.entity().downgrade();
-            let row_measure = bounds_observer(move |bounds, _window, cx| {
-                let height = f32::from(bounds.size.height);
-                let _ = row_measure_view.update(cx, |this, cx| {
-                    this.update_row_height(index, height, cx);
-                });
-            })
-            .absolute()
-            .inset_0();
+            let row_is_measured = self
+                .row_height_measured
+                .get(index)
+                .copied()
+                .unwrap_or(false);
+            let mut row_slot = div()
+                .absolute()
+                .left(px(0.0))
+                .right(px(0.0))
+                .top(px(y))
+                .child(row);
 
-            stack = stack.child(
-                div()
+            if !row_is_measured {
+                let row_measure_view = cx.entity().downgrade();
+                row_slot = row_slot.child(
+                    bounds_observer(move |bounds, _window, cx| {
+                        let height = f32::from(bounds.size.height);
+                        let _ = row_measure_view.update(cx, |this, cx| {
+                            this.update_row_height(index, height, cx);
+                        });
+                    })
                     .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .top(px(y))
-                    .child(row)
-                    .child(row_measure),
-            );
+                    .inset_0(),
+                );
+            }
+
+            stack = stack.child(row_slot);
         }
 
         let realtime_layout_animating =
-            handoff.is_some() || focus_started_at.is_some() || karaoke_running;
+            handoff.is_some() || focus_started_at.is_some() || karaoke_frame_active;
         let stack = stack
             .with_layout_animation_target(realtime_layout_animating)
             .into_any_element();
@@ -1158,7 +1202,10 @@ fn lyric_text_layer(
         );
     }
 
-    text.blur(px(blur_sigma.max(0.0)))
+    if blur_sigma >= LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX {
+        text = text.blur(px(blur_sigma));
+    }
+    text
 }
 
 #[inline]
@@ -1568,6 +1615,17 @@ fn lyric_motion_spring_value(
 }
 
 #[inline]
+fn quantize_viewport_blur(blur_px: f32) -> f32 {
+    let blur = blur_px.clamp(0.0, LYRIC_VIEWPORT_MAX_BLUR_PX);
+    if blur < LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX {
+        return 0.0;
+    }
+
+    ((blur / LYRIC_VIEWPORT_BLUR_QUANTUM_PX).round() * LYRIC_VIEWPORT_BLUR_QUANTUM_PX)
+        .clamp(LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX, LYRIC_VIEWPORT_MAX_BLUR_PX)
+}
+
+#[inline]
 fn playback_stack_viewport_profile(
     row_top: f32,
     row_height: f32,
@@ -1577,12 +1635,19 @@ fn playback_stack_viewport_profile(
         return (1.0, 0.0);
     }
 
-    // Sample the same normalized-Y field used by QueMusic's lyricfade.frag at the row center.
     let y = ((row_top + row_height * 0.5) / viewport_height).clamp(0.0, 1.0);
-    let blur_k = if y < 0.5 {
-        1.0 - smoothstep01(y / LYRIC_VIEWPORT_BLUR_TOP_RATIO.max(0.001))
+    let blur_k = if y < LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO {
+        smoothstep01(
+            (LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO - y)
+                / LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO.max(0.001),
+        )
+    } else if y > LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO {
+        smoothstep01(
+            (y - LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO)
+                / (1.0 - LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO).max(0.001),
+        )
     } else {
-        1.0 - smoothstep01((1.0 - y) / LYRIC_VIEWPORT_BLUR_BOTTOM_RATIO.max(0.001))
+        0.0
     };
     let fade = smoothstep01(y / LYRIC_VIEWPORT_FADE_TOP_RATIO.max(0.001))
         * smoothstep01(
@@ -1591,7 +1656,7 @@ fn playback_stack_viewport_profile(
 
     (
         fade.clamp(0.0, 1.0),
-        (LYRIC_VIEWPORT_MAX_BLUR_PX * blur_k).clamp(0.0, LYRIC_VIEWPORT_MAX_BLUR_PX),
+        quantize_viewport_blur(LYRIC_VIEWPORT_MAX_BLUR_PX * blur_k),
     )
 }
 
@@ -1779,18 +1844,27 @@ mod tests {
     }
 
     #[test]
-    fn quemusic_viewport_field_fades_and_blurs_top_and_bottom() {
+    fn viewport_field_keeps_middle_rows_crisp_and_blurs_only_edges() {
         let height = 720.0;
         let center = playback_stack_viewport_profile(330.0, 82.0, height);
+        let upper_middle = playback_stack_viewport_profile(92.0, 82.0, height);
+        let lower_middle = playback_stack_viewport_profile(500.0, 82.0, height);
         let top = playback_stack_viewport_profile(-10.0, 82.0, height);
         let bottom = playback_stack_viewport_profile(660.0, 82.0, height);
 
         assert!(center.0 > 0.95);
-        assert!(center.1 < 0.1);
+        assert_eq!(center.1, 0.0);
+        assert_eq!(upper_middle.1, 0.0);
+        assert_eq!(lower_middle.1, 0.0);
         assert!(top.0 < center.0);
         assert!(bottom.0 < center.0);
-        assert!(top.1 > center.1);
-        assert!(bottom.1 > center.1);
+        assert!(top.1 > 0.0 && top.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
+        assert!(bottom.1 > 0.0 && bottom.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
+        assert_eq!(quantize_viewport_blur(0.20), 0.0);
+        assert_eq!(
+            quantize_viewport_blur(8.0),
+            LYRIC_VIEWPORT_MAX_BLUR_PX
+        );
     }
 
     #[test]
@@ -1913,11 +1987,11 @@ mod tests {
         );
         assert_eq!(lyric_focus_profile(2, true, true), (1.0, 0.0));
 
-        let active = lyric_visual_profile(10, 10, 0.8, 3.0, false, true);
-        let inactive = lyric_visual_profile(12, 10, 0.8, 3.0, false, true);
+        let active = lyric_visual_profile(10, 10, 0.8, 2.0, false, true);
+        let inactive = lyric_visual_profile(12, 10, 0.8, 2.0, false, true);
         assert!(active.0 > inactive.0);
-        assert_eq!(active.1, 3.0);
-        assert_eq!(inactive.1, 3.0);
+        assert_eq!(active.1, 2.0);
+        assert_eq!(inactive.1, 2.0);
     }
 
     #[test]
