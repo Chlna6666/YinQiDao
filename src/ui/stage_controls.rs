@@ -27,7 +27,6 @@ use super::{
     theme::{self, format_remaining_time, format_time, themed_icon},
 };
 
-const STAGE_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
@@ -1021,6 +1020,7 @@ struct StageProgressView {
     drag_progress_ratio: Option<f32>,
     local_dragging: bool,
     transport_generation: u64,
+    animation_epoch: u64,
     slider: Option<InteractiveSliderState>,
     ui_events: Entity<AppUiEventBridge>,
     last_preview_emit_at: Instant,
@@ -1046,6 +1046,7 @@ impl StageProgressView {
                 AppUiEvent::PlaybackStateChanged(state) => {
                     if this.playback_state != state {
                         this.playback_state = state;
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
                         cx.notify();
                     }
                 }
@@ -1055,6 +1056,7 @@ impl StageProgressView {
                     }
                     if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
                         this.drag_progress_ratio = ratio;
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
                         cx.notify();
                     }
                 }
@@ -1069,6 +1071,7 @@ impl StageProgressView {
             drag_progress_ratio,
             local_dragging: false,
             transport_generation,
+            animation_epoch: 1,
             slider: None,
             ui_events,
             last_preview_emit_at: Instant::now() - app_ui_events::PROGRESS_PREVIEW_INTERVAL,
@@ -1106,6 +1109,7 @@ impl StageProgressView {
         self.controls_visible = controls_visible;
         if changed {
             self.transport_generation = transport_generation;
+            self.animation_epoch = self.animation_epoch.wrapping_add(1);
             cx.notify();
         }
     }
@@ -1193,6 +1197,7 @@ impl StageProgressView {
                 let _ = this_commit.update(cx, |this, cx| {
                     this.local_dragging = false;
                     this.drag_progress_ratio = None;
+                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
                     cx.notify();
                 });
                 let _ = commit_parent.update(cx, |app, app_cx| {
@@ -1210,29 +1215,12 @@ impl StageProgressView {
 }
 
 impl Render for StageProgressView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (engine_state, live_position_ms, duration_ms) = self
             .engine
             .as_ref()
             .map_or((PlaybackState::Stopped, 0, 0), |engine| engine.progress());
         let drag_progress_ratio = self.drag_progress_ratio;
-        let should_tick = self.stage_active
-            && self.controls_visible
-            && self.playback_state == PlaybackState::Playing
-            && engine_state == PlaybackState::Playing
-            && drag_progress_ratio.is_none()
-            && duration_ms > 0
-            && !window.is_minimized();
-
-        if should_tick {
-            // Deadline invalidation is coalesced by GPUI per current View entity. No detached timer
-            // survives pause/close, and no root MusicApp notification is involved.
-            window.request_invalidation_at(
-                Instant::now() + STAGE_PROGRESS_REFRESH_INTERVAL,
-                cx,
-            );
-        }
-
         let progress_ratio = drag_progress_ratio.unwrap_or_else(|| {
             if duration_ms == 0 {
                 0.0
@@ -1241,14 +1229,30 @@ impl Render for StageProgressView {
             }
         });
 
+        let renderer_owned = self.stage_active
+            && self.controls_visible
+            && self.playback_state == PlaybackState::Playing
+            && engine_state == PlaybackState::Playing
+            && drag_progress_ratio.is_none()
+            && live_position_ms < duration_ms;
+
         self.ensure_slider(cx);
-        self.slider
+        let slider = self
+            .slider
             .as_ref()
-            .expect("stage progress slider must be initialized")
-            .render(progress_ratio, SliderStyle::stage_progress())
-            .w_full()
-            .h_full()
-            .into_any_element()
+            .expect("stage progress slider must be initialized");
+        let slider = if renderer_owned {
+            slider.render_animated(
+                progress_ratio,
+                Duration::from_millis(duration_ms.saturating_sub(live_position_ms).max(1)),
+                self.animation_epoch,
+                SliderStyle::stage_progress(),
+            )
+        } else {
+            slider.render(progress_ratio, SliderStyle::stage_progress())
+        };
+
+        slider.w_full().h_full().into_any_element()
     }
 }
 

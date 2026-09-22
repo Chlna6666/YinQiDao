@@ -1,8 +1,9 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    App, Bounds, Div, ElementId, Empty, Global, Hsla, MouseButton, Pixels, SharedString, Stateful,
-    div, hsla, prelude::*, px, relative, rgb,
+    Animation, AnimationExt as _, AnimationProperty, App, Bounds, Div, ElementId, Empty, Global,
+    HorizontalRevealEdge, Hsla, MouseButton, Pixels, SharedString, Stateful, div, hsla, point,
+    prelude::*, px, relative, rgb,
 };
 
 use crate::ui::theme;
@@ -170,7 +171,30 @@ impl InteractiveSliderState {
     }
 
     pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
-        interactive_slider_state(self, ratio, style)
+        interactive_slider_state(self, ratio, style, None)
+    }
+
+    /// Render a monotonically advancing horizontal progress slider through retained animation.
+    ///
+    /// `ratio` is the current position. Fill and thumb advance to the end over `duration`.
+    /// Change `animation_epoch` after pause/resume, seek, track replacement, or another transport
+    /// discontinuity so the retained timeline restarts from the newly sampled ratio.
+    pub fn render_animated(
+        &self,
+        ratio: f32,
+        duration: Duration,
+        animation_epoch: u64,
+        style: SliderStyle,
+    ) -> Stateful<Div> {
+        interactive_slider_state(
+            self,
+            ratio,
+            style,
+            Some(SliderProgressAnimation {
+                duration,
+                epoch: animation_epoch,
+            }),
+        )
     }
 }
 
@@ -333,6 +357,193 @@ fn slider_visual_with_group(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SliderProgressAnimation {
+    duration: Duration,
+    epoch: u64,
+}
+
+fn animated_horizontal_track(
+    ratio: f32,
+    height: Pixels,
+    style: SliderStyle,
+    animation_name: &'static str,
+    animation: SliderProgressAnimation,
+) -> gpui::AnyElement {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let fill = div()
+        .w_full()
+        .h_full()
+        .rounded_full()
+        .bg(style.filled_color);
+
+    let fill = if ratio >= 1.0 || animation.duration.is_zero() {
+        fill.into_any_element()
+    } else {
+        fill.with_animation(
+            ElementId::NamedInteger(
+                SharedString::new_static(animation_name),
+                animation.epoch,
+            ),
+            Animation::new(animation.duration).with_property(
+                AnimationProperty::horizontal_reveal(
+                    HorizontalRevealEdge::Left,
+                    ratio,
+                    1.0,
+                ),
+            ),
+            |element, _| element,
+        )
+        .into_any_element()
+    };
+
+    div()
+        .w_full()
+        .h(height)
+        .rounded_full()
+        .bg(style.track_bg)
+        .child(fill)
+        .into_any_element()
+}
+
+fn slider_visual_with_group_animated(
+    id: ElementId,
+    ratio: f32,
+    style: SliderStyle,
+    hover_group: SharedString,
+    animation: SliderProgressAnimation,
+) -> Div {
+    let ratio = ratio.clamp(0.0, 1.0);
+    if ratio >= 1.0 || animation.duration.is_zero() {
+        return slider_visual_with_group(id, 1.0, style, hover_group);
+    }
+
+    let interaction_height = px(
+        f32::from(style.interaction_height)
+            .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
+            .max(f32::from(style.hover_track_height)),
+    );
+    let thumb_hover_group = hover_group.clone();
+    let rail_hover_group = hover_group.clone();
+    let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
+    let half_thumb = px(f32::from(style.thumb_size) * 0.5);
+
+    let mut thumb = div()
+        .flex_none()
+        .size(style.thumb_size)
+        .rounded_full()
+        .bg(style.thumb_color)
+        .shadow_md()
+        .opacity(0.0)
+        .group_hover(thumb_hover_group, move |s| {
+            s.opacity(1.0).scale(style.hover_thumb_scale)
+        })
+        .transition(theme::hover_transition());
+    if let Some(border) = style.thumb_border {
+        thumb = thumb.border_1().border_color(border);
+    }
+
+    let base_track_layer = {
+        let layer = div().absolute().inset_0().flex();
+        let layer = if style.edge_overlay {
+            layer.items_start()
+        } else {
+            layer.items_center()
+        };
+        layer.child(animated_horizontal_track(
+            ratio,
+            style.track_height,
+            style,
+            "slider-progress-base-fill",
+            animation,
+        ))
+    };
+
+    let hover_track = animated_horizontal_track(
+        ratio,
+        style.hover_track_height,
+        style,
+        "slider-progress-hover-fill",
+        animation,
+    );
+    let hover_track_layer = if style.edge_overlay {
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(edge_hover_top)
+            .h(style.hover_track_height)
+            .flex()
+            .items_start()
+            .opacity(0.0)
+            .group_hover(rail_hover_group, |s| s.opacity(1.0))
+            .transition(theme::hover_transition())
+            .child(hover_track)
+    } else {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .opacity(0.0)
+            .group_hover(rail_hover_group, |s| s.opacity(1.0))
+            .transition(theme::hover_transition())
+            .child(hover_track)
+    };
+
+    let thumb_layer = if style.edge_overlay {
+        div()
+            .absolute()
+            .left(px(-f32::from(half_thumb)))
+            .right(half_thumb)
+            .top(edge_hover_top)
+            .h(style.hover_track_height)
+            .flex()
+            .items_center()
+            .child(div().flex_none().w_full().h(px(1.0)))
+            .child(thumb)
+    } else {
+        div()
+            .absolute()
+            .left(px(-f32::from(half_thumb)))
+            .right(half_thumb)
+            .top(px(0.0))
+            .bottom(px(0.0))
+            .flex()
+            .items_center()
+            .child(div().flex_none().w_full().h(px(1.0)))
+            .child(thumb)
+    }
+    .with_animation(
+        ElementId::NamedInteger(
+            SharedString::new_static("slider-progress-thumb"),
+            animation.epoch,
+        ),
+        Animation::new(animation.duration).with_property(
+            AnimationProperty::relative_translation(
+                point(ratio - 1.0, 0.0),
+                point(0.0, 0.0),
+            ),
+        ),
+        |element, _| element,
+    );
+
+    let root = div()
+        .group(hover_group)
+        .relative()
+        .cursor_pointer()
+        .h(interaction_height)
+        .child(base_track_layer)
+        .child(hover_track_layer)
+        .child(thumb_layer);
+
+    if style.edge_overlay {
+        root.absolute().left(px(0.0)).right(px(0.0)).top(px(0.0))
+    } else {
+        root
+    }
+}
+
 fn slider_visual(id: ElementId, ratio: f32, style: SliderStyle) -> Div {
     let hover_group = SharedString::from(format!("slider-hover-{id}"));
     slider_visual_with_group(id, ratio, style, hover_group)
@@ -439,6 +650,7 @@ fn interactive_slider_state(
     state: &InteractiveSliderState,
     ratio: f32,
     style: SliderStyle,
+    animation: Option<SliderProgressAnimation>,
 ) -> Stateful<Div> {
     let id = state.id.clone();
     let drag_id = state.id.clone();
@@ -456,12 +668,20 @@ fn interactive_slider_state(
     let drag_for_up_out = state.on_drag_end.clone();
     let on_drag = state.on_drag.clone();
 
-    slider_visual_with_group(
-        id.clone(),
-        ratio,
-        style,
-        state.hover_group.clone(),
-    )
+    let visual = animation.map_or_else(
+        || slider_visual_with_group(id.clone(), ratio, style, state.hover_group.clone()),
+        |animation| {
+            slider_visual_with_group_animated(
+                id.clone(),
+                ratio,
+                style,
+                state.hover_group.clone(),
+                animation,
+            )
+        },
+    );
+
+    visual
         .on_children_prepainted(move |children_bounds, _window, _cx| {
             bounds_for_children.set(children_bounds.first().copied());
         })
