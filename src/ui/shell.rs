@@ -10,10 +10,10 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, App, AppContext, Bounds,
-    CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
-    WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, App, AppContext,
+    Bounds, CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
+    KeyDownEvent, Render, SharedString, StyleRefinement, Subscription, Timer, WeakEntity, Window,
+    WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -4934,7 +4934,13 @@ impl Render for MusicApp {
             );
             let hidden_stage =
                 AnimationProperty::translation(stage_position(0.0), stage_position(1.0));
-            let stage_titlebar = stage_controls::titlebar_view(self, cx);
+            let stage_titlebar = AnyView::from(stage_controls::titlebar_view(self, cx))
+                .cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(px(38.0)),
+                )
+                .reuse_on_window_refresh();
 
             let stage_layer = div()
                 .id("stage-drawer-root")
