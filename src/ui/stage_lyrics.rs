@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
     SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
-    Visibility, WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
+    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -1709,7 +1709,7 @@ fn sustained_word_emphasis(
     }
 }
 
-fn karaoke_reveal_layer(
+fn karaoke_reveal_word(
     content: impl IntoElement + 'static,
     word: &StageLyricWord,
     word_index: usize,
@@ -1717,43 +1717,43 @@ fn karaoke_reveal_layer(
     position_ms: u64,
     animate: bool,
     karaoke_epoch: u64,
-    animation_name: &'static str,
 ) -> gpui::AnyElement {
     let progress = progress.clamp(0.0, 1.0);
-    let layer = div()
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .h_full()
-        .overflow_hidden()
-        .child(content);
-
-    if animate
+    let (duration, to_progress) = if animate
         && progress < 1.0
         && let Some(remaining) = word_reveal_remaining_duration(word, position_ms)
     {
-        let animation = Animation::from_spec(
-            AnimationSpec::new(remaining).ease(Easing::Linear),
-        )
-        .with_property(AnimationProperty::horizontal_reveal(
-            HorizontalRevealEdge::Left,
-            progress,
-            1.0,
-        ));
-        return layer
-            .w_full()
-            .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static(animation_name),
-                    lyric_animation_instance_id(karaoke_epoch, word_index),
-                ),
-                animation,
-                |element, _| element,
-            )
-            .into_any_element();
-    }
+        (remaining, 1.0)
+    } else {
+        // Keep future/past/current words on the same AnimationElement type. A zero-duration
+        // timeline samples its terminal value immediately, so this is a paint-only static mask
+        // while the child keeps its full intrinsic width for flex wrapping.
+        (Duration::ZERO, progress)
+    };
 
-    layer.w(relative(progress)).into_any_element()
+    let animation = Animation::from_spec(
+        AnimationSpec::new(duration).ease(Easing::Linear),
+    )
+    .with_property(AnimationProperty::horizontal_reveal(
+        HorizontalRevealEdge::Left,
+        progress,
+        to_progress,
+    ));
+
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(content)
+        .with_animation(
+            ElementId::NamedInteger(
+                SharedString::new_static("lyric-word-reveal"),
+                lyric_animation_instance_id(karaoke_epoch, word_index),
+            ),
+            animation,
+            |element, _| element,
+        )
+        .into_any_element()
 }
 
 fn word_reveal_remaining_duration(
@@ -1872,31 +1872,6 @@ fn karaoke_word(
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
     let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
-    // The stable full-line text below owns layout and the dim glyphs. This transparent copy only
-    // supplies each word's exact inline box for the absolute karaoke overlay, so it cannot change
-    // row height or double the dim alpha.
-    let mut base = div()
-        .whitespace_nowrap()
-        .child(word.text.clone());
-    // This copy exists only to preserve each authored word's exact flex/text layout box. Hidden
-    // visibility participates in layout but Div exits before paint, so it does not emit a second
-    // transparent glyph run into the scene or glyph raster path.
-    base.style().visibility = Some(Visibility::Hidden);
-
-    let overlay = karaoke_reveal_layer(
-        div()
-            .whitespace_nowrap()
-            .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-            .child(word.text.clone()),
-        word,
-        index,
-        progress,
-        position_ms,
-        animate,
-        karaoke_epoch,
-        "lyric-word-reveal",
-    );
-
     let peak = sustained_word_peak_emphasis(word, is_last_word);
     let sustained = is_current_word && peak.glow_alpha > 0.0;
     let static_emphasis = sustained_word_emphasis(
@@ -1906,14 +1881,21 @@ fn karaoke_word(
         is_last_word,
     );
 
-    let mut word_root = div()
+    // One visible glyph run owns both intrinsic word width and karaoke paint. The renderer-owned
+    // ClipReveal masks this full-width subtree without changing flex geometry, eliminating the old
+    // hidden sizing glyph + absolute white-glyph duplicate.
+    let mut glyph = div()
         .relative()
         .flex_none()
         .whitespace_nowrap()
-        .child(base);
+        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+        .child(word.text.clone());
 
     if sustained {
         let mut glow = div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
             .whitespace_nowrap()
             .text_color(hsla(0.0, 0.0, 1.0, 0.92))
             .blur(px(peak.glow_blur_px))
@@ -1924,20 +1906,19 @@ fn karaoke_word(
             if let Some((from_envelope, to_envelope, duration)) =
                 sustained_animation_segment(word, position_ms)
             {
-                let animation = Animation::from_spec(
-                    AnimationSpec::new(duration).ease(Easing::InOutCubic),
-                )
-                .with_property(AnimationProperty::opacity(
-                    from_envelope.clamp(0.0, 1.0),
-                    to_envelope.clamp(0.0, 1.0),
-                ));
                 glow = glow
                     .with_animation(
                         ElementId::NamedInteger(
                             SharedString::new_static("lyric-word-glow"),
                             lyric_animation_instance_id(karaoke_epoch, index),
                         ),
-                        animation,
+                        Animation::from_spec(
+                            AnimationSpec::new(duration).ease(Easing::InOutCubic),
+                        )
+                        .with_property(AnimationProperty::opacity(
+                            from_envelope.clamp(0.0, 1.0),
+                            to_envelope.clamp(0.0, 1.0),
+                        )),
                         |element, _| element,
                     )
                     .into_any_element();
@@ -1953,21 +1934,28 @@ fn karaoke_word(
                 .into_any_element();
         }
 
-        word_root = word_root.child(karaoke_reveal_layer(
-            glow,
-            word,
-            index,
-            progress,
-            position_ms,
-            animate,
-            karaoke_epoch,
-            "lyric-word-glow-reveal",
-        ));
+        // Glow shares the same outer ClipReveal as the foreground glyph, so there is only one
+        // retained reveal timeline per word.
+        glyph = glyph.child(glow);
     }
 
-    word_root = word_root.child(overlay);
+    let revealed = karaoke_reveal_word(
+        glyph,
+        word,
+        index,
+        progress,
+        position_ms,
+        animate,
+        karaoke_epoch,
+    );
 
     if sustained {
+        let mut word_root = div()
+            .relative()
+            .flex_none()
+            .whitespace_nowrap()
+            .child(revealed);
+
         if animate {
             if let Some((from_envelope, to_envelope, duration)) =
                 sustained_animation_segment(word, position_ms)
@@ -2011,7 +1999,7 @@ fn karaoke_word(
             .into_any_element();
     }
 
-    word_root.into_any_element()
+    revealed
 }
 
 fn karaoke_words_overlay(
