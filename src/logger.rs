@@ -17,7 +17,29 @@ pub fn init_logging(config: &LogConfig, base_dir: &Path) -> Option<WorkerGuard> 
         _ => "info,yin_qi_dao=info,symphonia=warn,reqwest=info",
     };
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level_str));
+    let diagnostics_trace = std::env::var("YINQIDAO_GPUI_DIAGNOSTICS")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+    let default_filter = if diagnostics_trace {
+        if level_str.contains("gpui=info") {
+            level_str.replace("gpui=info", "gpui=trace")
+        } else {
+            format!("{level_str},gpui=trace")
+        }
+    } else {
+        level_str.to_string()
+    };
+
+    // An explicit RUST_LOG remains authoritative. Otherwise the existing GPUI diagnostics switch
+    // also enables GPUI's per-frame retained/selective-splice trace so the 5-second aggregate and
+    // the exact frame provenance can be correlated from one run.
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
