@@ -199,6 +199,7 @@ impl StageKaraokeLineView {
         line: StageLyricLine,
         position_ms: u64,
         playback_state: PlaybackState,
+        scrubbing: bool,
         ui_events: Entity<app_ui_events::AppUiEventBridge>,
         animation_epoch: u64,
         cx: &mut Context<Self>,
@@ -228,7 +229,7 @@ impl StageKaraokeLineView {
             line,
             position_ms,
             playback_state,
-            scrubbing: false,
+            scrubbing,
             animation_epoch,
             _ui_subscription: subscription,
         }
@@ -539,7 +540,6 @@ impl StageLyricsView {
         } else {
             live_position_ms
         };
-        let previous_word = self.active_word_index;
         let position_changed = self.position_ms != position_ms;
         if position_changed {
             self.position_ms = position_ms;
@@ -572,7 +572,6 @@ impl StageLyricsView {
         let next_word = self.compute_active_word_index();
         self.active_word_index = next_word;
         changed |= active_changed;
-        let _ = previous_word;
 
         if changed {
             cx.notify();
@@ -603,6 +602,7 @@ impl StageLyricsView {
             let ui_events = self.ui_events.clone();
             let position_ms = self.position_ms;
             let playback_state = self.playback_state;
+            let scrubbing = self.scrubbing;
             let animation_epoch = self.karaoke_epoch;
             cx.new(move |cx| {
                 StageKaraokeLineView::new(
@@ -610,6 +610,7 @@ impl StageLyricsView {
                     line,
                     position_ms,
                     playback_state,
+                    scrubbing,
                     ui_events,
                     animation_epoch,
                     cx,
