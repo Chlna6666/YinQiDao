@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
     SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
-    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
+    Visibility, WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -1875,10 +1875,13 @@ fn karaoke_word(
     // The stable full-line text below owns layout and the dim glyphs. This transparent copy only
     // supplies each word's exact inline box for the absolute karaoke overlay, so it cannot change
     // row height or double the dim alpha.
-    let base = div()
+    let mut base = div()
         .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, 0.0))
         .child(word.text.clone());
+    // This copy exists only to preserve each authored word's exact flex/text layout box. Hidden
+    // visibility participates in layout but Div exits before paint, so it does not emit a second
+    // transparent glyph run into the scene or glyph raster path.
+    base.style().visibility = Some(Visibility::Hidden);
 
     let overlay = karaoke_reveal_layer(
         div()
