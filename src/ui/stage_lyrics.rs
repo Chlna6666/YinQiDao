@@ -1740,11 +1740,7 @@ fn karaoke_reveal_word(
         to_progress,
     ));
 
-    div()
-        .relative()
-        .flex_none()
-        .whitespace_nowrap()
-        .child(content)
+    content
         .with_animation(
             ElementId::NamedInteger(
                 SharedString::new_static("lyric-word-reveal"),
@@ -1884,8 +1880,7 @@ fn karaoke_word(
     // One visible glyph run owns both intrinsic word width and karaoke paint. The renderer-owned
     // ClipReveal masks this full-width subtree without changing flex geometry, eliminating the old
     // hidden sizing glyph + absolute white-glyph duplicate.
-    let mut glyph = div()
-        .relative()
+    let foreground = div()
         .flex_none()
         .whitespace_nowrap()
         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
@@ -1935,21 +1930,24 @@ fn karaoke_word(
         }
 
         // Glow shares the same outer ClipReveal as the foreground glyph, so there is only one
-        // retained reveal timeline per word.
-        glyph = glyph.child(glow);
-    }
+        // retained reveal timeline per word. Paint it before foreground so blur never washes over
+        // the sharp white glyph.
+        let glyph = div()
+            .relative()
+            .flex_none()
+            .whitespace_nowrap()
+            .child(glow)
+            .child(foreground);
+        let revealed = karaoke_reveal_word(
+            glyph,
+            word,
+            index,
+            progress,
+            position_ms,
+            animate,
+            karaoke_epoch,
+        );
 
-    let revealed = karaoke_reveal_word(
-        glyph,
-        word,
-        index,
-        progress,
-        position_ms,
-        animate,
-        karaoke_epoch,
-    );
-
-    if sustained {
         let mut word_root = div()
             .relative()
             .flex_none()
@@ -1998,6 +1996,16 @@ fn karaoke_word(
             .scale(static_emphasis.scale)
             .into_any_element();
     }
+
+    karaoke_reveal_word(
+        foreground,
+        word,
+        index,
+        progress,
+        position_ms,
+        animate,
+        karaoke_epoch,
+    );
 
     revealed
 }
