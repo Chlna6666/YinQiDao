@@ -3,7 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
+use gpui::{
+    Animation, AnimationDriver, AnimationExt as _, AnimationProperty, AnimationSpec, Context,
+    IntoElement, Render, RepeatMode, Window, div, prelude::*, rgb,
+};
 
 use crate::artwork::ArtworkPalette;
 
@@ -30,8 +33,9 @@ pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgr
 pub(crate) fn apple_fluid_params(
     track_id: i64,
     palette: Option<&ArtworkPalette>,
-    time_seconds: f32,
+    time_base_seconds: f32,
     full_effect: bool,
+    renderer_clock_running: bool,
 ) -> ShaderParams16 {
     let fallback = ArtworkPalette::default();
     let palette = palette.unwrap_or(&fallback);
@@ -40,7 +44,14 @@ pub(crate) fn apple_fluid_params(
     let tertiary = mix3(dominant, secondary, 0.46);
     let dark = rgb01(palette.dark_ambient_rgb);
     let seed = ((track_id.unsigned_abs() % 10_007) as f32 / 10_007.0).fract();
-    let time = time_seconds.rem_euclid(21_600.0);
+    // A non-negative seed means the shader should add Nova's renderer presentation clock. Paused
+    // frames encode the exact same seed in [-2, -1] so the shader can freeze time without changing
+    // any color/noise identity.
+    let packed_seed = if renderer_clock_running {
+        seed
+    } else {
+        -(seed + 1.0)
+    };
     // Keep the cheap parameter branch available as a fallback/diagnostic path, but the retained
     // immersive Stage always paints the full field. Prewarm and drawer motion now reduce work by
     // freezing time and withholding RAF rather than switching to a visually different gradient.
@@ -48,9 +59,9 @@ pub(crate) fn apple_fluid_params(
     let dim = (palette.mask_alpha * 0.64).clamp(0.18, 0.46);
 
     ShaderParams16::from_columns([
-        [dominant[0], dominant[1], dominant[2], time],
+        [dominant[0], dominant[1], dominant[2], time_base_seconds],
         [secondary[0], secondary[1], secondary[2], motion],
-        [tertiary[0], tertiary[1], tertiary[2], seed],
+        [tertiary[0], tertiary[1], tertiary[2], packed_seed],
         [dark[0], dark[1], dark[2], dim],
     ])
 }
@@ -61,11 +72,30 @@ pub(crate) struct AppleFluidView {
     stage_visible: bool,
     playing: bool,
     animation_seconds: f32,
-    last_frame_at: Instant,
+    running_since: Option<Instant>,
     shader_available: bool,
 }
 
 impl AppleFluidView {
+    fn freeze_animation_clock(&mut self, now: Instant) {
+        if let Some(started_at) = self.running_since.take() {
+            self.animation_seconds = (
+                self.animation_seconds
+                    + now.saturating_duration_since(started_at).as_secs_f32()
+            )
+                .rem_euclid(21_600.0);
+        }
+    }
+
+    fn current_animation_seconds(&self, now: Instant) -> f32 {
+        let elapsed = self
+            .running_since
+            .map_or(0.0, |started_at| {
+                now.saturating_duration_since(started_at).as_secs_f32()
+            });
+        (self.animation_seconds + elapsed).rem_euclid(21_600.0)
+    }
+
     pub(crate) fn new() -> Self {
         // Parse/validate WGSL and build the shared mesh as soon as the retained entity is created.
         // The offscreen Stage prewarm then paints the exact full-fluid visual that will later be
@@ -77,7 +107,7 @@ impl AppleFluidView {
             stage_visible: false,
             playing: false,
             animation_seconds: 0.0,
-            last_frame_at: Instant::now(),
+            running_since: None,
             shader_available,
         }
     }
@@ -92,15 +122,14 @@ impl AppleFluidView {
     ) {
         let visibility_changed = self.stage_visible != stage_visible;
         let changed = self.track_id != track_id || self.palette != palette || visibility_changed;
+        if self.stage_visible && !stage_visible {
+            self.freeze_animation_clock(Instant::now());
+        }
         self.track_id = track_id;
         self.palette = palette;
         self.stage_visible = stage_visible;
 
         if changed {
-            // `stage_visible` controls only time advancement/RAF. Resetting the time origin here
-            // makes the first animated frame continue from the frozen prewarm image with a near-zero
-            // delta instead of jumping forward by however long the drawer transition took.
-            self.last_frame_at = Instant::now();
             cx.notify();
         }
     }
@@ -109,46 +138,73 @@ impl AppleFluidView {
         if self.playing == playing {
             return;
         }
+        if self.playing && !playing {
+            self.freeze_animation_clock(Instant::now());
+        }
         self.playing = playing;
-        self.last_frame_at = Instant::now();
         cx.notify();
     }
 }
 
 impl Render for AppleFluidView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match apple_fluid_program() {
             Ok(program) => {
                 self.shader_available = true;
                 let now = window.animation_time();
                 let animate = self.stage_visible && self.playing && !window.is_minimized();
+
                 if animate {
-                    let delta = now
-                        .saturating_duration_since(self.last_frame_at)
-                        .as_secs_f32()
-                        .min(0.05);
-                    self.animation_seconds = (self.animation_seconds + delta).rem_euclid(21_600.0);
-
-                    // Do not bind this slow ambient effect to the monitor's raw presentation
-                    // rate. On 240 Hz displays that used to notify this retained View 240 times/s
-                    // and compete with pointer/transport work. A 60 Hz entity-local invalidation
-                    // is visually continuous for the fluid field while leaving input frames free.
-                    window.request_invalidation_at(
-                        Instant::now() + FLUID_FRAME_INTERVAL,
-                        cx,
-                    );
+                    if self.running_since.is_none() {
+                        self.running_since = Some(now);
+                    }
+                } else {
+                    self.freeze_animation_clock(now);
                 }
-                self.last_frame_at = now;
 
-                return shader_effect_canvas(
+                let current_time = self.current_animation_seconds(now);
+                // Nova publishes a 60 Hz-quantized presentation tick in GlobalParams on every
+                // retained present. Store the inverse offset here so the first renderer-owned frame
+                // is phase-continuous, then let the shader advance without touching this View.
+                let renderer_time_60hz =
+                    (window.presentation_time_seconds() * 60.0).floor() / 60.0;
+                let time_base = if animate {
+                    current_time - renderer_time_60hz
+                } else {
+                    current_time
+                };
+
+                let effect = shader_effect_canvas(
                     program,
                     apple_fluid_params(
                         self.track_id,
                         self.palette.as_ref(),
-                        self.animation_seconds,
+                        time_base,
                         true,
+                        animate,
                     ),
                 );
+
+                if animate {
+                    // Opacity 1 -> 1 deliberately has no visual effect. Its only job is to own one
+                    // renderer timeline so Nova gets presentation-only frames at 60 Hz. No View
+                    // notify, Taffy pass, or root traversal is required for ambient motion.
+                    return effect
+                        .with_animation(
+                            "apple-fluid-presentation-clock",
+                            Animation::from_spec(
+                                AnimationSpec::new(Duration::from_secs(1))
+                                    .repeat(RepeatMode::Forever)
+                                    .presentation_interval(FLUID_FRAME_INTERVAL)
+                                    .driver(AnimationDriver::Gpu),
+                            )
+                            .with_property(AnimationProperty::opacity(1.0, 1.0)),
+                            |element, _| element,
+                        )
+                        .into_any_element();
+                }
+
+                return effect;
             }
             Err(error) => {
                 self.shader_available = false;
@@ -194,15 +250,22 @@ mod tests {
 
     #[test]
     fn fluid_time_is_not_audio_position() {
-        let first = apple_fluid_params(7, None, 12.5, true);
-        let second = apple_fluid_params(7, None, 18.5, true);
+        let first = apple_fluid_params(7, None, 12.5, true, false);
+        let second = apple_fluid_params(7, None, 18.5, true, false);
         assert_ne!(first, second);
     }
 
     #[test]
+    fn renderer_clock_state_changes_only_time_control_encoding() {
+        let frozen = apple_fluid_params(7, None, 12.5, true, false);
+        let running = apple_fluid_params(7, None, 12.5, true, true);
+        assert_ne!(frozen, running);
+    }
+
+    #[test]
     fn cheap_fallback_differs_from_full_fluid_parameter_set() {
-        let fallback = apple_fluid_params(7, None, 12.5, false);
-        let full = apple_fluid_params(7, None, 12.5, true);
+        let fallback = apple_fluid_params(7, None, 12.5, false, false);
+        let full = apple_fluid_params(7, None, 12.5, true, false);
         assert_ne!(fallback, full);
     }
 }

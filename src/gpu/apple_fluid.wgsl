@@ -10,6 +10,8 @@ struct GlobalParams {
     viewport_size: vec2<f32>,
     premultiplied_alpha: u32,
     pad: u32,
+    presentation_time_seconds: f32,
+    presentation_tick_60hz: u32,
 };
 
 struct ShaderEffectVertex {
@@ -110,9 +112,19 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let secondary = input.params1.xyz;
     let tertiary = input.params2.xyz;
     let dark = input.params3.xyz;
-    let time = input.params0.w;
     let motion = input.params1.w;
-    let seed = input.params2.w;
+    let packed_seed = input.params2.w;
+    let renderer_clock_running = packed_seed >= 0.0;
+    let seed = select(-packed_seed - 1.0, packed_seed, renderer_clock_running);
+    let renderer_time_60hz = f32(globals.presentation_tick_60hz) / 60.0;
+    let raw_time = input.params0.w + select(
+        0.0,
+        renderer_time_60hz,
+        renderer_clock_running,
+    );
+    // Keep the ambient field visually at 60 Hz even when another retained animation temporarily
+    // drives this window at 120/240 Hz. Wrapping bounds long-running f32 phase precision.
+    let time = fract(raw_time / 21600.0) * 21600.0;
     let dim = input.params3.w;
 
     // Stage prewarm and drawer motion only need the final color field to be visually coherent.
