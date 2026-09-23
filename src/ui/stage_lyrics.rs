@@ -322,7 +322,6 @@ pub(super) struct StageLyricsView {
     active_index: Option<usize>,
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
-    active_word_index: Option<usize>,
     active_karaoke_index: Option<usize>,
     active_karaoke_line: Option<Entity<StageKaraokeLineView>>,
     ui_events: Entity<app_ui_events::AppUiEventBridge>,
@@ -370,7 +369,6 @@ impl StageLyricsView {
             active_index: None,
             focus_from_index: None,
             focus_started_at: None,
-            active_word_index: None,
             active_karaoke_index: None,
             active_karaoke_line: None,
             ui_events: ui_events_for_view,
@@ -416,7 +414,6 @@ impl StageLyricsView {
                 }
 
                 let active_changed = self.update_active_index();
-                self.active_word_index = self.compute_active_word_index();
                 changed |= active_changed;
 
                 if was_scrubbing && !scrubbing {
@@ -510,7 +507,6 @@ impl StageLyricsView {
             self.active_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
-            self.active_word_index = None;
             self.active_karaoke_index = None;
             self.active_karaoke_line = None;
             self.hovered_index = None;
@@ -569,8 +565,6 @@ impl StageLyricsView {
         }
 
         let active_changed = self.update_active_index();
-        let next_word = self.compute_active_word_index();
-        self.active_word_index = next_word;
         changed |= active_changed;
 
         if changed {
@@ -740,14 +734,6 @@ impl StageLyricsView {
         true
     }
 
-    fn compute_active_word_index(&self) -> Option<usize> {
-        if !self.has_timeline || self.is_reading() {
-            return None;
-        }
-        let line = self.active_index.and_then(|index| self.lines.get(index))?;
-        active_enhanced_word_index(line, self.position_ms)
-    }
-
     #[inline]
     fn transport_should_run(&self) -> bool {
         self.has_timeline
@@ -790,7 +776,6 @@ impl StageLyricsView {
 
         self.position_ms = position_ms;
         let _active_changed = self.update_active_index();
-        self.active_word_index = self.compute_active_word_index();
     }
 
     #[inline]
@@ -805,7 +790,6 @@ impl StageLyricsView {
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
         self.focus_from_index = None;
         self.focus_started_at = None;
-        self.active_word_index = None;
         self.playback_stack_handoff = None;
         self.hovered_index = None;
 
@@ -831,7 +815,6 @@ impl StageLyricsView {
             self.reading_center_index = None;
             self.focus_from_index = None;
             self.focus_started_at = None;
-            self.active_word_index = self.compute_active_word_index();
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         }
 
@@ -952,14 +935,8 @@ impl Render for StageLyricsView {
         let anchor_y = viewport_height * LYRIC_ANCHOR_RATIO;
         let focus_from_index = self.focus_from_index;
         let focus_started_at = self.focus_started_at;
-        let active_word_index = self.active_word_index;
-        let position_ms = self.position_ms;
         let karaoke_epoch = self.karaoke_epoch;
         let motion_epoch = self.motion_epoch;
-        let karaoke_running = !reading_mode
-            && self.stage_active
-            && self.playback_state == PlaybackState::Playing
-            && !self.scrubbing;
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
             lyric_motion_spring_value(
                 handoff.from_active,
@@ -1066,10 +1043,7 @@ impl Render for StageLyricsView {
                 motion_epoch,
                 viewport_blur,
                 row_motion,
-                active_word_index,
-                position_ms,
                 reading_mode,
-                karaoke_running,
                 !reading_mode,
                 "lyric-text",
                 hovered,
@@ -1185,10 +1159,7 @@ fn render_lyric_row(
     motion_epoch: u64,
     viewport_blur: f32,
     row_motion: Option<LyricRowVisualMotion>,
-    active_word_index: Option<usize>,
-    position_ms: u64,
     reading_mode: bool,
-    karaoke_running: bool,
     depth_blur_active: bool,
     text_id: &'static str,
     hovered: bool,
@@ -1267,9 +1238,6 @@ fn render_lyric_row(
     let mut text = lyric_text_layer(
         line,
         karaoke_state,
-        active_word_index,
-        position_ms,
-        karaoke_running,
         should_render_karaoke_detail(index, active, reading_mode),
         karaoke_epoch,
         active_karaoke_overlay,
@@ -1437,7 +1405,8 @@ fn render_lyric_row(
             this.focus_from_index = this.active_index;
             this.focus_started_at = None;
             this.active_index = Some(index);
-            this.active_word_index = this.compute_active_word_index();
+            this.active_karaoke_index = None;
+            this.active_karaoke_line = None;
             this.karaoke_epoch = this.karaoke_epoch.wrapping_add(1);
             this.reading_center_index = Some(index);
             cx.notify();
@@ -1455,9 +1424,6 @@ fn render_lyric_row(
 fn lyric_text_layer(
     line: &StageLyricLine,
     karaoke_state: KaraokeLineState,
-    active_word_index: Option<usize>,
-    position_ms: u64,
-    karaoke_running: bool,
     karaoke_detail: bool,
     karaoke_epoch: u64,
     active_karaoke_overlay: Option<AnyView>,
@@ -1476,9 +1442,6 @@ fn lyric_text_layer(
         .child(stage_primary_lyric(
             line,
             karaoke_state,
-            active_word_index,
-            position_ms,
-            karaoke_running,
             karaoke_detail,
             karaoke_epoch,
             active_karaoke_overlay,
@@ -2095,9 +2058,6 @@ fn karaoke_words_overlay(
 fn stage_primary_lyric(
     line: &StageLyricLine,
     karaoke_state: KaraokeLineState,
-    current_word: Option<usize>,
-    position_ms: u64,
-    animate: bool,
     karaoke_detail: bool,
     karaoke_epoch: u64,
     active_karaoke_overlay: Option<AnyView>,
@@ -2139,9 +2099,9 @@ fn stage_primary_lyric(
             .child(karaoke_words_overlay(
                 line,
                 karaoke_state,
-                current_word,
-                position_ms,
-                animate,
+                None,
+                0,
+                false,
                 karaoke_epoch,
             ))
             .into_any_element()
