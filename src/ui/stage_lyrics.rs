@@ -4,10 +4,10 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, BorrowAppContext as _, Context,
-    Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render, SharedString,
-    Subscription, TransformOrigin, Transition, TransitionProperty, WeakEntity, Window,
-    bounds_observer, div, hsla, point, prelude::*, px, relative,
+    Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
+    Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
+    SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
+    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
 };
 use lucide_gpui::icon;
 
@@ -183,6 +183,100 @@ impl StageLyricLine {
     }
 }
 
+struct StageKaraokeLineView {
+    engine: Option<Arc<AudioEngine>>,
+    line: StageLyricLine,
+    position_ms: u64,
+    playback_state: PlaybackState,
+    scrubbing: bool,
+    animation_epoch: u64,
+    _ui_subscription: Subscription,
+}
+
+impl StageKaraokeLineView {
+    fn new(
+        engine: Option<Arc<AudioEngine>>,
+        line: StageLyricLine,
+        position_ms: u64,
+        playback_state: PlaybackState,
+        ui_events: Entity<app_ui_events::AppUiEventBridge>,
+        animation_epoch: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(state) => {
+                    if this.playback_state != state {
+                        this.playback_state = state;
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                        cx.notify();
+                    }
+                }
+                AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                    let scrubbing = ratio.is_some();
+                    if this.position_ms != position_ms || this.scrubbing != scrubbing {
+                        this.position_ms = position_ms;
+                        this.scrubbing = scrubbing;
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                        cx.notify();
+                    }
+                }
+            }
+        });
+        Self {
+            engine,
+            line,
+            position_ms,
+            playback_state,
+            scrubbing: false,
+            animation_epoch,
+            _ui_subscription: subscription,
+        }
+    }
+
+    fn refresh_position(&mut self) {
+        if self.scrubbing || self.playback_state != PlaybackState::Playing {
+            return;
+        }
+        let Some(engine) = &self.engine else {
+            return;
+        };
+        self.position_ms = engine.progress().1;
+    }
+
+    fn next_deadline(&self) -> Option<Duration> {
+        if self.scrubbing || self.playback_state != PlaybackState::Playing {
+            return None;
+        }
+        let timestamp = next_karaoke_timestamp(&self.line, self.position_ms)?;
+        Some(Duration::from_millis(
+            timestamp
+                .saturating_sub(self.position_ms)
+                .max(TRANSPORT_MIN_SLEEP),
+        ))
+    }
+}
+
+impl Render for StageKaraokeLineView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_position();
+        if let Some(delay) = self.next_deadline() {
+            window.request_invalidation_at(Instant::now() + delay, cx);
+        }
+
+        let current_word = active_enhanced_word_index(&self.line, self.position_ms);
+        let animate = self.playback_state == PlaybackState::Playing && !self.scrubbing;
+        karaoke_words_overlay(
+            &self.line,
+            KaraokeLineState::Active,
+            current_word,
+            self.position_ms,
+            animate,
+            self.animation_epoch,
+        )
+    }
+}
+
 
 pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
     let existing = cx
@@ -228,6 +322,9 @@ pub(super) struct StageLyricsView {
     focus_from_index: Option<usize>,
     focus_started_at: Option<Instant>,
     active_word_index: Option<usize>,
+    active_karaoke_index: Option<usize>,
+    active_karaoke_line: Option<Entity<StageKaraokeLineView>>,
+    ui_events: Entity<app_ui_events::AppUiEventBridge>,
     hovered_index: Option<usize>,
     karaoke_epoch: u64,
     motion_epoch: u64,
@@ -255,6 +352,7 @@ impl StageLyricsView {
         let transport_generation = engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
+        let ui_events_for_view = ui_events.clone();
         let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
             this.apply_ui_event(*event, cx);
         });
@@ -272,6 +370,9 @@ impl StageLyricsView {
             focus_from_index: None,
             focus_started_at: None,
             active_word_index: None,
+            active_karaoke_index: None,
+            active_karaoke_line: None,
+            ui_events: ui_events_for_view,
             hovered_index: None,
             karaoke_epoch: 0,
             motion_epoch: 0,
@@ -311,14 +412,11 @@ impl StageLyricsView {
                 }
                 if self.position_ms != position_ms {
                     self.position_ms = position_ms;
-                    changed = true;
                 }
 
-                let previous_word = self.active_word_index;
                 let active_changed = self.update_active_index();
                 self.active_word_index = self.compute_active_word_index();
-                let word_changed = previous_word != self.active_word_index;
-                changed |= active_changed || word_changed;
+                changed |= active_changed;
 
                 if was_scrubbing && !scrubbing {
                     self.focus_from_index = None;
@@ -412,6 +510,8 @@ impl StageLyricsView {
             self.focus_from_index = None;
             self.focus_started_at = None;
             self.active_word_index = None;
+            self.active_karaoke_index = None;
+            self.active_karaoke_line = None;
             self.hovered_index = None;
             self.reading_until = None;
             self.reading_center_index = None;
@@ -425,6 +525,8 @@ impl StageLyricsView {
 
         if transport_changed && !source_changed {
             self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
+            self.active_karaoke_index = None;
+            self.active_karaoke_line = None;
             changed = true;
         }
 
@@ -455,6 +557,8 @@ impl StageLyricsView {
             self.focus_started_at = None;
             self.playback_stack_handoff = None;
             self.hovered_index = None;
+            self.active_karaoke_index = None;
+            self.active_karaoke_line = None;
             if stage_active {
                 self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
             } else {
@@ -466,14 +570,52 @@ impl StageLyricsView {
 
         let active_changed = self.update_active_index();
         let next_word = self.compute_active_word_index();
-        let word_changed =
-            position_changed && !source_changed && !active_changed && previous_word != next_word;
         self.active_word_index = next_word;
-        changed |= active_changed || word_changed;
+        changed |= active_changed;
+        let _ = previous_word;
 
         if changed {
             cx.notify();
         }
+    }
+
+    fn sync_active_karaoke_leaf(&mut self, cx: &mut Context<Self>) {
+        let desired_index = if self.stage_active && !self.is_reading() {
+            self.active_index.filter(|index| {
+                self.lines
+                    .get(*index)
+                    .is_some_and(|line| line.enhanced_complete)
+            })
+        } else {
+            None
+        };
+
+        if self.active_karaoke_index == desired_index
+            && self.active_karaoke_line.is_some() == desired_index.is_some()
+        {
+            return;
+        }
+
+        self.active_karaoke_index = desired_index;
+        self.active_karaoke_line = desired_index.map(|index| {
+            let line = self.lines[index].clone();
+            let engine = self.engine.clone();
+            let ui_events = self.ui_events.clone();
+            let position_ms = self.position_ms;
+            let playback_state = self.playback_state;
+            let animation_epoch = self.karaoke_epoch;
+            cx.new(move |cx| {
+                StageKaraokeLineView::new(
+                    engine,
+                    line,
+                    position_ms,
+                    playback_state,
+                    ui_events,
+                    animation_epoch,
+                    cx,
+                )
+            })
+        });
     }
 
     fn reset_row_geometry(&mut self) {
@@ -587,6 +729,8 @@ impl StageLyricsView {
         };
 
         self.active_index = active;
+        self.active_karaoke_index = None;
+        self.active_karaoke_line = None;
         self.hovered_index = None;
         self.karaoke_epoch = self.karaoke_epoch.wrapping_add(1);
         if !self.is_reading() {
@@ -622,42 +766,6 @@ impl StageLyricsView {
         let mut next_timestamp = active
             .and_then(|index| self.lines.get(index + 1))
             .map(|line| line.timestamp_ms);
-
-        if !self.is_reading()
-            && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_timestamp) = next_enhanced_word_timestamp(line, position_ms)
-        {
-            next_timestamp =
-                Some(next_timestamp.map_or(word_timestamp, |current| current.min(word_timestamp)));
-        }
-
-        // The renderer-owned reveal can finish without rerendering this View. Wake exactly at the
-        // authored end so the retained tree commits its terminal state even for the final word.
-        if !self.is_reading()
-            && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_index) = active_enhanced_word_index(line, position_ms)
-            && let Some(word) = line.words.get(word_index)
-            && let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0)
-        {
-            let word_end = word.timestamp_ms.saturating_add(duration_ms);
-            if word_end > position_ms {
-                next_timestamp =
-                    Some(next_timestamp.map_or(word_end, |current| current.min(word_end)));
-            }
-        }
-
-        if !self.is_reading()
-            && let Some(line) = active.and_then(|index| self.lines.get(index))
-            && let Some(word_index) = active_enhanced_word_index(line, position_ms)
-            && let Some(word) = line.words.get(word_index)
-            && let Some(release_timestamp) = sustained_release_timestamp(word)
-            && release_timestamp > position_ms
-        {
-            next_timestamp = Some(
-                next_timestamp
-                    .map_or(release_timestamp, |current| current.min(release_timestamp)),
-            );
-        }
 
         let timestamp = next_timestamp?;
         Some(Duration::from_millis(
@@ -766,6 +874,7 @@ impl Render for StageLyricsView {
         let frame_now = window.animation_time();
         self.expire_deadlines(frame_now);
         self.refresh_transport();
+        self.sync_active_karaoke_leaf(cx);
         self.schedule_deadlines(window, cx);
 
         if self.lines.is_empty() {
@@ -858,6 +967,7 @@ impl Render for StageLyricsView {
             )
         });
         let lines = self.lines.clone();
+        let active_karaoke_line = self.active_karaoke_line.clone();
         let view = cx.entity().downgrade();
         let parent = self.parent.clone();
 
@@ -931,6 +1041,20 @@ impl Render for StageLyricsView {
                     (y, viewport_alpha, viewport_blur, None)
                 };
 
+            let active_karaoke_overlay = if !reading_mode && index == active {
+                active_karaoke_line.as_ref().map(|view| {
+                    AnyView::from(view.clone())
+                        .cached(
+                            StyleRefinement::default()
+                                .absolute()
+                                .inset_0(),
+                        )
+                        .reuse_on_window_refresh()
+                })
+            } else {
+                None
+            };
+
             let row = render_lyric_row(
                 &lines[index],
                 index,
@@ -950,6 +1074,7 @@ impl Render for StageLyricsView {
                 hovered,
                 reading_mode || handoff.is_none(),
                 karaoke_epoch,
+                active_karaoke_overlay,
                 view.clone(),
                 parent.clone(),
             );
@@ -1068,6 +1193,7 @@ fn render_lyric_row(
     hovered: bool,
     interactive: bool,
     karaoke_epoch: u64,
+    active_karaoke_overlay: Option<AnyView>,
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
@@ -1145,6 +1271,7 @@ fn render_lyric_row(
         karaoke_running,
         should_render_karaoke_detail(index, active, reading_mode),
         karaoke_epoch,
+        active_karaoke_overlay,
         static_blur,
         text_id,
         index,
@@ -1332,6 +1459,7 @@ fn lyric_text_layer(
     karaoke_running: bool,
     karaoke_detail: bool,
     karaoke_epoch: u64,
+    active_karaoke_overlay: Option<AnyView>,
     blur_sigma: f32,
     text_id: &'static str,
     index: usize,
@@ -1352,6 +1480,7 @@ fn lyric_text_layer(
             karaoke_running,
             karaoke_detail,
             karaoke_epoch,
+            active_karaoke_overlay,
         ));
 
     if let Some(translation) = &line.translation {
@@ -1471,6 +1600,33 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
                 .partition_point(|word| word.timestamp_ms <= position_ms),
         )
         .map(|word| word.timestamp_ms)
+}
+
+fn next_karaoke_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
+    let mut next_timestamp = next_enhanced_word_timestamp(line, position_ms);
+
+    if let Some(word_index) = active_enhanced_word_index(line, position_ms)
+        && let Some(word) = line.words.get(word_index)
+    {
+        if let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) {
+            let word_end = word.timestamp_ms.saturating_add(duration_ms);
+            if word_end > position_ms {
+                next_timestamp =
+                    Some(next_timestamp.map_or(word_end, |current| current.min(word_end)));
+            }
+        }
+
+        if let Some(release_timestamp) = sustained_release_timestamp(word)
+            && release_timestamp > position_ms
+        {
+            next_timestamp = Some(
+                next_timestamp
+                    .map_or(release_timestamp, |current| current.min(release_timestamp)),
+            );
+        }
+    }
+
+    next_timestamp
 }
 
 fn word_reveal_progress(word: &StageLyricWord, position_ms: u64) -> f32 {
@@ -1891,6 +2047,50 @@ fn karaoke_word(
     word_root.into_any_element()
 }
 
+fn karaoke_words_overlay(
+    line: &StageLyricLine,
+    karaoke_state: KaraokeLineState,
+    current_word: Option<usize>,
+    position_ms: u64,
+    animate: bool,
+    karaoke_epoch: u64,
+) -> gpui::Div {
+    let mut overlay = div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .text_size(px(28.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD);
+
+    for (index, word) in line.words.iter().enumerate() {
+        let (progress, word_animate) = match karaoke_state {
+            KaraokeLineState::Static | KaraokeLineState::Past => (1.0, false),
+            KaraokeLineState::Future => (0.0, false),
+            KaraokeLineState::Active => {
+                let progress = match current_word {
+                    Some(current) if index < current => 1.0,
+                    Some(current) if index == current => word_reveal_progress(word, position_ms),
+                    _ => 0.0,
+                };
+                (progress, animate && current_word == Some(index))
+            }
+        };
+
+        overlay = overlay.child(karaoke_word(
+            word,
+            index,
+            progress,
+            position_ms,
+            word_animate,
+            index + 1 == line.words.len(),
+            karaoke_epoch,
+        ));
+    }
+
+    overlay
+}
+
 fn stage_primary_lyric(
     line: &StageLyricLine,
     karaoke_state: KaraokeLineState,
@@ -1899,6 +2099,7 @@ fn stage_primary_lyric(
     animate: bool,
     karaoke_detail: bool,
     karaoke_epoch: u64,
+    active_karaoke_overlay: Option<AnyView>,
 ) -> gpui::AnyElement {
     const DIM_ALPHA: f32 = 0.46;
     const STATIC_ALPHA: f32 = 1.0;
@@ -1924,45 +2125,26 @@ fn stage_primary_lyric(
         return base.into_any_element();
     }
 
-    // Only current + previous retain word timing. The overlay is absolute, therefore switching a
-    // line into/out of karaoke detail cannot change intrinsic height or move neighboring rows.
-    let mut overlay = div()
-        .absolute()
-        .left(px(0.0))
-        .right(px(0.0))
-        .top(px(0.0))
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .text_size(px(28.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD);
-
-    for (index, word) in line.words.iter().enumerate() {
-        let (progress, word_animate) = match karaoke_state {
-            KaraokeLineState::Static | KaraokeLineState::Past => (1.0, false),
-            KaraokeLineState::Future => (0.0, false),
-            KaraokeLineState::Active => {
-                let progress = match current_word {
-                    Some(current) if index < current => 1.0,
-                    Some(current) if index == current => word_reveal_progress(word, position_ms),
-                    _ => 0.0,
-                };
-                // Long authored syllables get a separate emphasis envelope while their karaoke
-                // mask continues to reveal; short syllables remain a plain mask sweep.
-                (progress, animate && current_word == Some(index))
-            }
-        };
-
-        overlay = overlay.child(karaoke_word(
-            word,
-            index,
-            progress,
-            position_ms,
-            word_animate,
-            index + 1 == line.words.len(),
-            karaoke_epoch,
-        ));
-    }
+    // The current line's moving word state lives in a dedicated cached Entity. The previous line
+    // is static/completed and can be rebuilt only when the parent changes line.
+    let overlay = if let Some(active_overlay) = active_karaoke_overlay {
+        active_overlay.into_any_element()
+    } else {
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(0.0))
+            .child(karaoke_words_overlay(
+                line,
+                karaoke_state,
+                current_word,
+                position_ms,
+                animate,
+                karaoke_epoch,
+            ))
+            .into_any_element()
+    };
 
     div()
         .relative()
@@ -2470,6 +2652,39 @@ mod tests {
         assert_eq!(line.words[1].byte_start, "你好 ".len());
         assert_eq!(line.words[1].byte_end, line.text.len());
         assert_eq!(line.words[0].text.as_ref(), "你好 ");
+    }
+
+    #[test]
+    fn karaoke_leaf_owns_word_boundaries_and_release_deadlines() {
+        let line = StageLyricLine {
+            timestamp_ms: 1_000,
+            text: SharedString::from("啊好"),
+            translation: None,
+            words: Arc::from([
+                StageLyricWord {
+                    timestamp_ms: 1_000,
+                    duration_ms: Some(2_000),
+                    byte_start: 0,
+                    byte_end: 3,
+                    text: SharedString::from("啊"),
+                },
+                StageLyricWord {
+                    timestamp_ms: 3_000,
+                    duration_ms: Some(400),
+                    byte_start: 3,
+                    byte_end: 6,
+                    text: SharedString::from("好"),
+                },
+            ]),
+            enhanced_complete: true,
+            time_label: SharedString::new_static(""),
+        };
+
+        let release = sustained_release_timestamp(&line.words[0]).unwrap();
+        assert_eq!(next_karaoke_timestamp(&line, 1_100), Some(release.min(3_000)));
+        assert_eq!(next_karaoke_timestamp(&line, 2_999), Some(3_000));
+        assert_eq!(next_karaoke_timestamp(&line, 3_100), Some(3_400));
+        assert_eq!(next_karaoke_timestamp(&line, 3_400), None);
     }
 
     #[test]
