@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    Context, IntoElement, Pixels, Point, SharedString, Size, WeakEntity, div, hsla, point,
-    prelude::*, px, rgb,
+    Context, IntoElement, Pixels, Point, SharedString, Size, WeakEntity, div, point,
+    prelude::*, px,
 };
 use gpui_tokio::Tokio;
 
@@ -245,7 +245,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement> {
                 .bg(if active {
                     theme::accent_red_muted()
                 } else {
-                    hsla(0.0, 0.0, 0.0, 0.0)
+                    theme::transparent()
                 })
                 .hover(move |style| {
                     if disabled {
@@ -304,7 +304,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> Option<gpui::AnyElement> {
         .max_h(px(MENU_MAX_HEIGHT))
         .overflow_y_scroll()
         .rounded_xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(theme::BORDER_CARD)
         .shadow_lg()

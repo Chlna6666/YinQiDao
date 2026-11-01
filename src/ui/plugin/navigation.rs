@@ -625,7 +625,7 @@ pub fn sidebar_entry(
         .bg(if active {
             theme::accent_red_muted()
         } else {
-            gpui::hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         })
         .hover(move |style| {
             style.bg(if active {
@@ -638,7 +638,7 @@ pub fn sidebar_entry(
         .child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(if active {
             theme::ACCENT_RED.into()
         } else {
-            gpui::hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         }))
         .child(
             div()

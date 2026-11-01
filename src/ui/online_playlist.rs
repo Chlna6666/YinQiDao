@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use gpui::{App, IntoElement, WeakEntity, div, hsla, prelude::*, px, rgb, uniform_list};
+use gpui::{App, IntoElement, WeakEntity, div, hsla, prelude::*, px, uniform_list};
 use lucide_gpui::icon;
 
 use crate::{
@@ -244,7 +244,7 @@ pub(super) fn render<V: 'static>(
                 div()
                     .size_full()
                     .rounded_2xl()
-                    .bg(rgb(0xff_ff_ff))
+                    .bg(theme::BG_CARD)
                     .border_1()
                     .border_color(BORDER_CARD)
                     .flex()
@@ -278,7 +278,7 @@ fn render_songs_table(
         return div()
             .size_full()
             .rounded_2xl()
-            .bg(rgb(0xff_ff_ff))
+            .bg(theme::BG_CARD)
             .border_1()
             .border_color(BORDER_CARD)
             .py_12()
@@ -307,7 +307,7 @@ fn render_songs_table(
         .flex()
         .flex_col()
         .rounded_2xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .overflow_hidden()
@@ -411,7 +411,7 @@ fn render_online_song_row(
     let row_bg = if is_current {
         theme::accent_red_muted()
     } else {
-        hsla(0.0, 0.0, 0.0, 0.0)
+        theme::transparent()
     };
 
     div()
@@ -425,7 +425,7 @@ fn render_online_song_row(
         .transition(press_transition())
         .cursor_pointer()
         .border_b_1()
-        .border_color(hsla(220.0, 0.15, 0.95, 0.7))
+        .border_color(theme::BORDER_HAIRLINE)
         // Number / Playing Indicator / Buffering Spinner
         .child(
             div()

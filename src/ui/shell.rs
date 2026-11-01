@@ -4786,7 +4786,7 @@ impl MusicApp {
                             .bg(if self.scan_in_progress {
                                 theme::ACCENT_RED
                             } else {
-                                rgb(0x34_c7_59)
+                                theme::SUCCESS_GREEN
                             }),
                     )
                     .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
@@ -5533,9 +5533,9 @@ fn sidebar(
                                 .size(px(7.0))
                                 .rounded_full()
                                 .bg(if app.scan_in_progress {
-                                    rgb(0xff_9f_0a)
+                                    theme::WARNING_AMBER
                                 } else {
-                                    rgb(0x34_c7_59)
+                                    theme::SUCCESS_GREEN
                                 }),
                         )
                         .child(div().text_xs().text_color(theme::TEXT_TERTIARY).child(
@@ -5619,7 +5619,7 @@ fn render_playlist_sidebar_item(
     let bg_color = if active {
         theme::accent_red_muted()
     } else {
-        hsla(0.0, 0.0, 0.0, 0.0)
+        theme::transparent()
     };
 
     div()
@@ -5713,7 +5713,7 @@ where
     let bg_color = if active {
         theme::accent_red_muted()
     } else {
-        hsla(0.0, 0.0, 0.0, 0.0)
+        theme::transparent()
     };
 
     div()
@@ -5806,12 +5806,12 @@ where
     let icon_color = if active {
         hsla(348.0, 0.95, 0.56, 1.0)
     } else {
-        hsla(220.0, 0.08, 0.50, 1.0)
+        theme::TEXT_TERTIARY.into()
     };
     let bg_color = if active {
         theme::accent_red_muted()
     } else {
-        hsla(0.0, 0.0, 0.0, 0.0)
+        theme::transparent()
     };
 
     div()
@@ -5841,7 +5841,7 @@ where
                 .child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(if active {
                     theme::ACCENT_RED.into()
                 } else {
-                    hsla(0.0, 0.0, 0.0, 0.0)
+                    theme::transparent()
                 }))
                 .child(theme::themed_icon(icon, 16.0, icon_color))
                 .child(

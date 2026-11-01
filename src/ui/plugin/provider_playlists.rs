@@ -2,7 +2,7 @@ use std::{cell::RefCell, ops::Range, sync::Arc};
 
 use anyhow::Result;
 use gpui::{
-    Context, IntoElement, SharedString, WeakEntity, div, prelude::*, px, rgb, uniform_list,
+    Context, IntoElement, SharedString, WeakEntity, div, prelude::*, px, uniform_list,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -118,7 +118,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
         .rounded_full()
         .cursor_pointer()
         .opacity(if loading { 0.55 } else { 1.0 })
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(theme::BORDER_CARD)
         .text_xs()
@@ -153,7 +153,7 @@ pub(super) fn render(view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
             .gap_4()
             .px_4()
             .rounded_xl()
-            .bg(rgb(0xff_ff_ff))
+            .bg(theme::BG_CARD)
             .border_1()
             .border_color(theme::BORDER_CARD)
             .child(
@@ -295,7 +295,7 @@ fn provider_playlist_row(
         .gap_3()
         .px_4()
         .rounded_xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(theme::BORDER_CARD)
         .hover(|style| style.bg(theme::bg_hover()))

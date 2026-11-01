@@ -214,7 +214,7 @@ impl Render for MiniPlayerView {
             .id("mini-player-container")
             .w_full()
             .relative()
-            .bg(rgb(0xff_ff_ff))
+            .bg(theme::BG_CARD)
             .flex()
             .flex_col()
             .child(
@@ -421,7 +421,7 @@ impl Render for MiniPlayerView {
                                     .bg(if self.key.desktop_lyrics_visible {
                                         theme::accent_red_muted()
                                     } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                        theme::transparent()
                                     })
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -456,7 +456,7 @@ impl Render for MiniPlayerView {
                                     .bg(if self.key.queue_active {
                                         theme::accent_red_muted()
                                     } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                        theme::transparent()
                                     })
                                     .hover(|style| style.bg(theme::bg_hover()))
                                     .transition(press_transition())
@@ -467,7 +467,7 @@ impl Render for MiniPlayerView {
                                         if self.key.queue_active {
                                             ACCENT_RED.into()
                                         } else {
-                                            hsla(220.0, 0.08, 0.50, 1.0)
+                                            theme::TEXT_TERTIARY.into()
                                         },
                                     ))
                                     .on_mouse_down(gpui::MouseButton::Left, {
@@ -498,7 +498,7 @@ impl Render for MiniPlayerView {
                                                     icon!(volume_2)
                                                 },
                                                 16.0,
-                                                hsla(220.0, 0.08, 0.50, 1.0),
+                                                theme::TEXT_TERTIARY.into(),
                                             ))
                                             .on_mouse_down(gpui::MouseButton::Left, {
                                                 let parent = parent.clone();
@@ -641,7 +641,7 @@ fn control_button(
         .bg(if active {
             theme::accent_red_muted()
         } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         })
         .hover(|style| style.bg(theme::bg_hover()))
         .transition(press_transition())
@@ -652,7 +652,7 @@ fn control_button(
             if active {
                 ACCENT_RED.into()
             } else if compact {
-                hsla(220.0, 0.08, 0.50, 1.0)
+                theme::TEXT_TERTIARY.into()
             } else {
                 hsla(220.0, 0.10, 0.35, 1.0)
             },
@@ -679,7 +679,7 @@ fn repeat_button(
         .bg(if active {
             theme::accent_red_muted()
         } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         })
         .hover(|style| style.bg(theme::bg_hover()))
         .transition(press_transition())
@@ -693,7 +693,7 @@ fn repeat_button(
             if active {
                 ACCENT_RED.into()
             } else {
-                hsla(220.0, 0.08, 0.50, 1.0)
+                theme::TEXT_TERTIARY.into()
             },
         ))
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {

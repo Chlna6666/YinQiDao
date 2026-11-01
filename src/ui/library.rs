@@ -149,7 +149,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                 .py_2()
                                 .w(px(260.0))
                                 .rounded_full()
-                                .bg(rgb(0xff_ff_ff))
+                                .bg(theme::BG_CARD)
                                 .border_1()
                                 .border_color(if app.search_active {
                                     ACCENT_RED
@@ -163,7 +163,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                     if app.search_active {
                                         ACCENT_RED.into()
                                     } else {
-                                        hsla(220.0, 0.08, 0.50, 1.0)
+                                        theme::TEXT_TERTIARY.into()
                                     },
                                 ))
                                 .child(
@@ -379,7 +379,7 @@ where
         .bg(if active {
             rgb(0xff_ff_ff).into()
         } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         })
         .hover(|s| s.opacity(if active { 1.0 } else { 0.85 }))
         .transition(press_transition())
@@ -390,7 +390,7 @@ where
             if active {
                 ACCENT_RED.into()
             } else {
-                hsla(220.0, 0.08, 0.50, 1.0)
+                theme::TEXT_TERTIARY.into()
             },
         ))
         .child(
@@ -1022,7 +1022,7 @@ fn song_table_row(
         .bg(if is_current {
             theme::accent_red_muted()
         } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
+            theme::transparent()
         })
         .hover(|s| s.bg(theme::bg_hover()))
         .transition(press_transition())
@@ -1103,7 +1103,7 @@ fn song_table_row(
                     .child(themed_icon(
                         icon!(plus),
                         14.0,
-                        hsla(220.0, 0.08, 0.50, 1.0),
+                        theme::TEXT_TERTIARY.into(),
                     ))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                         let _ = view_add.update(cx, |this, cx| {
@@ -1451,7 +1451,7 @@ fn artist_circle_card(
                 .size(px(130.0))
                 .rounded_full()
                 .p_1()
-                .bg(rgb(0xff_ff_ff))
+                .bg(theme::BG_CARD)
                 .border_1()
                 .border_color(BORDER_CARD)
                 .child(
@@ -1526,7 +1526,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .justify_center()
             .gap_3()
             .rounded_2xl()
-            .bg(rgb(0xff_ff_ff))
+            .bg(theme::BG_CARD)
             .border_1()
             .border_color(BORDER_CARD)
             .child(themed_icon(
@@ -1626,7 +1626,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                         .py_1p5()
                         .rounded_full()
                         .cursor_pointer()
-                        .bg(rgb(0xff_ff_ff))
+                        .bg(theme::BG_CARD)
                         .border_1()
                         .border_color(BORDER_CARD)
                         .text_xs()
@@ -1657,7 +1657,7 @@ fn local_playlists_section(
             .gap_3()
             .px_4()
             .rounded_xl()
-            .bg(rgb(0xff_ff_ff))
+            .bg(theme::BG_CARD)
             .border_1()
             .border_color(BORDER_CARD)
             .child(themed_icon(
@@ -1759,7 +1759,7 @@ fn local_playlist_row(
         .gap_3()
         .px_4()
         .rounded_xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .hover(|style| style.bg(theme::bg_hover()))
@@ -1962,7 +1962,7 @@ fn empty_filter_state() -> impl IntoElement {
         .justify_center()
         .gap_2()
         .rounded_2xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .child(

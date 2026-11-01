@@ -131,7 +131,7 @@ fn login_invitation_card(view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
                         .rounded_xl()
                         .bg(theme::accent_red_muted())
                         .border_1()
-                        .border_color(hsla(348.0, 0.95, 0.56, 0.25))
+                        .border_color(theme::accent_red_border())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -410,7 +410,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     .bg(theme::accent_red_muted())
                     .text_color(ACCENT_RED)
                     .border_1()
-                    .border_color(hsla(348.0, 0.95, 0.56, 0.20))
+                    .border_color(theme::accent_red_border())
                     .hover(|s| s.bg(theme::accent_red_active()))
                     .transition(press_transition())
                     .active(|s| s.scale(0.96))
@@ -1106,7 +1106,7 @@ fn daily_recommended_tracks_section<V: 'static>(
                     .px_3()
                     .py_2()
                     .rounded_xl()
-                    .bg(rgb(0xff_ff_ff))
+                    .bg(theme::BG_CARD)
                     .border_1()
                     .border_color(BORDER_CARD)
                     .gap_3()
@@ -1164,7 +1164,7 @@ fn daily_recommended_tracks_section<V: 'static>(
                 .px_3()
                 .py_2()
                 .rounded_xl()
-                .bg(rgb(0xff_ff_ff))
+                .bg(theme::BG_CARD)
                 .border_1()
                 .border_color(BORDER_CARD)
                 .hover(|s| s.bg(theme::bg_hover()).border_color(ACCENT_RED))
@@ -1420,7 +1420,7 @@ fn stat_badge(label: &'static str, val: String, icon: &'static str) -> impl Into
         .px_4()
         .py_2p5()
         .rounded_xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .child(
@@ -1690,7 +1690,7 @@ pub(super) fn track_row(
         })
         .border_1()
         .border_color(if is_current {
-            hsla(348.0, 0.95, 0.56, 0.25)
+            theme::accent_red_border()
         } else {
             BORDER_CARD.into()
         })
@@ -1750,7 +1750,7 @@ pub(super) fn track_row(
                         .justify_center()
                         .rounded_full()
                         .hover(|s| s.bg(theme::bg_active()))
-                        .child(themed_icon(icon!(plus), 14.0, hsla(220.0, 0.08, 0.50, 1.0)))
+                        .child(themed_icon(icon!(plus), 14.0, theme::TEXT_TERTIARY.into()))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             app_listener(view, move |this, _, _, cx| {
@@ -1781,7 +1781,7 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
         .justify_center()
         .gap_4()
         .rounded_2xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .child(

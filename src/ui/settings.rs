@@ -1292,7 +1292,7 @@ fn card(title: &str, subtitle: &str, content: impl IntoElement) -> impl IntoElem
         .gap_4()
         .p_6()
         .rounded_2xl()
-        .bg(rgb(0xff_ff_ff))
+        .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
         .child(
@@ -1469,7 +1469,7 @@ fn toggle_switch(
             div()
                 .size(px(20.0))
                 .rounded_full()
-                .bg(rgb(0xff_ff_ff))
+                .bg(theme::BG_CARD)
                 .shadow_sm(),
         )
         .transition(press_transition())

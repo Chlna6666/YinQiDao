@@ -1,4 +1,4 @@
-use gpui::{AnyView, Context, Entity, IntoElement, StyleRefinement, div, hsla, prelude::*, px};
+use gpui::{AnyView, Context, Entity, IntoElement, StyleRefinement, div, prelude::*, px};
 
 use super::{
     app_runtime_events, mini_player_view,
@@ -42,7 +42,7 @@ pub(super) fn mini_player(
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                .bg(theme::transparent())
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::TEXT_TERTIARY)

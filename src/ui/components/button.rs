@@ -48,7 +48,7 @@ pub fn icon_button(
     let bg_color = if active {
         theme::accent_red_muted()
     } else {
-        hsla(0.0, 0.0, 0.0, 0.0)
+        theme::transparent()
     };
 
     div()
