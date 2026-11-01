@@ -327,8 +327,14 @@ fn render_songs_table(
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(TEXT_TERTIARY)
                 .child(div().w(px(48.0)).child("#"))
-                .child(div().flex_1().min_w(px(200.0)).child("标题"))
-                .child(div().w(px(220.0)).child("专辑"))
+                .child(div().flex_1().min_w(px(160.0)).child("标题"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(110.0))
+                        .max_w(px(260.0))
+                        .child("专辑"),
+                )
                 .child(div().w(px(60.0)).text_right().child("时长")),
         )
         .child(
@@ -504,7 +510,9 @@ fn render_online_song_row(
         // Album
         .child(
             div()
-                .w(px(220.0))
+                .flex_1()
+                .min_w(px(110.0))
+                .max_w(px(260.0))
                 .text_xs()
                 .text_color(TEXT_SECONDARY)
                 .truncate()

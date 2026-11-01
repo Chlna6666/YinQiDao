@@ -42,6 +42,8 @@ const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
 const ONLINE_SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(250);
 /// Coalesces library filter rebuilds while typing; fast typists see one rebuild per pause.
 const LIBRARY_FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
+/// Window that batches held-arrow-key repeats into one Seek command.
+const SEEK_KEY_COALESCE_DELAY: Duration = Duration::from_millis(220);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // Hidden Stage preparation must never compete with the transport's startup window. The audible
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
@@ -149,6 +151,11 @@ pub struct MusicApp {
     pub(crate) library_tab: LibraryTab,
     pub(crate) search: String,
     pub(crate) search_active: bool,
+    /// Volume captured when muting so unmuting restores the previous level.
+    pre_mute_volume: Option<f32>,
+    /// Arrow-key repeat coalescing: the not-yet-flushed seek target and its timer flag.
+    pending_seek_target_ms: Option<u64>,
+    seek_flush_pending: bool,
     /// Debounce state for the library filter refresh on search keystrokes.
     library_filter_generation: u64,
     library_filter_pending: bool,
@@ -778,6 +785,9 @@ impl MusicApp {
             library_tab: LibraryTab::Songs,
             search: String::new(),
             search_active: false,
+            pre_mute_volume: None,
+            pending_seek_target_ms: None,
+            seek_flush_pending: false,
             library_filter_generation: 0,
             library_filter_pending: false,
             status: if async_ready {
@@ -1180,6 +1190,11 @@ impl MusicApp {
         if self.stage_open || self.stage_animating {
             self.previous_page = page;
             self.close_stage(cx);
+            // One click navigates: closing the stage must not swallow the destination, so the
+            // target page switches in the same interaction instead of requiring a second click.
+            self.page = page;
+            route::navigate_to(cx, page);
+            cx.notify();
             return;
         }
         self.previous_page = page;
@@ -2036,14 +2051,51 @@ impl MusicApp {
         self.notify_current_content_surface(cx);
     }
 
+    /// Arrow-key seek with key-repeat coalescing: the first press seeks immediately so audio
+    /// feedback is instant, held-key repeats scrub the optimistic position and flush at most
+    /// one Seek command per 220ms window instead of flooding the command queue.
     pub(crate) fn seek_relative(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
         let duration = self.snapshot.duration_ms as i64;
-        let next = (self.snapshot.position_ms as i64 + delta_ms).clamp(0, duration.max(0)) as u64;
-        self.snapshot.position_ms = next;
-        self.position_ms = next;
-        self.config.position_ms = next;
-        self.send(PlayerCommand::Seek(Duration::from_millis(next)));
-        self.notify_transport_position_surfaces(cx);
+        match self.pending_seek_target_ms {
+            None => {
+                let next =
+                    (self.snapshot.position_ms as i64 + delta_ms).clamp(0, duration.max(0)) as u64;
+                self.snapshot.position_ms = next;
+                self.position_ms = next;
+                self.config.position_ms = next;
+                self.send(PlayerCommand::Seek(Duration::from_millis(next)));
+                self.pending_seek_target_ms = Some(next);
+                self.schedule_seek_flush(cx);
+                self.notify_transport_position_surfaces(cx);
+            }
+            Some(base) => {
+                let base = base as i64;
+                let next = (base + delta_ms).clamp(0, duration.max(0)) as u64;
+                self.pending_seek_target_ms = Some(next);
+                self.snapshot.position_ms = next;
+                self.position_ms = next;
+                self.config.position_ms = next;
+                self.notify_transport_position_surfaces(cx);
+            }
+        }
+    }
+
+    fn schedule_seek_flush(&mut self, cx: &mut Context<Self>) {
+        if self.seek_flush_pending {
+            return;
+        }
+        self.seek_flush_pending = true;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            Timer::after(SEEK_KEY_COALESCE_DELAY).await;
+            this.update(cx, |this, _cx| {
+                this.seek_flush_pending = false;
+                if let Some(target) = this.pending_seek_target_ms.take() {
+                    this.send(PlayerCommand::Seek(Duration::from_millis(target)));
+                }
+            })?;
+            Ok(())
+        })
+        .detach();
     }
 
     pub(crate) fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
@@ -3587,6 +3639,15 @@ impl MusicApp {
         }
     }
 
+    /// Whether a text input (search box, plugin fields) currently holds window focus. Global
+    /// transport shortcuts must yield to caret keys while typing.
+    fn typing_in_text_input(&self, window: &Window, cx: &Context<Self>) -> bool {
+        self.search_input.as_ref().is_some_and(|input| {
+            let handle = input.read(cx).focus_handle(cx);
+            handle.contains_focused(window, cx)
+        })
+    }
+
     pub(crate) fn refresh_online_recommendations(&mut self, cx: &mut Context<Self>) {
         if !self.online_authenticated {
             self.online_daily_tracks.clear();
@@ -4595,9 +4656,11 @@ impl MusicApp {
 
     pub(crate) fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         if self.config.volume > 0.001 {
+            // Remember the pre-mute level so unmuting restores what the user had.
+            self.pre_mute_volume = Some(self.config.volume);
             self.config.volume = 0.0;
         } else {
-            self.config.volume = 0.8;
+            self.config.volume = self.pre_mute_volume.take().unwrap_or(0.8);
         }
         self.send(PlayerCommand::SetVolume(self.config.volume));
         self.save_config();
@@ -4931,6 +4994,9 @@ impl Render for MusicApp {
                             window.focus(&handle);
                         }
                         cx.notify();
+                    } else if this.typing_in_text_input(window, cx) {
+                        // Space moves the caret inside search/plugin inputs; arrow keys there
+                        // move the caret too. Never translate them into transport commands.
                     } else if key == "space" {
                         this.toggle_play(cx);
                     } else if key == "left" {
@@ -5009,11 +5075,13 @@ impl Render for MusicApp {
                 // Interactive descendants own their pointer gestures and stop propagation where
                 // appropriate. A parent hit handler here can win the hit-test path across Entity
                 // boundaries and is especially harmful for the bottom retained controls.
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     this.wake_stage_controls_immediately(cx);
                     let key = event.keystroke.key.as_str();
                     if key == "escape" {
                         this.close_stage(cx);
+                    } else if this.typing_in_text_input(window, cx) {
+                        // Caret keys belong to focused text inputs even with the stage open.
                     } else if key == "space" {
                         this.toggle_play(cx);
                     } else if key == "left" {
@@ -5236,15 +5304,9 @@ fn sidebar(
                 cx.listener(|this, _, _, cx| {
                     this.load_and_show_cloud_library(cx);
                 }),
-            ))
-            .child(sidebar_item(
-                "我的收藏",
-                icon!(bookmark),
-                app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
-                cx.listener(|this, _, _, cx| {
-                    this.show_library_tab(LibraryTab::Playlists, cx);
-                }),
             ));
+        // 本地收藏功能尚未实现，「我的收藏」入口曾与「播放队列」指向同一视图，属错位导航，
+        // 暂时移除；待收藏数据模型落地后恢复独立入口。
 
         let lib_sec = div()
             .flex()

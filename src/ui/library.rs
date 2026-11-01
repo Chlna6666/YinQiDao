@@ -420,10 +420,10 @@ fn song_table_header() -> impl IntoElement {
         .text_color(TEXT_TERTIARY)
         .child(div().w(px(36.0)).child("#"))
         .child(div().flex_1().min_w(px(0.0)).child("标题"))
-        .child(div().w(px(200.0)).child("艺人"))
-        .child(div().w(px(220.0)).child("专辑"))
-        .child(div().w(px(80.0)).child("时长"))
-        .child(div().w(px(60.0)).child("操作"))
+        .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child("艺人"))
+        .child(div().flex_1().min_w(px(110.0)).max_w(px(260.0)).child("专辑"))
+        .child(div().w(px(64.0)).child("时长"))
+        .child(div().w(px(48.0)).child("操作"))
 }
 
 fn online_table_header() -> impl IntoElement {
@@ -439,10 +439,10 @@ fn online_table_header() -> impl IntoElement {
         .text_color(TEXT_TERTIARY)
         .child(div().w(px(36.0)).child("#"))
         .child(div().flex_1().min_w(px(0.0)).child("单曲标题"))
-        .child(div().w(px(200.0)).child("歌手"))
-        .child(div().w(px(220.0)).child("专辑"))
-        .child(div().w(px(80.0)).child("时长"))
-        .child(div().w(px(60.0)).child("操作"))
+        .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child("歌手"))
+        .child(div().flex_1().min_w(px(110.0)).max_w(px(260.0)).child("专辑"))
+        .child(div().w(px(64.0)).child("时长"))
+        .child(div().w(px(48.0)).child("操作"))
 }
 
 fn online_search_row<V: 'static>(
@@ -1060,7 +1060,9 @@ fn song_table_row(
         )
         .child(
             div()
-                .w(px(200.0))
+                .flex_1()
+                .min_w(px(110.0))
+                .max_w(px(240.0))
                 .text_sm()
                 .text_color(TEXT_SECONDARY)
                 .truncate()
@@ -1068,7 +1070,9 @@ fn song_table_row(
         )
         .child(
             div()
-                .w(px(220.0))
+                .flex_1()
+                .min_w(px(110.0))
+                .max_w(px(260.0))
                 .text_sm()
                 .text_color(TEXT_SECONDARY)
                 .truncate()
@@ -1076,13 +1080,13 @@ fn song_table_row(
         )
         .child(
             div()
-                .w(px(80.0))
+                .w(px(64.0))
                 .text_xs()
                 .text_color(TEXT_TERTIARY)
                 .child(format_time(track.duration_ms)),
         )
         .child(
-            div().w(px(60.0)).flex().items_center().child(
+            div().w(px(48.0)).flex().items_center().child(
                 div()
                     .id(SharedString::from(format!("lib-add-q-{track_id}")))
                     .size(px(26.0))
@@ -1112,8 +1116,12 @@ fn song_table_row(
                 plugin_context_menu::open_track(this, &track, position, viewport, app_cx);
             });
         })
-        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-            let _ = view_play.update(cx, |this, cx| this.play_track(track_id, cx));
+        // Double-click plays, matching the queue/online rows and desktop music app conventions;
+        // single-click no longer risks accidental playback while scrolling.
+        .on_mouse_down(gpui::MouseButton::Left, move |event, _, cx| {
+            if event.click_count >= 2 {
+                let _ = view_play.update(cx, |this, cx| this.play_track(track_id, cx));
+            }
         })
         .into_any_element()
 }

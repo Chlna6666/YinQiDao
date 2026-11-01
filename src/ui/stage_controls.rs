@@ -388,11 +388,9 @@ impl Render for StageControlsView {
         if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }
-        let visibility = if animating {
-            self.fade.target_value()
-        } else {
-            self.fade.value()
-        };
+        // Sample the motion each frame: target_value() would pin the chrome to its end opacity
+        // and turn the per-frame invalidation into a repaint loop without a visible fade.
+        let visibility = self.fade.value();
         let playing = self.playback_state == PlaybackState::Playing;
         let shuffle = self.shuffle;
         let repeat = self.repeat;
@@ -634,11 +632,8 @@ impl Render for StageTitlebarView {
         if animating && let Some(deadline) = self.fade.deadline() {
             window.request_invalidation_at(deadline, cx);
         }
-        let visibility = if animating {
-            self.fade.target_value()
-        } else {
-            self.fade.value()
-        };
+        // Sample the motion each frame (see StageControlsView::render).
+        let visibility = self.fade.value();
         if visibility <= 0.001 {
             return div().w_full().h(px(38.0)).into_any_element();
         }
