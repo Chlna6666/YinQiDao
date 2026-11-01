@@ -841,14 +841,19 @@ fn recent_view(
     query: &str,
     view: &WeakEntity<MusicApp>,
 ) -> impl IntoElement {
+    // One O(n) index build replaces the previous per-row `tracks.iter().find` scan.
+    let track_index: HashMap<TrackId, usize> = app
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| (track.id, index))
+        .collect();
     let mut seen_keys = std::collections::HashSet::new();
     let mut recent_tracks: Vec<Track> = Vec::new();
     for id in &app.recent_plays {
-        let track = app
-            .tracks
-            .iter()
-            .find(|t| t.id == *id)
-            .cloned()
+        let track = track_index
+            .get(id)
+            .map(|&index| app.tracks[index].clone())
             .or_else(|| app.online_track_cache.get(id).cloned());
         if let Some(track) = track {
             let key = (

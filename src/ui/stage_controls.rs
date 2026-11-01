@@ -4,10 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnyView, BorrowAppContext as _, Context, Easing, Entity, Global, IntoElement, Render,
-    SharedString, StyleRefinement, Subscription, Transition, TransitionProperty, WeakEntity, Window, div,
-    hsla,
-    prelude::*, px, rgb,
+    AnyElement, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render,
+    SharedString, Subscription, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -134,12 +132,6 @@ impl StageChromeFade {
     fn deadline(&self) -> Option<Instant> {
         self.started_at.map(|started_at| started_at + self.duration)
     }
-}
-
-fn stage_chrome_fade_transition() -> Transition {
-    Transition::new(STAGE_CHROME_FADE_DURATION)
-        .ease(Easing::InOutCubic)
-        .properties([TransitionProperty::Opacity])
 }
 
 #[derive(Default)]
@@ -566,7 +558,6 @@ impl Render for StageControlsView {
             .w_full()
             .flex_none()
             .opacity(visibility)
-            .transition(stage_chrome_fade_transition())
             .flex()
             .flex_col()
             .gap_1p5()
@@ -649,7 +640,6 @@ impl Render for StageTitlebarView {
             .h(px(38.0))
             .occlude()
             .opacity(visibility)
-            .transition(stage_chrome_fade_transition())
             .child(
                 div()
                     .id("stage-titlebar")
