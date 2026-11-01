@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
@@ -19,12 +16,11 @@ use super::{
     app_ui_events::{self, AppUiEvent},
     player_legacy, stage_chrome, stage_controls, stage_lyrics,
     shell::MusicApp,
-    theme::{TEXT_WHITE, elegant_gradient_for, themed_icon},
+    theme::{DURATION_LAYOUT, SampledMotion, TEXT_WHITE, ease_out_cubic, elegant_gradient_for, themed_icon},
 };
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 
-const STAGE_CHROME_LAYOUT_DURATION: Duration = Duration::from_millis(300);
 const STAGE_LEFT_VISIBLE_WIDTH_PX: f32 = 340.0;
 const STAGE_LEFT_HIDDEN_WIDTH_PX: f32 = 250.0;
 const STAGE_CONTROLS_SLOT_HEIGHT_PX: f32 = 158.0;
@@ -36,92 +32,11 @@ const STAGE_CONTENT_HIDDEN_BOTTOM_PX: f32 = 24.0;
 const STAGE_COLUMN_VISIBLE_GAP_PX: f32 = 48.0;
 const STAGE_COLUMN_HIDDEN_GAP_PX: f32 = 28.0;
 
-#[derive(Clone, Copy, Debug)]
-struct StageChromeLayoutMotion {
-    value: f32,
-    from: f32,
-    to: f32,
-    started_at: Option<Instant>,
-    duration: Duration,
-}
+/// 舞台 chrome 布局位移：统一走 theme::SampledMotion（300ms ease-out cubic）。
+type StageChromeLayoutMotion = SampledMotion;
 
-impl StageChromeLayoutMotion {
-    fn new(visible: bool) -> Self {
-        let value = if visible { 1.0 } else { 0.0 };
-        Self {
-            value,
-            from: value,
-            to: value,
-            started_at: None,
-            duration: STAGE_CHROME_LAYOUT_DURATION,
-        }
-    }
-
-    #[inline]
-    fn ease(progress: f32) -> f32 {
-        let t = progress.clamp(0.0, 1.0);
-        1.0 - (1.0 - t).powi(3)
-    }
-
-    fn sample(&self, now: Instant) -> f32 {
-        let Some(started_at) = self.started_at else {
-            return self.value;
-        };
-        if self.duration.is_zero() {
-            return self.to;
-        }
-        let linear =
-            now.saturating_duration_since(started_at).as_secs_f32() / self.duration.as_secs_f32();
-        let eased = Self::ease(linear);
-        self.from + (self.to - self.from) * eased
-    }
-
-    fn set_target(&mut self, visible: bool) -> bool {
-        let target = if visible { 1.0 } else { 0.0 };
-        if (self.to - target).abs() <= 0.001 {
-            return false;
-        }
-
-        let now = Instant::now();
-        let current = self.sample(now).clamp(0.0, 1.0);
-        self.value = current;
-        self.from = current;
-        self.to = target;
-
-        let distance = (target - current).abs();
-        if distance <= 0.001 {
-            self.value = target;
-            self.from = target;
-            self.started_at = None;
-            return true;
-        }
-
-        self.duration = Duration::from_secs_f32(
-            (STAGE_CHROME_LAYOUT_DURATION.as_secs_f32() * distance).max(0.001),
-        );
-        self.started_at = Some(now);
-        true
-    }
-
-    fn advance(&mut self, now: Instant) -> bool {
-        let Some(started_at) = self.started_at else {
-            return false;
-        };
-        self.value = self.sample(now).clamp(0.0, 1.0);
-        if now.saturating_duration_since(started_at) >= self.duration {
-            self.value = self.to;
-            self.from = self.to;
-            self.started_at = None;
-            false
-        } else {
-            true
-        }
-    }
-
-    #[inline]
-    fn value(&self) -> f32 {
-        self.value.clamp(0.0, 1.0)
-    }
+fn stage_chrome_layout_motion(visible: bool) -> StageChromeLayoutMotion {
+    SampledMotion::new(DURATION_LAYOUT, ease_out_cubic, visible)
 }
 
 #[inline]
@@ -274,7 +189,7 @@ pub(super) fn render(
                 cover: StageCoverRenderData::default(),
                 key: StagePlayerRenderKey::default(),
                 playing: false,
-                chrome_layout: StageChromeLayoutMotion::new(chrome_visible),
+                chrome_layout: stage_chrome_layout_motion(chrome_visible),
                 _ui_subscription: ui_subscription,
             }
         });

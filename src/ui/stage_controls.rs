@@ -25,110 +25,14 @@ use super::{
 const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 const TRANSPORT_MIN_SLEEP_MS: u64 = 8;
 const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
-const STAGE_CHROME_FADE_DURATION: Duration = Duration::from_millis(220);
 const STAGE_TRANSPORT_HEIGHT: f32 = 48.0;
 const STAGE_PROGRESS_HEIGHT: f32 = 30.0;
 
-#[derive(Clone, Copy, Debug)]
-struct StageChromeFade {
-    value: f32,
-    from: f32,
-    to: f32,
-    started_at: Option<Instant>,
-    duration: Duration,
-}
+/// 舞台 chrome 淡入淡出：统一走 theme::SampledMotion（220ms ease-in-out cubic）。
+type StageChromeFade = theme::SampledMotion;
 
-impl StageChromeFade {
-    fn new(visible: bool) -> Self {
-        let value = if visible { 1.0 } else { 0.0 };
-        Self {
-            value,
-            from: value,
-            to: value,
-            started_at: None,
-            duration: STAGE_CHROME_FADE_DURATION,
-        }
-    }
-
-    #[inline]
-    fn ease(progress: f32) -> f32 {
-        let progress = progress.clamp(0.0, 1.0);
-        if progress < 0.5 {
-            4.0 * progress * progress * progress
-        } else {
-            1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
-        }
-    }
-
-    fn sample(&self, now: Instant) -> f32 {
-        let Some(started_at) = self.started_at else {
-            return self.value;
-        };
-        if self.duration.is_zero() {
-            return self.to;
-        }
-        let linear =
-            now.saturating_duration_since(started_at).as_secs_f32() / self.duration.as_secs_f32();
-        let eased = Self::ease(linear);
-        self.from + (self.to - self.from) * eased
-    }
-
-    fn set_target(&mut self, visible: bool) -> bool {
-        let target = if visible { 1.0 } else { 0.0 };
-        if (self.to - target).abs() <= 0.001 {
-            return false;
-        }
-
-        let now = Instant::now();
-        let current = self.sample(now).clamp(0.0, 1.0);
-        self.value = current;
-        self.from = current;
-        self.to = target;
-
-        let distance = (target - current).abs();
-        if distance <= 0.001 {
-            self.value = target;
-            self.from = target;
-            self.started_at = None;
-            return true;
-        }
-
-        self.duration = Duration::from_secs_f32(
-            (STAGE_CHROME_FADE_DURATION.as_secs_f32() * distance).max(0.001),
-        );
-        self.started_at = Some(now);
-        true
-    }
-
-    fn advance(&mut self, now: Instant) -> bool {
-        let Some(started_at) = self.started_at else {
-            return false;
-        };
-
-        self.value = self.sample(now).clamp(0.0, 1.0);
-        if now.saturating_duration_since(started_at) >= self.duration {
-            self.value = self.to;
-            self.from = self.to;
-            self.started_at = None;
-            false
-        } else {
-            true
-        }
-    }
-
-    #[inline]
-    fn value(&self) -> f32 {
-        self.value.clamp(0.0, 1.0)
-    }
-
-    #[inline]
-    fn target_value(&self) -> f32 {
-        self.to.clamp(0.0, 1.0)
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.started_at.map(|started_at| started_at + self.duration)
-    }
+fn stage_chrome_fade(visible: bool) -> StageChromeFade {
+    theme::SampledMotion::new(theme::DURATION_EMPHASIZED, theme::ease_in_out_cubic, visible)
 }
 
 #[derive(Default)]
@@ -256,7 +160,7 @@ impl StageControlsView {
             volume_slider: None,
             volume_drag_ratio: None,
             stage_active: false,
-            fade: StageChromeFade::new(true),
+            fade: stage_chrome_fade(true),
             playback_state: PlaybackState::Paused,
             shuffle: false,
             repeat: RepeatMode::Off,
@@ -589,7 +493,7 @@ impl StageTitlebarView {
     fn new(parent: WeakEntity<MusicApp>) -> Self {
         Self {
             parent,
-            fade: StageChromeFade::new(true),
+            fade: stage_chrome_fade(true),
             title_key: 0,
             title: SharedString::new_static("沉浸音乐大舞台"),
         }
@@ -1334,9 +1238,9 @@ mod tests {
 
     #[test]
     fn stage_chrome_easing_is_bounded() {
-        assert_eq!(StageChromeFade::ease(0.0), 0.0);
-        assert!((StageChromeFade::ease(0.5) - 0.5).abs() < f32::EPSILON);
-        assert_eq!(StageChromeFade::ease(1.0), 1.0);
+        assert_eq!(theme::ease_in_out_cubic(0.0), 0.0);
+        assert!((theme::ease_in_out_cubic(0.5) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(theme::ease_in_out_cubic(1.0), 1.0);
     }
 
     #[test]
