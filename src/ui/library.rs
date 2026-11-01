@@ -26,14 +26,15 @@ use super::{
     },
 };
 
-pub(super) fn render(
+pub(super) fn render<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
 ) -> gpui::AnyElement {
     let query = normalized_query(&app.search);
 
     let content = match app.library_tab {
-        LibraryTab::Songs => songs_view(app, &query, view).into_any_element(),
+        LibraryTab::Songs => songs_view(app, &query, view, cx).into_any_element(),
         LibraryTab::Recent => recent_view(app, &query, view).into_any_element(),
         LibraryTab::Albums => albums_view(&app.tracks, &query, app, view).into_any_element(),
         LibraryTab::Artists => artists_view(&app.tracks, &query, app, view).into_any_element(),
@@ -433,11 +434,12 @@ fn online_table_header() -> impl IntoElement {
         .child(div().w(px(60.0)).child("操作"))
 }
 
-fn online_search_row(
+fn online_search_row<V: 'static>(
     index: usize,
     track: &crate::plugin::abi::RemoteTrack,
     route: PluginRoute,
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
 ) -> impl IntoElement {
     let remote_track = track.clone();
     let play_track = track.clone();
@@ -477,7 +479,7 @@ fn online_search_row(
                 .items_center()
                 .gap_3()
                 .child(image_cache::render_remote_cover(
-                    cover_url, 36.0, 36.0, 6.0,
+                    cover_url, 36.0, 36.0, 6.0, cx,
                 ))
                 .child(
                     div()
@@ -568,10 +570,11 @@ fn online_search_row(
         )
 }
 
-fn songs_view(
+fn songs_view<V: 'static>(
     app: &MusicApp,
     query: &str,
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
 ) -> impl IntoElement {
     let matching_indices = matching_track_indices(&app.tracks, query);
     let count = matching_indices
@@ -716,6 +719,7 @@ fn songs_view(
                     remote_track,
                     route.clone(),
                     view,
+                    cx,
                 ));
             }
         }

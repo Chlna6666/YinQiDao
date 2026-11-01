@@ -465,7 +465,7 @@ pub fn user_profile(provider_id: &str, account_id: &str) -> Result<types::UserPr
         provider_id: PROVIDER_ID.into(),
         account_id: account_id.into(),
         display_name,
-        avatar_url: value_string(profile, &["avatarUrl"]).map(force_https),
+        avatar_url: value_string(profile, &["avatarUrl"]).map(sized_artwork_url),
         bio: value_string(profile, &["signature"]).filter(|value| !value.trim().is_empty()),
         level: value_u32(&json, &["level"]),
         follower_count: value_u32(profile, &["followeds"]),
@@ -526,7 +526,7 @@ fn parse_playlist_collection(value: &Value) -> Result<types::MediaCollection, St
         .or_else(|| value_string(value, &["creator", "nickname"]));
     let artwork_url = value_string(value, &["coverImgUrl"])
         .or_else(|| value_string(value, &["picUrl"]))
-        .map(force_https);
+        .map(sized_artwork_url);
     let item_count = value_u32(value, &["trackCount"]);
     let saved = value_bool(value, &["subscribed"]);
     Ok(types::MediaCollection {
@@ -560,7 +560,7 @@ fn parse_album_collection(value: &Value) -> Result<types::MediaCollection, Strin
         },
         title,
         subtitle,
-        artwork_url: value_string(value, &["picUrl"]).map(force_https),
+        artwork_url: value_string(value, &["picUrl"]).map(sized_artwork_url),
         item_count: value_u32(value, &["size"]),
         editable: false,
         saved: Some(true),
@@ -592,7 +592,7 @@ fn parse_artist_collection(value: &Value) -> Result<types::MediaCollection, Stri
         subtitle,
         artwork_url: value_string(value, &["picUrl"])
             .or_else(|| value_string(value, &["img1v1Url"]))
-            .map(force_https),
+            .map(sized_artwork_url),
         item_count: value_u32(value, &["albumSize"]),
         editable: false,
         saved: Some(true),
@@ -631,7 +631,7 @@ fn parse_video_collection(value: &Value) -> Result<types::MediaCollection, Strin
         artwork_url: value_string(value, &["coverUrl"])
             .or_else(|| value_string(value, &["cover"]))
             .or_else(|| value_string(value, &["imgurl"]))
-            .map(force_https),
+            .map(sized_artwork_url),
         item_count: None,
         editable: false,
         saved: Some(true),
@@ -664,7 +664,7 @@ fn parse_recommended_playlist(
             subtitle,
             artwork_url: value_string(value, &["picUrl"])
                 .or_else(|| value_string(value, &["coverImgUrl"]))
-                .map(force_https),
+                .map(sized_artwork_url),
             item_count: value_u32(value, &["trackCount"]),
             editable: false,
             saved: value_bool(value, &["subscribed"]),
@@ -813,6 +813,23 @@ fn force_https(url: String) -> String {
     }
 }
 
+/// Upgrades an artwork URL to HTTPS and requests NetEase's 512px server-side crop.
+///
+/// Raw playlist/album covers are typically ~1095px; the app's image cache downsamples to 512px
+/// anyway, so asking for the crop up front cuts the download to roughly a quarter.
+fn sized_artwork_url(url: String) -> String {
+    let url = force_https(url);
+    if url.contains("music.126.net") {
+        if url.contains('?') {
+            format!("{url}&param=512y512")
+        } else {
+            format!("{url}?param=512y512")
+        }
+    } else {
+        url
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,10 +861,27 @@ mod tests {
         assert_eq!(collection.source.source_id, "12345");
         assert_eq!(
             collection.artwork_url.as_deref(),
-            Some("https://p1.music.126.net/xyz")
+            Some("https://p1.music.126.net/xyz?param=512y512")
         );
         assert_eq!(collection.item_count, Some(42));
         assert_eq!(collection.saved, Some(false));
+    }
+
+    #[test]
+    fn sized_artwork_url_upgrades_scheme_and_requests_crop() {
+        assert_eq!(
+            sized_artwork_url("http://p1.music.126.net/abc.jpg".into()),
+            "https://p1.music.126.net/abc.jpg?param=512y512"
+        );
+        assert_eq!(
+            sized_artwork_url("https://p2.music.126.net/x?param=300y300".into()),
+            "https://p2.music.126.net/x?param=300y300&param=512y512"
+        );
+        // Non-NetEase CDN URLs keep their original form.
+        assert_eq!(
+            sized_artwork_url("https://example.com/cover.png".into()),
+            "https://example.com/cover.png"
+        );
     }
 
     #[test]

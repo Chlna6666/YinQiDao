@@ -469,7 +469,7 @@ impl Render for HomePage {
             return div().into_any_element();
         };
         let app = parent.read(cx);
-        home::render(app, &self.parent)
+        home::render(app, &self.parent, cx)
     }
 }
 
@@ -520,7 +520,7 @@ impl Render for LibraryPage {
             return div().into_any_element();
         };
         let app = parent.read(cx);
-        library_page::render(app, &self.parent)
+        library_page::render(app, &self.parent, cx)
     }
 }
 
@@ -599,7 +599,7 @@ impl Render for OnlinePlaylistPage {
             return div().into_any_element();
         };
         let app = parent.read(cx);
-        super::online_playlist::render(app, &self.parent)
+        super::online_playlist::render(app, &self.parent, cx)
     }
 }
 
@@ -3683,7 +3683,25 @@ impl MusicApp {
                 task.await
             {
                 let _ = this.update(cx, |app, cx| {
+                    // Discover feature cards paint these covers on the first screen; warm them
+                    // before the bulk daily-track list so the small prefetch budget (8 URLs)
+                    // always covers the hero row (cards use daily[0..2], playlists[0..1],
+                    // new_tracks[0]).
                     let mut urls = Vec::new();
+                    let push_cover = |url: &Option<String>, urls: &mut Vec<String>| {
+                        if let Some(u) = url {
+                            urls.push(u.clone());
+                        }
+                    };
+                    for t in daily_tracks.iter().take(3) {
+                        push_cover(&t.cover_url, &mut urls);
+                    }
+                    for p in playlists.iter().take(2) {
+                        push_cover(&p.collection.artwork_url, &mut urls);
+                    }
+                    if let Some(t) = new_tracks.first() {
+                        push_cover(&t.cover_url, &mut urls);
+                    }
                     for t in &daily_tracks {
                         if let Some(u) = &t.cover_url {
                             urls.push(u.clone());
@@ -5592,6 +5610,7 @@ fn render_playlist_sidebar_item(
                     32.0,
                     32.0,
                     4.0,
+                    cx,
                 )),
         )
         .child(

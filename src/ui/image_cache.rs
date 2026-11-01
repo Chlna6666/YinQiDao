@@ -8,8 +8,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Context, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, Styled, div, img,
-    prelude::*, px,
+    AnyElement, App, Context, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, Styled, div,
+    img, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -96,7 +96,7 @@ async fn load_or_fetch(url: String) -> Option<Arc<[u8]>> {
     Some(arc)
 }
 
-pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<Arc<[u8]>> {
+pub fn load_remote_image<V: 'static>(url: &str, cx: &Context<V>) -> Option<Arc<[u8]>> {
     if let Some(cached) = get_cached(url) {
         return Some(cached);
     }
@@ -137,6 +137,43 @@ pub fn load_remote_image<V: 'static>(url: &str, cx: &mut Context<V>) -> Option<A
     }
 
     None
+}
+
+/// Fire-and-forget fetch that wakes `sink` when the bytes land (or when the attempt fails and
+/// releases its in-flight slot, letting a later render retry).
+///
+/// Takes `&App` so it works from every render context — page renders that already borrow the
+/// app state, and `uniform_list` item closures that only receive `&mut App`.
+pub fn request_remote_image<V: 'static>(url: &str, sink: gpui::WeakEntity<V>, cx: &App) {
+    if get_cached(url).is_some() {
+        return;
+    }
+    let should_fetch = {
+        let Ok(mut set) = in_flight().lock() else {
+            return;
+        };
+        set.insert(url.to_string())
+    };
+    if !should_fetch {
+        return;
+    }
+
+    let fetch_url = url.to_string();
+    let task = gpui_tokio::Tokio::spawn(cx, async move {
+        let bytes = load_or_fetch(fetch_url.clone()).await;
+        if let Ok(mut set) = in_flight().lock() {
+            set.remove(&fetch_url);
+        }
+        bytes.is_some()
+    });
+
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        let _ = task.await;
+        let _ = sink.update(cx, |_, cx| {
+            cx.notify();
+        });
+    })
+    .detach();
 }
 
 fn remote_image_client() -> Option<&'static reqwest::Client> {
@@ -183,7 +220,7 @@ pub fn render_remote_avatar<V: 'static>(
     url: Option<&str>,
     size_px: f32,
     is_default: bool,
-    cx: &mut Context<V>,
+    cx: &Context<V>,
 ) -> AnyElement {
     let border_col = if is_default {
         ACCENT_RED
@@ -242,6 +279,9 @@ pub fn render_remote_avatar<V: 'static>(
     }
 }
 
+/// Spawns a background fetch without waking any view. Kept for fire-and-forget warmers;
+/// render paths should prefer the notifying `load_remote_image` so covers appear as soon
+/// as their bytes land.
 pub fn fetch_detached(url: &str) {
     if get_cached(url).is_some() {
         return;
@@ -322,11 +362,12 @@ pub fn prefetch_urls<V: 'static>(urls: Vec<String>, cx: &mut Context<V>) {
     }
 }
 
-pub fn render_remote_cover(
+pub fn render_remote_cover<V: 'static>(
     url: Option<&str>,
     width_px: f32,
     height_px: f32,
     rounded_px: f32,
+    cx: &Context<V>,
 ) -> AnyElement {
     let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
         return div()
@@ -360,7 +401,7 @@ pub fn render_remote_cover(
         .flex_none()
         .into_any_element()
     } else {
-        fetch_detached(url);
+        request_remote_image(url, cx.weak_entity(), cx);
         div()
             .w(px(width_px))
             .h(px(height_px))
@@ -378,5 +419,92 @@ pub fn render_remote_cover(
                 TEXT_SECONDARY.into(),
             ))
             .into_any_element()
+    }
+}
+
+/// `render_remote_cover` twin for item closures that only receive `&mut App` (e.g.
+/// `uniform_list` items): wakes `sink` instead of a render context.
+pub fn render_remote_cover_with_sink<V: 'static>(
+    url: Option<&str>,
+    width_px: f32,
+    height_px: f32,
+    rounded_px: f32,
+    sink: &gpui::WeakEntity<V>,
+    cx: &mut App,
+) -> AnyElement {
+    let placeholder = || {
+        div()
+            .w(px(width_px))
+            .h(px(height_px))
+            .rounded(px(rounded_px))
+            .bg(theme::BG_CANVAS)
+            .border_1()
+            .border_color(BORDER_HAIRLINE)
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .child(themed_icon(
+                icon!(music),
+                (width_px * 0.3).clamp(14.0, 48.0),
+                TEXT_SECONDARY.into(),
+            ))
+            .into_any_element()
+    };
+
+    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
+        return placeholder();
+    };
+
+    if let Some(png_bytes) = get_cached(url) {
+        img(EncodedImageBytes::new(ImageFormat::Png, png_bytes.clone()))
+            .w(px(width_px))
+            .h(px(height_px))
+            .rounded(px(rounded_px))
+            .object_fit(ObjectFit::Cover)
+            .flex_none()
+            .into_any_element()
+    } else {
+        request_remote_image(url, sink.clone(), cx);
+        placeholder()
+    }
+}
+
+/// Full-bleed cover for absolutely-positioned card backgrounds (`inset_0` containers).
+///
+/// The image and its placeholder both stretch to the container, so fluid-width cards never
+/// expose an uncovered strip the overlay scrims would paint over.
+pub fn render_remote_cover_fill<V: 'static>(
+    url: Option<&str>,
+    rounded_px: f32,
+    cx: &Context<V>,
+) -> AnyElement {
+    let placeholder = |icon_size: f32| {
+        div()
+            .size_full()
+            .rounded(px(rounded_px))
+            .bg(theme::BG_CANVAS)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(themed_icon(icon!(music), icon_size, TEXT_SECONDARY.into()))
+            .into_any_element()
+    };
+
+    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
+        return placeholder(48.0);
+    };
+
+    if let Some(png_bytes) = get_cached(url) {
+        img(EncodedImageBytes::new(ImageFormat::Png, png_bytes.clone()))
+            .absolute()
+            .inset_0()
+            .size_full()
+            .rounded(px(rounded_px))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element()
+    } else {
+        request_remote_image(url, cx.weak_entity(), cx);
+        placeholder(48.0)
     }
 }

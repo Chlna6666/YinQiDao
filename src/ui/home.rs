@@ -27,7 +27,11 @@ use super::{
     },
 };
 
-pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
+pub(super) fn render<V: 'static>(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
+) -> gpui::AnyElement {
     let has_online_plugin = app.has_online_plugins;
     let is_authenticated = app.online_authenticated;
     let has_online_content = !app.online_daily_tracks.is_empty()
@@ -47,9 +51,9 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
     if has_online_plugin && is_authenticated {
         // 在线服务已登录：优先显示在线音乐推荐
         home = home
-            .child(discover_feature_cards(app, view))
-            .children(recommended_playlists_section(app, view))
-            .children(daily_recommended_tracks_section(app, view))
+            .child(discover_feature_cards(app, view, cx))
+            .children(recommended_playlists_section(app, view, cx))
+            .children(daily_recommended_tracks_section(app, view, cx))
             .children(plugin_home_sections(view));
 
         if !app.tracks.is_empty() {
@@ -449,7 +453,11 @@ pub(crate) fn default_netease_route() -> PluginRoute {
     }
 }
 
-fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
+fn discover_feature_cards<V: 'static>(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
+) -> impl IntoElement {
     let route = app
         .online_route
         .clone()
@@ -564,9 +572,11 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
     let card6_cov_rc = card6_cover.map(String::from);
 
     div()
+        .id("discover-feature-cards")
         .w_full()
+        .overflow_x_scroll()
         .flex()
-        .flex_wrap()
+        .flex_none()
         .gap_4()
         .child(feature_card(
             "每日推荐",
@@ -575,6 +585,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card1_cover,
             (rgb(0x3a1c1c), rgb(0x6b2222)),
             view,
+            cx,
             move |this, cx| {
                 if !card1_tracks.is_empty() {
                     this.play_online_playlist_track(
@@ -604,6 +615,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card2_cover,
             (rgb(0x3b1120), rgb(0x701a38)),
             view,
+            cx,
             move |this, cx| {
                 if let Some(track) = card2_track.clone() {
                     this.play_online_remote_track(card2_route.clone(), track, cx);
@@ -632,6 +644,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card3_cover,
             (rgb(0x23193d), rgb(0x43286e)),
             view,
+            cx,
             move |this, cx| {
                 if let Some(col) = card3_collection.clone() {
                     this.load_and_play_online_playlist(
@@ -668,6 +681,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card4_cover,
             (rgb(0x13283d), rgb(0x1e486b)),
             view,
+            cx,
             move |this, cx| {
                 if let Some(track) = card4_track.clone() {
                     this.play_online_remote_track(card4_route.clone(), track, cx);
@@ -696,6 +710,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card5_cover,
             (rgb(0x3a2912), rgb(0x6e4819)),
             view,
+            cx,
             move |this, cx| {
                 if let Some(track) = card5_track.clone() {
                     this.play_online_remote_track(card5_route.clone(), track, cx);
@@ -724,6 +739,7 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
             card6_cover,
             (rgb(0x123227), rgb(0x1d5c47)),
             view,
+            cx,
             move |this, cx| {
                 if let Some(col) = card6_collection.clone() {
                     this.load_and_play_online_playlist(
@@ -755,26 +771,30 @@ fn discover_feature_cards(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl I
         ))
 }
 
-fn feature_card<F, R>(
+fn feature_card<V, F, R>(
     title: &'static str,
     subtitle: String,
     badge_icon: &'static str,
     cover_url: Option<&str>,
     fallback_gradient: (gpui::Rgba, gpui::Rgba),
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
     on_click: F,
     on_right_click: R,
 ) -> impl IntoElement
 where
+    V: 'static,
     F: Fn(&mut MusicApp, &mut Context<MusicApp>) + 'static,
     R: Fn(&mut MusicApp, gpui::Point<gpui::Pixels>, &mut Context<MusicApp>) + 'static,
 {
     let bg_element = if let Some(url) = cover_url {
-        image_cache::render_remote_cover(Some(url), 160.0, 200.0, 14.0)
+        // Full-bleed background: the cover stretches with the fluid card width so the overlay
+        // scrims never sit on an uncovered strip (the old fixed 160x200 image did).
+        image_cache::render_remote_cover_fill(Some(url), 0.0, cx)
     } else {
         div()
-            .size_full()
-            .rounded(px(14.0))
+            .absolute()
+            .inset_0()
             .bg(linear_gradient(
                 135.0,
                 linear_color_stop(fallback_gradient.0, 0.0),
@@ -784,9 +804,8 @@ where
     };
 
     div()
-        .flex_1()
-        .min_w(px(145.0))
-        .max_w(px(180.0))
+        .flex_none()
+        .w(px(168.0))
         .h(px(200.0))
         .rounded(px(14.0))
         .relative()
@@ -851,9 +870,10 @@ where
         )
 }
 
-fn recommended_playlists_section(
+fn recommended_playlists_section<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
 ) -> Option<gpui::AnyElement> {
     if app.online_playlists.is_empty() && !app.online_recommendations_loading {
         return None;
@@ -933,7 +953,7 @@ fn recommended_playlists_section(
                             .border_1()
                             .border_color(BORDER_CARD)
                             .child(image_cache::render_remote_cover(
-                                cover_url, 150.0, 150.0, 12.0,
+                                cover_url, 150.0, 150.0, 12.0, cx,
                             ))
                             .child(
                                 div()
@@ -1057,9 +1077,10 @@ fn recommended_playlists_section(
     )
 }
 
-fn daily_recommended_tracks_section(
+fn daily_recommended_tracks_section<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
 ) -> Option<gpui::AnyElement> {
     if app.online_daily_tracks.is_empty() && !app.online_recommendations_loading {
         return None;
@@ -1156,7 +1177,9 @@ fn daily_recommended_tracks_section(
                         .gap_3()
                         .flex_1()
                         .min_w(px(0.0))
-                        .child(image_cache::render_remote_cover(cover_url, 44.0, 44.0, 8.0))
+                        .child(image_cache::render_remote_cover(
+                            cover_url, 44.0, 44.0, 8.0, cx,
+                        ))
                         .child(
                             div()
                                 .flex()

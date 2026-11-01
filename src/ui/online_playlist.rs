@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use gpui::{IntoElement, WeakEntity, div, hsla, prelude::*, px, rgb, uniform_list};
+use gpui::{App, IntoElement, WeakEntity, div, hsla, prelude::*, px, rgb, uniform_list};
 use lucide_gpui::icon;
 
 use crate::{
@@ -16,7 +16,11 @@ use crate::{
     },
 };
 
-pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyElement {
+pub(super) fn render<V: 'static>(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+    cx: &gpui::Context<V>,
+) -> gpui::AnyElement {
     let Some(data) = &app.active_online_playlist else {
         return div()
             .size_full()
@@ -99,6 +103,7 @@ pub(super) fn render(app: &MusicApp, view: &WeakEntity<MusicApp>) -> gpui::AnyEl
                             88.0,
                             88.0,
                             12.0,
+                            cx,
                         )),
                 )
                 .child(
@@ -331,7 +336,7 @@ fn render_songs_table(
                 uniform_list(
                     "online-playlist-songs-vlist",
                     count,
-                    move |range: Range<usize>, _window, _cx| {
+                    move |range: Range<usize>, _window, cx| {
                         let mut items = Vec::with_capacity(range.end - range.start);
                         for idx in range {
                             if let Some(track) = tracks.get(idx) {
@@ -350,6 +355,7 @@ fn render_songs_table(
                                     &view_clone,
                                     is_buffering,
                                     is_current,
+                                    cx,
                                 ));
                             }
                         }
@@ -372,6 +378,7 @@ fn render_online_song_row(
     view: &WeakEntity<MusicApp>,
     is_buffering: bool,
     is_current: bool,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let track_route = route.clone();
     let song_playlist_title = playlist_title.to_string();
@@ -444,7 +451,9 @@ fn render_online_song_row(
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(image_cache::render_remote_cover(cover_url, 40.0, 40.0, 6.0))
+                .child(image_cache::render_remote_cover_with_sink(
+                    cover_url, 40.0, 40.0, 6.0, view, cx,
+                ))
                 .child(
                     div()
                         .flex()
