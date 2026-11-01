@@ -18,7 +18,10 @@ struct CounterDeltas {
 }
 
 impl CounterDeltas {
-    fn between(previous: &PerformanceMetricsSnapshot, current: &PerformanceMetricsSnapshot) -> Self {
+    fn between(
+        previous: &PerformanceMetricsSnapshot,
+        current: &PerformanceMetricsSnapshot,
+    ) -> Self {
         Self {
             frame_requests: delta(previous.frame_request_count, current.frame_request_count),
             draws: delta(previous.draw_count, current.draw_count),

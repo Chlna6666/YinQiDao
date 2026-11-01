@@ -5,16 +5,13 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity, GpuMesh3d,
-    GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader,
-    GpuMesh3dVertex, HorizontalRevealEdge, IntoElement, SharedString, Subscription, TransformOrigin,
-    WeakEntity, WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*,
-    px, rgb,
+    GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex,
+    HorizontalRevealEdge, IntoElement, SharedString, Subscription, TransformOrigin, WeakEntity,
+    WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::{
-    desktop_lyrics::LyricsDisplay,
-    lyrics::LyricWord,
-    model::TrackId,
+    desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
     settings::DesktopLyricsAlignment,
 };
 
@@ -132,7 +129,9 @@ impl gpui::Render for DesktopLyricsView {
             self.line_transition_deadline = None;
         }
 
-        let next_key = display.as_ref().map(|display| (display.track_id, display.line_index));
+        let next_key = display
+            .as_ref()
+            .map(|display| (display.track_id, display.line_index));
         if next_key != self.display_key {
             if self.display_key.is_some() && next_key.is_some() {
                 self.previous_display = self.last_display.clone();
@@ -150,9 +149,7 @@ impl gpui::Render for DesktopLyricsView {
             && self
                 .line_transition_deadline
                 .is_some_and(|deadline| deadline > now);
-        if line_transition_active
-            && let Some(deadline) = self.line_transition_deadline
-        {
+        if line_transition_active && let Some(deadline) = self.line_transition_deadline {
             // One semantic cleanup wake only; retained animation owns all intermediate frames.
             window.request_invalidation_at(deadline, cx);
         }
@@ -229,9 +226,8 @@ impl gpui::Render for DesktopLyricsView {
 
             let mut previous_complete = previous.clone();
             previous_complete.position_ms = u64::MAX;
-            let outgoing_duration = Duration::from_secs_f32(
-                LYRIC_LINE_TRANSITION_DURATION.as_secs_f32() * 0.46,
-            );
+            let outgoing_duration =
+                Duration::from_secs_f32(LYRIC_LINE_TRANSITION_DURATION.as_secs_f32() * 0.46);
             let outgoing = div()
                 .absolute()
                 .inset_0()
@@ -383,8 +379,7 @@ fn desktop_lyrics_stack(
     display: &LyricsDisplay,
     config: &crate::settings::DesktopLyricsConfig,
 ) -> gpui::AnyElement {
-    let mut lyrics = desktop_stack_shell(config)
-        .child(desktop_current_group(display, config));
+    let mut lyrics = desktop_stack_shell(config).child(desktop_current_group(display, config));
 
     if config.two_line
         && let Some(next) = display.next.as_ref().filter(|text| !text.trim().is_empty())
@@ -418,9 +413,7 @@ fn desktop_lyrics_stack(
     lyrics.into_any_element()
 }
 
-fn desktop_stack_shell(
-    config: &crate::settings::DesktopLyricsConfig,
-) -> gpui::Div {
+fn desktop_stack_shell(config: &crate::settings::DesktopLyricsConfig) -> gpui::Div {
     let lyrics = div()
         .w_full()
         .min_w(px(0.0))
@@ -605,12 +598,11 @@ fn desktop_karaoke_word(
                     SharedString::new_static("desktop-lyrics-word-reveal"),
                     animation_id,
                 ),
-                Animation::new(remaining)
-                    .with_property(AnimationProperty::horizontal_reveal(
-                        HorizontalRevealEdge::Left,
-                        progress,
-                        1.0,
-                    )),
+                Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
+                    HorizontalRevealEdge::Left,
+                    progress,
+                    1.0,
+                )),
                 |element, _| element,
             )
             .into_any_element()
@@ -641,7 +633,11 @@ fn authored_or_inferred_word_duration(words: &[LyricWord], index: usize) -> Opti
 
 fn word_reveal_progress(word: &LyricWord, duration_ms: Option<u64>, position_ms: u64) -> f32 {
     let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
-        return if position_ms >= word.timestamp_ms { 1.0 } else { 0.0 };
+        return if position_ms >= word.timestamp_ms {
+            1.0
+        } else {
+            0.0
+        };
     };
     let elapsed = position_ms
         .saturating_sub(word.timestamp_ms)
@@ -997,10 +993,7 @@ mod tests {
 
     #[test]
     fn desktop_karaoke_infers_enhanced_lrc_duration_from_next_word() {
-        let words = [
-            word(1_000, None, "A"),
-            word(1_450, None, "B"),
-        ];
+        let words = [word(1_000, None, "A"), word(1_450, None, "B")];
         assert_eq!(authored_or_inferred_word_duration(&words, 0), Some(450));
         assert_eq!(authored_or_inferred_word_duration(&words, 1), None);
     }

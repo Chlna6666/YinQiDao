@@ -75,8 +75,7 @@ pub fn load_disk_cached(url: &str) -> Option<Arc<[u8]>> {
 
 async fn load_or_fetch(url: String) -> Option<Arc<[u8]>> {
     let disk_url = url.clone();
-    if let Ok(Some(bytes)) =
-        tokio::task::spawn_blocking(move || load_disk_cached(&disk_url)).await
+    if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || load_disk_cached(&disk_url)).await
     {
         return Some(bytes);
     }
@@ -116,20 +115,18 @@ pub fn load_remote_image<V: 'static>(url: &str, cx: &Context<V>) -> Option<Arc<[
             Ok((fetch_url, res))
         });
 
-        cx.spawn(async move |this, cx| {
-            match task.await {
-                Ok((url_done, Some(_))) => {
-                    if let Ok(mut set) = in_flight().lock() {
-                        set.remove(&url_done);
-                    }
-                    let _ = this.update(cx, |_, cx| {
-                        cx.notify();
-                    });
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((url_done, Some(_))) => {
+                if let Ok(mut set) = in_flight().lock() {
+                    set.remove(&url_done);
                 }
-                _ => {
-                    if let Ok(mut set) = in_flight().lock() {
-                        set.remove(&target_url);
-                    }
+                let _ = this.update(cx, |_, cx| {
+                    cx.notify();
+                });
+            }
+            _ => {
+                if let Ok(mut set) = in_flight().lock() {
+                    set.remove(&target_url);
                 }
             }
         })
@@ -248,17 +245,14 @@ pub fn render_remote_avatar<V: 'static>(
     };
 
     if let Some(png_bytes) = load_remote_image(url, cx) {
-        img(EncodedImageBytes::new(
-            ImageFormat::Png,
-            png_bytes.clone(),
-        ))
-        .size(px(size_px))
-        .rounded_full()
-        .border_1()
-        .border_color(border_col)
-        .object_fit(ObjectFit::Cover)
-        .flex_none()
-        .into_any_element()
+        img(EncodedImageBytes::new(ImageFormat::Png, png_bytes.clone()))
+            .size(px(size_px))
+            .rounded_full()
+            .border_1()
+            .border_color(border_col)
+            .object_fit(ObjectFit::Cover)
+            .flex_none()
+            .into_any_element()
     } else {
         div()
             .size(px(size_px))
@@ -319,9 +313,7 @@ pub fn prefetch_urls<V: 'static>(urls: Vec<String>, cx: &mut Context<V>) {
     let urls_to_fetch: Vec<String> = urls
         .into_iter()
         .filter(|url| {
-            !url.trim().is_empty()
-                && get_cached(url).is_none()
-                && seen.insert(url.clone())
+            !url.trim().is_empty() && get_cached(url).is_none() && seen.insert(url.clone())
         })
         .take(PREFETCH_VISIBLE_LIMIT)
         .collect();
@@ -390,16 +382,13 @@ pub fn render_remote_cover<V: 'static>(
     };
 
     if let Some(png_bytes) = get_cached(url) {
-        img(EncodedImageBytes::new(
-            ImageFormat::Png,
-            png_bytes.clone(),
-        ))
-        .w(px(width_px))
-        .h(px(height_px))
-        .rounded(px(rounded_px))
-        .object_fit(ObjectFit::Cover)
-        .flex_none()
-        .into_any_element()
+        img(EncodedImageBytes::new(ImageFormat::Png, png_bytes.clone()))
+            .w(px(width_px))
+            .h(px(height_px))
+            .rounded(px(rounded_px))
+            .object_fit(ObjectFit::Cover)
+            .flex_none()
+            .into_any_element()
     } else {
         request_remote_image(url, cx.weak_entity(), cx);
         div()

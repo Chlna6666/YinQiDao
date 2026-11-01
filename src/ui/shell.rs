@@ -30,8 +30,8 @@ use crate::{
 
 use super::{
     app_runtime_events, app_ui_events, home, library as library_page, mini_player_view, player,
-    player_stage,
     player::NowPlaying,
+    player_stage,
     route::{self, AppRoute},
     settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
 };
@@ -392,10 +392,8 @@ impl HomePage {
             });
         });
         let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            if matches!(
-                *event,
-                app_ui_events::AppUiEvent::PlaybackStateChanged(_)
-            ) && this.last_key.active
+            if matches!(*event, app_ui_events::AppUiEvent::PlaybackStateChanged(_))
+                && this.last_key.active
             {
                 cx.notify();
             }
@@ -845,9 +843,7 @@ impl MusicApp {
             stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_transition_start_armed: false,
             stage_prepared: false,
-            stage_prewarm_after: Some(
-                std::time::Instant::now() + STAGE_BACKGROUND_PREWARM_DELAY,
-            ),
+            stage_prewarm_after: Some(std::time::Instant::now() + STAGE_BACKGROUND_PREWARM_DELAY),
             stage_last_user_activity: std::time::Instant::now(),
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
@@ -983,8 +979,7 @@ impl MusicApp {
         let initial_key = home_page_render_key(self);
         let parent = cx.entity();
         let ui_events = app_ui_events::bridge(cx);
-        let page =
-            cx.new(move |cx| HomePage::new(parent, initial_key, ui_events, cx));
+        let page = cx.new(move |cx| HomePage::new(parent, initial_key, ui_events, cx));
         self.home_page = Some(page.clone());
         page
     }
@@ -1104,11 +1099,7 @@ impl MusicApp {
         cx.notify();
     }
 
-    fn finish_stage_transition_if_due(
-        &mut self,
-        now: std::time::Instant,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_stage_transition_if_due(&mut self, now: std::time::Instant, cx: &mut Context<Self>) {
         if !self.stage_animating {
             return;
         }
@@ -1360,11 +1351,7 @@ impl MusicApp {
         }
     }
 
-    pub(crate) fn sync_lyrics_surfaces(
-        &mut self,
-        track_id: TrackId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn sync_lyrics_surfaces(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         let is_current = self
             .snapshot
             .current_track
@@ -1381,8 +1368,7 @@ impl MusicApp {
     }
 
     fn cancel_online_play_request(&mut self) {
-        self.online_play_request_generation =
-            self.online_play_request_generation.wrapping_add(1);
+        self.online_play_request_generation = self.online_play_request_generation.wrapping_add(1);
         self.online_track_buffering = None;
         // gpui_tokio::Tokio::spawn_result is cancellation-safe: dropping the owning GPUI task
         // cancels the Tokio request as well, so superseded stream materializations do not keep
@@ -1429,8 +1415,7 @@ impl MusicApp {
     fn schedule_online_playlist_prefetch(&mut self, cx: &mut Context<Self>) {
         self.cancel_online_preload_tasks();
 
-        let Some((route, candidates)) =
-            self.online_playlist_lookahead(ONLINE_ASSET_LOOKAHEAD)
+        let Some((route, candidates)) = self.online_playlist_lookahead(ONLINE_ASSET_LOOKAHEAD)
         else {
             self.online_preloaded_tracks.clear();
             return;
@@ -1457,12 +1442,8 @@ impl MusicApp {
                 let route = asset_route.clone();
                 let cache = playback_cache.clone();
                 joins.spawn(async move {
-                    let _ = load_online_lyrics_cached_or_remote(
-                        cache,
-                        route,
-                        remote.source,
-                    )
-                    .await?;
+                    let _ =
+                        load_online_lyrics_cached_or_remote(cache, route, remote.source).await?;
                     Ok::<(), anyhow::Error>(())
                 });
             }
@@ -1517,11 +1498,7 @@ impl MusicApp {
                 let frontend = crate::plugin::frontend::global()
                     .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
                 let result = frontend
-                    .prepare_remote_track_for_route(
-                        &route_for_prepare,
-                        &remote_for_prepare,
-                        None,
-                    )
+                    .prepare_remote_track_for_route(&route_for_prepare, &remote_for_prepare, None)
                     .await?;
                 result
                     .value
@@ -2396,12 +2373,7 @@ impl MusicApp {
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))??;
-            Ok::<_, anyhow::Error>((
-                tracks,
-                engine_tracks,
-                library_track_ids,
-                track_index_by_id,
-            ))
+            Ok::<_, anyhow::Error>((tracks, engine_tracks, library_track_ids, track_index_by_id))
         });
         cx.spawn(async move |this, cx| -> Result<()> {
             let query_result = task.await;
@@ -2530,13 +2502,9 @@ impl MusicApp {
         let remote = remote.clone();
         let cover_url = cover_url.map(str::to_owned);
         let _ = crate::runtime::spawn_blocking(move || {
-            if let Err(error) = cache.store_playback(
-                &track,
-                &route,
-                &source,
-                &remote,
-                cover_url.as_deref(),
-            ) {
+            if let Err(error) =
+                cache.store_playback(&track, &route, &source, &remote, cover_url.as_deref())
+            {
                 tracing::warn!(error = %error, "持久化在线播放资源元数据失败");
             }
         });
@@ -2596,8 +2564,7 @@ impl MusicApp {
         self.online_preloaded_tracks.clear();
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
-        self.online_play_request_generation =
-            self.online_play_request_generation.wrapping_add(1);
+        self.online_play_request_generation = self.online_play_request_generation.wrapping_add(1);
         let generation = self.online_play_request_generation;
 
         self.online_track_buffering = Some(source.source_id.clone());
@@ -2623,10 +2590,8 @@ impl MusicApp {
                     &remote,
                     cover_url.as_deref(),
                 );
-                self.online_playback_meta.insert(
-                    track_id,
-                    (route.clone(), source.clone(), cover_url.clone()),
-                );
+                self.online_playback_meta
+                    .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
                 self.online_remote_tracks
                     .insert(track_id, (route.clone(), remote.clone()));
                 self.status = format!("正在播放在线音频：{title} · {artist}");
@@ -2685,10 +2650,8 @@ impl MusicApp {
                             &remote_for_cache,
                             cover_url.as_deref(),
                         );
-                        app.online_playback_meta.insert(
-                            track_id,
-                            (route.clone(), source.clone(), cover_url.clone()),
-                        );
+                        app.online_playback_meta
+                            .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
                         app.online_remote_tracks
                             .insert(track_id, (route.clone(), remote_for_cache.clone()));
                         app.status = format!("正在播放在线音频：{title} · {artist}");
@@ -2770,10 +2733,11 @@ impl MusicApp {
                 if let Some(cache) = artwork_cache.clone() {
                     let key = target_url.clone();
                     let cache_bytes = bytes.clone();
-                    let art =
-                        tokio::task::spawn_blocking(move || cache.store(&key, cache_bytes.as_ref()))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))??;
+                    let art = tokio::task::spawn_blocking(move || {
+                        cache.store(&key, cache_bytes.as_ref())
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))??;
                     return Ok((art.png, art.blurred_png, art.palette));
                 }
 
@@ -2895,13 +2859,7 @@ impl MusicApp {
                     let first_title = first.title.clone();
                     let _ = this.update(cx, |app, cx| {
                         app.status = format!("正在播放歌单，首曲：{first_title}");
-                        app.play_online_playlist_track(
-                            route,
-                            playlist_title,
-                            tracks,
-                            0,
-                            cx,
-                        );
+                        app.play_online_playlist_track(route, playlist_title, tracks, 0, cx);
                     });
                 }
             }
@@ -2915,10 +2873,7 @@ impl MusicApp {
         .detach();
     }
 
-    fn prefetch_online_playlist_images(
-        data: &OnlinePlaylistViewData,
-        cx: &mut Context<Self>,
-    ) {
+    fn prefetch_online_playlist_images(data: &OnlinePlaylistViewData, cx: &mut Context<Self>) {
         let mut urls = Vec::with_capacity(data.tracks.len().saturating_add(1));
         if let Some(url) = data.cover_url.as_ref().filter(|url| !url.trim().is_empty()) {
             urls.push(url.clone());
@@ -3875,9 +3830,8 @@ impl MusicApp {
         cx.spawn(async move |this, cx| -> Result<()> {
             Timer::after(ONLINE_SEARCH_DEBOUNCE_DELAY).await;
 
-            let is_current = this.update(cx, |app, _cx| {
-                app.online_search_generation == generation
-            })?;
+            let is_current =
+                this.update(cx, |app, _cx| app.online_search_generation == generation)?;
             if !is_current {
                 return Ok(());
             }
@@ -3913,7 +3867,10 @@ impl MusicApp {
 
                 match result {
                     Ok(Some((route, tracks))) => {
-                        let urls = tracks.iter().filter_map(|track| track.cover_url.clone()).collect();
+                        let urls = tracks
+                            .iter()
+                            .filter_map(|track| track.cover_url.clone())
+                            .collect();
                         crate::ui::image_cache::prefetch_urls(urls, cx);
                         app.online_search_route = Some(route);
                         app.online_search_results = tracks;
@@ -4531,8 +4488,7 @@ impl MusicApp {
             DragTarget::Progress => {
                 self.seeking = true;
                 self.drag_progress_ratio = Some(ratio);
-                let position_ms =
-                    (self.snapshot.duration_ms as f32 * ratio).round() as u64;
+                let position_ms = (self.snapshot.duration_ms as f32 * ratio).round() as u64;
                 app_ui_events::emit_music(
                     cx,
                     app_ui_events::AppUiEvent::ProgressChanged {
@@ -4564,8 +4520,7 @@ impl MusicApp {
                     .is_none_or(|current| (current - ratio).abs() >= 0.0015);
                 if changed {
                     self.drag_progress_ratio = Some(ratio);
-                    let position_ms =
-                        (self.snapshot.duration_ms as f32 * ratio).round() as u64;
+                    let position_ms = (self.snapshot.duration_ms as f32 * ratio).round() as u64;
                     app_ui_events::emit_music(
                         cx,
                         app_ui_events::AppUiEvent::ProgressChanged {
@@ -4707,9 +4662,8 @@ impl MusicApp {
         }
         if self.playback_time.is_none() {
             let engine = self.engine.clone();
-            self.playback_time = Some(cx.new(move |cx| {
-                player::PlaybackTime::new(parent, engine, ui_events, cx)
-            }));
+            self.playback_time =
+                Some(cx.new(move |cx| player::PlaybackTime::new(parent, engine, ui_events, cx)));
         }
         (
             self.playback_progress
@@ -4876,7 +4830,9 @@ impl Render for MusicApp {
         let stage_prewarm = !self.stage_prepared
             && !self.stage_open
             && !self.stage_animating
-            && self.stage_prewarm_after.is_some_and(|deadline| deadline <= now);
+            && self
+                .stage_prewarm_after
+                .is_some_and(|deadline| deadline <= now);
         if !self.stage_prepared
             && !self.stage_open
             && !self.stage_animating
@@ -4947,10 +4903,7 @@ impl Render for MusicApp {
         // hidden application shell. This removes sidebar/online-playlist/mini-player work from
         // transport and drag frames.
         let base_shell = if stage_fully_covering {
-            div()
-                .size_full()
-                .bg(theme::BG_CANVAS)
-                .into_any_element()
+            div().size_full().bg(theme::BG_CANVAS).into_any_element()
         } else {
             let (playback_progress, playback_time) = self.ensure_playback_progress(cx);
             let main_page = match self.page {
@@ -5052,11 +5005,7 @@ impl Render for MusicApp {
             let hidden_stage =
                 AnimationProperty::translation(stage_position(0.0), stage_position(1.0));
             let stage_titlebar = AnyView::from(stage_controls::titlebar_view(self, cx))
-                .cached(
-                    StyleRefinement::default()
-                        .w_full()
-                        .h(px(38.0)),
-                )
+                .cached(StyleRefinement::default().w_full().h(px(38.0)))
                 .reuse_on_window_refresh();
 
             let stage_layer = div()

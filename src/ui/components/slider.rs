@@ -257,11 +257,9 @@ fn slider_visual_with_group(
     hover_group: SharedString,
 ) -> Div {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
-    let interaction_height = px(
-        f32::from(style.interaction_height)
-            .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
-            .max(f32::from(style.hover_track_height)),
-    );
+    let interaction_height = px(f32::from(style.interaction_height)
+        .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
+        .max(f32::from(style.hover_track_height)));
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
     let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
@@ -304,7 +302,11 @@ fn slider_visual_with_group(
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
             .transition(theme::hover_transition())
-            .child(horizontal_track(clamped_ratio, style.hover_track_height, style))
+            .child(horizontal_track(
+                clamped_ratio,
+                style.hover_track_height,
+                style,
+            ))
     } else {
         div()
             .absolute()
@@ -314,7 +316,11 @@ fn slider_visual_with_group(
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
             .transition(theme::hover_transition())
-            .child(horizontal_track(clamped_ratio, style.hover_track_height, style))
+            .child(horizontal_track(
+                clamped_ratio,
+                style.hover_track_height,
+                style,
+            ))
     };
 
     let thumb_layer = if style.edge_overlay {
@@ -377,25 +383,19 @@ fn animated_horizontal_track(
         .rounded_full()
         .bg(style.filled_color);
 
-    let fill = if ratio >= 1.0 || animation.duration.is_zero() {
-        fill.into_any_element()
-    } else {
-        fill.with_animation(
-            ElementId::NamedInteger(
-                SharedString::new_static(animation_name),
-                animation.epoch,
-            ),
-            Animation::new(animation.duration).with_property(
-                AnimationProperty::horizontal_reveal(
-                    HorizontalRevealEdge::Left,
-                    ratio,
-                    1.0,
+    let fill =
+        if ratio >= 1.0 || animation.duration.is_zero() {
+            fill.into_any_element()
+        } else {
+            fill.with_animation(
+                ElementId::NamedInteger(SharedString::new_static(animation_name), animation.epoch),
+                Animation::new(animation.duration).with_property(
+                    AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, ratio, 1.0),
                 ),
-            ),
-            |element, _| element,
-        )
-        .into_any_element()
-    };
+                |element, _| element,
+            )
+            .into_any_element()
+        };
 
     div()
         .w_full()
@@ -418,11 +418,9 @@ fn slider_visual_with_group_animated(
         return slider_visual_with_group(id, 1.0, style, hover_group);
     }
 
-    let interaction_height = px(
-        f32::from(style.interaction_height)
-            .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
-            .max(f32::from(style.hover_track_height)),
-    );
+    let interaction_height = px(f32::from(style.interaction_height)
+        .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
+        .max(f32::from(style.hover_track_height)));
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
     let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
@@ -519,12 +517,10 @@ fn slider_visual_with_group_animated(
             SharedString::new_static("slider-progress-thumb"),
             animation.epoch,
         ),
-        Animation::new(animation.duration).with_property(
-            AnimationProperty::relative_translation(
-                point(ratio - 1.0, 0.0),
-                point(0.0, 0.0),
-            ),
-        ),
+        Animation::new(animation.duration).with_property(AnimationProperty::relative_translation(
+            point(ratio - 1.0, 0.0),
+            point(0.0, 0.0),
+        )),
         |element, _| element,
     );
 
@@ -890,5 +886,4 @@ mod tests {
         cell.set(None);
         assert!(cell.get().is_none());
     }
-
 }

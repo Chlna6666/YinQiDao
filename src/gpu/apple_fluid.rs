@@ -79,20 +79,16 @@ pub(crate) struct AppleFluidView {
 impl AppleFluidView {
     fn freeze_animation_clock(&mut self, now: Instant) {
         if let Some(started_at) = self.running_since.take() {
-            self.animation_seconds = (
-                self.animation_seconds
-                    + now.saturating_duration_since(started_at).as_secs_f32()
-            )
-                .rem_euclid(21_600.0);
+            self.animation_seconds = (self.animation_seconds
+                + now.saturating_duration_since(started_at).as_secs_f32())
+            .rem_euclid(21_600.0);
         }
     }
 
     fn current_animation_seconds(&self, now: Instant) -> f32 {
-        let elapsed = self
-            .running_since
-            .map_or(0.0, |started_at| {
-                now.saturating_duration_since(started_at).as_secs_f32()
-            });
+        let elapsed = self.running_since.map_or(0.0, |started_at| {
+            now.saturating_duration_since(started_at).as_secs_f32()
+        });
         (self.animation_seconds + elapsed).rem_euclid(21_600.0)
     }
 
@@ -166,8 +162,7 @@ impl Render for AppleFluidView {
                 // Nova publishes a 60 Hz-quantized presentation tick in GlobalParams on every
                 // retained present. Store the inverse offset here so the first renderer-owned frame
                 // is phase-continuous, then let the shader advance without touching this View.
-                let renderer_time_60hz =
-                    (window.presentation_time_seconds() * 60.0).floor() / 60.0;
+                let renderer_time_60hz = (window.presentation_time_seconds() * 60.0).floor() / 60.0;
                 let time_base = if animate {
                     current_time - renderer_time_60hz
                 } else {

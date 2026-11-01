@@ -210,4 +210,3 @@ pub(crate) fn set_desktop_lyrics_bounds(
 ) -> bool {
     false
 }
-

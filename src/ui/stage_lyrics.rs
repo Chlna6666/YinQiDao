@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
     SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
-    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px, relative,
+    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -204,23 +204,21 @@ impl StageKaraokeLineView {
         animation_epoch: u64,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            match *event {
-                AppUiEvent::PlaybackStateChanged(state) => {
-                    if this.playback_state != state {
-                        this.playback_state = state;
-                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
-                        cx.notify();
-                    }
+        let subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| match *event {
+            AppUiEvent::PlaybackStateChanged(state) => {
+                if this.playback_state != state {
+                    this.playback_state = state;
+                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                    cx.notify();
                 }
-                AppUiEvent::ProgressChanged { position_ms, ratio } => {
-                    let scrubbing = ratio.is_some();
-                    if this.position_ms != position_ms || this.scrubbing != scrubbing {
-                        this.position_ms = position_ms;
-                        this.scrubbing = scrubbing;
-                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
-                        cx.notify();
-                    }
+            }
+            AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                let scrubbing = ratio.is_some();
+                if this.position_ms != position_ms || this.scrubbing != scrubbing {
+                    this.position_ms = position_ms;
+                    this.scrubbing = scrubbing;
+                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                    cx.notify();
                 }
             }
         });
@@ -278,7 +276,6 @@ impl Render for StageKaraokeLineView {
     }
 }
 
-
 pub(super) fn sync_if_created(app: &MusicApp, cx: &mut Context<MusicApp>) {
     let existing = cx
         .try_global::<StageLyricsViewCache>()
@@ -298,8 +295,7 @@ pub(super) fn view(app: &MusicApp, cx: &mut Context<MusicApp>) -> Entity<StageLy
             return view.clone();
         }
         let view_events = ui_events.clone();
-        let view =
-            cx.new(move |cx| StageLyricsView::new(parent, engine, view_events, cx));
+        let view = cx.new(move |cx| StageLyricsView::new(parent, engine, view_events, cx));
         cache.view = Some(view.clone());
         view
     });
@@ -750,7 +746,7 @@ impl StageLyricsView {
                 .partition_point(|line| line.timestamp_ms <= position_ms)
                 .saturating_sub(1),
         );
-        let mut next_timestamp = active
+        let next_timestamp = active
             .and_then(|index| self.lines.get(index + 1))
             .map(|line| line.timestamp_ms);
 
@@ -938,11 +934,7 @@ impl Render for StageLyricsView {
         let karaoke_epoch = self.karaoke_epoch;
         let motion_epoch = self.motion_epoch;
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
-            lyric_motion_spring_value(
-                handoff.from_active,
-                handoff.to_active,
-                &self.row_prefix_sum,
-            )
+            lyric_motion_spring_value(handoff.from_active, handoff.to_active, &self.row_prefix_sum)
         });
         let lines = self.lines.clone();
         let active_karaoke_line = self.active_karaoke_line.clone();
@@ -962,71 +954,60 @@ impl Render for StageLyricsView {
                 .unwrap_or(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
             let hovered = self.hovered_index == Some(index);
 
-            let (y, viewport_alpha, viewport_blur, row_motion) =
-                if let Some(handoff) = handoff {
-                    let from_y = playback_stack_row_top(
-                        index,
-                        handoff.from_active,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    );
-                    let to_y = playback_stack_row_top(
-                        index,
-                        handoff.to_active,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    );
-                    let (mut from_alpha, mut from_blur) =
-                        playback_stack_viewport_profile(from_y, row_height, viewport_height);
-                    let (mut to_alpha, mut to_blur) =
-                        playback_stack_viewport_profile(to_y, row_height, viewport_height);
-                    if hovered {
-                        from_alpha = 1.0;
-                        to_alpha = 1.0;
-                        from_blur = 0.0;
-                        to_blur = 0.0;
-                    }
+            let (y, viewport_alpha, viewport_blur, row_motion) = if let Some(handoff) = handoff {
+                let from_y = playback_stack_row_top(
+                    index,
+                    handoff.from_active,
+                    &self.row_prefix_sum,
+                    anchor_y,
+                );
+                let to_y = playback_stack_row_top(
+                    index,
+                    handoff.to_active,
+                    &self.row_prefix_sum,
+                    anchor_y,
+                );
+                let (mut from_alpha, mut from_blur) =
+                    playback_stack_viewport_profile(from_y, row_height, viewport_height);
+                let (mut to_alpha, mut to_blur) =
+                    playback_stack_viewport_profile(to_y, row_height, viewport_height);
+                if hovered {
+                    from_alpha = 1.0;
+                    to_alpha = 1.0;
+                    from_blur = 0.0;
+                    to_blur = 0.0;
+                }
 
-                    let relative = index as isize - handoff.to_active as isize;
-                    let (delay, duration) = lyric_row_motion_timing(relative);
-                    let offset_y = from_y - to_y;
-                    let curve_x2 =
-                        motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2);
-                    let motion = (offset_y.abs() > 0.01).then_some(LyricRowVisualMotion {
-                        offset_y,
-                        delay,
-                        duration,
-                        curve_x2,
-                        from_viewport_alpha: from_alpha,
-                        to_viewport_alpha: to_alpha,
-                        from_viewport_blur: from_blur,
-                        to_viewport_blur: to_blur,
-                    });
-                    (to_y, to_alpha, to_blur, motion)
-                } else {
-                    let y = playback_stack_row_top(
-                        index,
-                        center_index,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    );
-                    let (mut viewport_alpha, mut viewport_blur) =
-                        playback_stack_viewport_profile(y, row_height, viewport_height);
-                    if reading_mode || hovered {
-                        viewport_alpha = 1.0;
-                        viewport_blur = 0.0;
-                    }
-                    (y, viewport_alpha, viewport_blur, None)
-                };
+                let relative = index as isize - handoff.to_active as isize;
+                let (delay, duration) = lyric_row_motion_timing(relative);
+                let offset_y = from_y - to_y;
+                let curve_x2 = motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2);
+                let motion = (offset_y.abs() > 0.01).then_some(LyricRowVisualMotion {
+                    offset_y,
+                    delay,
+                    duration,
+                    curve_x2,
+                    from_viewport_alpha: from_alpha,
+                    to_viewport_alpha: to_alpha,
+                    from_viewport_blur: from_blur,
+                    to_viewport_blur: to_blur,
+                });
+                (to_y, to_alpha, to_blur, motion)
+            } else {
+                let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
+                let (mut viewport_alpha, mut viewport_blur) =
+                    playback_stack_viewport_profile(y, row_height, viewport_height);
+                if reading_mode || hovered {
+                    viewport_alpha = 1.0;
+                    viewport_blur = 0.0;
+                }
+                (y, viewport_alpha, viewport_blur, None)
+            };
 
             let active_karaoke_overlay = if !reading_mode && index == active {
                 active_karaoke_line.as_ref().map(|view| {
                     AnyView::from(view.clone())
-                        .cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .inset_0(),
-                        )
+                        .cached(StyleRefinement::default().absolute().inset_0())
                         .reuse_on_window_refresh()
                 })
             } else {
@@ -1134,15 +1115,13 @@ impl Render for StageLyricsView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
-            .on_scroll_wheel(cx.listener(
-                |this, event: &gpui::ScrollWheelEvent, _, cx| {
-                    let delta = event.delta.pixel_delta(px(48.0)).y;
-                    this.begin_reading_mode(f32::from(delta), cx);
-                    let _ = this
-                        .parent
-                        .update(cx, |app, cx| app.wake_stage_controls(cx));
-                },
-            ))
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                let delta = event.delta.pixel_delta(px(48.0)).y;
+                this.begin_reading_mode(f32::from(delta), cx);
+                let _ = this
+                    .parent
+                    .update(cx, |app, cx| app.wake_stage_controls(cx));
+            }))
             .child(viewport_measure)
             .child(stack)
     }
@@ -1213,9 +1192,8 @@ fn render_lyric_row(
         previous_profile.map_or(target_alpha, |previous| previous.0)
     };
     let resolved_blur = if hovered { 0.0 } else { target_blur };
-    let blur_transition = row_motion.filter(|motion| {
-        (motion.from_viewport_blur - motion.to_viewport_blur).abs() > 0.001
-    });
+    let blur_transition = row_motion
+        .filter(|motion| (motion.from_viewport_blur - motion.to_viewport_blur).abs() > 0.001);
     let static_blur = if blur_transition.is_some() {
         0.0
     } else {
@@ -1584,8 +1562,7 @@ fn next_karaoke_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64
             && release_timestamp > position_ms
         {
             next_timestamp = Some(
-                next_timestamp
-                    .map_or(release_timestamp, |current| current.min(release_timestamp)),
+                next_timestamp.map_or(release_timestamp, |current| current.min(release_timestamp)),
             );
         }
     }
@@ -1653,10 +1630,7 @@ fn should_emphasize_sustained_word(word: &StageLyricWord) -> bool {
 }
 
 #[inline]
-fn sustained_time_envelope(
-    word: &StageLyricWord,
-    position_ms: u64,
-) -> f32 {
+fn sustained_time_envelope(word: &StageLyricWord, position_ms: u64) -> f32 {
     let Some(duration_ms) = word.duration_ms.filter(|duration| *duration > 0) else {
         return 0.0;
     };
@@ -1671,8 +1645,7 @@ fn sustained_time_envelope(
 
     // Long-note emphasis is clock-driven, not mask-driven. Give it a short attack, keep the bloom
     // through the sustained body, and release only near the authored syllable end.
-    let (attack_ms, release_ms) =
-        sustained_attack_release_ms(word).unwrap_or((120, 140));
+    let (attack_ms, release_ms) = sustained_attack_release_ms(word).unwrap_or((120, 140));
 
     if elapsed_ms < attack_ms {
         smoothstep01(elapsed_ms as f32 / attack_ms.max(1) as f32)
@@ -1731,14 +1704,10 @@ fn karaoke_reveal_word(
         (Duration::ZERO, progress)
     };
 
-    let animation = Animation::from_spec(
-        AnimationSpec::new(duration).ease(Easing::Linear),
-    )
-    .with_property(AnimationProperty::horizontal_reveal(
-        HorizontalRevealEdge::Left,
-        progress,
-        to_progress,
-    ));
+    let animation =
+        Animation::from_spec(AnimationSpec::new(duration).ease(Easing::Linear)).with_property(
+            AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, progress, to_progress),
+        );
 
     content
         .with_animation(
@@ -1752,10 +1721,7 @@ fn karaoke_reveal_word(
         .into_any_element()
 }
 
-fn word_reveal_remaining_duration(
-    word: &StageLyricWord,
-    position_ms: u64,
-) -> Option<Duration> {
+fn word_reveal_remaining_duration(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
     let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
     let end_ms = word.timestamp_ms.saturating_add(duration_ms);
     (position_ms < end_ms).then(|| Duration::from_millis(end_ms - position_ms))
@@ -1847,11 +1813,7 @@ fn sustained_animation_segment(
             Duration::from_millis((attack_ms - elapsed_ms).max(1)),
         ))
     } else if remaining_ms <= release_ms {
-        Some((
-            envelope,
-            0.0,
-            Duration::from_millis(remaining_ms.max(1)),
-        ))
+        Some((envelope, 0.0, Duration::from_millis(remaining_ms.max(1))))
     } else {
         None
     }
@@ -1870,12 +1832,7 @@ fn karaoke_word(
     let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
     let peak = sustained_word_peak_emphasis(word, is_last_word);
     let sustained = is_current_word && peak.glow_alpha > 0.0;
-    let static_emphasis = sustained_word_emphasis(
-        word,
-        position_ms,
-        is_current_word,
-        is_last_word,
-    );
+    let static_emphasis = sustained_word_emphasis(word, position_ms, is_current_word, is_last_word);
 
     // One visible glyph run owns both intrinsic word width and karaoke paint. The renderer-owned
     // ClipReveal masks this full-width subtree without changing flex geometry, eliminating the old
@@ -1907,13 +1864,11 @@ fn karaoke_word(
                             SharedString::new_static("lyric-word-glow"),
                             lyric_animation_instance_id(karaoke_epoch, index),
                         ),
-                        Animation::from_spec(
-                            AnimationSpec::new(duration).ease(Easing::InOutCubic),
-                        )
-                        .with_property(AnimationProperty::opacity(
-                            from_envelope.clamp(0.0, 1.0),
-                            to_envelope.clamp(0.0, 1.0),
-                        )),
+                        Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
+                            .with_property(AnimationProperty::opacity(
+                                from_envelope.clamp(0.0, 1.0),
+                                to_envelope.clamp(0.0, 1.0),
+                            )),
                         |element, _| element,
                     )
                     .into_any_element();
@@ -1948,7 +1903,7 @@ fn karaoke_word(
             karaoke_epoch,
         );
 
-        let mut word_root = div()
+        let word_root = div()
             .relative()
             .flex_none()
             .whitespace_nowrap()
@@ -1961,16 +1916,15 @@ fn karaoke_word(
                 let from_scale = 1.0 + (peak.scale - 1.0) * from_envelope;
                 let to_scale = 1.0 + (peak.scale - 1.0) * to_envelope;
                 let peak_scale = peak.scale.max(0.0001);
-                let animation = Animation::from_spec(
-                    AnimationSpec::new(duration).ease(Easing::InOutCubic),
-                )
-                .with_property(AnimationProperty::scale_opacity(
-                    from_scale / peak_scale,
-                    to_scale / peak_scale,
-                    1.0,
-                    1.0,
-                    TransformOrigin::new(0.0, 1.0),
-                ));
+                let animation =
+                    Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
+                        .with_property(AnimationProperty::scale_opacity(
+                            from_scale / peak_scale,
+                            to_scale / peak_scale,
+                            1.0,
+                            1.0,
+                            TransformOrigin::new(0.0, 1.0),
+                        ));
                 return word_root
                     .top(px(-peak.lift_px))
                     .scale(peak.scale)
@@ -2005,9 +1959,7 @@ fn karaoke_word(
         position_ms,
         animate,
         karaoke_epoch,
-    );
-
-    revealed
+    )
 }
 
 fn karaoke_words_overlay(
@@ -2115,16 +2067,8 @@ fn stage_primary_lyric(
         .into_any_element()
 }
 
-
-
-
 #[inline]
-fn playback_stack_row_top(
-    index: usize,
-    active: usize,
-    prefix_sum: &[f32],
-    anchor_y: f32,
-) -> f32 {
+fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
     let index_prefix = prefix_sum
         .get(index)
         .copied()
@@ -2139,11 +2083,7 @@ fn playback_stack_row_top(
 }
 
 #[inline]
-fn lyric_motion_spring_value(
-    from_active: usize,
-    to_active: usize,
-    prefix_sum: &[f32],
-) -> f32 {
+fn lyric_motion_spring_value(from_active: usize, to_active: usize, prefix_sum: &[f32]) -> f32 {
     let from = prefix_sum
         .get(from_active)
         .copied()
@@ -2197,9 +2137,7 @@ fn playback_stack_viewport_profile(
         0.0
     };
     let fade = smoothstep01(y / LYRIC_VIEWPORT_FADE_TOP_RATIO.max(0.001))
-        * smoothstep01(
-            (1.0 - y) / LYRIC_VIEWPORT_FADE_BOTTOM_RATIO.max(0.001),
-        );
+        * smoothstep01((1.0 - y) / LYRIC_VIEWPORT_FADE_BOTTOM_RATIO.max(0.001));
 
     (
         fade.clamp(0.0, 1.0),
@@ -2218,8 +2156,7 @@ fn lyric_row_motion_timing(relative_to_active: isize) -> (Duration, Duration) {
 
     let shifted = (relative_to_active + 4).max(0) as f32;
     let delay_ms = shifted.powf(LYRIC_MOTION_DELAY_POWER) * LYRIC_MOTION_DELAY_BASE_MS;
-    let duration_ms =
-        LYRIC_MOTION_BASE_DURATION_MS + shifted * LYRIC_MOTION_DURATION_STEP_MS;
+    let duration_ms = LYRIC_MOTION_BASE_DURATION_MS + shifted * LYRIC_MOTION_DURATION_STEP_MS;
 
     (
         Duration::from_secs_f32(delay_ms / 1_000.0),
@@ -2284,7 +2221,6 @@ fn format_lyric_time(ms: u64) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2302,7 +2238,7 @@ mod tests {
 
     #[test]
     fn prefix_sum_geometry_uses_real_row_heights() {
-        let heights = [82.0, 110.0, 90.0];
+        // `prefix` is the running sum of the row heights [82, 110, 90].
         let prefix = [0.0, 82.0, 192.0, 282.0];
         let anchor = 400.0;
 
@@ -2349,22 +2285,9 @@ mod tests {
         let start = Instant::now();
         let (delay, duration) = lyric_row_motion_timing(0);
         let p0 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay);
-        let p25 = lyric_row_motion_progress(
-            10,
-            10,
-            0.0,
-            start,
-            start + delay + duration / 4,
-        );
-        let p75 = lyric_row_motion_progress(
-            10,
-            10,
-            0.0,
-            start,
-            start + delay + duration * 3 / 4,
-        );
-        let p100 =
-            lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration);
+        let p25 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration / 4);
+        let p75 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration * 3 / 4);
+        let p100 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration);
 
         assert_eq!(p0, 0.0);
         assert!(p25 > 0.0);
@@ -2410,10 +2333,7 @@ mod tests {
         assert!(top.1 > 0.0 && top.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
         assert!(bottom.1 > 0.0 && bottom.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
         assert_eq!(quantize_viewport_blur(0.20), 0.0);
-        assert_eq!(
-            quantize_viewport_blur(8.0),
-            LYRIC_VIEWPORT_MAX_BLUR_PX
-        );
+        assert_eq!(quantize_viewport_blur(8.0), LYRIC_VIEWPORT_MAX_BLUR_PX);
     }
 
     #[test]
@@ -2517,8 +2437,6 @@ mod tests {
         assert_eq!(format_lyric_time(62_345), "01:02.345");
         assert_eq!(format_lyric_time(3_662_007), "01:01:02.007");
     }
-
-
 
     #[test]
     fn semantic_focus_is_binary_while_viewport_field_owns_blur() {
@@ -2641,7 +2559,10 @@ mod tests {
         };
 
         let release = sustained_release_timestamp(&line.words[0]).unwrap();
-        assert_eq!(next_karaoke_timestamp(&line, 1_100), Some(release.min(3_000)));
+        assert_eq!(
+            next_karaoke_timestamp(&line, 1_100),
+            Some(release.min(3_000))
+        );
         assert_eq!(next_karaoke_timestamp(&line, 2_999), Some(3_000));
         assert_eq!(next_karaoke_timestamp(&line, 3_100), Some(3_400));
         assert_eq!(next_karaoke_timestamp(&line, 3_400), None);

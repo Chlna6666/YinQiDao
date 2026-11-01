@@ -66,21 +66,19 @@ impl PlaybackProgress {
         let playback_state = engine
             .as_ref()
             .map_or(PlaybackState::Stopped, |engine| engine.progress().0);
-        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            match *event {
-                AppUiEvent::PlaybackStateChanged(state) => {
-                    if this.playback_state != state {
-                        this.playback_state = state;
-                        cx.notify();
-                    }
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| match *event {
+            AppUiEvent::PlaybackStateChanged(state) => {
+                if this.playback_state != state {
+                    this.playback_state = state;
+                    cx.notify();
                 }
-                AppUiEvent::ProgressChanged { ratio, .. } => {
-                    let next = ratio.map(f32::to_bits);
-                    if this.drag_ratio_bits != next {
-                        this.drag_ratio_bits = next;
-                        if this.local_drag_ratio.is_none() || ratio.is_none() {
-                            cx.notify();
-                        }
+            }
+            AppUiEvent::ProgressChanged { ratio, .. } => {
+                let next = ratio.map(f32::to_bits);
+                if this.drag_ratio_bits != next {
+                    this.drag_ratio_bits = next;
+                    if this.local_drag_ratio.is_none() || ratio.is_none() {
+                        cx.notify();
                     }
                 }
             }
@@ -146,10 +144,8 @@ impl PlaybackProgress {
                                 return None;
                             }
                             this.last_preview_emit_at = now;
-                            let duration_ms = this
-                                .engine
-                                .as_ref()
-                                .map_or(0, |engine| engine.progress().2);
+                            let duration_ms =
+                                this.engine.as_ref().map_or(0, |engine| engine.progress().2);
                             let position_ms = (duration_ms as f32 * ratio).round() as u64;
                             Some(AppUiEvent::ProgressChanged {
                                 position_ms,
@@ -272,17 +268,15 @@ impl PlaybackTime {
         ui_events: Entity<AppUiEventBridge>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            match *event {
-                AppUiEvent::PlaybackStateChanged(_) => cx.notify(),
-                AppUiEvent::ProgressChanged { position_ms, ratio } => {
-                    let next = ratio.map(|_| position_ms);
-                    if this.preview_position_ms != next {
-                        this.preview_position_ms = next;
-                        cx.notify();
-                    } else if ratio.is_none() {
-                        cx.notify();
-                    }
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| match *event {
+            AppUiEvent::PlaybackStateChanged(_) => cx.notify(),
+            AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                let next = ratio.map(|_| position_ms);
+                if this.preview_position_ms != next {
+                    this.preview_position_ms = next;
+                    cx.notify();
+                } else if ratio.is_none() {
+                    cx.notify();
                 }
             }
         });
@@ -320,7 +314,10 @@ impl Render for PlaybackTime {
         {
             let remainder = position_ms % 1_000;
             let delay = Duration::from_millis((1_000 - remainder).max(16));
-            window.request_invalidation_at(Instant::now() + delay.min(MINI_TIME_REFRESH_INTERVAL), cx);
+            window.request_invalidation_at(
+                Instant::now() + delay.min(MINI_TIME_REFRESH_INTERVAL),
+                cx,
+            );
         }
         let display_position = preview_position_ms.unwrap_or(position_ms);
 
@@ -340,7 +337,6 @@ impl Render for PlaybackTime {
             .child(theme::format_time(duration_ms))
     }
 }
-
 
 fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl IntoElement {
     if let Some(bytes) = artwork {

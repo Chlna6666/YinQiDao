@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter, Global,
-};
+use gpui::{App, AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter, Global};
 
 use crate::model::PlaybackState;
 
@@ -50,10 +48,6 @@ pub(crate) fn emit_music(cx: &mut Context<MusicApp>, event: AppUiEvent) {
     bridge.update(cx, |_, cx| cx.emit(event));
 }
 
-pub(crate) fn emit_from_app(
-    bridge: &Entity<AppUiEventBridge>,
-    event: AppUiEvent,
-    cx: &mut App,
-) {
-    let _ = bridge.update(cx, |_, cx| cx.emit(event));
+pub(crate) fn emit_from_app(bridge: &Entity<AppUiEventBridge>, event: AppUiEvent, cx: &mut App) {
+    bridge.update(cx, |_, cx| cx.emit(event));
 }

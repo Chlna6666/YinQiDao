@@ -79,12 +79,8 @@ impl PlaybackAssetCache {
                 entries_directory.display()
             )
         })?;
-        fs::create_dir_all(&lyrics_directory).with_context(|| {
-            format!(
-                "创建在线歌词缓存目录失败: {}",
-                lyrics_directory.display()
-            )
-        })?;
+        fs::create_dir_all(&lyrics_directory)
+            .with_context(|| format!("创建在线歌词缓存目录失败: {}", lyrics_directory.display()))?;
         Ok(Self {
             directory,
             entries_directory,
@@ -275,7 +271,10 @@ fn validate_playback_entry(entry: &DiskPlaybackEntry) -> Result<()> {
         || entry.route.provider_id.len() > 128
         || entry.route.account_id.len() > 512
         || entry.source.source_id.len() > 1024
-        || entry.cover_url.as_ref().is_some_and(|url| url.len() > 8 * 1024)
+        || entry
+            .cover_url
+            .as_ref()
+            .is_some_and(|url| url.len() > 8 * 1024)
     {
         bail!("在线播放缓存字段超过安全上限");
     }
@@ -300,14 +299,16 @@ where
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("读取缓存 metadata 失败: {}", path.display()));
+            return Err(error)
+                .with_context(|| format!("读取缓存 metadata 失败: {}", path.display()));
         }
     };
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CACHE_FILE_BYTES {
         return Ok(None);
     }
 
-    let bytes = fs::read(path).with_context(|| format!("读取在线播放缓存失败: {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("读取在线播放缓存失败: {}", path.display()))?;
     match serde_json::from_slice::<T>(&bytes) {
         Ok(value) => Ok(Some(value)),
         Err(error) => {
@@ -336,8 +337,7 @@ where
         // Windows rename does not replace an existing destination. Writes are serialized, so the
         // remove+rename fallback cannot race another writer inside this cache instance.
         if path.exists() {
-            fs::remove_file(path)
-                .with_context(|| format!("替换旧缓存失败: {}", path.display()))?;
+            fs::remove_file(path).with_context(|| format!("替换旧缓存失败: {}", path.display()))?;
             fs::rename(&tmp, path)
                 .with_context(|| format!("提交在线播放缓存失败: {}", path.display()))?;
         } else {

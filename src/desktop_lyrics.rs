@@ -367,15 +367,13 @@ impl MusicApp {
         ensure_window_state(cx);
         let overlay =
             cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
-        let moved = overlay
-            .as_ref()
-            .is_some_and(|overlay| {
-                overlay
-                    .update(cx, |_view, window, _cx| {
-                        crate::window_platform::set_desktop_lyrics_bounds(window, bounds)
-                    })
-                    .unwrap_or(false)
-            });
+        let moved = overlay.as_ref().is_some_and(|overlay| {
+            overlay
+                .update(cx, |_view, window, _cx| {
+                    crate::window_platform::set_desktop_lyrics_bounds(window, bounds)
+                })
+                .unwrap_or(false)
+        });
 
         // Windows keeps the same HWND, avoiding a one-frame duplicate DirectComposition surface.
         // Platforms without direct geometry support fall back to the previous recreate path.

@@ -23,11 +23,7 @@ pub(super) fn mini_player(
 
     let mini_player = mini_player_view::view(app, cx, playback_progress, playback_time);
     let mini_player = AnyView::from(mini_player)
-        .cached(
-            StyleRefinement::default()
-                .w_full()
-                .h(px(72.0)),
-        )
+        .cached(StyleRefinement::default().w_full().h(px(72.0)))
         .reuse_on_window_refresh();
     div()
         .relative()

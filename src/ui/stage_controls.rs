@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render,
-    SharedString, Subscription, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
+    AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString,
+    StyleRefinement, Subscription, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -16,10 +16,7 @@ use crate::{
 
 use super::{
     app_ui_events::{self, AppUiEvent, AppUiEventBridge},
-    components::{
-        SliderStyle,
-        slider::InteractiveSliderState,
-    },
+    components::{SliderStyle, slider::InteractiveSliderState},
     shell::MusicApp,
     stage_chrome,
     theme::{self, format_remaining_time, format_time, themed_icon},
@@ -206,8 +203,7 @@ fn transport_view(
             return view.clone();
         }
         let view_events = ui_events.clone();
-        let view =
-            cx.new(move |cx| StageTransportView::new(parent, engine, view_events, cx));
+        let view = cx.new(move |cx| StageTransportView::new(parent, engine, view_events, cx));
         cache.view = Some(view.clone());
         view
     });
@@ -582,7 +578,6 @@ impl Render for StageControlsView {
     }
 }
 
-
 pub(super) struct StageTitlebarView {
     parent: WeakEntity<MusicApp>,
     fade: StageChromeFade,
@@ -842,19 +837,17 @@ impl StageTransportView {
         ui_events: Entity<AppUiEventBridge>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            match *event {
-                AppUiEvent::PlaybackStateChanged(state) => {
-                    if this.playback_state != state {
-                        this.playback_state = state;
-                        cx.notify();
-                    }
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| match *event {
+            AppUiEvent::PlaybackStateChanged(state) => {
+                if this.playback_state != state {
+                    this.playback_state = state;
+                    cx.notify();
                 }
-                AppUiEvent::ProgressChanged { ratio, .. } => {
-                    if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
-                        this.drag_progress_ratio = ratio;
-                        cx.notify();
-                    }
+            }
+            AppUiEvent::ProgressChanged { ratio, .. } => {
+                if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                    this.drag_progress_ratio = ratio;
+                    cx.notify();
                 }
             }
         });
@@ -902,13 +895,7 @@ impl StageTransportView {
             let stage_active = self.stage_active;
             let controls_visible = self.controls_visible;
             progress.update(cx, |progress, cx| {
-                progress.sync(
-                    engine,
-                    playback_state,
-                    stage_active,
-                    controls_visible,
-                    cx,
-                )
+                progress.sync(engine, playback_state, stage_active, controls_visible, cx)
             });
         }
 
@@ -995,7 +982,6 @@ impl Render for StageTransportView {
     }
 }
 
-
 struct StageProgressView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
@@ -1026,24 +1012,22 @@ impl StageProgressView {
         let transport_generation = engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
-        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
-            match *event {
-                AppUiEvent::PlaybackStateChanged(state) => {
-                    if this.playback_state != state {
-                        this.playback_state = state;
-                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
-                        cx.notify();
-                    }
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| match *event {
+            AppUiEvent::PlaybackStateChanged(state) => {
+                if this.playback_state != state {
+                    this.playback_state = state;
+                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                    cx.notify();
                 }
-                AppUiEvent::ProgressChanged { ratio, .. } => {
-                    if this.local_dragging && ratio.is_some() {
-                        return;
-                    }
-                    if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
-                        this.drag_progress_ratio = ratio;
-                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
-                        cx.notify();
-                    }
+            }
+            AppUiEvent::ProgressChanged { ratio, .. } => {
+                if this.local_dragging && ratio.is_some() {
+                    return;
+                }
+                if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                    this.drag_progress_ratio = ratio;
+                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                    cx.notify();
                 }
             }
         });
@@ -1121,10 +1105,7 @@ impl StageProgressView {
                     this.local_dragging = true;
                     this.drag_progress_ratio = Some(ratio);
                     this.last_preview_emit_at = Instant::now();
-                    let duration_ms = this
-                        .engine
-                        .as_ref()
-                        .map_or(0, |engine| engine.progress().2);
+                    let duration_ms = this.engine.as_ref().map_or(0, |engine| engine.progress().2);
                     let position_ms = (duration_ms as f32 * ratio).round() as u64;
                     cx.notify();
                     AppUiEvent::ProgressChanged {
@@ -1153,8 +1134,7 @@ impl StageProgressView {
                     this.local_dragging = true;
                     this.drag_progress_ratio = Some(ratio);
                     let now = Instant::now();
-                    let should_emit = now
-                        .saturating_duration_since(this.last_preview_emit_at)
+                    let should_emit = now.saturating_duration_since(this.last_preview_emit_at)
                         >= app_ui_events::PROGRESS_PREVIEW_INTERVAL;
                     cx.notify();
 
@@ -1162,10 +1142,7 @@ impl StageProgressView {
                         return None;
                     }
                     this.last_preview_emit_at = now;
-                    let duration_ms = this
-                        .engine
-                        .as_ref()
-                        .map_or(0, |engine| engine.progress().2);
+                    let duration_ms = this.engine.as_ref().map_or(0, |engine| engine.progress().2);
                     let position_ms = (duration_ms as f32 * ratio).round() as u64;
                     Some(AppUiEvent::ProgressChanged {
                         position_ms,
@@ -1196,7 +1173,6 @@ impl StageProgressView {
             },
         ));
     }
-
 }
 
 impl Render for StageProgressView {

@@ -21,8 +21,8 @@ mod audio;
 mod audio_policy;
 mod desktop_lyrics;
 mod global_shortcuts;
-mod gpui_diagnostics;
 mod gpu;
+mod gpui_diagnostics;
 mod hotkeys;
 mod library;
 mod lucide_assets {

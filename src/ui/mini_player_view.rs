@@ -6,7 +6,8 @@ use std::{
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
     IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Subscription, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    Subscription, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb,
 };
 use lucide_gpui::icon;
 
@@ -99,28 +100,28 @@ pub(super) fn view(
                 }
             });
             MiniPlayerView {
-            parent: view_parent,
-            playback_progress: initial_progress,
-            playback_time: initial_time,
-            volume_slider,
-            track: MiniTrackRenderData::default(),
-            key: MiniPlayerRenderKey {
-                track_id: None,
-                artwork_ptr: 0,
-                artwork_len: 0,
-                playback_state: PlaybackState::Stopped,
-                shuffle: false,
-                repeat: RepeatMode::Off,
-                desktop_lyrics_visible: false,
-                queue_active: false,
-                slider_volume_bits: 1.0_f32.to_bits(),
-                icon_volume_bits: 1.0_f32.to_bits(),
-            },
-            slider_volume: 1.0,
-            icon_volume: 1.0,
-            last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
-            last_volume_command: 1.0,
-            _ui_subscription: ui_subscription,
+                parent: view_parent,
+                playback_progress: initial_progress,
+                playback_time: initial_time,
+                volume_slider,
+                track: MiniTrackRenderData::default(),
+                key: MiniPlayerRenderKey {
+                    track_id: None,
+                    artwork_ptr: 0,
+                    artwork_len: 0,
+                    playback_state: PlaybackState::Stopped,
+                    shuffle: false,
+                    repeat: RepeatMode::Off,
+                    desktop_lyrics_visible: false,
+                    queue_active: false,
+                    slider_volume_bits: 1.0_f32.to_bits(),
+                    icon_volume_bits: 1.0_f32.to_bits(),
+                },
+                slider_volume: 1.0,
+                icon_volume: 1.0,
+                last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
+                last_volume_command: 1.0,
+                _ui_subscription: ui_subscription,
             }
         });
         cache.view = Some(view.clone());
