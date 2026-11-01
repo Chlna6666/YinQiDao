@@ -27,9 +27,34 @@ pub fn source_chip(label: &str) -> AnyElement {
         .into_any_element()
 }
 
+/// 多来源判定 + 显示名提取：仅当启用来源 ≥2 时才返回标识文案。
+pub fn provider_label_for(
+    labels: &std::collections::BTreeMap<String, String>,
+    provider_id: &str,
+) -> Option<String> {
+    if labels.len() > 1 {
+        labels.get(provider_id).cloned()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_label_only_in_multi_source_mode() {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("netease".into(), "网易云音乐".into());
+        assert_eq!(provider_label_for(&labels, "netease"), None);
+        labels.insert("qqmusic".into(), "QQ音乐".into());
+        assert_eq!(
+            provider_label_for(&labels, "qqmusic"),
+            Some("QQ音乐".into())
+        );
+        assert_eq!(provider_label_for(&labels, "unknown"), None);
+    }
 
     #[test]
     fn source_chip_renders_label_text() {

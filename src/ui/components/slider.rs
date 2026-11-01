@@ -627,11 +627,6 @@ fn vertical_slider_visual(id: ElementId, ratio: f32, height: Pixels, style: Slid
         )
 }
 
-pub fn smooth_slider(id: impl Into<ElementId>, ratio: f32, style: SliderStyle) -> Stateful<Div> {
-    let id = id.into();
-    slider_visual(id.clone(), ratio, style).id(id)
-}
-
 pub fn interactive_slider(
     id: impl Into<ElementId>,
     ratio: f32,

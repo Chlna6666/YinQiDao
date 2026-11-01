@@ -194,7 +194,7 @@ fn attach_translation(line: &mut LyricLine, translation: &LyricLine) {
 }
 
 fn is_legacy_bilingual_source(source: &str) -> bool {
-    matches!(source, "网易云音乐" | "QQ音乐" | "缓存")
+    matches!(source, "网易云音乐" | "QQ音乐" | "qqmusic" | "缓存")
 }
 
 fn collapse_legacy_bilingual_lrc(input: &str) -> Vec<LyricLine> {

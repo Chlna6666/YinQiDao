@@ -407,7 +407,8 @@ where
         .on_mouse_down(gpui::MouseButton::Left, on_click)
 }
 
-fn song_table_header() -> impl IntoElement {
+/// 曲目表头（本地/在线共用同一套列规格，仅文案不同）。
+fn track_table_header(title_label: &'static str, artist_label: &'static str) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -419,30 +420,19 @@ fn song_table_header() -> impl IntoElement {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(TEXT_TERTIARY)
         .child(div().w(px(36.0)).child("#"))
-        .child(div().flex_1().min_w(px(0.0)).child("标题"))
-        .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child("艺人"))
+        .child(div().flex_1().min_w(px(0.0)).child(title_label))
+        .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child(artist_label))
         .child(div().flex_1().min_w(px(110.0)).max_w(px(260.0)).child("专辑"))
         .child(div().w(px(64.0)).child("时长"))
         .child(div().w(px(48.0)).child("操作"))
 }
 
+fn song_table_header() -> impl IntoElement {
+    track_table_header("标题", "艺人")
+}
+
 fn online_table_header() -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .px_4()
-        .py_2()
-        .border_b_1()
-        .border_color(BORDER_HAIRLINE)
-        .text_xs()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(TEXT_TERTIARY)
-        .child(div().w(px(36.0)).child("#"))
-        .child(div().flex_1().min_w(px(0.0)).child("单曲标题"))
-        .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child("歌手"))
-        .child(div().flex_1().min_w(px(110.0)).max_w(px(260.0)).child("专辑"))
-        .child(div().w(px(64.0)).child("时长"))
-        .child(div().w(px(48.0)).child("操作"))
+    track_table_header("单曲标题", "歌手")
 }
 
 fn online_search_row<V: 'static>(
@@ -730,7 +720,7 @@ fn songs_view<V: 'static>(
             );
         } else {
             for (idx, remote_track) in app.online_search_results.iter().enumerate() {
-                let source_label = crate::ui::home::source_label_for(&provider_labels, &remote_track.source.provider_id);
+                let source_label = crate::ui::components::source_chip::provider_label_for(&provider_labels, &remote_track.source.provider_id);
                 online_list = online_list.child(online_search_row(
                     idx + 1,
                     remote_track,

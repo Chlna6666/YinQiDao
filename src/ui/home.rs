@@ -462,18 +462,6 @@ pub(crate) fn fallback_online_route(app: &MusicApp) -> PluginRoute {
         })
 }
 
-/// 来源标识标签：多来源启用时返回该 provider 的显示名。
-pub(crate) fn source_label_for(
-    labels: &std::collections::BTreeMap<String, String>,
-    provider_id: &str,
-) -> Option<String> {
-    if labels.len() > 1 {
-        labels.get(provider_id).cloned()
-    } else {
-        None
-    }
-}
-
 fn discover_feature_cards<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
@@ -958,8 +946,10 @@ fn recommended_playlists_section<V: 'static>(
             let col_menu = collection_ref.clone();
             let route_menu = route_clone.clone();
 
-            let source_label =
-                source_label_for(&provider_labels, &item.collection.source.provider_id);
+            let source_label = crate::ui::components::source_chip::provider_label_for(
+                &provider_labels,
+                &item.collection.source.provider_id,
+            );
             grid = grid.child(
                 div()
                     .w(px(150.0))
