@@ -26,6 +26,45 @@ pub fn accent_red_border() -> Hsla {
     hsla(348.0, 0.95, 0.56, 0.25)
 }
 
+/// 强调色柔和高亮底（选中播放列表药丸），比 muted 更实的粉底
+pub fn accent_red_soft() -> Hsla {
+    hsla(348.0, 0.90, 0.95, 1.0)
+}
+
+/// 强调色柔和描边
+pub fn accent_red_soft_border() -> Hsla {
+    hsla(348.0, 0.90, 0.60, 0.30)
+}
+
+/// 语义状态前景/底色（成功/警告/错误），供状态药丸与提示组件使用
+pub fn success_fg() -> Hsla {
+    hsla(140.0, 0.45, 0.36, 1.0)
+}
+
+pub fn success_tint(alpha: f32) -> Hsla {
+    hsla(140.0, 0.45, 0.45, alpha)
+}
+
+pub fn warning_fg() -> Hsla {
+    hsla(38.0, 0.75, 0.36, 1.0)
+}
+
+pub fn warning_tint(alpha: f32) -> Hsla {
+    hsla(40.0, 0.85, 0.50, alpha)
+}
+
+pub fn error_tint(alpha: f32) -> Hsla {
+    hsla(8.0, 0.72, 0.52, alpha)
+}
+
+pub fn info_fg() -> Hsla {
+    hsla(210.0, 0.75, 0.45, 1.0)
+}
+
+pub fn info_tint(alpha: f32) -> Hsla {
+    hsla(210.0, 0.65, 0.50, alpha)
+}
+
 /// 语义状态色（成功 / 警告 / 信息；对齐 Apple 系统色）
 pub const SUCCESS_GREEN: Rgba = rgb(0x34_c7_59);
 pub const WARNING_AMBER: Rgba = rgb(0xff_9f_0a);
@@ -131,6 +170,10 @@ pub mod dark {
     /// 黑色遮罩/阴影（scrim），显式 alpha
     pub fn scrim(alpha: f32) -> Hsla {
         hsla(0.0, 0.0, 0.0, alpha)
+    }
+    /// 深色表面描边（调试窗卡片边框等）
+    pub fn border() -> Hsla {
+        hsla(0.0, 0.0, 1.0, 0.10)
     }
 }
 

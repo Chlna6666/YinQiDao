@@ -13,7 +13,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, App, AppContext,
     Bounds, CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
     KeyDownEvent, Render, SharedString, StyleRefinement, Subscription, Timer, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, hsla, point, prelude::*, px, rgb, size,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -4725,17 +4725,17 @@ impl MusicApp {
                     .gap_2()
                     .child(traffic_light_button(
                         "window-close",
-                        rgb(0xff_5f_56),
+                        theme::TRAFFIC_LIGHT_RED,
                         cx.listener(|_, _, _, cx| cx.quit()),
                     ))
                     .child(traffic_light_button(
                         "window-minimize",
-                        rgb(0xff_bd_2e),
+                        theme::TRAFFIC_LIGHT_AMBER,
                         cx.listener(|_, _, window, _| window.minimize_window()),
                     ))
                     .child(traffic_light_button(
                         "window-maximize",
-                        rgb(0x27_c9_3f),
+                        theme::TRAFFIC_LIGHT_GREEN,
                         cx.listener(|_, _, window, _| {
                             if window.is_maximized() {
                                 window.restore_window();
@@ -5013,7 +5013,7 @@ impl Render for MusicApp {
                 .absolute()
                 .inset_0()
                 .overflow_hidden()
-                .bg(rgb(0x0e0f16))
+                .bg(theme::STAGE_BG)
                 .text_color(theme::TEXT_WHITE)
                 .on_mouse_move(
                     cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
@@ -5372,7 +5372,7 @@ fn sidebar(
                                 .child(theme::themed_icon(
                                     icon!(audio_waveform),
                                     18.0,
-                                    hsla(0.0, 0.0, 1.0, 1.0),
+                                    theme::dark::white(1.0),
                                 )),
                         )
                         .child(
@@ -5527,7 +5527,7 @@ fn sidebar(
                         .px_2()
                         .py_2()
                         .rounded_md()
-                        .bg(hsla(0.0, 0.0, 0.0, 0.02))
+                        .bg(theme::dark::scrim(0.02))
                         .child(
                             div()
                                 .size(px(7.0))
@@ -5749,9 +5749,9 @@ where
                         .rounded_full()
                         .flex_none()
                         .bg(if active {
-                            theme::ACCENT_RED.into()
+                            theme::ACCENT_RED
                         } else {
-                            hsla(220.0, 0.08, 0.60, 1.0)
+                            theme::TEXT_TERTIARY
                         }),
                 )
                 .child(
@@ -5804,7 +5804,7 @@ where
         theme::TEXT_PRIMARY
     };
     let icon_color = if active {
-        hsla(348.0, 0.95, 0.56, 1.0)
+        theme::ACCENT_RED.into()
     } else {
         theme::TEXT_TERTIARY.into()
     };
@@ -5869,7 +5869,7 @@ where
         .rounded_full()
         .bg(color)
         .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.15))
+        .border_color(theme::dark::scrim(0.15))
         .cursor_pointer()
         .occlude()
         .window_control_area(gpui::WindowControlArea::Client)

@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     Context, EncodedImageBytes, Entity, ImageFormat, IntoElement, ObjectFit, Render, Subscription,
-    WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    WeakEntity, Window, div, img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -15,7 +15,7 @@ use super::{
     app_ui_events::{self, AppUiEvent, AppUiEventBridge},
     components::{SliderStyle, slider::InteractiveSliderState},
     shell::MusicApp,
-    theme::{self, TEXT_TERTIARY, TEXT_WHITE, elegant_gradient_for, themed_icon},
+    theme::{self, TEXT_TERTIARY, TEXT_WHITE, dark, elegant_gradient_for, themed_icon},
 };
 
 const MINI_PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -360,7 +360,7 @@ fn mini_cover_element(track_id: Option<i64>, artwork: Option<Arc<[u8]>>) -> impl
         .flex()
         .items_center()
         .justify_center()
-        .child(themed_icon(icon!(disc_3), 22.0, hsla(0.0, 0.0, 1.0, 0.85)))
+        .child(themed_icon(icon!(disc_3), 22.0, dark::white(0.85)))
         .into_any_element()
 }
 
@@ -409,10 +409,11 @@ impl Render for NowPlaying {
             track.artist.as_str()
         });
         let artwork = self.artwork.clone();
+        // 动态模糊封面之上的底色比静态背景更深一档（恢复 0x0e0f16/0x11131c 的原始层次）
         let bg = if self.dynamic_blur {
-            rgb(0x11131c)
+            theme::STAGE_BG
         } else {
-            rgb(0x0e0f16)
+            theme::STAGE_BG_ELEVATED
         };
 
         div()
@@ -447,7 +448,7 @@ impl Render for NowPlaying {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(themed_icon(icon!(disc_3), 96.0, hsla(0.0, 0.0, 1.0, 0.75)))
+                            .child(themed_icon(icon!(disc_3), 96.0, dark::white(0.75)))
                             .into_any_element()
                     })
                     .child(
@@ -459,7 +460,7 @@ impl Render for NowPlaying {
                     .child(
                         div()
                             .text_base()
-                            .text_color(hsla(0.0, 0.0, 1.0, 0.68))
+                            .text_color(dark::white(0.68))
                             .child(artist.to_owned()),
                     ),
             )

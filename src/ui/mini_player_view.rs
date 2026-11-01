@@ -6,8 +6,7 @@ use std::{
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
     IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Subscription, WeakEntity, Window, div, hsla, img, linear_color_stop, linear_gradient,
-    prelude::*, px, rgb,
+    Subscription, WeakEntity, Window, div, img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -22,8 +21,8 @@ use super::{
     player_stage::{PlaybackProgress, PlaybackTime},
     shell::MusicApp,
     theme::{
-        self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, elegant_gradient_for, press_transition,
-        themed_icon,
+        self, ACCENT_RED, TEXT_PRIMARY, TEXT_SECONDARY, dark, elegant_gradient_for,
+        press_transition, themed_icon,
     },
 };
 
@@ -297,7 +296,7 @@ impl Render for MiniPlayerView {
                                     .child(themed_icon(
                                         icon!(heart),
                                         15.0,
-                                        hsla(220.0, 0.08, 0.60, 1.0),
+                                        theme::TEXT_TERTIARY.into(),
                                     )),
                             ),
                     )
@@ -352,7 +351,7 @@ impl Render for MiniPlayerView {
                                             .bg(if is_playing {
                                                 ACCENT_RED
                                             } else {
-                                                rgb(0x1d_1d_1f)
+                                                theme::TEXT_PRIMARY
                                             })
                                             .hover(|style| style.opacity(0.90))
                                             .transition(press_transition())
@@ -364,7 +363,7 @@ impl Render for MiniPlayerView {
                                                     icon!(play)
                                                 },
                                                 18.0,
-                                                hsla(0.0, 0.0, 1.0, 1.0),
+                                                dark::white(1.0),
                                             ))
                                             .on_mouse_down(gpui::MouseButton::Left, {
                                                 let parent = parent.clone();
@@ -426,9 +425,9 @@ impl Render for MiniPlayerView {
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(if self.key.desktop_lyrics_visible {
-                                        ACCENT_RED
+                                        gpui::Hsla::from(ACCENT_RED)
                                     } else {
-                                        rgb(0x78_7f_8c)
+                                        theme::TEXT_TERTIARY.into()
                                     })
                                     .hover(|style| style.bg(theme::bg_hover()))
                                     .transition(press_transition())
@@ -654,7 +653,7 @@ fn control_button(
             } else if compact {
                 theme::TEXT_TERTIARY.into()
             } else {
-                hsla(220.0, 0.10, 0.35, 1.0)
+                theme::TEXT_SECONDARY.into()
             },
         ))
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
@@ -724,6 +723,6 @@ fn mini_cover_element(track_id: Option<TrackId>, artwork: Option<Arc<[u8]>>) -> 
         .flex()
         .items_center()
         .justify_center()
-        .child(themed_icon(icon!(disc_3), 22.0, hsla(0.0, 0.0, 1.0, 0.85)))
+        .child(themed_icon(icon!(disc_3), 22.0, dark::white(0.85)))
         .into_any_element()
 }

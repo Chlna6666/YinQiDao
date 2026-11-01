@@ -52,7 +52,7 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
                 .px_8()
                 .pt_5()
                 .pb_3()
-                .bg(rgb(0xfa_fb_fc))
+                .bg(theme::BG_CARD)
                 .border_b_1()
                 .border_color(BORDER_HAIRLINE)
                 .child(header())
@@ -405,7 +405,7 @@ fn eq_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
                 div()
                     .p_5()
                     .rounded_2xl()
-                    .bg(rgb(0xf8_f9_fb))
+                    .bg(theme::BG_CARD)
                     .border_1()
                     .border_color(BORDER_CARD)
                     .child(bands),
@@ -425,7 +425,7 @@ fn eq_band(
     style.filled_color = if db >= 0.0 {
         ACCENT_RED.into()
     } else {
-        rgb(0x00_7a_ff).into()
+        theme::INFO_BLUE.into()
     };
     let weak = cx.weak_entity();
 
@@ -1461,7 +1461,7 @@ fn toggle_switch(
         .p(px(3.0))
         .rounded_full()
         .cursor_pointer()
-        .bg(if active { ACCENT_RED } else { rgb(0xd8_db_e2) })
+        .bg(if active { ACCENT_RED } else { theme::BORDER_HAIRLINE })
         .flex()
         .when(active, |style| style.justify_end())
         .when(!active, |style| style.justify_start())

@@ -6,8 +6,8 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
-    SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
-    WeakEntity, Window, bounds_observer, div, point, prelude::*, px,
+    SharedString, StyleRefinement, Subscription, TransformOrigin, WeakEntity, Window,
+    bounds_observer, div, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     app_ui_events::{self, AppUiEvent},
     shell::MusicApp,
-    theme::{dark, themed_icon},
+    theme::{dark, hover_transition, themed_icon},
 };
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
@@ -1356,11 +1356,7 @@ fn render_lyric_row(
                 .items_center()
                 .justify_center()
                 .opacity(if interactive && hovered { 1.0 } else { 0.0 })
-                .transition(
-                    Transition::new(Duration::from_millis(80))
-                        .ease(Easing::OutCubic)
-                        .properties([TransitionProperty::Opacity]),
-                )
+                .transition(hover_transition())
                 .bg(dark::scrim(0.28))
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)

@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use gpui::{App, IntoElement, WeakEntity, div, hsla, prelude::*, px, uniform_list};
+use gpui::{App, IntoElement, WeakEntity, div, prelude::*, px, uniform_list};
 use lucide_gpui::icon;
 
 use crate::{
@@ -126,7 +126,7 @@ pub(super) fn render<V: 'static>(
                                         .rounded_md()
                                         .bg(theme::accent_red_muted())
                                         .border_1()
-                                        .border_color(hsla(348.0, 0.95, 0.56, 0.3))
+                                        .border_color(theme::accent_red_border())
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(ACCENT_RED)
@@ -489,9 +489,9 @@ fn render_online_song_row(
                                         .px(px(3.5))
                                         .py(px(0.5))
                                         .rounded(px(theme::RADIUS_SM))
-                                        .bg(hsla(348.0, 0.90, 0.96, 1.0))
+                                        .bg(theme::accent_red_soft())
                                         .border_1()
-                                        .border_color(hsla(348.0, 0.85, 0.65, 0.35))
+                                        .border_color(theme::accent_red_soft_border())
                                         .text_color(ACCENT_RED)
                                         .text_size(px(theme::FONT_CAPTION_MIN))
                                         .line_height(px(11.0))

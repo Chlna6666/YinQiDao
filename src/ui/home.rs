@@ -3,7 +3,7 @@ use std::{collections::HashSet, rc::Rc};
 use anyhow::Result;
 use gpui::{
     Context, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity, div,
-    hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -23,7 +23,7 @@ use super::{
     shell::{MusicApp, app_listener},
     theme::{
         self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_WHITE,
-        elegant_gradient_for, format_time, press_transition, themed_icon,
+        dark, elegant_gradient_for, format_time, press_transition, themed_icon,
     },
 };
 
@@ -816,7 +816,7 @@ where
         .hover(|s| s.scale(theme::HOVER_SCALE).border_color(ACCENT_RED))
         .transition(press_transition())
         .child(bg_element)
-        .child(div().absolute().inset_0().bg(hsla(0.0, 0.0, 0.0, 0.25)))
+        .child(div().absolute().inset_0().bg(dark::scrim(0.25)))
         .child(
             div()
                 .absolute()
@@ -828,7 +828,7 @@ where
                 .px_2p5()
                 .py_1()
                 .rounded_lg()
-                .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                .bg(dark::scrim(0.55))
                 .child(themed_icon(badge_icon, 13.0, TEXT_WHITE.into()))
                 .child(
                     div()
@@ -845,7 +845,7 @@ where
                 .left_0()
                 .right_0()
                 .p_2p5()
-                .bg(hsla(0.0, 0.0, 0.0, 0.65))
+                .bg(dark::scrim(0.65))
                 .child(
                     div()
                         .text_xs()
@@ -966,7 +966,7 @@ fn recommended_playlists_section<V: 'static>(
                                     .px_2()
                                     .py_0p5()
                                     .rounded_full()
-                                    .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                                    .bg(dark::scrim(0.55))
                                     .child(themed_icon(icon!(headphones), 11.0, TEXT_WHITE.into()))
                                     .child(
                                         div()
@@ -1206,9 +1206,9 @@ fn daily_recommended_tracks_section<V: 'static>(
                                                 .px_1()
                                                 .py_0p5()
                                                 .rounded(px(theme::RADIUS_SM))
-                                                .bg(hsla(348.0, 0.90, 0.95, 1.0))
+                                                .bg(theme::accent_red_soft())
                                                 .border_1()
-                                                .border_color(hsla(348.0, 0.90, 0.60, 0.3))
+                                                .border_color(theme::accent_red_soft_border())
                                                 .text_color(ACCENT_RED)
                                                 .text_xs()
                                                 .child("SQ"),
@@ -1521,7 +1521,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
             .flex()
             .items_center()
             .justify_center()
-            .child(themed_icon(icon!(disc_3), 42.0, hsla(0.0, 0.0, 1.0, 0.80)))
+            .child(themed_icon(icon!(disc_3), 42.0, dark::white(0.80)))
             .into_any_element()
     };
 
@@ -1548,7 +1548,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                         .absolute()
                         .inset_0()
                         .rounded_xl()
-                        .bg(hsla(0.0, 0.0, 0.0, 0.20))
+                        .bg(dark::scrim(0.20))
                         .opacity(0.0)
                         .hover(|s| s.opacity(1.0))
                         .transition(press_transition())
@@ -1563,7 +1563,7 @@ fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> imp
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(themed_icon(icon!(play), 20.0, hsla(0.0, 0.0, 1.0, 1.0))),
+                                .child(themed_icon(icon!(play), 20.0, dark::white(1.0))),
                         ),
                 ),
         )
@@ -1670,7 +1670,7 @@ pub(super) fn track_row(
             .flex()
             .items_center()
             .justify_center()
-            .child(themed_icon(icon!(music), 18.0, hsla(0.0, 0.0, 1.0, 0.85)))
+            .child(themed_icon(icon!(music), 18.0, dark::white(0.85)))
             .into_any_element()
     };
 
@@ -1687,7 +1687,7 @@ pub(super) fn track_row(
         .bg(if is_current {
             theme::accent_red_muted()
         } else {
-            rgb(0xff_ff_ff).into()
+            theme::TEXT_WHITE.into()
         })
         .border_1()
         .border_color(if is_current {
@@ -1823,11 +1823,7 @@ fn empty_state(_app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement
                 .hover(|s| s.opacity(0.90))
                 .transition(press_transition())
                 .active(|s| s.scale(theme::PRESS_STANDARD))
-                .child(themed_icon(
-                    icon!(folder_plus),
-                    16.0,
-                    hsla(0.0, 0.0, 1.0, 1.0),
-                ))
+                .child(themed_icon(icon!(folder_plus), 16.0, dark::white(1.0)))
                 .child(
                     div()
                         .text_sm()

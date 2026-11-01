@@ -1,6 +1,7 @@
 use gpui::{Div, ElementId, Hsla, Pixels, SharedString, Stateful, div, hsla, prelude::*};
 
 use crate::ui::theme;
+use crate::ui::theme::dark;
 
 /// 优雅的胶囊/毛玻璃按钮组件
 pub fn glass_button(
@@ -11,13 +12,13 @@ pub fn glass_button(
     let bg_color = if active {
         theme::ACCENT_RED.into()
     } else {
-        hsla(0.0, 0.0, 1.0, 0.12)
+        dark::white(0.12)
     };
 
     let hover_bg = if active {
         theme::ACCENT_RED.into()
     } else {
-        hsla(0.0, 0.0, 1.0, 0.22)
+        dark::white(0.22)
     };
 
     div()
@@ -32,7 +33,7 @@ pub fn glass_button(
         .active(|s| s.scale(theme::PRESS_STRONG))
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+        .text_color(dark::white(0.90))
         .child(label.into())
 }
 
@@ -60,7 +61,7 @@ pub fn icon_button(
         .rounded_full()
         .cursor_pointer()
         .bg(bg_color)
-        .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.16)))
+        .hover(|s| s.bg(dark::white(0.16)))
         .transition(theme::press_transition())
         .active(|s| s.scale(theme::PRESS_STRONG))
         .child(theme::themed_icon(icon_svg, icon_size, icon_color))

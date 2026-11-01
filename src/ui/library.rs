@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{
     EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity,
-    Window, div, hsla, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list,
+    Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, uniform_list,
 };
 use lucide_gpui::icon;
 
@@ -20,7 +20,7 @@ mod provider_playlists;
 
 use super::{
     shell::{MusicApp, app_listener},
-    theme::{
+    theme::{dark, 
         self, ACCENT_RED, BORDER_CARD, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY,
         TEXT_TERTIARY, elegant_gradient_for, format_time, press_transition, themed_icon,
     },
@@ -314,7 +314,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                 .gap_1()
                 .p_1()
                 .rounded_full()
-                .bg(rgb(0xec_ee_f2))
+                .bg(theme::BORDER_CARD)
                 .child(segmented_tab_item(
                     "本地歌曲",
                     icon!(music),
@@ -377,7 +377,7 @@ where
         .rounded_full()
         .cursor_pointer()
         .bg(if active {
-            rgb(0xff_ff_ff).into()
+            theme::TEXT_WHITE.into()
         } else {
             theme::transparent()
         })
@@ -512,9 +512,9 @@ fn online_search_row<V: 'static>(
                                 .px_1()
                                 .py_0p5()
                                 .rounded(px(theme::RADIUS_SM))
-                                .bg(hsla(348.0, 0.90, 0.95, 1.0))
+                                .bg(theme::accent_red_soft())
                                 .border_1()
-                                .border_color(hsla(348.0, 0.90, 0.60, 0.3))
+                                .border_color(theme::accent_red_soft_border())
                                 .text_color(ACCENT_RED)
                                 .text_xs()
                                 .child("SQ"),
@@ -999,7 +999,7 @@ fn song_table_row(
             .child(themed_icon(
                 icon!(music),
                 16.0,
-                hsla(0.0, 0.0, 1.0, 0.85),
+                dark::white(0.85),
             ))
             .into_any_element()
     };
@@ -1262,7 +1262,7 @@ fn album_poster_card(
             .child(themed_icon(
                 icon!(disc_3),
                 48.0,
-                hsla(0.0, 0.0, 1.0, 0.80),
+                dark::white(0.80),
             ))
             .into_any_element()
     };
@@ -1290,7 +1290,7 @@ fn album_poster_card(
                         .absolute()
                         .inset_0()
                         .rounded_xl()
-                        .bg(hsla(0.0, 0.0, 0.0, 0.25))
+                        .bg(dark::scrim(0.25))
                         .opacity(0.0)
                         .hover(|s| s.opacity(1.0))
                         .transition(press_transition())
@@ -1308,7 +1308,7 @@ fn album_poster_card(
                                 .child(themed_icon(
                                     icon!(play),
                                     22.0,
-                                    hsla(0.0, 0.0, 1.0, 1.0),
+                                    dark::white(1.0),
                                 )),
                         ),
                 ),
@@ -1470,7 +1470,7 @@ fn artist_circle_card(
                         .child(themed_icon(
                             icon!(users_round),
                             44.0,
-                            hsla(0.0, 0.0, 1.0, 0.85),
+                            dark::white(0.85),
                         )),
                 ),
         )
@@ -1855,7 +1855,7 @@ fn queue_item_row(
         .bg(if is_current {
             theme::accent_red_muted()
         } else {
-            rgb(0xff_ff_ff).into()
+            theme::TEXT_WHITE.into()
         })
         .hover(|s| s.bg(theme::bg_hover()))
         .transition(theme::press_transition())
@@ -1887,11 +1887,14 @@ fn queue_item_row(
                 .gap_3()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(div().size(px(8.0)).rounded_full().bg(if is_current {
-                    ACCENT_RED.into()
-                } else {
-                    hsla(220.0, 0.08, 0.70, 1.0)
-                }))
+                .child({
+                    let dot_color = if is_current {
+                        gpui::Hsla::from(ACCENT_RED)
+                    } else {
+                        theme::TEXT_TERTIARY.into()
+                    };
+                    div().size(px(8.0)).rounded_full().bg(dot_color)
+                })
                 .child(
                     div()
                         .flex()

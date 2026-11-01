@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
-use gpui::{Context, IntoElement, div, hsla, prelude::*, px};
+use gpui::{Context, IntoElement, div, prelude::*, px};
 use gpui_tokio::Tokio;
 
 use crate::{
@@ -948,13 +948,13 @@ fn enabled_badge(enabled: bool) -> gpui::AnyElement {
         .py(px(2.0))
         .rounded_full()
         .bg(if enabled {
-            hsla(140.0, 0.45, 0.45, 0.12)
+            theme::success_tint(0.12)
         } else {
-            hsla(0.0, 0.0, 0.0, 0.05)
+            theme::dark::scrim(0.05)
         })
         .text_xs()
         .text_color(if enabled {
-            hsla(140.0, 0.45, 0.36, 1.0)
+            theme::success_fg()
         } else {
             theme::TEXT_TERTIARY.into()
         })
@@ -964,24 +964,18 @@ fn enabled_badge(enabled: bool) -> gpui::AnyElement {
 
 fn session_badge(status: PluginAccountSessionStatus) -> gpui::AnyElement {
     let (label, background, text) = match status {
-        PluginAccountSessionStatus::Authenticated => (
-            "已认证",
-            hsla(140.0, 0.45, 0.45, 0.12),
-            hsla(140.0, 0.45, 0.36, 1.0),
-        ),
-        PluginAccountSessionStatus::PendingValidation => (
-            "待验证",
-            hsla(42.0, 0.75, 0.50, 0.14),
-            hsla(38.0, 0.75, 0.36, 1.0),
-        ),
-        PluginAccountSessionStatus::Expired => (
-            "已过期",
-            hsla(8.0, 0.72, 0.52, 0.12),
-            theme::ACCENT_RED.into(),
-        ),
+        PluginAccountSessionStatus::Authenticated => {
+            ("已认证", theme::success_tint(0.12), theme::success_fg())
+        }
+        PluginAccountSessionStatus::PendingValidation => {
+            ("待验证", theme::warning_tint(0.14), theme::warning_fg())
+        }
+        PluginAccountSessionStatus::Expired => {
+            ("已过期", theme::error_tint(0.12), theme::ACCENT_RED.into())
+        }
         PluginAccountSessionStatus::LoggedOut => (
             "已退出",
-            hsla(0.0, 0.0, 0.0, 0.05),
+            theme::dark::scrim(0.05),
             theme::TEXT_TERTIARY.into(),
         ),
     };
@@ -1014,10 +1008,10 @@ fn active_badge(label: &'static str) -> gpui::AnyElement {
         .px_2()
         .py(px(1.0))
         .rounded_full()
-        .bg(hsla(140.0, 0.45, 0.45, 0.14))
+        .bg(theme::success_tint(0.14))
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(hsla(140.0, 0.55, 0.32, 1.0))
+        .text_color(theme::success_fg())
         .child(label)
         .into_any_element()
 }

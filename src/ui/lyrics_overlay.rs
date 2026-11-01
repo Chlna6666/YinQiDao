@@ -741,7 +741,7 @@ fn toolbar_button(
         .bg(hsla(0.0, 0.0, 0.10, 0.80))
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(0xff_ff_ff))
+        .text_color(dark::white(1.0))
         .hover(|style| style.bg(hsla(0.0, 0.0, 0.04, 0.92)))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
@@ -864,7 +864,7 @@ fn settings_row(
         .cursor_pointer()
         .window_control_area(WindowControlArea::Client)
         .text_xs()
-        .text_color(rgb(0xf2_f2_f7))
+        .text_color(dark::text_primary())
         .hover(|style| style.bg(dark::hover_fill()))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
@@ -876,7 +876,7 @@ fn settings_row(
                 .min_w(px(18.0))
                 .text_right()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(0xff_ff_ff))
+                .text_color(dark::white(1.0))
                 .child(value),
         )
 }

@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use gpui::{
     App, AppContext, ClipboardItem, Context, EncodedImageBytes, Entity, Focusable, ImageFormat,
-    IntoElement, SharedString, WeakEntity, Window, div, hsla, img, prelude::*, px,
+    IntoElement, SharedString, WeakEntity, Window, div, img, prelude::*, px,
 };
 use gpui_tokio::Tokio;
 use image::{DynamicImage, ImageBuffer, ImageFormat as ImgFormat, Rgba};
@@ -507,7 +507,7 @@ fn authenticated_user_card(
                 .rounded_full()
                 .bg(theme::BG_CANVAS)
                 .border_2()
-                .border_color(hsla(140.0, 0.55, 0.45, 0.6))
+                .border_color(theme::success_tint(0.6))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -525,7 +525,7 @@ fn authenticated_user_card(
                         .right_0()
                         .size(px(22.0))
                         .rounded_full()
-                        .bg(hsla(140.0, 0.70, 0.40, 1.0))
+                        .bg(theme::SUCCESS_GREEN)
                         .border_2()
                         .border_color(theme::BG_CARD)
                         .flex()
@@ -563,12 +563,12 @@ fn authenticated_user_card(
                 .px_3()
                 .py_1()
                 .rounded_full()
-                .bg(hsla(140.0, 0.50, 0.45, 0.12))
+                .bg(theme::success_tint(0.12))
                 .border_1()
-                .border_color(hsla(140.0, 0.55, 0.45, 0.3))
+                .border_color(theme::success_tint(0.3))
                 .text_xs()
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(hsla(140.0, 0.75, 0.38, 1.0))
+                .text_color(theme::success_fg())
                 .child("✓ 认证成功，已登录网易云音乐"),
         )
         .child(

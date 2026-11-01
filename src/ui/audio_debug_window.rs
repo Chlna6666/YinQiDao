@@ -16,7 +16,10 @@ use crate::audio::{
     ManualHeadTrackingProvider, Vec3, audio_debug_latest_snapshot, reset_runtime_listener_pose,
     set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
-use crate::ui::theme::{STAGE_BG_ELEVATED, STAGE_BG_SUNKEN, TEXT_SECONDARY, TEXT_TERTIARY};
+use crate::ui::theme::{
+    STAGE_BG, STAGE_BG_ELEVATED, STAGE_BG_SUNKEN, SUCCESS_GREEN, TEXT_SECONDARY, TEXT_TERTIARY,
+    WARNING_AMBER, dark, success_fg,
+};
 
 use super::{
     audio_debug_analysis::{analysis_sections, stage_card as analysis_stage_card},
@@ -232,8 +235,8 @@ impl Render for AudioDebugView {
             .id("audio-debug-root")
             .size_full()
             .overflow_y_scroll()
-            .bg(rgb(0x090b0f))
-            .text_color(rgb(0xecf1f6))
+            .bg(STAGE_BG_SUNKEN)
+            .text_color(dark::text_primary())
             .p_5()
             .flex()
             .flex_col()
@@ -327,7 +330,7 @@ impl Render for AudioDebugView {
                         "SOURCE",
                         "解码 / 多声道双耳化 / 重采样",
                         &snapshot.source,
-                        rgb(0x8fa3ba).into(),
+                        TEXT_SECONDARY.into(),
                     ))
                     .child(analysis_stage_card(
                         "POST-EQ",
@@ -401,7 +404,7 @@ impl Render for AudioDebugView {
                                         .px_2()
                                         .py_1()
                                         .rounded_md()
-                                        .bg(rgb(0x10151c))
+                                        .bg(STAGE_BG)
                                         .text_xs()
                                         .text_color(TEXT_SECONDARY)
                                         .child(interaction_hint),
@@ -505,7 +508,7 @@ impl Render for AudioDebugView {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x727d89))
+                    .text_color(TEXT_TERTIARY)
                     .child("完整实验室分析已恢复：A/B/C 频谱、Transfer ΔdB、M/S、相位相关历史、Crest/动态历史、Spectrogram、Waveform、Vectorscope、True Peak/LUFS；GPU 3D 只替换空间主视图，不再删除原有工程分析能力。"),
             )
     }
@@ -519,8 +522,16 @@ fn monitor_button(label: &'static str, active: bool) -> gpui::Stateful<gpui::Div
         .rounded_lg()
         .cursor_pointer()
         .border_1()
-        .border_color(if active { rgb(0x4b8f70) } else { rgb(0x2a3038) })
-        .bg(if active { rgb(0x173729) } else { rgb(0x15191f) })
+        .border_color(if active {
+            SUCCESS_GREEN.into()
+        } else {
+            dark::border()
+        })
+        .bg(if active {
+            success_fg()
+        } else {
+            STAGE_BG_ELEVATED.into()
+        })
         .text_xs()
         .child(label)
 }
@@ -533,8 +544,8 @@ fn action_button(label: &'static str) -> gpui::Stateful<gpui::Div> {
         .rounded_md()
         .cursor_pointer()
         .border_1()
-        .border_color(rgb(0x303843))
-        .bg(rgb(0x141920))
+        .border_color(dark::border())
+        .bg(STAGE_BG_ELEVATED)
         .text_xs()
         .child(label)
 }
@@ -556,8 +567,8 @@ fn panel(title: &'static str, subtitle: Option<String>, content: impl IntoElemen
         .p_3()
         .rounded_xl()
         .border_1()
-        .border_color(rgb(0x252b33))
-        .bg(rgb(0x101319))
+        .border_color(dark::border())
+        .bg(STAGE_BG_ELEVATED)
         .child(header)
         .child(content)
 }
@@ -571,7 +582,7 @@ fn metric(label: &'static str, value: String) -> gpui::Div {
         .flex()
         .flex_col()
         .gap_0p5()
-        .child(div().text_xs().text_color(rgb(0x697481)).child(label))
+        .child(div().text_xs().text_color(TEXT_TERTIARY).child(label))
         .child(div().text_xs().child(value))
 }
 
@@ -642,7 +653,7 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
         let mut row = div()
             .py_1()
             .border_b_1()
-            .border_color(rgb(0x20252c))
+            .border_color(dark::border())
             .flex()
             .flex_col()
             .gap_0p5()
@@ -730,7 +741,7 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
             div()
                 .py_1()
                 .border_b_1()
-                .border_color(rgb(0x20252c))
+                .border_color(dark::border())
                 .flex()
                 .flex_col()
                 .gap_0p5()
@@ -742,7 +753,7 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
                             div()
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(0xffc857))
+                                .text_color(WARNING_AMBER)
                                 .child(format!(
                                     "{channel} · {} · tap {}",
                                     wall_label(reflection.wall),

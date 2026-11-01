@@ -2,6 +2,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, hsla, prelude::*
 use lucide_gpui::icon;
 
 use crate::plugin::management::{PluginImportCandidate, PluginInstallStatus};
+use crate::ui::theme::dark;
 use crate::ui::{plugin_settings, shell::MusicApp, theme};
 
 #[derive(Clone, Debug)]
@@ -67,7 +68,7 @@ fn render_service_auth_modal(cx: &mut Context<MusicApp>) -> AnyElement {
         .id("global-modal-backdrop")
         .absolute()
         .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.50))
+        .bg(dark::scrim(0.50))
         .flex()
         .items_center()
         .justify_center()
@@ -163,19 +164,19 @@ fn render_plugin_import_modal(
     ) = match &candidate.install_status {
         PluginInstallStatus::NewInstall => (
             "新插件",
-            hsla(140.0, 0.45, 0.45, 0.12),
-            hsla(140.0, 0.45, 0.36, 1.0),
-            hsla(140.0, 0.45, 0.45, 0.08),
-            hsla(140.0, 0.45, 0.45, 0.20),
+            theme::success_tint(0.12),
+            theme::success_fg(),
+            theme::success_tint(0.08),
+            theme::success_tint(0.20),
             "该插件尚未安装，确认导入后将安全复制到插件库并加载注册。".to_string(),
             "确认导入",
         ),
         PluginInstallStatus::Upgrade { current_version } => (
             "版本升级",
-            hsla(210.0, 0.65, 0.50, 0.12),
-            hsla(210.0, 0.75, 0.45, 1.0),
-            hsla(210.0, 0.65, 0.50, 0.08),
-            hsla(210.0, 0.65, 0.50, 0.20),
+            theme::info_tint(0.12),
+            theme::info_fg(),
+            theme::info_tint(0.08),
+            theme::info_tint(0.20),
             format!(
                 "当前已安装旧版本 v{current_version}，确认后将升级至 v{} 并更新组件与扩展。",
                 candidate.version
@@ -184,10 +185,10 @@ fn render_plugin_import_modal(
         ),
         PluginInstallStatus::SameVersion { current_version } => (
             "覆盖重载",
-            hsla(40.0, 0.85, 0.50, 0.12),
-            hsla(35.0, 0.90, 0.35, 1.0),
-            hsla(40.0, 0.85, 0.50, 0.08),
-            hsla(40.0, 0.85, 0.50, 0.20),
+            theme::warning_tint(0.12),
+            theme::warning_fg(),
+            theme::warning_tint(0.08),
+            theme::warning_tint(0.20),
             format!(
                 "已安装相同版本 v{current_version}。确认后将使用新文件覆盖现有插件并热重载运行时。"
             ),
@@ -195,10 +196,10 @@ fn render_plugin_import_modal(
         ),
         PluginInstallStatus::Downgrade { current_version } => (
             "降级警告",
-            hsla(0.0, 0.65, 0.50, 0.12),
+            theme::error_tint(0.12),
             theme::ACCENT_RED.into(),
-            hsla(0.0, 0.65, 0.50, 0.08),
-            hsla(0.0, 0.65, 0.50, 0.20),
+            theme::error_tint(0.08),
+            theme::error_tint(0.20),
             format!(
                 "警告：当前已安装更高版本 v{current_version}，导入将降级至 v{}，部分已有配置可能不兼容！",
                 candidate.version
@@ -236,9 +237,9 @@ fn render_plugin_import_modal(
                         .px_2()
                         .py(px(2.0))
                         .rounded_md()
-                        .bg(hsla(210.0, 0.50, 0.50, 0.10))
+                        .bg(theme::info_tint(0.10))
                         .text_xs()
-                        .text_color(hsla(210.0, 0.70, 0.40, 1.0))
+                        .text_color(theme::info_fg())
                         .child(auth.clone()),
                 );
             }
@@ -306,7 +307,7 @@ fn render_plugin_import_modal(
         .absolute()
         .inset_0()
         .occlude()
-        .bg(hsla(0.0, 0.0, 0.0, 0.50))
+        .bg(dark::scrim(0.50))
         .flex()
         .items_center()
         .justify_center()
@@ -562,7 +563,7 @@ fn render_context_menu_modal(data: &ContextMenuData, cx: &mut Context<MusicApp>)
         .id("context-menu-backdrop")
         .absolute()
         .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.01))
+        .bg(dark::scrim(0.01))
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|app, _, _, cx| {
@@ -583,7 +584,7 @@ fn render_context_menu_modal(data: &ContextMenuData, cx: &mut Context<MusicApp>)
                 .left(position.x)
                 .top(position.y)
                 .w(px(160.0))
-                .bg(gpui::rgb(0xff_ff_ff))
+                .bg(theme::BG_CARD)
                 .border_1()
                 .border_color(theme::BORDER_CARD)
                 .rounded_xl()

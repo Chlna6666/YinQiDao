@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::ui::theme;
+use crate::ui::theme::dark;
 
 type SliderCallback = Rc<dyn Fn(f32, &mut App)>;
 
@@ -35,10 +36,10 @@ impl Default for SliderStyle {
             thumb_size: px(12.0),
             hover_thumb_scale: 1.25,
             interaction_height: px(30.0),
-            track_bg: hsla(0.0, 0.0, 1.0, 0.20),
+            track_bg: dark::white(0.20),
             filled_color: theme::ACCENT_RED.into(),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
-            thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.15)),
+            thumb_color: dark::white(1.0),
+            thumb_border: Some(dark::scrim(0.15)),
             edge_overlay: false,
         }
     }
@@ -52,10 +53,10 @@ impl SliderStyle {
             thumb_size: px(10.0),
             hover_thumb_scale: 1.20,
             interaction_height: px(30.0),
-            track_bg: rgb(0xe1_e4_e9).into(),
+            track_bg: theme::BORDER_HAIRLINE.into(),
             filled_color: theme::ACCENT_RED.into(),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
-            thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.15)),
+            thumb_color: dark::white(1.0),
+            thumb_border: Some(dark::scrim(0.15)),
             edge_overlay: true,
         }
     }
@@ -67,9 +68,9 @@ impl SliderStyle {
             thumb_size: px(10.0),
             hover_thumb_scale: 1.20,
             interaction_height: px(30.0),
-            track_bg: hsla(0.0, 0.0, 1.0, 0.26),
-            filled_color: hsla(0.0, 0.0, 1.0, 0.96),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
+            track_bg: dark::white(0.26),
+            filled_color: dark::white(0.96),
+            thumb_color: dark::white(1.0),
             thumb_border: None,
             edge_overlay: false,
         }
@@ -82,9 +83,9 @@ impl SliderStyle {
             thumb_size: px(9.0),
             hover_thumb_scale: 1.20,
             interaction_height: px(22.0),
-            track_bg: hsla(0.0, 0.0, 1.0, 0.24),
-            filled_color: hsla(0.0, 0.0, 1.0, 0.90),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
+            track_bg: dark::white(0.24),
+            filled_color: dark::white(0.90),
+            thumb_color: dark::white(1.0),
             thumb_border: None,
             edge_overlay: false,
         }
@@ -97,10 +98,10 @@ impl SliderStyle {
             thumb_size: px(10.0),
             hover_thumb_scale: 1.20,
             interaction_height: px(22.0),
-            track_bg: rgb(0xe0_e2_e8).into(),
+            track_bg: theme::BORDER_HAIRLINE.into(),
             filled_color: theme::ACCENT_RED.into(),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
-            thumb_border: Some(hsla(0.0, 0.0, 0.0, 0.12)),
+            thumb_color: dark::white(1.0),
+            thumb_border: Some(dark::scrim(0.12)),
             edge_overlay: false,
         }
     }
@@ -112,10 +113,10 @@ impl SliderStyle {
             thumb_size: px(13.0),
             hover_thumb_scale: 1.15,
             interaction_height: px(30.0),
-            track_bg: rgb(0xe1_e4_ea).into(),
+            track_bg: theme::BORDER_HAIRLINE.into(),
             filled_color: theme::ACCENT_RED.into(),
-            thumb_color: hsla(0.0, 0.0, 1.0, 1.0),
-            thumb_border: Some(hsla(220.0, 0.08, 0.68, 0.55)),
+            thumb_color: dark::white(1.0),
+            thumb_border: Some(theme::BORDER_HAIRLINE.into()),
             edge_overlay: false,
         }
     }

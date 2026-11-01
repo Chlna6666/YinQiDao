@@ -4,7 +4,7 @@ use gpui::{
 };
 
 use crate::audio::{AudioDebugSnapshot, AudioDebugStage};
-use crate::ui::theme::{STAGE_BG, STAGE_BG_SUNKEN, TEXT_SECONDARY};
+use crate::ui::theme::{STAGE_BG, STAGE_BG_SUNKEN, TEXT_SECONDARY, TEXT_TERTIARY, dark};
 
 const DB_FLOOR: f32 = -120.0;
 
@@ -21,7 +21,7 @@ pub(super) fn stage_card(
         .rounded_xl()
         .bg(STAGE_BG)
         .border_1()
-        .border_color(rgb(0x25_2b_34))
+        .border_color(dark::border())
         .flex()
         .flex_col()
         .gap_3()
@@ -37,7 +37,7 @@ pub(super) fn stage_card(
                         .text_color(accent)
                         .child(title),
                 )
-                .child(div().text_xs().text_color(rgb(0x7f_88_94)).child(subtitle)),
+                .child(div().text_xs().text_color(TEXT_TERTIARY).child(subtitle)),
         )
         .child(metric_row([
             ("Peak", format_db(stage.peak_dbfs)),
@@ -178,7 +178,7 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
         .gap_3()
         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title));
     if let Some(subtitle) = subtitle {
-        header = header.child(div().text_xs().text_color(rgb(0x82_8c_99)).child(subtitle));
+        header = header.child(div().text_xs().text_color(TEXT_TERTIARY).child(subtitle));
     }
 
     div()
@@ -186,7 +186,7 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
         .rounded_xl()
         .bg(STAGE_BG)
         .border_1()
-        .border_color(rgb(0x25_2b_34))
+        .border_color(dark::border())
         .flex()
         .flex_col()
         .gap_3()

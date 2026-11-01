@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
-use gpui::{Context, IntoElement, SharedString, div, hsla, prelude::*, px};
+use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 use gpui_tokio::Tokio;
 
 use crate::plugin::management::{self, PluginSummary};
@@ -472,13 +472,13 @@ fn plugin_card(
                                 .py(px(2.0))
                                 .rounded_full()
                                 .bg(if plugin.enabled {
-                                    hsla(140.0, 0.45, 0.45, 0.12)
+                                    theme::success_tint(0.12)
                                 } else {
-                                    hsla(0.0, 0.0, 0.0, 0.05)
+                                    theme::dark::scrim(0.05)
                                 })
                                 .text_xs()
                                 .text_color(if plugin.enabled {
-                                    hsla(140.0, 0.45, 0.36, 1.0)
+                                    theme::success_fg()
                                 } else {
                                     theme::TEXT_TERTIARY.into()
                                 })
