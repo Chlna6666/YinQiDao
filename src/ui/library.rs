@@ -226,7 +226,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                             .text_color(ACCENT_RED)
                                             .hover(|s| s.bg(theme::accent_red_active()))
                                             .transition(press_transition())
-                                            .active(|s| s.scale(0.96))
+                                            .active(|s| s.scale(theme::PRESS_STANDARD))
                                             .child(themed_icon(
                                                 icon!(folder_plus),
                                                 15.0,
@@ -258,7 +258,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                             .text_color(TEXT_PRIMARY)
                                             .hover(|s| s.bg(theme::bg_hover()))
                                             .transition(press_transition())
-                                            .active(|s| s.scale(0.96))
+                                            .active(|s| s.scale(theme::PRESS_STANDARD))
                                             .child(themed_icon(
                                                 icon!(refresh_cw),
                                                 14.0,
@@ -293,7 +293,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                                     .text_color(TEXT_SECONDARY)
                                     .hover(|s| s.bg(theme::bg_hover()).text_color(TEXT_PRIMARY))
                                     .transition(press_transition())
-                                    .active(|s| s.scale(0.96))
+                                    .active(|s| s.scale(theme::PRESS_STANDARD))
                                     .child(themed_icon(icon!(trash_2), 14.0, TEXT_SECONDARY.into()))
                                     .child(div().text_xs().child("清空记录"))
                                     .on_mouse_down(gpui::MouseButton::Left, app_listener(view, |this, _, _, cx| {
@@ -383,7 +383,7 @@ where
         })
         .hover(|s| s.opacity(if active { 1.0 } else { 0.85 }))
         .transition(press_transition())
-        .active(|s| s.scale(0.96))
+        .active(|s| s.scale(theme::PRESS_STANDARD))
         .child(themed_icon(
             icon,
             14.0,
@@ -511,7 +511,7 @@ fn online_search_row<V: 'static>(
                             div()
                                 .px_1()
                                 .py_0p5()
-                                .rounded(px(3.0))
+                                .rounded(px(theme::RADIUS_SM))
                                 .bg(hsla(348.0, 0.90, 0.95, 1.0))
                                 .border_1()
                                 .border_color(hsla(348.0, 0.90, 0.60, 0.3))
@@ -1026,7 +1026,7 @@ fn song_table_row(
         })
         .hover(|s| s.bg(theme::bg_hover()))
         .transition(press_transition())
-        .active(|s| s.scale(0.995))
+        .active(|s| s.scale(theme::PRESS_SUBTLE))
         .child(
             div()
                 .w(px(36.0))
@@ -1100,6 +1100,7 @@ fn song_table_row(
                     .justify_center()
                     .rounded_full()
                     .hover(|s| s.bg(theme::bg_active()))
+                    .transition(theme::hover_transition())
                     .child(themed_icon(
                         icon!(plus),
                         14.0,
@@ -1274,9 +1275,9 @@ fn album_poster_card(
         .flex_col()
         .gap_2()
         .cursor_pointer()
-        .hover(|s| s.scale(1.02))
+        .hover(|s| s.scale(theme::HOVER_SCALE))
         .transition(press_transition())
-        .active(|s| s.scale(0.97))
+        .active(|s| s.scale(theme::PRESS_STANDARD))
         .child(
             div()
                 .size(px(170.0))
@@ -1443,9 +1444,9 @@ fn artist_circle_card(
         .items_center()
         .gap_2p5()
         .cursor_pointer()
-        .hover(|s| s.scale(1.03))
+        .hover(|s| s.scale(theme::HOVER_SCALE))
         .transition(press_transition())
-        .active(|s| s.scale(0.97))
+        .active(|s| s.scale(theme::PRESS_STANDARD))
         .child(
             div()
                 .size(px(130.0))
@@ -1763,6 +1764,7 @@ fn local_playlist_row(
         .border_1()
         .border_color(BORDER_CARD)
         .hover(|style| style.bg(theme::bg_hover()))
+        .transition(theme::hover_transition())
         .child(
             div()
                 .flex()
@@ -1939,6 +1941,7 @@ fn queue_item_row(
                         .justify_center()
                         .rounded_full()
                         .hover(|s| s.bg(theme::bg_active()))
+                        .transition(theme::hover_transition())
                         .child(themed_icon(
                             icon!(x),
                             14.0,

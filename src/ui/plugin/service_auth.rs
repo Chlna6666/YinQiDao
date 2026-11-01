@@ -598,7 +598,7 @@ fn authenticated_user_card(
                         .text_color(theme::TEXT_WHITE)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::ACCENT_RED_HOVER))
-                        .active(|s| s.scale(0.98))
+                        .active(|s| s.scale(theme::PRESS_SUBTLE))
                         .child("设为当前生效账号")
                         .on_mouse_down(
                             gpui::MouseButton::Left,
@@ -629,7 +629,7 @@ fn authenticated_user_card(
                         .text_color(theme::TEXT_PRIMARY)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::bg_hover()))
-                        .active(|s| s.scale(0.98))
+                        .active(|s| s.scale(theme::PRESS_SUBTLE))
                         .child("完成")
                         .on_mouse_down(
                             gpui::MouseButton::Left,

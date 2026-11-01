@@ -406,6 +406,7 @@ impl Render for StageControlsView {
                     .rounded_full()
                     .cursor_pointer()
                     .hover(|style| style.bg(dark::hover_fill()))
+                    .transition(theme::hover_transition())
                     .child(themed_icon(
                         if volume <= 0.001 {
                             icon!(volume_x)

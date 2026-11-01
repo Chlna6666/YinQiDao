@@ -29,7 +29,7 @@ pub fn glass_button(
         .bg(bg_color)
         .hover(move |s| s.bg(hover_bg))
         .transition(theme::press_transition())
-        .active(|s| s.scale(0.95))
+        .active(|s| s.scale(theme::PRESS_STRONG))
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(hsla(0.0, 0.0, 1.0, 0.90))
@@ -62,6 +62,6 @@ pub fn icon_button(
         .bg(bg_color)
         .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.16)))
         .transition(theme::press_transition())
-        .active(|s| s.scale(0.92))
+        .active(|s| s.scale(theme::PRESS_STRONG))
         .child(theme::themed_icon(icon_svg, icon_size, icon_color))
 }

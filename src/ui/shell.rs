@@ -5640,12 +5640,12 @@ fn render_playlist_sidebar_item(
             })
         })
         .transition(theme::hover_transition())
-        .active(|s| s.scale(0.98))
+        .active(|s| s.scale(theme::PRESS_SUBTLE))
         .child(
             div()
                 .size(px(32.0))
                 .flex_none()
-                .rounded(px(4.0))
+                .rounded(px(theme::RADIUS_SM))
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme::BORDER_CARD)
@@ -5735,7 +5735,7 @@ where
             })
         })
         .transition(theme::hover_transition())
-        .active(|s| s.scale(0.98))
+        .active(|s| s.scale(theme::PRESS_SUBTLE))
         .child(
             div()
                 .flex()
@@ -5832,7 +5832,7 @@ where
             })
         })
         .transition(theme::hover_transition())
-        .active(|s| s.scale(0.98))
+        .active(|s| s.scale(theme::PRESS_SUBTLE))
         .child(
             div()
                 .flex()
@@ -5875,7 +5875,7 @@ where
         .window_control_area(gpui::WindowControlArea::Client)
         .hover(|s| s.opacity(0.80))
         .transition(theme::press_transition())
-        .active(|s| s.scale(0.90))
+        .active(|s| s.scale(theme::PRESS_STRONG))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
             on_press(event, window, cx);

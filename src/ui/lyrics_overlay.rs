@@ -10,7 +10,7 @@ use gpui::{
     WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
-use crate::ui::theme::dark;
+use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
     settings::DesktopLyricsAlignment,
@@ -771,7 +771,7 @@ fn settings_panel(
         .right(px(8.0))
         .w(px(322.0))
         .p(px(6.0))
-        .rounded(px(12.0))
+        .rounded(px(RADIUS_LG))
         .occlude()
         .window_control_area(WindowControlArea::Client)
         .bg(hsla(0.0, 0.0, 0.16, 0.92))
@@ -857,7 +857,7 @@ fn settings_row(
         .w(px(98.0))
         .h(px(20.0))
         .px(px(7.0))
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .flex()
         .items_center()
         .justify_between()

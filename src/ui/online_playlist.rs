@@ -71,6 +71,7 @@ pub(super) fn render<V: 'static>(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(TEXT_SECONDARY)
                 .hover(|s| s.text_color(ACCENT_RED))
+                .transition(theme::hover_transition())
                 .child(themed_icon(icon!(arrow_left), 16.0, TEXT_SECONDARY.into()))
                 .child("返回发现")
                 .on_mouse_down(
@@ -167,7 +168,7 @@ pub(super) fn render<V: 'static>(
                                         .cursor_pointer()
                                         .hover(|s| s.opacity(0.90))
                                         .transition(press_transition())
-                                        .active(|s| s.scale(0.96))
+                                        .active(|s| s.scale(theme::PRESS_STANDARD))
                                         .child(themed_icon(icon!(play), 13.0, TEXT_WHITE.into()))
                                         .child(
                                             div()
@@ -487,12 +488,12 @@ fn render_online_song_row(
                                     div()
                                         .px(px(3.5))
                                         .py(px(0.5))
-                                        .rounded(px(2.5))
+                                        .rounded(px(theme::RADIUS_SM))
                                         .bg(hsla(348.0, 0.90, 0.96, 1.0))
                                         .border_1()
                                         .border_color(hsla(348.0, 0.85, 0.65, 0.35))
                                         .text_color(ACCENT_RED)
-                                        .text_size(px(9.5))
+                                        .text_size(px(theme::FONT_CAPTION_MIN))
                                         .line_height(px(11.0))
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .child("SQ"),
