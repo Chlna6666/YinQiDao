@@ -16,6 +16,7 @@ use crate::audio::{
     ManualHeadTrackingProvider, Vec3, audio_debug_latest_snapshot, reset_runtime_listener_pose,
     set_audio_debug_enabled, set_audio_debug_monitor_mode, spatial_debug_latest_snapshot,
 };
+use crate::ui::theme::{STAGE_BG_ELEVATED, STAGE_BG_SUNKEN, TEXT_SECONDARY, TEXT_TERTIARY};
 
 use super::{
     audio_debug_analysis::{analysis_sections, stage_card as analysis_stage_card},
@@ -257,7 +258,7 @@ impl Render for AudioDebugView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0x85909d))
+                                    .text_color(TEXT_SECONDARY)
                                     .child(format!(
                                         "实时 DSP 探针 · {} Hz · frame #{} · 监听 {} · scene {} · bed {}",
                                         snapshot.sample_rate,
@@ -367,7 +368,7 @@ impl Render for AudioDebugView {
                                 .h(px(540.0))
                                 .overflow_hidden()
                                 .rounded_lg()
-                                .bg(rgb(0x070a0e))
+                                .bg(STAGE_BG_SUNKEN)
                                 .child(match mesh {
                                     Some(mesh) => canvas(
                                         move |bounds, _window, _cx| bounds,
@@ -385,7 +386,7 @@ impl Render for AudioDebugView {
                                         .items_center()
                                         .justify_center()
                                         .text_sm()
-                                        .text_color(rgb(0x74808d))
+                                        .text_color(TEXT_SECONDARY)
                                         .child(mesh_error.map_or_else(
                                             || "播放空间音频后显示球形 3D 声场".to_string(),
                                             |error| format!("3D shader/mesh: {error}"),
@@ -402,7 +403,7 @@ impl Render for AudioDebugView {
                                         .rounded_md()
                                         .bg(rgb(0x10151c))
                                         .text_xs()
-                                        .text_color(rgb(0x8d98a5))
+                                        .text_color(TEXT_SECONDARY)
                                         .child(interaction_hint),
                                 )
                                 .on_mouse_down(
@@ -546,7 +547,7 @@ fn panel(title: &'static str, subtitle: Option<String>, content: impl IntoElemen
             .child(title),
     );
     if let Some(subtitle) = subtitle {
-        header = header.child(div().text_xs().text_color(rgb(0x77828f)).child(subtitle));
+        header = header.child(div().text_xs().text_color(TEXT_SECONDARY).child(subtitle));
     }
     div()
         .flex()
@@ -566,7 +567,7 @@ fn metric(label: &'static str, value: String) -> gpui::Div {
         .px_2()
         .py_1()
         .rounded_md()
-        .bg(rgb(0x171c23))
+        .bg(STAGE_BG_ELEVATED)
         .flex()
         .flex_col()
         .gap_0p5()
@@ -581,7 +582,7 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x77828f))
+                    .text_color(TEXT_SECONDARY)
                     .child("等待 scene"),
             )
             .into_any_element();
@@ -656,7 +657,7 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                             .font_weight(gpui::FontWeight::BOLD)
                             .child(format!("#{:02} {channel} · {kind}", source.source_index)),
                     )
-                    .child(div().text_xs().text_color(rgb(0x9aa4af)).child(format!(
+                    .child(div().text_xs().text_color(TEXT_SECONDARY).child(format!(
                         "az {:+.1}° / el {:+.1}° / {:.2}m",
                         source.azimuth_degrees, source.elevation_degrees, source.distance_meters
                     ))),
@@ -666,11 +667,11 @@ fn spatial_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElement
                 linear_dbfs(source.input_peak),
                 linear_dbfs(source.input_rms),
             )))
-            .child(div().text_xs().text_color(rgb(0x77828f)).child(format!(
+            .child(div().text_xs().text_color(TEXT_SECONDARY).child(format!(
                 "ITD {:.2}smp · ILD {:+.2}dB · L/R {:.3}/{:.3}",
                 source.itd_samples, source.ild_db, source.left_gain, source.right_gain
             )))
-            .child(div().text_xs().text_color(rgb(0x68737f)).child(format!(
+            .child(div().text_xs().text_color(TEXT_TERTIARY).child(format!(
                 "near {:.0}% · shadow {:.0}% · air {:.0}% · direct {:.3}",
                 source.near_field_amount * 100.0,
                 source.head_shadow_amount * 100.0,
@@ -705,7 +706,7 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x77828f))
+                    .text_color(TEXT_SECONDARY)
                     .child("等待 reflection matrix"),
             )
             .into_any_element();
@@ -751,18 +752,18 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x9aa4af))
+                                .text_color(TEXT_SECONDARY)
                                 .child(format!("{:.2} ms", reflection.delay_milliseconds)),
                         ),
                 )
-                .child(div().text_xs().text_color(rgb(0x77828f)).child(format!(
+                .child(div().text_xs().text_color(TEXT_SECONDARY).child(format!(
                     "path {:.2}m (+{:.2}m) · wet {:.3} · reflect {:.3}",
                     reflection.path_length_meters,
                     reflection.excess_path_meters,
                     reflection.wet_contribution,
                     reflection.wall_reflectance
                 )))
-                .child(div().text_xs().text_color(rgb(0x68737f)).child(format!(
+                .child(div().text_xs().text_color(TEXT_TERTIARY).child(format!(
                     "arrival az {:+.1}° / el {:+.1}° · L/R delay {:.2}/{:.2} · gain {:.3}/{:.3}",
                     reflection.arrival_azimuth_degrees,
                     reflection.arrival_elevation_degrees,
@@ -777,7 +778,7 @@ fn reflection_telemetry(snapshot: Option<SpatialDebugSnapshot>) -> gpui::AnyElem
         body = body.child(
             div()
                 .text_sm()
-                .text_color(rgb(0x77828f))
+                .text_color(TEXT_SECONDARY)
                 .child("当前没有 active reflection"),
         );
     }

@@ -10,6 +10,7 @@ use gpui::{
     WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
+use crate::ui::theme::dark;
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
     settings::DesktopLyricsAlignment,
@@ -775,7 +776,7 @@ fn settings_panel(
         .window_control_area(WindowControlArea::Client)
         .bg(hsla(0.0, 0.0, 0.16, 0.92))
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.16))
+        .border_color(dark::hover_fill_strong())
         .shadow_md()
         .flex()
         .flex_wrap()
@@ -864,7 +865,7 @@ fn settings_row(
         .window_control_area(WindowControlArea::Client)
         .text_xs()
         .text_color(rgb(0xf2_f2_f7))
-        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.10)))
+        .hover(|style| style.bg(dark::hover_fill()))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
             handler(event, window, cx);

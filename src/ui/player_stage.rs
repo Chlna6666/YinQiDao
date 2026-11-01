@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div, hsla, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -16,7 +16,7 @@ use super::{
     app_ui_events::{self, AppUiEvent},
     player_legacy, stage_chrome, stage_controls, stage_lyrics,
     shell::MusicApp,
-    theme::{DURATION_LAYOUT, SampledMotion, TEXT_WHITE, ease_out_cubic, elegant_gradient_for, themed_icon},
+    theme::{dark, DURATION_LAYOUT, SampledMotion, STAGE_BG, TEXT_WHITE, ease_out_cubic, elegant_gradient_for, themed_icon},
 };
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
@@ -321,7 +321,7 @@ impl Render for StagePlayerView {
             .size_full()
             .relative()
             .overflow_hidden()
-            .bg(rgb(0x0e0f16))
+            .bg(STAGE_BG)
             .text_color(TEXT_WHITE)
             // Pointer activity is handled once by shell's stage-drawer-root. Duplicating the same
             // move/down handlers here caused nested Entity::update calls for every pointer event.
@@ -392,7 +392,7 @@ fn stage_artwork(data: &StageCoverRenderData, size_px: f32) -> gpui::AnyElement 
             .child(themed_icon(
                 icon!(disc_3),
                 (size_px * 0.32).clamp(64.0, 88.0),
-                hsla(0.0, 0.0, 1.0, 0.7),
+                dark::white(0.7),
             ))
             .into_any_element()
     };
@@ -404,7 +404,7 @@ fn stage_artwork(data: &StageCoverRenderData, size_px: f32) -> gpui::AnyElement 
         .rounded_2xl()
         .overflow_hidden()
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.15))
+        .border_color(dark::white(0.15))
         .shadow_lg()
         .child(cover)
         .into_any_element()
@@ -441,7 +441,7 @@ fn stage_metadata(
                     div()
                         .w_full()
                         .text_sm()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.70))
+                        .text_color(dark::white(0.70))
                         .truncate()
                         .child(data.artist.clone()),
                 )
@@ -449,7 +449,7 @@ fn stage_metadata(
                     div()
                         .w_full()
                         .text_sm()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.34))
+                        .text_color(dark::white(0.34))
                         .truncate()
                         .child(data.album.clone()),
                 ),
@@ -465,7 +465,7 @@ fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElem
         .absolute()
         .inset_0()
         .overflow_hidden()
-        .bg(rgb(0x0e0f16))
+        .bg(STAGE_BG)
         .child(fluid)
         .into_any_element()
 }

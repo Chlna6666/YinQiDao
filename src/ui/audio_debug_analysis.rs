@@ -4,6 +4,7 @@ use gpui::{
 };
 
 use crate::audio::{AudioDebugSnapshot, AudioDebugStage};
+use crate::ui::theme::{STAGE_BG, STAGE_BG_SUNKEN, TEXT_SECONDARY};
 
 const DB_FLOOR: f32 = -120.0;
 
@@ -18,7 +19,7 @@ pub(super) fn stage_card(
         .min_w(px(0.0))
         .p_4()
         .rounded_xl()
-        .bg(rgb(0x10_13_18))
+        .bg(STAGE_BG)
         .border_1()
         .border_color(rgb(0x25_2b_34))
         .flex()
@@ -183,7 +184,7 @@ fn panel(title: &'static str, subtitle: Option<String>, body: gpui::AnyElement) 
     div()
         .p_4()
         .rounded_xl()
-        .bg(rgb(0x10_13_18))
+        .bg(STAGE_BG)
         .border_1()
         .border_color(rgb(0x25_2b_34))
         .flex()
@@ -220,7 +221,7 @@ fn metric(label: &'static str, value: String) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap_0p5()
-        .child(div().text_xs().text_color(rgb(0x78_82_8f)).child(label))
+        .child(div().text_xs().text_color(TEXT_SECONDARY).child(label))
         .child(
             div()
                 .text_sm()
@@ -233,7 +234,7 @@ fn spectrum_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_db_grid(window, bounds);
             paint_series(
                 window,
@@ -270,7 +271,7 @@ fn transfer_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_zero_line(window, bounds, -18.0, 18.0);
             paint_series(
                 window,
@@ -298,7 +299,7 @@ fn ms_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_db_grid(window, bounds);
             paint_series(
                 window,
@@ -326,7 +327,7 @@ fn history_canvas(values: Vec<f32>, min: f32, max: f32, line_color: Hsla) -> imp
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_zero_line(window, bounds, min, max);
             paint_series(window, bounds, &values, line_color, px(1.5), min, max);
         },
@@ -337,7 +338,7 @@ fn spectrogram_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x08_0a_0e)));
+            window.paint_quad(fill(bounds, STAGE_BG_SUNKEN));
             let rows = snapshot.spectrogram.len();
             let bins = snapshot.spectrogram.first().map_or(0, Vec::len);
             if rows == 0 || bins == 0 {
@@ -374,7 +375,7 @@ fn waveform_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_zero_line(window, bounds, -1.0, 1.0);
             paint_series(
                 window,
@@ -411,7 +412,7 @@ fn vectorscope_canvas(snapshot: AudioDebugSnapshot) -> impl IntoElement {
     canvas(
         move |bounds, _window, _cx| bounds,
         move |bounds, _prepaint, window, _cx| {
-            window.paint_quad(fill(bounds, rgb(0x0c_0f_14)));
+            window.paint_quad(fill(bounds, STAGE_BG));
             paint_vectorscope_axes(window, bounds);
             paint_vectorscope(
                 window,

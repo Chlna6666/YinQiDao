@@ -2,9 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{
-    Easing, Hsla, Rgba, Styled, Svg, Transition, TransitionProperty, hsla, px, rgb, svg,
-};
+use gpui::{Easing, Hsla, Rgba, Styled, Svg, Transition, TransitionProperty, hsla, px, rgb, svg};
 
 // ============================================================================
 // 色彩 · 浅色页面（Apple Music Light & Clean Premium Palette）
@@ -32,6 +30,11 @@ pub fn accent_red_border() -> Hsla {
 pub const SUCCESS_GREEN: Rgba = rgb(0x34_c7_59);
 pub const WARNING_AMBER: Rgba = rgb(0xff_9f_0a);
 pub const INFO_BLUE: Rgba = rgb(0x00_77_ff);
+
+/// macOS 红绿灯（窗口与舞台标题栏共用一套）
+pub const TRAFFIC_LIGHT_RED: Rgba = rgb(0xff_5f_56);
+pub const TRAFFIC_LIGHT_AMBER: Rgba = rgb(0xff_bd_2e);
+pub const TRAFFIC_LIGHT_GREEN: Rgba = rgb(0x27_c9_3f);
 
 /// 页面基准底色 (暖调浅灰，苹果桌面级纯净表面)
 pub const BG_CANVAS: Rgba = rgb(0xf5_f5_f7);
@@ -81,11 +84,11 @@ pub const TEXT_WHITE: Rgba = rgb(0xff_ff_ff);
 // ============================================================================
 
 /// 沉浸舞台基准底色（统一 0x0e0f16，收敛 0x0c0f14/0x101318 等漂移值）
-pub const STAGE_BG: Rgba = rgb(0x0e_0f_16);
+pub const STAGE_BG: Rgba = rgb(0x0e0f16);
 /// 更深一层的下沉表面（调试窗背景、舞台内嵌面板）
-pub const STAGE_BG_SUNKEN: Rgba = rgb(0x07_0a_0e);
+pub const STAGE_BG_SUNKEN: Rgba = rgb(0x070a0e);
 /// 浮于舞台之上的面板（调试窗卡片）
-pub const STAGE_BG_ELEVATED: Rgba = rgb(0x17_1c_23);
+pub const STAGE_BG_ELEVATED: Rgba = rgb(0x171c23);
 
 pub mod dark {
     use gpui::{Hsla, hsla};
@@ -276,9 +279,8 @@ impl SampledMotion {
             return true;
         }
 
-        self.duration = Duration::from_secs_f32(
-            (self.base_duration.as_secs_f32() * distance).max(0.001),
-        );
+        self.duration =
+            Duration::from_secs_f32((self.base_duration.as_secs_f32() * distance).max(0.001));
         self.started_at = Some(now);
         true
     }

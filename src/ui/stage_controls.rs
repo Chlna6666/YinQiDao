@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString,
-    StyleRefinement, Subscription, WeakEntity, Window, div, hsla, prelude::*, px, rgb,
+    StyleRefinement, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -19,7 +19,10 @@ use super::{
     components::{SliderStyle, slider::InteractiveSliderState},
     shell::MusicApp,
     stage_chrome,
-    theme::{self, format_remaining_time, format_time, themed_icon},
+    theme::{
+        self, TRAFFIC_LIGHT_AMBER, TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_RED, dark,
+        format_remaining_time, format_time, themed_icon,
+    },
 };
 
 const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -32,7 +35,11 @@ const STAGE_PROGRESS_HEIGHT: f32 = 30.0;
 type StageChromeFade = theme::SampledMotion;
 
 fn stage_chrome_fade(visible: bool) -> StageChromeFade {
-    theme::SampledMotion::new(theme::DURATION_EMPHASIZED, theme::ease_in_out_cubic, visible)
+    theme::SampledMotion::new(
+        theme::DURATION_EMPHASIZED,
+        theme::ease_in_out_cubic,
+        visible,
+    )
 }
 
 #[derive(Default)]
@@ -333,13 +340,13 @@ impl Render for StageControlsView {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.08)))
+                    .hover(|style| style.bg(dark::hover_fill()))
                     .active(|style| style.scale(0.90))
                     .transition(theme::press_transition())
                     .child(themed_icon(
                         if playing { icon!(pause) } else { icon!(play) },
                         30.0,
-                        hsla(0.0, 0.0, 1.0, 0.96),
+                        dark::text_primary(),
                     ))
                     .on_mouse_down(gpui::MouseButton::Left, {
                         let parent = parent.clone();
@@ -398,7 +405,7 @@ impl Render for StageControlsView {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.10)))
+                    .hover(|style| style.bg(dark::hover_fill()))
                     .child(themed_icon(
                         if volume <= 0.001 {
                             icon!(volume_x)
@@ -408,7 +415,7 @@ impl Render for StageControlsView {
                             icon!(volume_2)
                         },
                         12.0,
-                        hsla(0.0, 0.0, 1.0, 0.62),
+                        dark::text_tertiary(),
                     ))
                     .on_mouse_down(gpui::MouseButton::Left, {
                         let parent = parent.clone();
@@ -445,11 +452,7 @@ impl Render for StageControlsView {
                         }
                     }),
             )
-            .child(themed_icon(
-                icon!(volume_2),
-                12.0,
-                hsla(0.0, 0.0, 1.0, 0.62),
-            ));
+            .child(themed_icon(icon!(volume_2), 12.0, dark::text_tertiary()));
 
         // Apple Music-style distribution: progress/time, playback controls, and volume are separate
         // rows. Slider hit-testing never shares a flex row with clock labels or transport buttons.
@@ -545,9 +548,9 @@ impl Render for StageTitlebarView {
                     .w_full()
                     .h(px(38.0))
                     .flex_none()
-                    .bg(hsla(0.0, 0.0, 0.0, 0.10))
+                    .bg(dark::scrim(0.10))
                     .border_b_1()
-                    .border_color(hsla(0.0, 0.0, 1.0, 0.05))
+                    .border_color(dark::white(0.05))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -561,17 +564,17 @@ impl Render for StageTitlebarView {
                             .gap_2()
                             .child(stage_traffic_light_button(
                                 "stage-window-close",
-                                rgb(0xff_5f_56),
+                                TRAFFIC_LIGHT_RED,
                                 |_, _, cx| cx.quit(),
                             ))
                             .child(stage_traffic_light_button(
                                 "stage-window-minimize",
-                                rgb(0xff_bd_2e),
+                                TRAFFIC_LIGHT_AMBER,
                                 |_, window, _| window.minimize_window(),
                             ))
                             .child(stage_traffic_light_button(
                                 "stage-window-maximize",
-                                rgb(0x27_c9_3f),
+                                TRAFFIC_LIGHT_GREEN,
                                 |_, window, _| {
                                     if window.is_maximized() {
                                         window.restore_window();
@@ -594,7 +597,7 @@ impl Render for StageTitlebarView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(hsla(0.0, 0.0, 1.0, 0.70))
+                                    .text_color(dark::white(0.70))
                                     .truncate()
                                     .child(title),
                             )
@@ -629,8 +632,8 @@ impl Render for StageTitlebarView {
                                     .py_1()
                                     .rounded_full()
                                     .cursor_pointer()
-                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
-                                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.22)))
+                                    .bg(dark::white(0.12))
+                                    .hover(|style| style.bg(dark::white(0.22)))
                                     .transition(theme::press_transition())
                                     .active(|style| style.scale(0.95))
                                     .on_mouse_down(
@@ -645,16 +648,12 @@ impl Render for StageTitlebarView {
                                             });
                                         },
                                     )
-                                    .child(themed_icon(
-                                        icon!(eye_off),
-                                        14.0,
-                                        hsla(0.0, 0.0, 1.0, 0.90),
-                                    ))
+                                    .child(themed_icon(icon!(eye_off), 14.0, dark::white(0.90)))
                                     .child(
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                                            .text_color(dark::white(0.90))
                                             .child("纯享沉浸"),
                                     ),
                             )
@@ -670,8 +669,8 @@ impl Render for StageTitlebarView {
                                     .py_1()
                                     .rounded_full()
                                     .cursor_pointer()
-                                    .bg(hsla(0.0, 0.0, 1.0, 0.12))
-                                    .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.22)))
+                                    .bg(dark::white(0.12))
+                                    .hover(|style| style.bg(dark::white(0.22)))
                                     .transition(theme::press_transition())
                                     .active(|style| style.scale(0.95))
                                     .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
@@ -683,13 +682,13 @@ impl Render for StageTitlebarView {
                                     .child(themed_icon(
                                         icon!(chevron_down),
                                         14.0,
-                                        hsla(0.0, 0.0, 1.0, 0.90),
+                                        dark::white(0.90),
                                     ))
                                     .child(
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                                            .text_color(dark::white(0.90))
                                             .child("收起舞台 (Esc)"),
                                     ),
                             ),
@@ -879,7 +878,7 @@ impl Render for StageTransportView {
                     .items_center()
                     .justify_between()
                     .text_xs()
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.58))
+                    .text_color(dark::white(0.58))
                     .child(format_time(position))
                     .child(format_remaining_time(position, duration_ms)),
             )
@@ -1164,10 +1163,10 @@ fn control_button(
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.08)))
+        .hover(|style| style.bg(dark::hover_fill()))
         .active(|style| style.scale(0.90))
         .transition(theme::press_transition())
-        .child(themed_icon(icon, 27.0, hsla(0.0, 0.0, 1.0, 0.94)))
+        .child(themed_icon(icon, 27.0, dark::white(0.94)))
         .on_mouse_down(gpui::MouseButton::Left, listener)
 }
 
@@ -1185,16 +1184,16 @@ fn stage_mode_button(
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.06)))
+        .hover(|style| style.bg(dark::white(0.06)))
         .active(|style| style.scale(0.90))
         .transition(theme::press_transition())
         .child(themed_icon(
             icon,
             15.0,
             if active {
-                hsla(0.0, 0.0, 1.0, 0.92)
+                dark::white(0.92)
             } else {
-                hsla(0.0, 0.0, 1.0, 0.48)
+                dark::white(0.48)
             },
         ))
         .on_mouse_down(gpui::MouseButton::Left, listener)
@@ -1211,7 +1210,7 @@ fn stage_traffic_light_button(
         .rounded_full()
         .bg(color)
         .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.15))
+        .border_color(dark::scrim(0.15))
         .cursor_pointer()
         .occlude()
         .window_control_area(gpui::WindowControlArea::Client)

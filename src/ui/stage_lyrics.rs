@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
     SharedString, StyleRefinement, Subscription, TransformOrigin, Transition, TransitionProperty,
-    WeakEntity, Window, bounds_observer, div, hsla, point, prelude::*, px,
+    WeakEntity, Window, bounds_observer, div, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     app_ui_events::{self, AppUiEvent},
     shell::MusicApp,
-    theme::themed_icon,
+    theme::{dark, themed_icon},
 };
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
@@ -869,17 +869,17 @@ impl Render for StageLyricsView {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(themed_icon(icon!(music), 36.0, hsla(0.0, 0.0, 1.0, 0.25)))
+                .child(themed_icon(icon!(music), 36.0, dark::white(0.25)))
                 .child(
                     div()
                         .text_lg()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.50))
+                        .text_color(dark::white(0.50))
                         .child("暂无可显示歌词"),
                 )
                 .child(
                     div()
                         .text_sm()
-                        .text_color(hsla(0.0, 0.0, 1.0, 0.30))
+                        .text_color(dark::white(0.30))
                         .child("支持内嵌 LRC 或联网自动检索"),
                 );
         }
@@ -1361,10 +1361,10 @@ fn render_lyric_row(
                         .ease(Easing::OutCubic)
                         .properties([TransitionProperty::Opacity]),
                 )
-                .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                .bg(dark::scrim(0.28))
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+                .text_color(dark::white(0.92))
                 .child(line.time_label.clone()),
         );
     }
@@ -1431,7 +1431,7 @@ fn lyric_text_layer(
                 .w_full()
                 .min_w(px(0.0))
                 .text_size(px(17.0))
-                .text_color(hsla(0.0, 0.0, 1.0, 0.72))
+                .text_color(dark::text_secondary())
                 .child(translation.clone()),
         );
     }
@@ -1840,7 +1840,7 @@ fn karaoke_word(
     let foreground = div()
         .flex_none()
         .whitespace_nowrap()
-        .text_color(hsla(0.0, 0.0, 1.0, 1.0))
+        .text_color(dark::white(1.0))
         .child(word.text.clone());
 
     if sustained {
@@ -1849,7 +1849,7 @@ fn karaoke_word(
             .left(px(0.0))
             .top(px(0.0))
             .whitespace_nowrap()
-            .text_color(hsla(0.0, 0.0, 1.0, 0.92))
+            .text_color(dark::white(0.92))
             .blur(px(peak.glow_blur_px))
             .child(word.text.clone())
             .into_any_element();
@@ -2030,7 +2030,7 @@ fn stage_primary_lyric(
         .min_w(px(0.0))
         .text_size(px(28.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(hsla(0.0, 0.0, 1.0, base_alpha))
+        .text_color(dark::white(base_alpha))
         .child(line.text.clone());
 
     if !line.enhanced_complete || !karaoke_detail {
