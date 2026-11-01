@@ -1,0 +1,81 @@
+name: QQ Music Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "plugins/qqmusic/**"
+      - "plugins/wit/yinqidao-plugin.wit"
+      - ".github/workflows/plugin-qqmusic.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "plugins/qqmusic/**"
+      - "plugins/wit/yinqidao-plugin.wit"
+      - ".github/workflows/plugin-qqmusic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build QQ Music Component
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-wasip2
+          components: clippy
+
+      - name: Check native helper code
+        run: cargo check --manifest-path plugins/netease/Cargo.toml --locked
+
+      - name: Run native helper tests
+        run: cargo test --manifest-path plugins/netease/Cargo.toml --locked
+
+      - name: Clippy handwritten native code
+        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Check WASI Component guest
+        run: cargo check --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked
+
+      # wit-bindgen's generated canonical ABI necessarily contains unsafe/export_name/link_section.
+      # Keep handwritten decoder/API code strict in the native Clippy step above; only the WASI
+      # generated ABI invocation receives this compiler-lint exception.
+      - name: Clippy WASI Component guest
+        run: cargo clippy --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --locked -- -D warnings -A unsafe-code
+
+      - name: Build release Component
+        run: cargo build --manifest-path plugins/netease/Cargo.toml --target wasm32-wasip2 --release --locked
+
+      - name: Assemble plugin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/io.yinqidao.netease
+          cp plugins/netease/plugin.toml dist/io.yinqidao.netease/plugin.toml
+          cp plugins/netease/target/wasm32-wasip2/release/yinqidao_netease_plugin.wasm \
+            dist/io.yinqidao.netease/provider.wasm
+          test -s dist/io.yinqidao.netease/provider.wasm
+          python - <<'PY'
+          from pathlib import Path
+          wasm = Path("dist/io.yinqidao.netease/provider.wasm").read_bytes()
+          if not wasm.startswith(b"\0asm"):
+              raise SystemExit("provider.wasm does not have WebAssembly magic")
+          print(f"provider.wasm: {len(wasm)} bytes")
+          PY
+
+      - name: Upload installable plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: yinqidao-netease-plugin
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

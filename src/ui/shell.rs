@@ -3014,7 +3014,7 @@ impl MusicApp {
         let route = self
             .online_route
             .clone()
-            .unwrap_or_else(crate::ui::home::default_netease_route);
+            .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
         let tracks = self.online_daily_tracks.clone();
         let cover_url = tracks.first().and_then(|t| t.cover_url.clone());
         let loading =
@@ -3050,7 +3050,7 @@ impl MusicApp {
         let route = self
             .online_route
             .clone()
-            .unwrap_or_else(crate::ui::home::default_netease_route);
+            .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
         self.show_online_playlist_detail(
             OnlinePlaylistViewData {
                 title: "我喜欢的音乐".into(),
@@ -3141,7 +3141,7 @@ impl MusicApp {
         let route = self
             .online_route
             .clone()
-            .unwrap_or_else(crate::ui::home::default_netease_route);
+            .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
 
         self.show_online_playlist_detail(
             OnlinePlaylistViewData {
@@ -3361,7 +3361,7 @@ impl MusicApp {
                     let route = self
                         .online_route
                         .clone()
-                        .unwrap_or_else(crate::ui::home::default_netease_route);
+                        .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
                     self.play_online_playlist_track(
                         route,
                         "每日歌曲推荐".into(),
@@ -3396,7 +3396,7 @@ impl MusicApp {
                 let route = self
                     .online_route
                     .clone()
-                    .unwrap_or_else(crate::ui::home::default_netease_route);
+                    .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
                 let daily_tracks = self.online_daily_tracks.clone();
                 let mut added_ids = Vec::new();
                 for t in &daily_tracks {
@@ -3413,7 +3413,7 @@ impl MusicApp {
                 let route = self
                     .online_route
                     .clone()
-                    .unwrap_or_else(crate::ui::home::default_netease_route);
+                    .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
                 let daily_tracks = self.online_daily_tracks.clone();
                 for t in &daily_tracks {
                     let prepared = self.ensure_track_for_remote(&route, t);
@@ -5135,6 +5135,14 @@ fn sidebar(
         .has_online_plugins
         && app.online_authenticated
     {
+        let provider_labels = crate::plugin::management::provider_display_labels();
+        let multi_provider = provider_labels.len() > 1;
+        let source_label = |route: &crate::plugin::abi::PluginRoute| {
+            multi_provider
+                .then(|| provider_labels.get(&route.provider_id))
+                .flatten()
+                .cloned()
+        };
         let mut created_playlists = Vec::new();
         let mut collected_playlists = Vec::new();
         for (route, pl) in &app.online_user_playlists {
@@ -5171,7 +5179,10 @@ fn sidebar(
                             .active_online_playlist
                             .as_ref()
                             .is_some_and(|p| p.title == pl.name);
-                    group = group.child(render_playlist_sidebar_item(route, pl, is_active, cx));
+                    let source = source_label(&route);
+                    group = group.child(render_playlist_sidebar_item(
+                        route, pl, is_active, source, cx,
+                    ));
                 }
             }
             Some(group)
@@ -5203,7 +5214,10 @@ fn sidebar(
                             .active_online_playlist
                             .as_ref()
                             .is_some_and(|p| p.title == pl.name);
-                    group = group.child(render_playlist_sidebar_item(route, pl, is_active, cx));
+                    let source = source_label(&route);
+                    group = group.child(render_playlist_sidebar_item(
+                        route, pl, is_active, source, cx,
+                    ));
                 }
             }
             Some(group)
@@ -5605,6 +5619,7 @@ fn render_playlist_sidebar_item(
     route: crate::plugin::abi::PluginRoute,
     pl: crate::plugin::abi::PlaylistDescriptor,
     active: bool,
+    source_label: Option<String>,
     cx: &mut Context<MusicApp>,
 ) -> gpui::AnyElement {
     let pl_name = pl.name.clone();
@@ -5661,19 +5676,30 @@ fn render_playlist_sidebar_item(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .text_xs()
-                .font_weight(if active {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if active {
-                    theme::ACCENT_RED
-                } else {
-                    theme::TEXT_PRIMARY
-                })
-                .truncate()
-                .child(pl_name),
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_xs()
+                        .font_weight(if active {
+                            gpui::FontWeight::SEMIBOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .text_color(if active {
+                            theme::ACCENT_RED
+                        } else {
+                            theme::TEXT_PRIMARY
+                        })
+                        .truncate()
+                        .child(pl_name),
+                )
+                .when_some(source_label, |row, label| {
+                    row.child(crate::ui::components::source_chip(&label))
+                }),
         )
         .on_mouse_down(
             gpui::MouseButton::Left,

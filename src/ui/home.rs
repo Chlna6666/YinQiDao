@@ -443,13 +443,34 @@ fn format_play_count(score: Option<f32>) -> String {
     }
 }
 
-pub(crate) fn default_netease_route() -> PluginRoute {
-    PluginRoute {
-        plugin_id: "netease".to_string(),
-        provider_id: "netease-music".to_string(),
-        account_id: String::new(),
-        priority: 0,
-        is_default: true,
+/// 在线兜底路由：优先复用会话内已知的任意来源路由（多插件均适用），
+/// 全部缺失时返回空路由（点击目标保持惰性，而不是错误地落到某个固定来源）。
+pub(crate) fn fallback_online_route(app: &MusicApp) -> PluginRoute {
+    app.online_route
+        .clone()
+        .or_else(|| {
+            app.online_user_playlists
+                .first()
+                .map(|(route, _)| route.clone())
+        })
+        .unwrap_or(PluginRoute {
+            plugin_id: String::new(),
+            provider_id: String::new(),
+            account_id: String::new(),
+            priority: 0,
+            is_default: true,
+        })
+}
+
+/// 来源标识标签：多来源启用时返回该 provider 的显示名。
+pub(crate) fn source_label_for(
+    labels: &std::collections::BTreeMap<String, String>,
+    provider_id: &str,
+) -> Option<String> {
+    if labels.len() > 1 {
+        labels.get(provider_id).cloned()
+    } else {
+        None
     }
 }
 
@@ -461,7 +482,7 @@ fn discover_feature_cards<V: 'static>(
     let route = app
         .online_route
         .clone()
-        .unwrap_or_else(default_netease_route);
+        .unwrap_or_else(|| fallback_online_route(app));
 
     // Card 1: 每日推荐
     let card1_subtitle = if let Some(track) = app.online_daily_tracks.first() {
@@ -875,6 +896,7 @@ fn recommended_playlists_section<V: 'static>(
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
 ) -> Option<gpui::AnyElement> {
+    let provider_labels = crate::plugin::management::provider_display_labels();
     if app.online_playlists.is_empty() && !app.online_recommendations_loading {
         return None;
     }
@@ -882,7 +904,7 @@ fn recommended_playlists_section<V: 'static>(
     let route = app
         .online_route
         .clone()
-        .unwrap_or_else(default_netease_route);
+        .unwrap_or_else(|| fallback_online_route(app));
 
     let mut grid = div().w_full().flex().flex_wrap().gap_4();
 
@@ -936,6 +958,8 @@ fn recommended_playlists_section<V: 'static>(
             let col_menu = collection_ref.clone();
             let route_menu = route_clone.clone();
 
+            let source_label =
+                source_label_for(&provider_labels, &item.collection.source.provider_id);
             grid = grid.child(
                 div()
                     .w(px(150.0))
@@ -981,11 +1005,21 @@ fn recommended_playlists_section<V: 'static>(
                         div()
                             .mt_2()
                             .w(px(150.0))
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(TEXT_PRIMARY)
-                            .line_clamp(2)
-                            .child(title),
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(TEXT_PRIMARY)
+                                    .line_clamp(2)
+                                    .child(title),
+                            )
+                            .children(
+                                source_label
+                                    .map(|label| crate::ui::components::source_chip(&label)),
+                            ),
                     )
                     .child(
                         div()
@@ -1090,7 +1124,7 @@ fn daily_recommended_tracks_section<V: 'static>(
     let route = app
         .online_route
         .clone()
-        .unwrap_or_else(default_netease_route);
+        .unwrap_or_else(|| fallback_online_route(app));
 
     let mut track_grid = div().w_full().flex().flex_wrap().gap_3();
 

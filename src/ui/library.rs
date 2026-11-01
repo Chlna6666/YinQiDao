@@ -449,6 +449,7 @@ fn online_search_row<V: 'static>(
     index: usize,
     track: &crate::plugin::abi::RemoteTrack,
     route: PluginRoute,
+    source_label: Option<String>,
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
 ) -> impl IntoElement {
@@ -518,7 +519,10 @@ fn online_search_row<V: 'static>(
                                 .text_color(ACCENT_RED)
                                 .text_xs()
                                 .child("SQ"),
-                        ),
+                        )
+                        .children(source_label.map(|label| {
+                            crate::ui::components::source_chip(&label)
+                        })),
                 ),
         )
         .child(
@@ -587,6 +591,7 @@ fn songs_view<V: 'static>(
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
 ) -> impl IntoElement {
+    let provider_labels = crate::plugin::management::provider_display_labels();
     let matching_indices = matching_track_indices(&app.tracks, query);
     let count = matching_indices
         .as_ref()
@@ -725,10 +730,12 @@ fn songs_view<V: 'static>(
             );
         } else {
             for (idx, remote_track) in app.online_search_results.iter().enumerate() {
+                let source_label = crate::ui::home::source_label_for(&provider_labels, &remote_track.source.provider_id);
                 online_list = online_list.child(online_search_row(
                     idx + 1,
                     remote_track,
                     route.clone(),
+                    source_label,
                     view,
                     cx,
                 ));

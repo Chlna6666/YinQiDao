@@ -1,0 +1,39 @@
+package_schema = 1
+component = "provider.wasm"
+
+id = "io.yinqidao.qqmusic"
+name = "QQ音乐"
+version = "0.1.0"
+abi_version = 1
+description = "YinQiDao QQ音乐 Provider：Cookie/扫码登录、搜索、歌词、封面、在线播放、歌单、专辑/歌手集合、喜欢与个性推荐。"
+homepage = "https://y.qq.com"
+network_domains = [
+  "y.qq.com",
+  "u.y.qq.com",
+  "c.y.qq.com",
+  "i.y.qq.com",
+  "musicue.stream.qqmusic.qq.com",
+  "*.qq.com",
+  "*.gtimg.cn",
+  "*.music.tc.qq.com",
+  "dl.stream.qqmusic.qq.com",
+  "isure.stream.qqmusic.qq.com",
+  "aqqmusic.tc.qq.com",
+]
+
+[[providers]]
+id = "qqmusic"
+display_name = "QQ音乐"
+capabilities = [
+  "authentication",
+  "search",
+  "metadata",
+  "lyrics",
+  "artwork",
+  "streaming",
+  "playlists",
+  "media_collections",
+  "recommendations",
+  "user_profile",
+]
+auth_methods = ["cookie_import"]

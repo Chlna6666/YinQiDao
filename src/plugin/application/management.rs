@@ -143,6 +143,45 @@ fn page_cache() -> Result<Arc<ui::page_cache::PluginUiPageCache>> {
     ui::page_cache::initialize(DEFAULT_UI_PAGE_CACHE_ENTRIES)
 }
 
+/// 按 UI revision 缓存的来源显示名映射；列表/行渲染可每帧调用而不重复克隆目录。
+pub fn provider_display_labels() -> std::collections::BTreeMap<String, String> {
+    use std::sync::Mutex;
+    type ProviderLabelCache = (u64, std::collections::BTreeMap<String, String>);
+    static CACHE: std::sync::OnceLock<Mutex<Option<ProviderLabelCache>>> =
+        std::sync::OnceLock::new();
+    let revision = ui_observable_revision();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_revision, labels)) = guard.as_ref()
+        && *cached_revision == revision
+    {
+        return labels.clone();
+    }
+    let labels = provider_display_names().unwrap_or_default();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((revision, labels.clone()));
+    }
+    labels
+}
+
+/// 多来源 UI：provider_id → 来源显示名（来自已安装插件目录）。
+/// 未安装/未知的 provider_id 由调用方回退为原始 id 显示。
+pub fn provider_display_names() -> Result<std::collections::BTreeMap<String, String>> {
+    let Some(runtime) = super::host::runtime::global() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let catalog = runtime.catalog_snapshot()?;
+    let mut names = std::collections::BTreeMap::new();
+    for plugin in catalog.plugins() {
+        for descriptor in &plugin.manifest.providers {
+            names
+                .entry(descriptor.id.clone())
+                .or_insert_with(|| descriptor.display_name.clone());
+        }
+    }
+    Ok(names)
+}
+
 pub fn list_installed() -> Result<Vec<PluginSummary>> {
     Ok(manager()?
         .list_installed()?
