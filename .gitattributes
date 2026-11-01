@@ -1,0 +1,27 @@
+# 行尾规范：所有文本文件统一使用 LF（仓库与检出工作区一致）
+* text=auto eol=lf
+
+# Windows 运行时脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做行尾处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.gz binary
+*.mp3 binary
+*.flac binary
+*.wav binary
