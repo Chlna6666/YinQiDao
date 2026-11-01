@@ -40,6 +40,8 @@ const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
 const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
 const ONLINE_SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(250);
+/// Coalesces library filter rebuilds while typing; fast typists see one rebuild per pause.
+const LIBRARY_FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
 const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // Hidden Stage preparation must never compete with the transport's startup window. The audible
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
@@ -147,6 +149,9 @@ pub struct MusicApp {
     pub(crate) library_tab: LibraryTab,
     pub(crate) search: String,
     pub(crate) search_active: bool,
+    /// Debounce state for the library filter refresh on search keystrokes.
+    library_filter_generation: u64,
+    library_filter_pending: bool,
     pub(crate) status: String,
     pub(crate) scan_in_progress: bool,
     pub(crate) last_scan: Option<ScanReport>,
@@ -515,12 +520,13 @@ impl LibraryPage {
 }
 
 impl Render for LibraryPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
+        let viewport_width = f32::from(window.viewport_size().width);
         let app = parent.read(cx);
-        library_page::render(app, &self.parent, cx)
+        library_page::render(app, &self.parent, cx, viewport_width)
     }
 }
 
@@ -772,6 +778,8 @@ impl MusicApp {
             library_tab: LibraryTab::Songs,
             search: String::new(),
             search_active: false,
+            library_filter_generation: 0,
+            library_filter_pending: false,
             status: if async_ready {
                 "异步运行时已就绪".into()
             } else {
@@ -3532,13 +3540,17 @@ impl MusicApp {
             std::rc::Rc::new(move |val: String, _window, cx| {
                 if let Some(parent) = parent.upgrade() {
                     parent.update(cx, |this, cx| {
+                        let input_changed = this.search != val;
                         this.search = val.clone();
                         this.trigger_online_search(val, cx);
                         if !this.search.trim().is_empty() && this.page != AppPage::Library {
                             this.page = AppPage::Library;
                             cx.notify();
-                        } else if this.page == AppPage::Library {
-                            this.notify_library_surface(cx);
+                        }
+                        // The O(n) library filter runs on the LibraryPage render; debounce it so
+                        // fast typists do not rebuild the whole filtered list per keystroke.
+                        if input_changed {
+                            this.schedule_library_filter_refresh(cx);
                         }
                     });
                 }
@@ -3750,6 +3762,27 @@ impl MusicApp {
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+
+    /// Debounces the O(n) library filter rebuild while the user types (one rebuild per pause).
+    fn schedule_library_filter_refresh(&mut self, cx: &mut Context<Self>) {
+        self.library_filter_generation = self.library_filter_generation.wrapping_add(1);
+        let generation = self.library_filter_generation;
+        if self.library_filter_pending {
+            return;
+        }
+        self.library_filter_pending = true;
+        cx.spawn(async move |this, cx| -> Result<()> {
+            Timer::after(LIBRARY_FILTER_DEBOUNCE_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.library_filter_pending = false;
+                if this.library_filter_generation == generation {
+                    this.notify_library_surface(cx);
+                }
+            })?;
+            Ok(())
         })
         .detach();
     }

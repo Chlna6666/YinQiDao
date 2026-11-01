@@ -625,7 +625,15 @@ fn run_bridge(
 
     while running.load(Ordering::Acquire) {
         let mut refresh_snapshot = false;
-        match request_rx.recv_timeout(Duration::from_millis(4)) {
+        // Fade ramps need the fine 4ms tick for smooth gain steps; the idle loop otherwise only
+        // feeds the 25ms progress sampler, so it can sleep six times longer between wakeups.
+        // Incoming commands still wake the receiver immediately in both cases.
+        let poll_interval = if transport_fade.active {
+            Duration::from_millis(4)
+        } else {
+            PROGRESS_INTERVAL
+        };
+        match request_rx.recv_timeout(poll_interval) {
             Ok(request) => {
                 refresh_snapshot |= request_refreshes_snapshot(&request);
                 if !apply_request(

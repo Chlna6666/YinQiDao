@@ -9,9 +9,10 @@ use crate::model::PlaybackState;
 use super::shell::MusicApp;
 
 /// Cross-view scrub previews are bounded independently from raw pointer frequency.
-/// The active slider still paints every local input sample; semantic consumers do not need
-/// 240+ notifications per second.
-pub(crate) const PROGRESS_PREVIEW_INTERVAL: Duration = Duration::from_micros(8_333);
+/// The active slider still paints every local input sample (thumb tracking stays pointer-rate);
+/// semantic consumers (lyrics, clocks, transport) refresh at ~30Hz which is well past their
+/// perceptual resolution and cuts cross-view notification churn 4x.
+pub(crate) const PROGRESS_PREVIEW_INTERVAL: Duration = Duration::from_micros(33_333);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum AppUiEvent {

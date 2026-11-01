@@ -30,26 +30,37 @@ pub(super) fn render<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
+    viewport_width: f32,
 ) -> gpui::AnyElement {
     let query = normalized_query(&app.search);
 
     let content = match app.library_tab {
         LibraryTab::Songs => songs_view(app, &query, view, cx).into_any_element(),
         LibraryTab::Recent => recent_view(app, &query, view).into_any_element(),
-        LibraryTab::Albums => albums_view(&app.tracks, &query, app, view).into_any_element(),
-        LibraryTab::Artists => artists_view(&app.tracks, &query, app, view).into_any_element(),
+        LibraryTab::Albums => {
+            albums_view(&app.tracks, &query, app, view, viewport_width).into_any_element()
+        }
+        LibraryTab::Artists => {
+            artists_view(&app.tracks, &query, app, view, viewport_width).into_any_element()
+        }
         LibraryTab::Playlists => queue_view(app, view).into_any_element(),
     };
 
     let virtualized_tab = matches!(
         app.library_tab,
-        LibraryTab::Songs | LibraryTab::Recent | LibraryTab::Playlists
+        LibraryTab::Songs
+            | LibraryTab::Recent
+            | LibraryTab::Playlists
+            | LibraryTab::Albums
+            | LibraryTab::Artists
     );
     if virtualized_tab {
         div()
             .id(match app.library_tab {
                 LibraryTab::Songs => "library-songs-container",
                 LibraryTab::Recent => "library-recent-container",
+                LibraryTab::Albums => "library-albums-container",
+                LibraryTab::Artists => "library-artists-container",
                 _ => "library-queue-container",
             })
             .size_full()
@@ -1107,11 +1118,22 @@ fn song_table_row(
         .into_any_element()
 }
 
+/// Poster/circle grid geometry for the virtualized album & artist tabs.
+const ALBUM_CARD_SIZE: f32 = 170.0;
+const ALBUM_CARD_ROW_GAP: f32 = 24.0;
+const ALBUM_ROW_HEIGHT: f32 = 248.0;
+const ARTIST_CARD_SIZE: f32 = 140.0;
+const ARTIST_CARD_ROW_GAP: f32 = 32.0;
+const ARTIST_ROW_HEIGHT: f32 = 224.0;
+
+/// Virtualized poster grid: only the visible rows build their cards, so thousand-album
+/// libraries no longer rebuild the entire tree on every artwork/notify pass.
 fn albums_view(
     tracks: &[Track],
     query: &str,
-    app: &MusicApp,
+    _app: &MusicApp,
     view: &WeakEntity<MusicApp>,
+    viewport_width: f32,
 ) -> impl IntoElement {
     let mut albums: Vec<(String, String, TrackId, usize)> = Vec::new();
     let mut album_indices: HashMap<String, usize> = HashMap::new();
@@ -1136,16 +1158,64 @@ fn albums_view(
         return empty_filter_state().into_any_element();
     }
 
-    let mut grid = div().flex().flex_wrap().gap_6();
+    let usable = (viewport_width - 64.0).max(ALBUM_CARD_SIZE);
+    let cols = ((usable / (ALBUM_CARD_SIZE + ALBUM_CARD_ROW_GAP)).floor() as usize)
+        .clamp(2, 8)
+        .max(1);
+    let rows = albums.len().div_ceil(cols);
+    let albums = std::sync::Arc::new(albums);
+    let view_weak = view.clone();
 
-    for (name, artist, track_id, count) in albums {
-        let artwork = app.artworks.get(&track_id).cloned();
-        grid = grid.child(album_poster_card(
-            name, artist, track_id, count, artwork, view,
-        ));
-    }
-
-    grid.into_any_element()
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .overflow_hidden()
+        .child(
+            div().flex_1().min_h(px(0.0)).overflow_hidden().child(
+                uniform_list(
+                    "library-albums-vlist",
+                    rows,
+                    move |range: Range<usize>, _window, cx| {
+                        let albums = albums.clone();
+                        let view = view_weak.clone();
+                        view.update(cx, |this, _cx| {
+                            let mut items = Vec::with_capacity(range.end - range.start);
+                            for row in range {
+                                let mut row_cards = div()
+                                    .flex()
+                                    .flex_none()
+                                    .gap(px(ALBUM_CARD_ROW_GAP))
+                                    .h(px(ALBUM_ROW_HEIGHT))
+                                    .items_start();
+                                for slot in 0..cols {
+                                    let Some((name, artist, track_id, count)) =
+                                        albums.get(row * cols + slot)
+                                    else {
+                                        break;
+                                    };
+                                    let artwork = this.artworks.get(track_id).cloned();
+                                    row_cards = row_cards.child(album_poster_card(
+                                        name.clone(),
+                                        artist.clone(),
+                                        *track_id,
+                                        *count,
+                                        artwork,
+                                        &view,
+                                    ));
+                                }
+                                items.push(row_cards.into_any_element());
+                            }
+                            items
+                        })
+                        .unwrap_or_default()
+                    },
+                )
+                .size_full(),
+            ),
+        )
+        .into_any_element()
 }
 
 fn album_poster_card(
@@ -1255,11 +1325,13 @@ fn album_poster_card(
         }))
 }
 
+/// Virtualized circle-card grid, mirroring `albums_view`.
 fn artists_view(
     tracks: &[Track],
     query: &str,
     _app: &MusicApp,
     view: &WeakEntity<MusicApp>,
+    viewport_width: f32,
 ) -> impl IntoElement {
     let mut artists: Vec<(String, TrackId, usize)> = Vec::new();
     let mut artist_indices: HashMap<String, usize> = HashMap::new();
@@ -1284,13 +1356,61 @@ fn artists_view(
         return empty_filter_state().into_any_element();
     }
 
-    let mut grid = div().flex().flex_wrap().gap_8();
+    let usable = (viewport_width - 64.0).max(ARTIST_CARD_SIZE);
+    let cols = ((usable / (ARTIST_CARD_SIZE + ARTIST_CARD_ROW_GAP)).floor() as usize)
+        .clamp(3, 9)
+        .max(1);
+    let rows = artists.len().div_ceil(cols);
+    let artists = std::sync::Arc::new(artists);
+    let view_weak = view.clone();
 
-    for (name, track_id, count) in artists {
-        grid = grid.child(artist_circle_card(name, track_id, count, view));
-    }
-
-    grid.into_any_element()
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .overflow_hidden()
+        .child(
+            div().flex_1().min_h(px(0.0)).overflow_hidden().child(
+                uniform_list(
+                    "library-artists-vlist",
+                    rows,
+                    move |range: Range<usize>, _window, cx| {
+                        let artists = artists.clone();
+                        let view = view_weak.clone();
+                        view.update(cx, |_this, _cx| {
+                            let mut items = Vec::with_capacity(range.end - range.start);
+                            for row in range {
+                                let mut row_cards = div()
+                                    .flex()
+                                    .flex_none()
+                                    .gap(px(ARTIST_CARD_ROW_GAP))
+                                    .h(px(ARTIST_ROW_HEIGHT))
+                                    .items_start();
+                                for slot in 0..cols {
+                                    let Some((name, track_id, count)) =
+                                        artists.get(row * cols + slot)
+                                    else {
+                                        break;
+                                    };
+                                    row_cards = row_cards.child(artist_circle_card(
+                                        name.clone(),
+                                        *track_id,
+                                        *count,
+                                        &view,
+                                    ));
+                                }
+                                items.push(row_cards.into_any_element());
+                            }
+                            items
+                        })
+                        .unwrap_or_default()
+                    },
+                )
+                .size_full(),
+            ),
+        )
+        .into_any_element()
 }
 
 fn artist_circle_card(
