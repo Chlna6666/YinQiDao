@@ -141,50 +141,75 @@ impl StageLyricLine {
     }
 
     fn from_source(line: &LyricLine) -> Self {
-        let mut byte_offset = 0;
-        let words = line
-            .words
-            .iter()
-            .enumerate()
-            .map(|(index, word)| {
-                let byte_start = byte_offset;
-                byte_offset += word.text.len();
-                // QRC/YRC/TTML provide an authored duration. Enhanced LRC only provides starts, in
-                // which case the next authored segment gives a precise upper bound without inventing
-                // timing from character count. The last LRC segment stays duration-less.
-                let duration_ms = word
-                    .duration_ms
-                    .filter(|duration| *duration > 0)
-                    .or_else(|| {
-                        line.words.get(index + 1).and_then(|next| {
-                            let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
-                            (duration > 0).then_some(duration)
-                        })
-                    });
-                StageLyricWord {
-                    timestamp_ms: word.timestamp_ms,
-                    duration_ms,
-                    byte_start,
-                    byte_end: byte_offset,
-                    text: SharedString::from(word.text.clone()),
-                }
-            })
-            .collect::<Vec<_>>()
-            .into();
+        let enhanced_complete = line.words.len() <= MAX_KARAOKE_WORDS_PER_LINE
+            && enhanced_words_cover_primary_text(line);
+        // Providers occasionally concatenate English timed tokens without
+        // spaces. Normalize once for both static text and karaoke rendering.
+        let mut display_text = String::new();
+        let mut words = Vec::with_capacity(line.words.len());
+        for (index, word) in line.words.iter().enumerate() {
+            let byte_start = display_text.len();
+            let segment = if enhanced_complete {
+                display_word_segment(&line.words, index)
+            } else {
+                word.text.clone()
+            };
+            display_text.push_str(&segment);
+            let byte_end = display_text.len();
+            let duration_ms = word
+                .duration_ms
+                .filter(|duration| *duration > 0)
+                .or_else(|| {
+                    line.words.get(index + 1).and_then(|next| {
+                        let duration = next.timestamp_ms.saturating_sub(word.timestamp_ms);
+                        (duration > 0).then_some(duration)
+                    })
+                });
+            words.push(StageLyricWord {
+                timestamp_ms: word.timestamp_ms,
+                duration_ms,
+                byte_start,
+                byte_end,
+                text: SharedString::from(segment),
+            });
+        }
         Self {
             timestamp_ms: line.timestamp_ms,
-            text: SharedString::from(line.text.clone()),
+            text: SharedString::from(if enhanced_complete {
+                display_text
+            } else {
+                line.text.clone()
+            }),
             translation: line
                 .translation
                 .as_deref()
                 .filter(|translation| !translation.trim().is_empty())
                 .map(|translation| SharedString::from(translation.to_owned())),
-            words,
-            enhanced_complete: line.words.len() <= MAX_KARAOKE_WORDS_PER_LINE
-                && enhanced_words_cover_primary_text(line),
+            words: words.into(),
+            enhanced_complete,
             time_label: SharedString::from(format_lyric_time(line.timestamp_ms)),
         }
     }
+}
+
+/// Restore missing English word separators without changing source timestamps.
+fn display_word_segment(words: &[crate::lyrics::LyricWord], index: usize) -> String {
+    let text = words[index].text.as_str();
+    let mut output = text.to_owned();
+    if let Some(next) = words.get(index + 1) {
+        let last = text.chars().last();
+        let first = next.text.chars().next();
+        let ends_word = last.is_some_and(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, ',' | '.' | '!' | '?' | ';' | ':')
+        });
+        let begins_word = first.is_some_and(|ch| ch.is_ascii_alphanumeric());
+        if ends_word && begins_word {
+            output.push(' ');
+        }
+    }
+    output
+}
+
 }
 
 struct StageKaraokeLineView {
@@ -2238,6 +2263,40 @@ fn format_lyric_time(ms: u64) -> String {
 mod tests {
     use super::*;
     use crate::lyrics::LyricWord;
+
+    #[test]
+    fn english_timed_word_spacing_keeps_source_immutable() {
+        let line = LyricLine {
+            timestamp_ms: 0,
+            text: "andwe'llgetitright".to_owned(),
+            translation: None,
+            words: vec![
+                LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "and".into() },
+                LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "we'll".into() },
+                LyricWord { timestamp_ms: 200, duration_ms: Some(100), text: "get".into() },
+                LyricWord { timestamp_ms: 300, duration_ms: Some(100), text: "it".into() },
+                LyricWord { timestamp_ms: 400, duration_ms: Some(100), text: "right".into() },
+            ].into(),
+        };
+        let stage = StageLyricLine::from_source(&line);
+        assert_eq!(stage.text.as_ref(), "and we'll get it right");
+        assert_eq!(stage.words[0].text.as_ref(), "and ");
+        assert_eq!(line.text, "andwe'llgetitright");
+    }
+
+    #[test]
+    fn cjk_and_existing_spaces_are_preserved() {
+        let cjk = vec![
+            LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "我".into() },
+            LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "爱".into() },
+        ];
+        assert_eq!(display_word_segment(&cjk, 0), "我");
+        let english = vec![
+            LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "I ".into() },
+            LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "know".into() },
+        ];
+        assert_eq!(display_word_segment(&english, 0), "I ");
+    }
 
     #[test]
     fn dense_enhanced_lyrics_fall_back_to_single_text_layout() {
