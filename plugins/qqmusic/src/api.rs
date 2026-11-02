@@ -99,10 +99,12 @@ pub fn session_for(account_id: Option<&str>, now_ms: u64) -> ApiResult<Session> 
         Some(id) => {
             let account = require_stored_account(id)?;
             let cookie = account_cookie(id)?;
+            let qm_keyst = cookie_value(&cookie, "qm_keyst")
+                .or_else(|| cookie_value(&cookie, "qqmusic_key"));
             Ok(Session::logged_in(
                 cookie,
                 account.account_id.clone(),
-                None,
+                qm_keyst,
                 now_ms,
             ))
         }

@@ -63,6 +63,9 @@ fn comm_block(session: &Session) -> Map<String, Value> {
     comm.insert("cv".into(), Value::from(4_747_474));
     comm.insert("platform".into(), Value::from("yqq.json"));
     comm.insert("uin".into(), Value::from(session.uin.clone()));
+    if let Some(key) = session.qm_keyst.as_deref() {
+        comm.insert("authst".into(), Value::from(key));
+    }
     let g_tk = session.g_tk();
     comm.insert("g_tk".into(), Value::from(g_tk));
     comm.insert("g_tk_new_20200303".into(), Value::from(g_tk));
