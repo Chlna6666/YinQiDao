@@ -205,6 +205,7 @@ pub struct MusicApp {
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
     /// Shared chrome transition, copied into each retained stage child.
     pub(crate) stage_chrome_motion: theme::SampledMotion,
+    pub(crate) stage_chrome_epoch: u64,
     // Transport buttons update their retained controls optimistically. Defer the heavy MusicApp
     // root repaint until AudioEngine ACK arrives so mouse-down never competes with a full-window
     // layout generation frame.
@@ -856,6 +857,7 @@ impl MusicApp {
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
             stage_chrome_motion: stage_chrome::fade_motion(false),
+            stage_chrome_epoch: 0,
             transport_root_notify_pending: false,
             track_root_notify_pending: false,
             fluid_background: None,
@@ -1243,7 +1245,11 @@ impl MusicApp {
 
     fn sync_stage_chrome_motion(&mut self) {
         let visible = stage_chrome::target_visible(self);
-        self.stage_chrome_motion.set_target(visible);
+        stage_chrome::retarget_motion(
+            &mut self.stage_chrome_motion,
+            &mut self.stage_chrome_epoch,
+            visible,
+        );
     }
 
     fn sync_stage_chrome_surfaces(&mut self, cx: &mut Context<Self>) {

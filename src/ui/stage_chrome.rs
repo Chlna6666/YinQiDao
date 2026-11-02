@@ -14,6 +14,14 @@ pub(super) fn fade_motion(visible: bool) -> SampledMotion {
     )
 }
 
+/// Retarget once per semantic visibility change and publish a monotonically increasing epoch.
+/// Epoch comparisons also catch a fast hide-then-show that returns to the same boolean target.
+pub(super) fn retarget_motion(motion: &mut SampledMotion, epoch: &mut u64, visible: bool) {
+    if motion.set_target(visible) {
+        *epoch = epoch.wrapping_add(1);
+    }
+}
+
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[inline]
@@ -47,4 +55,24 @@ pub(super) fn needs_wake_surface(app: &MusicApp) -> bool {
 #[inline]
 pub(super) fn pointer_motion_may_refresh_activity(app: &MusicApp) -> bool {
     app.stage_open && !needs_wake_surface(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rapid_chrome_reverse_advances_shared_epoch() {
+        let mut motion = fade_motion(false);
+        let mut epoch = 0;
+        retarget_motion(&mut motion, &mut epoch, false);
+        assert_eq!(epoch, 0);
+        retarget_motion(&mut motion, &mut epoch, true);
+        assert_eq!(epoch, 1);
+        retarget_motion(&mut motion, &mut epoch, false);
+        assert_eq!(epoch, 2);
+        retarget_motion(&mut motion, &mut epoch, true);
+        assert_eq!(epoch, 3);
+        assert_eq!(motion.target_value(), 1.0);
+    }
 }

@@ -186,7 +186,8 @@ pub(super) fn sync_chrome_if_created(app: &MusicApp, cx: &mut Context<MusicApp>)
     };
 
     stage.update(cx, |stage, cx| {
-        if stage.chrome_layout.target_value() != app.stage_chrome_motion.target_value() {
+        if stage.chrome_epoch != app.stage_chrome_epoch {
+            stage.chrome_epoch = app.stage_chrome_epoch;
             stage.chrome_layout = app.stage_chrome_motion;
             cx.notify();
         }
@@ -241,6 +242,7 @@ pub(super) fn render(
     };
     let playing = app.snapshot.state == PlaybackState::Playing;
     let initial_chrome_motion = app.stage_chrome_motion;
+    let initial_chrome_epoch = app.stage_chrome_epoch;
 
     let ui_events = app_ui_events::bridge(cx);
     let initial_fluid = fluid_background.clone();
@@ -270,6 +272,7 @@ pub(super) fn render(
                 key: StagePlayerRenderKey::default(),
                 playing: false,
                 chrome_layout: initial_chrome_motion,
+                chrome_epoch: initial_chrome_epoch,
                 _ui_subscription: ui_subscription,
             }
         });
@@ -305,7 +308,8 @@ pub(super) fn render(
             stage.controls = controls.clone();
             changed = true;
         }
-        if stage.chrome_layout.target_value() != app.stage_chrome_motion.target_value() {
+        if stage.chrome_epoch != app.stage_chrome_epoch {
+            stage.chrome_epoch = app.stage_chrome_epoch;
             stage.chrome_layout = app.stage_chrome_motion;
             changed = true;
         }
@@ -331,6 +335,7 @@ struct StagePlayerView {
     key: StagePlayerRenderKey,
     playing: bool,
     chrome_layout: StageChromeLayoutMotion,
+    chrome_epoch: u64,
     _ui_subscription: Subscription,
 }
 

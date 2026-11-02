@@ -127,6 +127,7 @@ pub(super) struct StageControlsView {
     volume_drag_ratio: Option<f32>,
     stage_active: bool,
     fade: StageChromeFade,
+    fade_epoch: u64,
     playback_state: PlaybackState,
     shuffle: bool,
     repeat: RepeatMode,
@@ -159,7 +160,8 @@ impl StageControlsView {
             volume_slider: None,
             volume_drag_ratio: None,
             stage_active: false,
-            fade: stage_chrome::fade_motion(true),
+            fade: stage_chrome::fade_motion(false),
+            fade_epoch: 0,
             playback_state: PlaybackState::Paused,
             shuffle: false,
             repeat: RepeatMode::Off,
@@ -253,8 +255,9 @@ impl StageControlsView {
             || self.shuffle != shuffle
             || self.repeat != repeat
             || volume_changed;
-        let fade_changed = self.fade.target_value() != app.stage_chrome_motion.target_value();
+        let fade_changed = self.fade_epoch != app.stage_chrome_epoch;
         if fade_changed {
+            self.fade_epoch = app.stage_chrome_epoch;
             self.fade = app.stage_chrome_motion;
         }
 
@@ -489,6 +492,7 @@ impl Render for StageControlsView {
 pub(super) struct StageTitlebarView {
     parent: WeakEntity<MusicApp>,
     fade: StageChromeFade,
+    fade_epoch: u64,
     title_key: u64,
     title: SharedString,
 }
@@ -497,15 +501,17 @@ impl StageTitlebarView {
     fn new(parent: WeakEntity<MusicApp>) -> Self {
         Self {
             parent,
-            fade: stage_chrome::fade_motion(true),
+            fade: stage_chrome::fade_motion(false),
+            fade_epoch: 0,
             title_key: 0,
             title: SharedString::new_static("沉浸音乐大舞台"),
         }
     }
 
     fn sync_from_app(&mut self, app: &MusicApp, cx: &mut Context<Self>) {
-        let fade_changed = self.fade.target_value() != app.stage_chrome_motion.target_value();
+        let fade_changed = self.fade_epoch != app.stage_chrome_epoch;
         if fade_changed {
+            self.fade_epoch = app.stage_chrome_epoch;
             self.fade = app.stage_chrome_motion;
         }
         let title_key = stage_title_fingerprint(app);
