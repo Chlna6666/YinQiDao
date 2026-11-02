@@ -667,23 +667,16 @@ impl StageLyricsView {
             return;
         }
 
-        let first_measurement = self
-            .row_height_measured
-            .get(index)
-            .is_some_and(|measured| !*measured);
         if let Some(measured) = self.row_height_measured.get_mut(index) {
             *measured = true;
         }
 
-        let height_changed = (self.row_heights[index] - height).abs() > 0.5;
-        if height_changed {
+        // Mark a row measured without invalidating the full lyric tree when
+        // its geometry is unchanged. Observers previously caused redundant
+        // first-measurement redraws across every visible row during stage open.
+        if (self.row_heights[index] - height).abs() > 0.5 {
             self.row_heights[index] = height;
             self.rebuild_row_prefix_sum();
-        }
-
-        // Remove the one-shot observer after its first stable measurement. During a hand-off this
-        // avoids running an entity update callback for every visible row on every animation frame.
-        if first_measurement || height_changed {
             cx.notify();
         }
     }
