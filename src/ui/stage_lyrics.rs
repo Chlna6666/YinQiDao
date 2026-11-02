@@ -1986,10 +1986,8 @@ fn karaoke_word(
                             SharedString::new_static("lyric-syllable-halo"),
                             lyric_animation_instance_id(karaoke_epoch, index),
                         ),
-                        Animation::from_spec(
-                            AnimationSpec::new(duration).ease(Easing::InOutCubic),
-                        )
-                        .with_property(AnimationProperty::opacity(from, to)),
+                        Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
+                            .with_property(AnimationProperty::opacity(from, to)),
                         |element, _| element,
                     )
                     .into_any_element();
