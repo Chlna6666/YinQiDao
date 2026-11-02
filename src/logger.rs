@@ -4,6 +4,53 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use crate::settings::LogConfig;
 
+/// Install a low-overhead Rust panic reporter for development and production.
+///
+/// Native Windows SEH exceptions such as STATUS_STACK_OVERFLOW bypass Rust's
+/// panic hook; Windows crash dumps remain necessary for those failures.
+pub fn install_panic_diagnostics(base_dir: &Path) {
+    use std::{backtrace::Backtrace, fs::OpenOptions, io::Write, panic, time::UNIX_EPOCH};
+
+    let crash_dir = base_dir.join("logs").join("crashes");
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let filename = format!("panic-{}-{now}.txt", std::process::id());
+        if std::fs::create_dir_all(&crash_dir).is_ok()
+            && let Ok(mut file) = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(crash_dir.join(filename))
+        {
+            let thread = std::thread::current();
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            let _ = writeln!(file, "YinQiDao Rust panic (not Windows SEH)");
+            let _ = writeln!(file, "thread: {}", thread.name().unwrap_or("<unnamed>"));
+            let _ = writeln!(file, "message: {message}");
+            if let Some(location) = info.location() {
+                let _ = writeln!(
+                    file,
+                    "source: {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
+            }
+            let _ = writeln!(file, "backtrace:\n{}", Backtrace::force_capture());
+            let _ = file.flush();
+        }
+        previous(info);
+    }));
+}
+
 pub fn init_logging(config: &LogConfig, base_dir: &Path) -> Option<WorkerGuard> {
     let level_str = match config.level.to_lowercase().as_str() {
         // “debug” means application diagnostics, not every dependency's internal compiler/driver

@@ -25,6 +25,14 @@ fn main() {
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
+    if target_env == "msvc" {
+        // GPUI's retained AnyView/Div prepaint can nest very large frames
+        // (a crash dump recorded a single ~142 KiB __chkstk probe).
+        // Reserve virtual address space; the OS commits stack pages on demand.
+        // This is mitigation, not a substitute for reducing frame usage upstream.
+        println!("cargo:rustc-link-arg-bin=yin_qi_dao=/STACK:16777216");
+    }
+
     let resource = match target_env.as_str() {
         "msvc" => compile_msvc_resource(&manifest_dir, &rc_file, &out_dir, &target_arch),
         "gnullvm" => compile_llvm_resource(&manifest_dir, &rc_file, &out_dir),

@@ -129,5 +129,8 @@ incremental = false
 debug = 0
 
 [profile.dev]
+# Keep the optimized dev behavior to reproduce GPUI's real stack usage,
+# but also emit full PDB symbols for source/line-level crash diagnostics.
 opt-level = 3
+debug = 2
 panic = "unwind"

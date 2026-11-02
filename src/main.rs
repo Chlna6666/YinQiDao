@@ -89,6 +89,9 @@ fn main() -> Result<()> {
     hotkeys::set_enabled(config.lyrics_shortcuts.enabled);
 
     let _log_guard = logger::init_logging(&config.log, &base_dir);
+    // Automatic plain-text backtraces for Rust panics; no debugger required.
+    // Windows native stack overflows still require the OS crash-dump path.
+    logger::install_panic_diagnostics(&base_dir);
     tracing::info!(
         "音栖岛启动中... 运行模式: 异步多线程, 日志级别: {}",
         config.log.level
