@@ -44,7 +44,17 @@ fn sessions() -> &'static Mutex<HashMap<PathBuf, Weak<ProgressiveSession>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+impl std::fmt::Debug for ProgressiveSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressiveSession").field("file", &self.file).finish_non_exhaustive()
+    }
+}
+
 impl ProgressiveSession {
+    pub(crate) fn file_path(&self) -> &Path {
+        &self.file
+    }
+
     pub(crate) fn register(file: PathBuf) -> Arc<Self> {
         let session = Arc::new(Self {
             file: file.clone(),
