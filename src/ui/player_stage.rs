@@ -26,7 +26,7 @@ pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 const STAGE_LYRICS_GOLDEN_SHARE: f32 = 0.618_034;
 const STAGE_STACKED_BREAKPOINT_PX: f32 = 800.0;
 const STAGE_CONTROLS_SLOT_HEIGHT_PX: f32 = 158.0;
-const STAGE_METADATA_SLOT_HEIGHT_PX: f32 = 72.0;
+const STAGE_METADATA_SLOT_HEIGHT_PX: f32 = 92.0;
 const STAGE_CONTENT_VISIBLE_TOP_PX: f32 = 54.0;
 const STAGE_CONTENT_HIDDEN_TOP_PX: f32 = 24.0;
 const STAGE_CONTENT_VISIBLE_BOTTOM_PX: f32 = 32.0;
@@ -134,7 +134,7 @@ impl StageLayoutMetrics {
             metadata_height,
             controls_height,
             cluster_gap,
-            metadata_offset_y: -18.0 * (1.0 - progress),
+            metadata_offset_y: 0.0,
         }
     }
 
