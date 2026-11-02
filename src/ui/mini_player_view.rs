@@ -35,8 +35,10 @@ impl Global for MiniPlayerViewCache {}
 
 const MINI_PLAYBACK_TIME_WIDTH: f32 = 104.0;
 const MINI_PLAYBACK_TIME_HEIGHT: f32 = 18.0;
-// Limit the progress hit strip to the rail rather than the transport buttons.
-const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 12.0;
+// The cached region is positioned ABOVE the player. Its 7px height
+// contains the entire expanded rail without overlapping transport controls.
+const MINI_PROGRESS_OUTWARD_REVEAL: f32 = 4.0;
+const MINI_PROGRESS_INTERACTION_HEIGHT: f32 = 3.0;
 const VOLUME_COMMAND_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -555,8 +557,8 @@ fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyView {
                 .absolute()
                 .left(px(0.0))
                 .right(px(0.0))
-                .top(px(0.0))
-                .h(px(MINI_PROGRESS_INTERACTION_HEIGHT)),
+                .top(px(-MINI_PROGRESS_OUTWARD_REVEAL))
+                .h(px(MINI_PROGRESS_INTERACTION_HEIGHT + MINI_PROGRESS_OUTWARD_REVEAL)),
         )
         .reuse_on_window_refresh()
 }

@@ -52,8 +52,8 @@ impl SliderStyle {
             hover_track_height: px(6.0),
             thumb_size: px(10.0),
             hover_thumb_scale: 1.20,
-            // The previous 30px strip reached into the play/pause controls.
-            interaction_height: px(12.0),
+            // 2px rail + 1px tolerance. Expansion occurs outside the player.
+            interaction_height: px(3.0),
             track_bg: theme::BORDER_HAIRLINE.into(),
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: dark::white(1.0),
@@ -259,6 +259,36 @@ fn horizontal_track(ratio: f32, height: Pixels, style: SliderStyle) -> Div {
         )
 }
 
+/// Unlike normal sliders, the mini edge overlay must not expand the
+/// resting hitbox to accommodate an invisible 10px thumb.
+fn horizontal_interaction_height(style: SliderStyle) -> Pixels {
+    if style.edge_overlay {
+        style.interaction_height
+    } else {
+        px(f32::from(style.interaction_height)
+            .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
+            .max(f32::from(style.hover_track_height)))
+    }
+}
+
+/// Extra pixels painted ABOVE the mini player's top edge on hover.
+fn edge_reveal_height(style: SliderStyle) -> Pixels {
+    px((f32::from(style.hover_track_height) - f32::from(style.track_height)).max(0.0))
+}
+
+/// The cached view is positioned `-reveal` above the player's top edge.
+/// In the resting state the hitbox starts at +reveal; on hover it expands
+/// upward, leaving its bottom edge completely unchanged.
+fn edge_overlay_root(root: Div, style: SliderStyle) -> Div {
+    let reveal = edge_reveal_height(style);
+    let expanded_hit_height = px(f32::from(style.interaction_height) + f32::from(reveal));
+    root.absolute()
+        .left(px(0.0))
+        .right(px(0.0))
+        .top(reveal)
+        .hover(move |hover| hover.top(px(0.0)).h(expanded_hit_height))
+}
+
 fn slider_visual_with_group(
     _id: ElementId,
     ratio: f32,
@@ -266,12 +296,9 @@ fn slider_visual_with_group(
     hover_group: SharedString,
 ) -> Div {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
-    let interaction_height = px(f32::from(style.interaction_height)
-        .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
-        .max(f32::from(style.hover_track_height)));
+    let interaction_height = horizontal_interaction_height(style);
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
-    let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
     let half_thumb = px(f32::from(style.thumb_size) * 0.5);
 
     let mut thumb = div()
@@ -297,26 +324,22 @@ fn slider_visual_with_group(
         } else {
             layer.items_center()
         };
-        layer.child(horizontal_track(clamped_ratio, style.track_height, style))
+        let track = horizontal_track(clamped_ratio, style.track_height, style);
+        let track = if style.edge_overlay {
+            track
+                .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
+                .transition(theme::hover_transition())
+        } else {
+            track
+        };
+        layer.child(track)
     };
     let hover_track_layer = if style.edge_overlay {
-        div()
-            .absolute()
-            .left(px(0.0))
-            .right(px(0.0))
-            .top(edge_hover_top)
-            .h(style.hover_track_height)
-            .flex()
-            .items_start()
-            .opacity(0.0)
-            .group_hover(rail_hover_group, |s| s.opacity(1.0))
-            .transition(theme::hover_transition())
-            .child(horizontal_track(
-                clamped_ratio,
-                style.hover_track_height,
-                style,
-            ))
+        // Avoid a hidden 6px overlay that can receive pointer input
+        // even while the resting progress rail is only 2px tall.
+        None
     } else {
+        Some(
         div()
             .absolute()
             .inset_0()
@@ -329,7 +352,7 @@ fn slider_visual_with_group(
                 clamped_ratio,
                 style.hover_track_height,
                 style,
-            ))
+            )))
     };
 
     let thumb_layer = if style.edge_overlay {
@@ -337,8 +360,9 @@ fn slider_visual_with_group(
             .absolute()
             .left(px(-f32::from(half_thumb)))
             .right(half_thumb)
-            .top(edge_hover_top)
-            .h(style.hover_track_height)
+            .top(px(0.0))
+            .h(style.interaction_height)
+            .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
             .flex()
             .items_center()
             .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
@@ -362,11 +386,11 @@ fn slider_visual_with_group(
         .cursor_pointer()
         .h(interaction_height)
         .child(base_track_layer)
-        .child(hover_track_layer)
+        .children(hover_track_layer)
         .child(thumb_layer);
 
     if style.edge_overlay {
-        root.absolute().left(px(0.0)).right(px(0.0)).top(px(0.0))
+        edge_overlay_root(root, style)
     } else {
         root
     }
@@ -427,12 +451,9 @@ fn slider_visual_with_group_animated(
         return slider_visual_with_group(id, 1.0, style, hover_group);
     }
 
-    let interaction_height = px(f32::from(style.interaction_height)
-        .max(f32::from(style.thumb_size) * style.hover_thumb_scale)
-        .max(f32::from(style.hover_track_height)));
+    let interaction_height = horizontal_interaction_height(style);
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
-    let edge_hover_top = px(f32::from(style.track_height) - f32::from(style.hover_track_height));
     let half_thumb = px(f32::from(style.thumb_size) * 0.5);
 
     let mut thumb = div()
@@ -474,19 +495,9 @@ fn slider_visual_with_group_animated(
         animation,
     );
     let hover_track_layer = if style.edge_overlay {
-        div()
-            .absolute()
-            .left(px(0.0))
-            .right(px(0.0))
-            .top(edge_hover_top)
-            .h(style.hover_track_height)
-            .flex()
-            .items_start()
-            .opacity(0.0)
-            .group_hover(rail_hover_group, |s| s.opacity(1.0))
-            .transition(theme::hover_transition())
-            .child(hover_track)
+        None
     } else {
+        Some(
         div()
             .absolute()
             .inset_0()
@@ -495,7 +506,7 @@ fn slider_visual_with_group_animated(
             .opacity(0.0)
             .group_hover(rail_hover_group, |s| s.opacity(1.0))
             .transition(theme::hover_transition())
-            .child(hover_track)
+            .child(hover_track))
     };
 
     let thumb_layer = if style.edge_overlay {
@@ -503,8 +514,9 @@ fn slider_visual_with_group_animated(
             .absolute()
             .left(px(-f32::from(half_thumb)))
             .right(half_thumb)
-            .top(edge_hover_top)
-            .h(style.hover_track_height)
+            .top(px(0.0))
+            .h(style.interaction_height)
+            .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
             .flex()
             .items_center()
             .child(div().flex_none().w_full().h(px(1.0)))
@@ -539,11 +551,11 @@ fn slider_visual_with_group_animated(
         .cursor_pointer()
         .h(interaction_height)
         .child(base_track_layer)
-        .child(hover_track_layer)
+        .children(hover_track_layer)
         .child(thumb_layer);
 
     if style.edge_overlay {
-        root.absolute().left(px(0.0)).right(px(0.0)).top(px(0.0))
+        edge_overlay_root(root, style)
     } else {
         root
     }
@@ -880,10 +892,14 @@ mod tests {
     #[test]
     fn mini_progress_hover_expands_outward() {
         let style = SliderStyle::mini_progress();
-        assert!(f32::from(style.hover_track_height) > f32::from(style.track_height));
-        assert!(f32::from(style.track_height) - f32::from(style.hover_track_height) < 0.0);
-        // Constrain seeking to the rail, rather than transport control buttons.
-        assert!(f32::from(style.interaction_height) <= 12.0);
+        let resting_height = horizontal_interaction_height(style);
+        let reveal_height = edge_reveal_height(style);
+        assert_eq!(f32::from(style.track_height), 2.0);
+        assert_eq!(f32::from(resting_height), 3.0);
+        assert_eq!(f32::from(reveal_height), 4.0);
+        assert_eq!(f32::from(style.hover_track_height), 6.0);
+        // On hover expand 4px above the player, never farther below it.
+        assert_eq!(f32::from(resting_height) + f32::from(reveal_height), 7.0);
     }
 
     #[test]
