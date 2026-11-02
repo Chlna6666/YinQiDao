@@ -231,7 +231,12 @@ pub fn import_candidate(candidate: &PluginImportCandidate) -> Result<PluginImpor
         bail!("插件文件在确认期间已更改，请重新选择并检查插件信息");
     }
 
-    if !current.source_path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("wasm")) {
+    if !current
+        .source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+    {
         return import_directory(&current.package_dir);
     }
 
@@ -277,12 +282,15 @@ fn stage_selected_wasm(candidate: &PluginImportCandidate) -> Result<StagedPlugin
         fs::create_dir_all(parent).context("创建临时组件目录失败")?;
     }
     fs::copy(
-        candidate.package_dir.join(super::host::catalog::PLUGIN_PACKAGE_FILE),
-        staged.package_dir.join(super::host::catalog::PLUGIN_PACKAGE_FILE),
+        candidate
+            .package_dir
+            .join(super::host::catalog::PLUGIN_PACKAGE_FILE),
+        staged
+            .package_dir
+            .join(super::host::catalog::PLUGIN_PACKAGE_FILE),
     )
     .context("复制插件清单失败")?;
-    fs::copy(&candidate.source_path, component_destination)
-        .context("复制所选 WASM 组件失败")?;
+    fs::copy(&candidate.source_path, component_destination).context("复制所选 WASM 组件失败")?;
     Ok(staged)
 }
 
@@ -301,7 +309,6 @@ pub fn import_file(file_path: &Path) -> Result<PluginImportSummary> {
     let candidate = inspect_plugin_file(file_path)?;
     import_candidate(&candidate)
 }
-
 
 fn compare_versions(v1: &str, v2: &str) -> std::cmp::Ordering {
     let parse = |v: &str| -> Vec<u64> {

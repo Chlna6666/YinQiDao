@@ -171,9 +171,10 @@ pub(crate) fn confirm_import(
         return;
     }
     let task = Tokio::spawn_result(cx, async move {
-        let imported = tokio::task::spawn_blocking(move || management::import_candidate(&candidate))
-            .await
-            .map_err(|_| anyhow!("插件导入任务异常退出"))??;
+        let imported =
+            tokio::task::spawn_blocking(move || management::import_candidate(&candidate))
+                .await
+                .map_err(|_| anyhow!("插件导入任务异常退出"))??;
         let plugins = tokio::task::spawn_blocking(management::list_installed)
             .await
             .map_err(|_| anyhow!("插件列表刷新任务异常退出"))??;
