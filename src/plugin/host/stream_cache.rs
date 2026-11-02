@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -11,7 +11,9 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use md5::{Digest, Md5};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
+
+use crate::audio::progressive::ProgressiveSession;
 
 use crate::plugins::{KeyValue, PluginRoute, StreamDescriptor, StreamRequest};
 
@@ -32,6 +34,8 @@ const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
 const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_CACHE_IDENTITY_BYTES: usize = 32 * 1024;
 const WRITER_QUEUE_DEPTH: usize = 4;
+/// Playback may begin before full download; probes still require enough contiguous bytes.
+const INITIAL_PLAYABLE_BYTES: u64 = 768 * 1024;
 
 static PLUGIN_STREAM_CACHE: OnceLock<Arc<PluginStreamCache>> = OnceLock::new();
 static TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -43,7 +47,8 @@ pub struct PluginMaterializedStream {
     pub cache_hit: bool,
     /// Keep the finalized bucket pinned for as long as the caller owns this materialization.
     /// The lease is intentionally opaque outside the Host cache implementation.
-    _lease: Arc<PluginStreamCacheLease>,
+    _lease: Option<Arc<PluginStreamCacheLease>>,
+    _live: Option<Arc<ProgressiveSession>>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +68,78 @@ pub struct PluginStreamCache {
     download_gate: Arc<Semaphore>,
 }
 
+type EarlyResponse = Result<PluginMaterializedStream, String>;
+
+#[derive(Clone)]
+struct EarlyReady {
+    tx: Arc<Mutex<Option<oneshot::Sender<EarlyResponse>>>>,
+    session: Arc<Mutex<Option<Arc<ProgressiveSession>>>>,
+}
+
+impl EarlyReady {
+    fn send(&self, result: EarlyResponse) {
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(result);
+        }
+    }
+
+    fn remember(&self, session: Arc<ProgressiveSession>) {
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+    }
+
+    fn finish(&self, result: &Result<PluginMaterializedStream>) {
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(session) = session {
+            session.finish(result.as_ref().err().map(|err| format!("{err:#}")));
+        }
+        match result {
+            Ok(stream) => self.send(Ok(stream.clone())),
+            Err(err) => self.send(Err(format!("{err:#}"))),
+        }
+    }
+}
+
 impl PluginStreamCache {
+    /// Open a Host-owned seekable stream as soon as enough contiguous bytes are present.
+    /// Unsupported containers keep the verified full-download path.
+    pub async fn materialize_progressively(
+        self: &Arc<Self>,
+        runtime: Arc<PluginHostServices>,
+        route: PluginRoute,
+        request: StreamRequest,
+        descriptor: StreamDescriptor,
+    ) -> Result<PluginMaterializedStream> {
+        if !matches!(
+            codec_extension(descriptor.codec.as_deref()),
+            "mp3" | "flac" | "ogg" | "opus" | "wav" | "aac"
+        ) {
+            return self.materialize(runtime.as_ref(), &route, &request, &descriptor).await;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let notice = EarlyReady {
+            tx: Arc::new(Mutex::new(Some(tx))),
+            session: Arc::new(Mutex::new(None)),
+        };
+        let worker_notice = notice.clone();
+        let cache = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = cache
+                .materialize_impl(
+                    runtime.as_ref(),
+                    &route,
+                    &request,
+                    &descriptor,
+                    Some(worker_notice.clone()),
+                )
+                .await;
+            worker_notice.finish(&result);
+        });
+        rx.await
+            .context("等待渐进式音源首批数据失败")?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -92,6 +168,17 @@ impl PluginStreamCache {
         route: &PluginRoute,
         request: &StreamRequest,
         descriptor: &StreamDescriptor,
+    ) -> Result<PluginMaterializedStream> {
+        self.materialize_impl(runtime, route, request, descriptor, None).await
+    }
+
+    async fn materialize_impl(
+        &self,
+        runtime: &PluginHostServices,
+        route: &PluginRoute,
+        request: &StreamRequest,
+        descriptor: &StreamDescriptor,
+        early: Option<EarlyReady>,
     ) -> Result<PluginMaterializedStream> {
         let identity = cache_identity(route, request, descriptor)?;
         let locator = locator_hex(&identity);
@@ -145,6 +232,12 @@ impl PluginStreamCache {
         let temp_dir = self
             .root
             .join(format!(".{locator}.tmp-{}-{nonce}", std::process::id()));
+        let live = early.as_ref().map(|notice| {
+            let session = ProgressiveSession::register(temp_dir.join(&audio_name));
+            session.hold_reservation(disk_reservation.clone());
+            notice.remember(session.clone());
+            session
+        });
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(WRITER_QUEUE_DEPTH);
         // A closed channel alone does not mean the transfer completed: dropping/cancelling the
         // materialize future also drops the sender. The blocking writer therefore requires this
@@ -157,6 +250,8 @@ impl PluginStreamCache {
         let writer_max_stream_bytes = self.max_stream_bytes;
         let writer_completed_flag = writer_completed.clone();
         let writer_disk_reservation = disk_reservation.clone();
+        let writer_live = live.clone();
+        let writer_early = early.clone();
         let writer = tokio::task::spawn_blocking(move || {
             let _disk_reservation = writer_disk_reservation;
             write_temp_entry(
@@ -166,6 +261,8 @@ impl PluginStreamCache {
                 writer_max_stream_bytes,
                 writer_rx,
                 writer_completed_flag,
+                writer_live,
+                writer_early,
             )
         });
 
@@ -203,19 +300,25 @@ impl PluginStreamCache {
             Ok(downloaded) => downloaded,
             Err(error) => {
                 let _ = writer_result;
-                cleanup_temp_dir(temp_dir).await;
+                if live.is_none() {
+                    cleanup_temp_dir(temp_dir).await;
+                }
                 return Err(error);
             }
         };
         let written = match writer_result {
             Ok(written) => written,
             Err(error) => {
-                cleanup_temp_dir(temp_dir).await;
+                if live.is_none() {
+                    cleanup_temp_dir(temp_dir).await;
+                }
                 return Err(error);
             }
         };
         if downloaded == 0 || written != downloaded {
-            cleanup_temp_dir(temp_dir).await;
+            if live.is_none() {
+                cleanup_temp_dir(temp_dir).await;
+            }
             bail!("插件 stream cache 写入长度不一致: downloaded={downloaded}, written={written}");
         }
 
@@ -225,22 +328,50 @@ impl PluginStreamCache {
         let commit_audio_name = audio_name.clone();
         let commit_max_stream_bytes = self.max_stream_bytes;
         let commit_cache_ttl = self.cache_ttl;
+        let is_live = live.is_some();
         let committed = tokio::task::spawn_blocking(move || {
-            commit_temp_entry(
-                &commit_temp_dir,
-                &commit_bucket,
-                &commit_identity,
-                &commit_audio_name,
-                commit_max_stream_bytes,
-                commit_cache_ttl,
-            )
+            if is_live {
+                // Hard-link into a separate staging directory: the open decoder keeps its
+                // original temporary path, and the finalized cache is atomically published.
+                // Both links share the same underlying bytes; no second audio copy is allocated.
+                commit_progressive_entry(
+                    &commit_temp_dir,
+                    &commit_bucket,
+                    &commit_identity,
+                    &commit_audio_name,
+                    commit_max_stream_bytes,
+                    commit_cache_ttl,
+                )
+            } else {
+                commit_temp_entry(
+                    &commit_temp_dir,
+                    &commit_bucket,
+                    &commit_identity,
+                    &commit_audio_name,
+                    commit_max_stream_bytes,
+                    commit_cache_ttl,
+                )
+            }
         })
         .await
-        .context("等待插件 stream cache 提交任务失败")??;
+        .context("等待插件 stream cache 提交任务失败")?;
 
-        // Pin before releasing the temp-download reservation so no GC can remove the new bucket
-        // between atomic commit and handoff to the decoder.
-        let materialized = self.pin_entry(committed)?;
+        // A completed stream remains playable even when disk hard links are unsupported;
+        // that case simply disables this download's persistent-cache promotion.
+        let materialized = if let Some(session) = live {
+            if let Err(error) = &committed {
+                tracing::warn!(reason = %error, "渐进式下载已完成，但无法提交持久缓存");
+            }
+            PluginMaterializedStream {
+                path: session.file_path().to_path_buf(),
+                bytes: written,
+                cache_hit: false,
+                _lease: None,
+                _live: Some(session),
+            }
+        } else {
+            self.pin_entry(committed?)?
+        };
         drop(disk_reservation);
 
         // Preserve headroom already promised to any other concurrent materialization. A plain GC
@@ -294,7 +425,8 @@ impl PluginStreamCache {
             path: entry.path,
             bytes: entry.bytes,
             cache_hit: entry.cache_hit,
-            _lease: lease,
+            _lease: Some(lease),
+            _live: None,
         })
     }
 }
@@ -683,6 +815,8 @@ fn write_temp_entry(
     max_stream_bytes: u64,
     mut receiver: mpsc::Receiver<Vec<u8>>,
     completed: Arc<AtomicBool>,
+    live: Option<Arc<ProgressiveSession>>,
+    early: Option<EarlyReady>,
 ) -> Result<u64> {
     let result = (|| {
         let root = temp_dir
@@ -717,6 +851,20 @@ fn write_temp_entry(
             audio
                 .write_all(&chunk)
                 .context("写入插件 stream cache 音频失败")?;
+            if let Some(session) = &live {
+                session.written(written);
+                if written >= INITIAL_PLAYABLE_BYTES
+                    && let Some(early) = &early
+                {
+                    early.send(Ok(PluginMaterializedStream {
+                        path: audio_path.clone(),
+                        bytes: written,
+                        cache_hit: false,
+                        _lease: None,
+                        _live: Some(session.clone()),
+                    }));
+                }
+            }
         }
         if !completed.load(Ordering::Acquire) {
             bail!("插件 stream cache writer 未收到完整下载提交标记");
@@ -747,7 +895,7 @@ fn write_temp_entry(
         Ok(written)
     })();
 
-    if result.is_err() {
+    if result.is_err() && live.is_none() {
         let _ = fs::remove_dir_all(temp_dir);
     }
     result
@@ -854,6 +1002,35 @@ fn cached_entry(
         bytes: audio_metadata.len(),
         cache_hit: true,
     }))
+}
+
+/// Keep the decoder's temporary path stable while publishing a validated cache entry.
+/// Links must stay under the same Host cache root to preserve the disk quota model.
+fn commit_progressive_entry(
+    temp_dir: &Path,
+    bucket: &Path,
+    identity: &[u8],
+    audio_name: &str,
+    max_bytes: u64,
+    ttl: Duration,
+) -> Result<CachedStreamEntry> {
+    let root = temp_dir.parent().ok_or_else(|| anyhow!("missing cache root"))?;
+    let stage = root.join(format!(
+        ".progressive-commit-{}-{}",
+        std::process::id(),
+        TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&stage).context("创建渐进式缓存提交目录失败")?;
+    let result = (|| {
+        fs::hard_link(temp_dir.join(audio_name), stage.join(audio_name))
+            .context("当前文件系统不支持渐进式缓存 hard-link")?;
+        fs::write(stage.join("identity.bin"), identity)?;
+        commit_temp_entry(&stage, bucket, identity, audio_name, max_bytes, ttl)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
 }
 
 fn commit_temp_entry(
@@ -1097,7 +1274,7 @@ mod tests {
         drop(tx);
         let completed = Arc::new(AtomicBool::new(false));
 
-        let result = write_temp_entry(&temp_dir, b"identity", "audio.media", 1024, rx, completed);
+        let result = write_temp_entry(&temp_dir, b"identity", "audio.media", 1024, rx, completed, None, None);
         assert!(result.is_err());
         assert!(!temp_dir.exists());
         let _ = fs::remove_dir_all(root);
