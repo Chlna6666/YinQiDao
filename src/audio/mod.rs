@@ -8,9 +8,9 @@ mod engine;
 #[rustfmt::skip]
 mod facade;
 mod fingerprint;
-pub(crate) mod progressive;
 mod head_tracking;
 mod head_tracking_opentrack;
+pub(crate) mod progressive;
 mod smart_profile;
 mod spatial_activity;
 mod spatial_debug;

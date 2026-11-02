@@ -975,8 +975,10 @@ impl AudioWorker {
             if !self.handle_commands() {
                 break;
             }
-            if !matches!(self.state, PlaybackState::Playing | PlaybackState::Buffering)
-                || self.decoder.is_none()
+            if !matches!(
+                self.state,
+                PlaybackState::Playing | PlaybackState::Buffering
+            ) || self.decoder.is_none()
             {
                 thread::sleep(Duration::from_millis(8));
                 continue;
@@ -1026,7 +1028,10 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::Pause => {
-                if matches!(self.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                if matches!(
+                    self.state,
+                    PlaybackState::Playing | PlaybackState::Buffering
+                ) {
                     self.state = PlaybackState::Paused;
                     self.paused.store(true, Ordering::Release);
                     self.emit(PlayerEvent::StateChanged(self.state));

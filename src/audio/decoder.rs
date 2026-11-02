@@ -346,18 +346,19 @@ impl DecoderStream {
             path: path.to_path_buf(),
             source,
         })?;
-        let source: Box<dyn symphonia::core::io::MediaSource> = if let Some(session) =
-            progressive::lookup(path)
-        {
-            Box::new(ProgressiveMediaSource::open(path, session).map_err(|source| {
-                DecodeError::Open {
-                    path: path.to_path_buf(),
-                    source,
-                }
-            })?)
-        } else {
-            Box::new(file)
-        };
+        let source: Box<dyn symphonia::core::io::MediaSource> =
+            if let Some(session) = progressive::lookup(path) {
+                Box::new(
+                    ProgressiveMediaSource::open(path, session).map_err(|source| {
+                        DecodeError::Open {
+                            path: path.to_path_buf(),
+                            source,
+                        }
+                    })?,
+                )
+            } else {
+                Box::new(file)
+            };
         let source = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {

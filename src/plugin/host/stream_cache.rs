@@ -94,7 +94,11 @@ impl EarlyReady {
     }
 
     fn finish(&self, result: &Result<PluginMaterializedStream>) {
-        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(session) = session {
             session.finish(result.as_ref().err().map(|err| format!("{err:#}")));
         }
@@ -119,7 +123,9 @@ impl PluginStreamCache {
             codec_extension(descriptor.codec.as_deref()),
             "mp3" | "flac" | "ogg" | "opus" | "wav" | "aac"
         ) {
-            return self.materialize(runtime.as_ref(), &route, &request, &descriptor).await;
+            return self
+                .materialize(runtime.as_ref(), &route, &request, &descriptor)
+                .await;
         }
 
         let (tx, rx) = oneshot::channel();
@@ -175,7 +181,8 @@ impl PluginStreamCache {
         request: &StreamRequest,
         descriptor: &StreamDescriptor,
     ) -> Result<PluginMaterializedStream> {
-        self.materialize_impl(runtime, route, request, descriptor, None).await
+        self.materialize_impl(runtime, route, request, descriptor, None)
+            .await
     }
 
     async fn materialize_impl(
@@ -1020,7 +1027,9 @@ fn commit_progressive_entry(
     max_bytes: u64,
     ttl: Duration,
 ) -> Result<CachedStreamEntry> {
-    let root = temp_dir.parent().ok_or_else(|| anyhow!("missing cache root"))?;
+    let root = temp_dir
+        .parent()
+        .ok_or_else(|| anyhow!("missing cache root"))?;
     let stage = root.join(format!(
         ".progressive-commit-{}-{}",
         std::process::id(),
@@ -1280,7 +1289,16 @@ mod tests {
         drop(tx);
         let completed = Arc::new(AtomicBool::new(false));
 
-        let result = write_temp_entry(&temp_dir, b"identity", "audio.media", 1024, rx, completed, None, None);
+        let result = write_temp_entry(
+            &temp_dir,
+            b"identity",
+            "audio.media",
+            1024,
+            rx,
+            completed,
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(!temp_dir.exists());
         let _ = fs::remove_dir_all(root);

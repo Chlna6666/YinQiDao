@@ -4,12 +4,12 @@
 //! contiguous, already persisted byte prefix. Readers do not conflate a temporary
 //! underrun with end-of-file. No network or filesystem wait enters a CPAL callback.
 use std::{
+    any::Any,
     collections::HashMap,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock, Weak},
-    any::Any,
     time::Duration,
 };
 use symphonia::core::io::MediaSource;
@@ -46,7 +46,9 @@ fn sessions() -> &'static Mutex<HashMap<PathBuf, Weak<ProgressiveSession>>> {
 
 impl std::fmt::Debug for ProgressiveSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProgressiveSession").field("file", &self.file).finish_non_exhaustive()
+        f.debug_struct("ProgressiveSession")
+            .field("file", &self.file)
+            .finish_non_exhaustive()
     }
 }
 
@@ -145,11 +147,7 @@ impl Drop for ProgressiveSession {
 }
 
 pub(crate) fn lookup(path: &Path) -> Option<Arc<ProgressiveSession>> {
-    sessions()
-        .lock()
-        .ok()?
-        .get(path)
-        .and_then(Weak::upgrade)
+    sessions().lock().ok()?.get(path).and_then(Weak::upgrade)
 }
 
 pub(crate) struct ProgressiveMediaSource {
@@ -251,13 +249,19 @@ mod tests {
         let mut writer = File::create(&file).unwrap();
         let session = ProgressiveSession::register(file.clone());
         let mut reader = ProgressiveMediaSource::open(&file, session.clone()).unwrap();
-        assert_eq!(reader.read(&mut [0u8; 4]).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            reader.read(&mut [0u8; 4]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         writer.write_all(b"abc").unwrap();
         session.written(3);
         let mut bytes = [0; 4];
         assert_eq!(reader.read(&mut bytes).unwrap(), 3);
         assert_eq!(&bytes[..3], b"abc");
-        assert_eq!(reader.read(&mut bytes).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            reader.read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         session.finish(None);
         assert_eq!(reader.read(&mut bytes).unwrap(), 0);
         drop(reader);
@@ -276,7 +280,10 @@ mod tests {
         let session = ProgressiveSession::register(path.clone());
         let mut reader = ProgressiveMediaSource::open(&path, session.clone()).unwrap();
         session.finish(Some("network closed".into()));
-        assert_eq!(reader.read(&mut [0u8; 1]).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            reader.read(&mut [0u8; 1]).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
         drop(reader);
         drop(session);
     }
