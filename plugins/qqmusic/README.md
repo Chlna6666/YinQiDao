@@ -6,7 +6,7 @@
 
 | 能力 | QQ音乐（本插件） | 与网易云同时启用时 |
 |---|---|---|
-| authentication | Cookie 导入（music.y.qq.com 登录后复制 Cookie；最小集 `uin + qm_keyst`） | 各自独立登录、独立账户、互不干扰 |
+| authentication | **QQ App 扫码**（ptqrshow/ptqrlogin/OAuth/QQLogin）与 Cookie 导入；QQ 音乐 App 扫码仍需 Host MQTT/WebSocket 支持 | 各自独立登录、独立账户、互不干扰 |
 | search | `music.search.SearchCgiService`（特殊信封：key=module、无 comm） | 搜索扇出同时发给所有健康来源，结果按 provider 去重合并 |
 | streaming | `vkey.GetVkeyServer/CgiGetVkey`（游客 M500 / 登录 M800 / 绿钻 F000 探测） | 各曲目按其 `source.provider_id` 回源，不跨源解析 |
 | lyrics | 老 fcgi LRC + 翻译（base64） | 曲目各自的来源提供歌词 |
@@ -56,3 +56,10 @@ io.yinqidao.qqmusic/
 
 `plugin.toml` 复制自 `plugins/qqmusic/plugin.toml`，将编译产物复制并命名为
 `provider.wasm`。注意 QQ 与网易云插件的 `plugin.toml`、WASM 不能混用。
+
+
+## QQ 扫码与 QQ 音乐 App 扫码的协议边界
+
+- **手机 QQ 扫码（本插件已接入源码）**：`ptqrshow` 返回 PNG 和 qrsig；`ptqrlogin` 轮询；扫码确认后通过 `check_sig → graph OAuth → QQLogin` 换取 QQ 音乐凭据。Host 使用官方 PNG 图片原样显示，手动停止 OAuth 302 自动跳转以提取 Set-Cookie，完成后复用 Cookie 登录的 Secret 持久化。
+- **QQ 音乐 App 扫码（尚未启用）**：官方 `music.login.LoginServer/CreateQRCode` 返回 PNG 和 qrcodeID；`mu.y.qq.com/ws/handshake` 的 MQTT v5/WSS 推送 cookies 事件后，才能调用 `music.login.LoginServer/Login`。当前插件 Host 只提供 HTTP，不提供经过权限验证、隔离和生命周期管理的 MQTT/WebSocket 通道，不能伪装成普通 HTTP 轮询或把账号 Token 发送给第三方转发服务。需要在 Host 添加该通道后单独启用第二种认证方式。
+- 所有二维码登录均为非公开逆向接口，需真实账号扫码验证；CI 检查只能证明构建、解析与本地测试通过。

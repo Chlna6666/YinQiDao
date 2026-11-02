@@ -10,7 +10,7 @@ use crate::protocol::{self, Session};
 pub const PROVIDER_ID: &str = "qqmusic";
 const ACCOUNT_INDEX_KEY: &str = "account-index-v1";
 const COOKIE_KEY: &str = "cookie-v1";
-const COOKIE_CHALLENGE_ID: &str = "cookie-import-v1";
+pub(crate) const COOKIE_CHALLENGE_ID: &str = "cookie-import-v1";
 const MAX_COOKIE_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 2 * 1024;
 const MAX_PLAYLIST_NAME_BYTES: usize = 512;
@@ -43,7 +43,7 @@ pub fn manifest() -> types::PluginManifest {
             id: PROVIDER_ID.into(),
             display_name: "QQ音乐".into(),
             capabilities: provider_capabilities(),
-            auth_methods: vec![types::AuthMethod::CookieImport],
+            auth_methods: vec![types::AuthMethod::QrCode, types::AuthMethod::CookieImport],
         }],
         network_domains: vec![
             "y.qq.com".into(),
@@ -52,6 +52,7 @@ pub fn manifest() -> types::PluginManifest {
             "c.y.qq.com".into(),
             "i.y.qq.com".into(),
             "ssl.ptlogin2.qq.com".into(),
+            "ssl.ptlogin2.graph.qq.com".into(),
             "graph.qq.com".into(),
             "*.music.tc.qq.com".into(),
             "dl.stream.qqmusic.qq.com".into(),

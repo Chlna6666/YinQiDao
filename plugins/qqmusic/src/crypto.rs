@@ -24,6 +24,23 @@ pub fn g_tk(qm_keyst: Option<&str>) -> u32 {
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Encode official PNG QR bytes; never reinterpret raw PNG bytes as a URL QR.
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let first = chunk[0] >> 2;
+        let second = ((chunk[0] & 0x03) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4);
+        let third = ((chunk.get(1).copied().unwrap_or(0) & 0x0f) << 2)
+            | (chunk.get(2).copied().unwrap_or(0) >> 6);
+        let fourth = chunk.get(2).copied().unwrap_or(0) & 0x3f;
+        result.push(BASE64_ALPHABET[first as usize] as char);
+        result.push(BASE64_ALPHABET[second as usize] as char);
+        result.push(if chunk.len() >= 2 { BASE64_ALPHABET[third as usize] as char } else { '=' });
+        result.push(if chunk.len() == 3 { BASE64_ALPHABET[fourth as usize] as char } else { '=' });
+    }
+    result
+}
+
 /// 标准 Base64 解码（含 padding 容错；非法输入返回 None）。
 pub fn base64_decode(input: &str) -> Option<Vec<u8>> {
     let mut lookup = [255_u8; 256];
@@ -82,6 +99,9 @@ mod tests {
 
     #[test]
     fn base64_decode_round_trips_ascii_and_binary() {
+        for bytes in [&b""[..], &b"x"[..], &b"xy"[..], &b"xyz"[..], &b"\x89PNG\r\n\x1a\n"[..]] {
+            assert_eq!(base64_decode(&base64_encode(bytes)).as_deref(), Some(bytes));
+        }
         assert_eq!(
             base64_decode("aGVsbG8=").as_deref(),
             Some(b"hello".as_slice())

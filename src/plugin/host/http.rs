@@ -257,7 +257,13 @@ impl PluginHttpExecutor {
 
         let mut method = parse_method(&request.method, &self.limits)?;
         let mut url = parse_request_url(&request.url, &self.limits)?;
+        let manual_redirect = request.headers.iter().any(|header| {
+            header.key.eq_ignore_ascii_case("x-yinqidao-redirect-mode")
+                && header.value.eq_ignore_ascii_case("manual")
+        });
         let mut headers = build_request_headers(&request.headers, &self.limits)?;
+        // This is a Host-only control, never forwarded to third-party servers.
+        headers.remove("x-yinqidao-redirect-mode");
         let mut body = request.body;
 
         for redirect_count in 0..=self.limits.max_redirects {
@@ -278,7 +284,7 @@ impl PluginHttpExecutor {
                 .with_context(|| format!("插件 HTTP 请求失败: {}", authorized.url))?;
 
             let status = response.status().as_u16();
-            if !is_followable_redirect(status) {
+            if manual_redirect || !is_followable_redirect(status) {
                 return Ok(response);
             }
             if redirect_count == self.limits.max_redirects {

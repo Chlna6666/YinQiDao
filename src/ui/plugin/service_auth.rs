@@ -694,7 +694,11 @@ fn provider_list(
                     "plugin-auth-method-{}-{}-{:?}",
                     option.plugin_id, option.provider_id, method
                 )),
-                auth_method_label(method),
+                if option.plugin_id == "io.yinqidao.qqmusic" && method == AuthMethod::QrCode {
+                    "QQ 扫码登录"
+                } else {
+                    auth_method_label(method)
+                },
                 false,
                 cx.listener(move |this, _, _, cx| {
                     begin_auth(this, plugin_id.clone(), provider_id.clone(), method, cx);
@@ -795,6 +799,20 @@ fn begin_auth(
 }
 
 fn qr_payload_to_png(payload: &str) -> Option<Arc<[u8]>> {
+    // Some providers return the actual QR as PNG bytes, rather than a URL
+    // containing the QR content. Re-encoding a PNG data URI as QR text produces
+    // an entirely different, unscannable code.
+    if let Some(encoded) = payload.strip_prefix("data:image/png;base64,") {
+        use base64::Engine as _;
+        if encoded.len() > 512 * 1024 {
+            return None;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        if decoded.len() > 256 * 1024 || !decoded.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return None;
+        }
+        return Some(Arc::from(decoded.into_boxed_slice()));
+    }
     let code = QrCode::new(payload.as_bytes()).ok()?;
     let modules = code.width() as u32;
     let quiet_zone = 2u32;
@@ -891,7 +909,13 @@ fn complete_begin(
             };
             state.status = match flow.challenge.kind {
                 AuthChallengeKind::Form => "认证表单已就绪；逐项输入并按 Enter 确认。".into(),
-                AuthChallengeKind::QrCode => "二维码已就绪，请使用网易云音乐 App 扫码登录。".into(),
+                AuthChallengeKind::QrCode => {
+                    if flow.plugin_id == "io.yinqidao.qqmusic" {
+                        "二维码已就绪，请使用手机 QQ 扫码并在手机上确认。".into()
+                    } else {
+                        "二维码已就绪，请使用对应的音乐 App 扫码登录。".into()
+                    }
+                },
                 _ => "认证 challenge 已就绪；完成外部操作后点击“检查状态”。".into(),
             };
             state.active_flow = Some(flow);
@@ -955,7 +979,11 @@ fn challenge_card(
                             div()
                                 .text_xs()
                                 .text_color(theme::TEXT_SECONDARY)
-                                .child("请使用网易云音乐手机 App 扫码登录（支持自动轮询检测）"),
+                                .child(if flow.plugin_id == "io.yinqidao.qqmusic" {
+                                    "请使用手机 QQ 扫码确认（支持自动轮询检测）"
+                                } else {
+                                    "请使用对应的音乐 App 扫码（支持自动轮询检测）"
+                                }),
                         ),
                 );
             } else {
