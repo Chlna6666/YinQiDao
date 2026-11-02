@@ -807,7 +807,9 @@ fn qr_payload_to_png(payload: &str) -> Option<Arc<[u8]>> {
         if encoded.len() > 512 * 1024 {
             return None;
         }
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()?;
         if decoded.len() > 256 * 1024 || !decoded.starts_with(b"\x89PNG\r\n\x1a\n") {
             return None;
         }
@@ -915,7 +917,7 @@ fn complete_begin(
                     } else {
                         "二维码已就绪，请使用对应的音乐 App 扫码登录。".into()
                     }
-                },
+                }
                 _ => "认证 challenge 已就绪；完成外部操作后点击“检查状态”。".into(),
             };
             state.active_flow = Some(flow);
@@ -975,16 +977,13 @@ fn challenge_card(
                                         .rounded_md(),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_SECONDARY)
-                                .child(if flow.plugin_id == "io.yinqidao.qqmusic" {
-                                    "请使用手机 QQ 扫码确认（支持自动轮询检测）"
-                                } else {
-                                    "请使用对应的音乐 App 扫码（支持自动轮询检测）"
-                                }),
-                        ),
+                        .child(div().text_xs().text_color(theme::TEXT_SECONDARY).child(
+                            if flow.plugin_id == "io.yinqidao.qqmusic" {
+                                "请使用手机 QQ 扫码确认（支持自动轮询检测）"
+                            } else {
+                                "请使用对应的音乐 App 扫码（支持自动轮询检测）"
+                            },
+                        )),
                 );
             } else {
                 content = content.child(info_block("二维码 payload", payload));

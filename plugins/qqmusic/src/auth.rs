@@ -1,4 +1,7 @@
 //! QQ Music authentication: Cookie import and QQ ptlogin QR OAuth.
+// Native test builds have no guest exports; the exported authentication entrypoints
+// are only reachable on the wasm32 component target.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 //!
 //! QQ Music mobile-app QR uses an independent MQTT-over-WebSocket protocol and
 //! is intentionally not advertised until the sandbox Host exposes a secure
