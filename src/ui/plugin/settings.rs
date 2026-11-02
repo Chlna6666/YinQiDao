@@ -115,7 +115,7 @@ fn import_plugin(cx: &mut Context<MusicApp>) {
     let task = Tokio::spawn_result(cx, async move {
         let picked = rfd::AsyncFileDialog::new()
             .set_title("选择插件文件")
-            .add_filter("插件文件 (*.wasm, *.toml)", &["wasm", "toml"])
+            .add_filter("插件文件 (*.zip, *.wasm, *.toml)", &["zip", "wasm", "toml"])
             .pick_file()
             .await
             .map(|file| file.path().to_path_buf());

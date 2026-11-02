@@ -23,6 +23,8 @@ use super::{
     },
 };
 
+mod zip_import;
+
 const DEFAULT_UI_PAGE_CACHE_ENTRIES: usize = 128;
 const MAX_PAGE_EVENT_TOAST_BYTES: usize = 4 * 1024;
 
@@ -231,6 +233,17 @@ pub fn import_candidate(candidate: &PluginImportCandidate) -> Result<PluginImpor
         bail!("插件文件在确认期间已更改，请重新选择并检查插件信息");
     }
 
+    if current
+        .source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        // Never import the preflight copy: the archive is extracted and verified
+        // again after user confirmation, with a fresh bounded temporary directory.
+        let extracted = zip_import::extract(&current.source_path)?;
+        return import_directory(&extracted.package_dir);
+    }
     if !current
         .source_path
         .extension()
@@ -358,6 +371,15 @@ fn auth_method_display_name(method: &AuthMethod) -> &'static str {
 pub fn inspect_plugin_file(file_path: &Path) -> Result<PluginImportCandidate> {
     let canonical = fs::canonicalize(file_path)
         .with_context(|| format!("读取插件文件路径失败: {}", file_path.display()))?;
+    if canonical.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+        // Extract only into a transient private directory, then use exactly the
+        // existing manifest/component validation path, including the UI preview.
+        let extracted = zip_import::extract(&canonical)?;
+        let mut candidate = inspect_plugin_file(&extracted.package_dir)?;
+        candidate.source_path = canonical.clone();
+        candidate.package_dir = canonical;
+        return Ok(candidate);
+    }
 
     let (package_dir, manifest_path, chosen_component_path) = if canonical.is_dir() {
         let manifest = canonical.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
