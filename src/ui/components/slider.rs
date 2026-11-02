@@ -278,8 +278,6 @@ fn commit_on_release(dragged: bool, deferred: bool) -> bool {
     dragged || deferred
 }
 
-
-
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
     let width = f32::from(bounds.size.width).max(1.0);
     let local = f32::from(position_x - bounds.left());
