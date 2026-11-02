@@ -48,7 +48,6 @@ const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // Hidden Stage preparation must never compete with the transport's startup window. The audible
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
 const STAGE_BACKGROUND_PREWARM_DELAY: Duration = Duration::from_millis(2_000);
-const STAGE_MANUAL_WAKE_THRESHOLD_PX: f32 = 8.0;
 
 fn online_source_key(
     route: &crate::plugin::abi::PluginRoute,
@@ -1250,15 +1249,26 @@ impl MusicApp {
         }
     }
 
-    pub(crate) fn wake_stage_controls(&mut self, cx: &mut Context<Self>) {
-        if self.stage_suppress_wake_until.is_some() {
+    pub(crate) fn wake_stage_controls(&mut self, _cx: &mut Context<Self>) {
+        // Scroll and passive pointer activity must never reveal an already
+        // hidden immersive UI; only the dedicated click-to-wake layer does.
+        if stage_chrome::pointer_motion_may_refresh_activity(self) {
+            self.stage_last_user_activity = std::time::Instant::now();
+        }
+    }
+
+    /// The hidden stage has one full-surface transparent hit target. Its first
+    /// click only reveals chrome and never seeks/plays through to descendants.
+    /// Notify the shell instead of synchronously updating child entities from
+    /// within an input handler (avoids GPUI prepaint/update reentrancy).
+    fn reveal_stage_controls_from_click(&mut self, cx: &mut Context<Self>) {
+        if !self.stage_open || !stage_chrome::needs_wake_surface(self) {
             return;
         }
-        let needs_sync = stage_chrome::needs_wake_surface(self);
+        self.stage_suppress_wake_until = None;
+        self.stage_controls_hovered = false;
         self.stage_last_user_activity = std::time::Instant::now();
-        if needs_sync {
-            self.sync_stage_chrome_surfaces(cx);
-        }
+        cx.notify();
     }
 
     pub(crate) fn wake_stage_controls_immediately(&mut self, cx: &mut Context<Self>) {
@@ -1300,22 +1310,20 @@ impl MusicApp {
         pos: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let manual_immersive = self.stage_suppress_wake_until.is_some();
-        let threshold = if manual_immersive {
-            STAGE_MANUAL_WAKE_THRESHOLD_PX
-        } else {
-            2.0
-        };
+        // Retain the pointer position even when hidden, but NEVER clear manual
+        // suppression or reset the 20-second idle deadline from mouse motion.
+        // Otherwise drifting the pointer over lyrics reopens the controls.
+        if !stage_chrome::pointer_motion_may_refresh_activity(self) {
+            self.stage_last_mouse_pos = Some(pos);
+            return;
+        }
         let moved = self.stage_last_mouse_pos.is_none_or(|last| {
             let dx = f32::from(pos.x - last.x).abs();
             let dy = f32::from(pos.y - last.y).abs();
-            dx >= threshold || dy >= threshold
+            dx >= 2.0 || dy >= 2.0
         });
         if moved {
             self.stage_last_mouse_pos = Some(pos);
-            if manual_immersive {
-                self.stage_suppress_wake_until = None;
-            }
             self.wake_stage_controls(cx);
         }
     }
@@ -5064,12 +5072,10 @@ impl Render for MusicApp {
                         this.handle_stage_mouse_move(event.position, cx);
                     }),
                 )
-                // Do not register blanket mouse-down/up handlers on the full-screen Stage.
-                // Interactive descendants own their pointer gestures and stop propagation where
-                // appropriate. A parent hit handler here can win the hit-test path across Entity
-                // boundaries and is especially harmful for the bottom retained controls.
+                // Do not install a blanket click handler on the Stage parent:
+                // a dedicated topmost wake overlay (below) consumes the FIRST
+                // click only while chrome is hidden, preventing click-through.
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.wake_stage_controls_immediately(cx);
                     let key = event.keystroke.key.as_str();
                     if key == "escape" {
                         this.close_stage(cx);
@@ -5097,6 +5103,26 @@ impl Render for MusicApp {
                         .left(px(0.0))
                         .right(px(0.0))
                         .child(stage_titlebar),
+                )
+                // Last-painted, transparent and occluding: motion and wheel
+                // never reveal chrome. The first LEFT click wakes it, is
+                // stopped here, and cannot reach the underlying lyrics/seek
+                // controls. The overlay disappears when chrome is visible.
+                .children(
+                    (self.stage_open && stage_chrome::needs_wake_surface(self)).then(|| {
+                        div()
+                            .id("stage-click-to-wake")
+                            .absolute()
+                            .inset_0()
+                            .occlude()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.reveal_stage_controls_from_click(cx);
+                                }),
+                            )
+                    }),
                 )
                 .composite_layer();
 
@@ -6062,9 +6088,23 @@ mod tests {
     }
 
     #[test]
-    fn manual_immersive_requires_meaningful_pointer_motion() {
-        assert!(STAGE_MANUAL_WAKE_THRESHOLD_PX > 2.0);
-        assert_eq!(STAGE_MANUAL_WAKE_THRESHOLD_PX, 8.0);
+    fn hidden_stage_requires_click_instead_of_pointer_motion() {
+        let mut app = MusicApp::new(false);
+        app.stage_open = true;
+        app.stage_suppress_wake_until = Some(std::time::Instant::now());
+        assert!(stage_chrome::needs_wake_surface(&app));
+        assert!(!stage_chrome::pointer_motion_may_refresh_activity(&app));
+
+        app.stage_suppress_wake_until = None;
+        app.stage_controls_hovered = false;
+        app.stage_last_user_activity =
+            std::time::Instant::now() - stage_chrome::IDLE_TIMEOUT - Duration::from_secs(1);
+        assert!(stage_chrome::needs_wake_surface(&app));
+        assert!(!stage_chrome::pointer_motion_may_refresh_activity(&app));
+
+        app.stage_last_user_activity = std::time::Instant::now();
+        assert!(!stage_chrome::needs_wake_surface(&app));
+        assert!(stage_chrome::pointer_motion_may_refresh_activity(&app));
     }
 
     #[test]

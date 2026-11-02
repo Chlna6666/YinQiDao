@@ -471,9 +471,14 @@ impl Render for StageControlsView {
                 let parent = parent.clone();
                 move |hovered: &bool, _, cx| {
                     let _ = parent.update(cx, |app, _app_cx| {
+                        // Invisible controls must not wake themselves through
+                        // stray hover transitions while the pointer is moving.
+                        if !stage_chrome::pointer_motion_may_refresh_activity(app) {
+                            return;
+                        }
                         let changed = app.stage_controls_hovered != *hovered;
                         app.stage_controls_hovered = *hovered;
-                        if changed && app.stage_suppress_wake_until.is_none() {
+                        if changed {
                             app.stage_last_user_activity = Instant::now();
                         }
                     });

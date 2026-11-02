@@ -29,3 +29,10 @@ pub(super) fn target_visible(app: &MusicApp) -> bool {
 pub(super) fn needs_wake_surface(app: &MusicApp) -> bool {
     app.stage_suppress_wake_until.is_some() || idle_hidden(app)
 }
+
+/// Pointer motion may keep *visible* chrome active, but must never reveal
+/// manually hidden or timeout-hidden chrome. Revealing needs a deliberate click.
+#[inline]
+pub(super) fn pointer_motion_may_refresh_activity(app: &MusicApp) -> bool {
+    app.stage_open && !needs_wake_surface(app)
+}
