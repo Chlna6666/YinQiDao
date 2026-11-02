@@ -1,4 +1,4 @@
-use gpui::{AnyView, Context, Entity, IntoElement, StyleRefinement, div, prelude::*, px};
+use gpui::{AnyView, Context, Entity, IntoElement, div, prelude::*, px};
 
 use super::{
     app_runtime_events, mini_player_view,
@@ -22,11 +22,14 @@ pub(super) fn mini_player(
     }
 
     let mini_player = mini_player_view::view(app, cx, playback_progress, playback_time);
-    let mini_player = AnyView::from(mini_player)
-        .cached(StyleRefinement::default().w_full().h(px(72.0)))
-        .reuse_on_window_refresh();
+    // The 72px transport is tiny, but its outer cached/reuse-on-window-refresh
+    // boundary can replay an incomplete primitive range after Stage is
+    // mounted/unmounted. Keep the inner time/progress entities cached and
+    // allow the actual controls to paint on window refresh instead.
+    let mini_player = AnyView::from(mini_player);
     div()
         .relative()
+        .w_full()
         .h(px(72.0))
         .child(mini_player)
         .child(

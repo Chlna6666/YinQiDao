@@ -930,10 +930,22 @@ impl StageLyricsView {
         {
             window.request_invalidation_at(until, cx);
         }
-        // Focus/row transitions are renderer-owned. Do not wake the UI thread merely because a
-        // visual timeline reached its final sample: the retained scene already displays that final
-        // value. Stale focus/handoff bookkeeping is retired on the next semantic render
-        // (word/line boundary, input, pause/seek, etc.).
+        // The compositor animates the intermediate samples; schedule only ONE
+        // semantic repaint at the boundary. Otherwise the retained transition
+        // can keep stale focus/blur state until the next lyric or user event,
+        // causing a sudden flash or disappearing text on the following repaint.
+        if let Some(handoff) = self.playback_stack_handoff {
+            let deadline = handoff.started_at + handoff.duration();
+            if deadline > now {
+                window.request_invalidation_at(deadline, cx);
+            }
+        }
+        if let Some(started_at) = self.focus_started_at {
+            let deadline = started_at + LYRIC_FOCUS_TRANSITION_DURATION;
+            if deadline > now {
+                window.request_invalidation_at(deadline, cx);
+            }
+        }
     }
 }
 
@@ -1065,11 +1077,12 @@ impl Render for StageLyricsView {
                 );
                 let (mut from_alpha, _) =
                     playback_stack_viewport_profile(from_y, row_height, viewport_height);
-                let (mut to_alpha, _) =
+                let (mut to_alpha, mut to_blur) =
                     playback_stack_viewport_profile(to_y, row_height, viewport_height);
                 if hovered {
                     from_alpha = 1.0;
                     to_alpha = 1.0;
+                    to_blur = 0.0;
                 }
 
                 let relative = index as isize - handoff.to_active as isize;
@@ -1084,10 +1097,11 @@ impl Render for StageLyricsView {
                     from_viewport_alpha: from_alpha,
                     to_viewport_alpha: to_alpha,
                 });
-                // No animated Gaussian blur on moving glyphs: that requires
-                // a new text offscreen pass during each lyric-scroll frame.
-                // Restore the quantized edge depth cue once motion settles.
-                (to_y, to_alpha, 0.0, motion)
+                // Keep the final quantized edge blur on moving glyphs as well.
+                // The value is constant throughout the compositor timeline:
+                // no per-frame blur re-rasterization and no sudden blur pop
+                // when the row animation finishes.
+                (to_y, to_alpha, to_blur, motion)
             } else {
                 let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
                 let (mut viewport_alpha, mut viewport_blur) =
@@ -1101,10 +1115,15 @@ impl Render for StageLyricsView {
                 (y, viewport_alpha, viewport_blur, None)
             };
 
-            // Virtualize rows outside both the previous and target viewport
-            // positions, with one-row overscan for easing/transform effects.
-            let from_y = y + row_motion.map_or(0.0, |motion| motion.offset_y);
-            if !lyric_row_intersects_viewport(from_y, y, row_height, viewport_height) {
+            // During a handoff the compositor may still paint a previous
+            // visual position even after a newer line boundary is reported.
+            // Keep ALL bounded endpoint rows mounted until the animation
+            // settles; endpoint-only culling made lines blink/disappear when
+            // wheel input or lyric boundaries arrived mid-transition.
+            // Outside a handoff we can safely cull genuinely offscreen rows.
+            if handoff.is_none()
+                && !lyric_row_intersects_viewport(y, y, row_height, viewport_height)
+            {
                 continue;
             }
 
@@ -1284,13 +1303,11 @@ fn render_lyric_row(
     } else {
         previous_profile.map_or(target_alpha, |previous| previous.0)
     };
-    // Do not animate GPU blur simultaneously with row translation. This
-    // avoids repeatedly allocating/rasterizing text blur layers on movement.
-    let static_blur = if hovered || row_motion.is_some() {
-        0.0
-    } else {
-        target_blur
-    };
+    // Gaussian edge blur remains quantized and constant throughout the
+    // row's compositor translation; the transition itself never animates
+    // blur sigma. Disabling blur here made every row snap sharp on movement
+    // and abruptly blurry again at completion.
+    let static_blur = if hovered { 0.0 } else { target_blur };
     let focus_transition = previous_active.is_some()
         && focus_started_at
             .is_some_and(|started_at| frame_now < started_at + LYRIC_FOCUS_TRANSITION_DURATION);
