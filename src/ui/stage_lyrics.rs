@@ -1115,12 +1115,7 @@ impl Render for StageLyricsView {
                 reading_mode || handoff.is_none(),
                 karaoke_epoch,
                 active_karaoke_overlay,
-                !self
-                    .row_height_measured
-                    .get(index)
-                    .copied()
-                    .unwrap_or(false)
-                    || index == active,
+                true, // Track wrapped row geometry throughout karaoke/focus transitions.
                 view.clone(),
                 parent.clone(),
             );
@@ -2106,7 +2101,7 @@ fn stage_lyric_content_width(viewport_width: f32, window_width: f32) -> f32 {
     } else {
         window_width * 0.55
     };
-    (column_width - 120.0).max(180.0)
+    (column_width - 120.0).max(1.0)
 }
 
 #[inline]
