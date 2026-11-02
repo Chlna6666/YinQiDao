@@ -51,6 +51,7 @@ struct StageLayoutMetrics {
     column_gap: f32,
     artwork_column_width: f32,
     lyrics_column_width: f32,
+    content_height: f32,
     cover_size: f32,
     controls_width: f32,
     content_top: f32,
@@ -125,6 +126,7 @@ impl StageLayoutMetrics {
             column_gap,
             artwork_column_width,
             lyrics_column_width,
+            content_height: available_height,
             cover_size,
             controls_width,
             content_top,
@@ -407,7 +409,7 @@ impl Render for StagePlayerView {
         let artwork_column = div()
             .w(px(layout.artwork_column_width))
             .h(if layout.horizontal {
-                px(f32::from(viewport.height) - layout.content_top - layout.content_bottom)
+                px(layout.content_height)
             } else {
                 px(layout.artwork_cluster_height())
             })
