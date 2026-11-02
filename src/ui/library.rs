@@ -61,7 +61,7 @@ pub(super) fn render<V: 'static>(
                 LibraryTab::Recent => "library-recent-container",
                 LibraryTab::Albums => "library-albums-container",
                 LibraryTab::Artists => "library-artists-container",
-                _ => "library-queue-container",
+                _ => "library-playlists-container",
             })
             .size_full()
             .relative()
@@ -103,7 +103,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
         LibraryTab::Recent => "最近播放",
         LibraryTab::Albums => "专辑资料库",
         LibraryTab::Artists => "艺术家",
-        LibraryTab::Playlists => "播放列表与队列",
+        LibraryTab::Playlists => "播放列表",
     };
 
     let subtitle = match app.library_tab {
@@ -348,7 +348,7 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     }),
                 ))
                 .child(segmented_tab_item(
-                    "播放列表/队列",
+                    "播放列表",
                     icon!(list_music),
                     app.library_tab == LibraryTab::Playlists,
                     app_listener(view, |this, _, _, cx| {
@@ -1502,6 +1502,56 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
         .as_ref()
         .map(|library| library.playlist_summaries())
         .unwrap_or_else(|| Arc::<[LocalPlaylistSummary]>::from([]));
+
+    // Playlist management stays in the library. The current playback queue is a
+    // contextual side sheet, so it never replaces the page being browsed.
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .overflow_hidden()
+        .child(local_playlists_section(playlists, view))
+        .child(provider_playlists::render(view))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .p_4()
+                .rounded_xl()
+                .bg(theme::BG_CARD)
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(TEXT_SECONDARY)
+                        .child("当前播放队列可从底部播放器随时打开"),
+                )
+                .child(
+                    div()
+                        .id("library-open-queue-drawer")
+                        .cursor_pointer()
+                        .rounded_full()
+                        .px_3()
+                        .py_2()
+                        .bg(theme::accent_red_muted())
+                        .text_color(ACCENT_RED)
+                        .text_sm()
+                        .child("查看队列")
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, |app, _, _, cx| app.toggle_queue_drawer(cx)),
+                        ),
+                ),
+        )
+}
+
+/// Reuses the existing virtualized local queue rows in the side sheet.
+/// Queue mutations still call MusicApp's existing playback and persistence APIs.
+pub(super) fn queue_drawer_items(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+) -> gpui::AnyElement {
     let queue_ids = &app.config.queue;
     let queue_ids_for_rows = queue_ids.clone();
     let track_indices_for_rows = Arc::new(
@@ -1553,7 +1603,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .overflow_hidden()
             .child(
                 uniform_list(
-                    "library-queue-vlist",
+                    "queue-drawer-vlist",
                     queue_ids.len(),
                     move |range: Range<usize>, _window, cx| {
                         view_for_rows
@@ -1597,49 +1647,7 @@ fn queue_view(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
             .into_any_element()
     };
 
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_hidden()
-        .child(local_playlists_section(playlists, view))
-        .child(provider_playlists::render(view))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(TEXT_PRIMARY)
-                        .child(format!("待播队列中共有 {} 首歌曲", queue_ids.len())),
-                )
-                .child_if(!queue_ids.is_empty(), || {
-                    div()
-                        .id("queue-clear-btn")
-                        .px_3()
-                        .py_1p5()
-                        .rounded_full()
-                        .cursor_pointer()
-                        .bg(theme::BG_CARD)
-                        .border_1()
-                        .border_color(BORDER_CARD)
-                        .text_xs()
-                        .text_color(TEXT_SECONDARY)
-                        .hover(|s| s.text_color(ACCENT_RED))
-                        .transition(press_transition())
-                        .child("清空队列")
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            app_listener(view, |this, _, _, cx| this.clear_queue(cx)),
-                        )
-                }),
-        )
-        .child(queue_body)
-        .into_any_element()
+    queue_body
 }
 
 fn local_playlists_section(

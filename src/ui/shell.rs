@@ -33,7 +33,7 @@ use super::{
     player::NowPlaying,
     player_stage,
     route::{self, AppRoute},
-    settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
+    queue_drawer, settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
@@ -188,6 +188,9 @@ pub struct MusicApp {
     pub(crate) pending_volume_ratio: Option<f32>,
     lyrics_checked: HashSet<TrackId>,
     last_polled_track_id: Option<TrackId>,
+    pub(crate) queue_drawer_open: bool,
+    pub(crate) queue_drawer_motion: theme::SampledMotion,
+    pub(crate) queue_drawer_epoch: u64,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -841,6 +844,13 @@ impl MusicApp {
             pending_volume_ratio: None,
             lyrics_checked: HashSet::new(),
             last_polled_track_id: None,
+            queue_drawer_open: false,
+            queue_drawer_motion: theme::SampledMotion::new(
+                Duration::from_millis(260),
+                theme::ease_out_cubic,
+                false,
+            ),
+            queue_drawer_epoch: 0,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -1190,6 +1200,28 @@ impl MusicApp {
         });
     }
 
+    /// Reverses the current animation from its sampled presentation value.
+    /// No route change or content width animation is involved.
+    pub(crate) fn begin_queue_drawer_transition(
+        &mut self,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.queue_drawer_open == open {
+            return;
+        }
+        self.queue_drawer_open = open;
+        if self.queue_drawer_motion.set_target(open) {
+            self.queue_drawer_epoch = self.queue_drawer_epoch.wrapping_add(1);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_queue_drawer(&mut self, cx: &mut Context<Self>) {
+        let open = !self.queue_drawer_open;
+        self.begin_queue_drawer_transition(open, cx);
+    }
+
     pub(crate) fn show_page(&mut self, page: AppPage, cx: &mut Context<Self>) {
         if page == AppPage::Player {
             self.open_stage(cx);
@@ -1212,6 +1244,9 @@ impl MusicApp {
     }
 
     pub(crate) fn open_stage(&mut self, cx: &mut Context<Self>) {
+        if self.queue_drawer_open {
+            self.begin_queue_drawer_transition(false, cx);
+        }
         if self.page != AppPage::Player {
             self.previous_page = self.page;
         }
@@ -2951,6 +2986,9 @@ impl MusicApp {
     }
 
     fn notify_current_content_surface(&mut self, cx: &mut Context<Self>) {
+        if self.queue_drawer_open {
+            cx.notify();
+        }
         match self.page {
             AppPage::Home => self.notify_home_surface(cx),
             AppPage::Library => self.notify_library_surface(cx),
@@ -4864,6 +4902,13 @@ impl Render for MusicApp {
         let now = std::time::Instant::now();
         self.finish_stage_transition_if_due(now, cx);
         self.schedule_stage_transition_deadline(window, cx);
+        // Compositor owns intermediate frames; one logical wakeup tears down a closed drawer.
+        self.queue_drawer_motion.advance(window.animation_time());
+        if let Some(deadline) = self.queue_drawer_motion.deadline()
+            && deadline > now
+        {
+            window.request_invalidation_for(cx.entity_id(), deadline, cx);
+        }
 
         // Route restoration may request the Stage before this frame's surface decision. Resolve it
         // first so the very same frame constructs the drawer and only then arms its presentation
@@ -4979,6 +5024,7 @@ impl Render for MusicApp {
 
             div()
                 .size_full()
+                .relative()
                 .flex()
                 .flex_col()
                 .bg(theme::BG_CANVAS)
@@ -4986,7 +5032,10 @@ impl Render for MusicApp {
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     let key = event.keystroke.key.as_str();
                     let modifiers = event.keystroke.modifiers;
-                    if this.acoustid_key_active {
+                    if key == "escape" && this.queue_drawer_open {
+                        cx.stop_propagation();
+                        this.begin_queue_drawer_transition(false, cx);
+                    } else if this.acoustid_key_active {
                         this.update_acoustid_key(key, cx);
                     } else if modifiers.control && key.eq_ignore_ascii_case("f") {
                         this.search_active = true;
@@ -5028,6 +5077,11 @@ impl Render for MusicApp {
                     playback_progress,
                     playback_time,
                 ))
+                // A floating side sheet leaves navigation and the bottom transport in place.
+                .children(
+                    (self.queue_drawer_open || self.queue_drawer_motion.deadline().is_some())
+                        .then(|| queue_drawer::render(self, cx, window)),
+                )
                 .into_any_element()
         };
 

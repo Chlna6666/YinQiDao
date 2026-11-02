@@ -12,7 +12,7 @@ use lucide_gpui::icon;
 
 use crate::{
     audio::PlayerCommand,
-    model::{AppPage, LibraryTab, PlaybackState, RepeatMode, TrackId},
+    model::{PlaybackState, RepeatMode, TrackId},
 };
 
 use super::{
@@ -156,7 +156,7 @@ pub(super) fn view(
         shuffle: app.snapshot.shuffle,
         repeat: app.snapshot.repeat,
         desktop_lyrics_visible: app.config.desktop_lyrics.visible,
-        queue_active: app.page == AppPage::Library && app.library_tab == LibraryTab::Playlists,
+        queue_active: app.queue_drawer_open,
         slider_volume_bits: slider_volume.to_bits(),
         icon_volume_bits: icon_volume.to_bits(),
     };
@@ -477,7 +477,7 @@ impl Render for MiniPlayerView {
                                         move |_, _, cx| {
                                             cx.stop_propagation();
                                             let _ = parent.update(cx, |app, app_cx| {
-                                                app.show_library_tab(LibraryTab::Playlists, app_cx);
+                                                app.toggle_queue_drawer(app_cx);
                                             });
                                         }
                                     }),

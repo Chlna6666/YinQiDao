@@ -354,6 +354,12 @@ impl SampledMotion {
         self.to.clamp(0.0, 1.0)
     }
 
+    /// Segment endpoints used to move composited overlays without relayout.
+    #[inline]
+    pub fn segment(&self) -> (f32, f32, Duration) {
+        (self.from, self.to, self.duration)
+    }
+
     /// 当前运动段的结束时刻（用于逐帧 invalidation 调度）。
     pub fn deadline(&self) -> Option<Instant> {
         self.started_at.map(|started_at| started_at + self.duration)
