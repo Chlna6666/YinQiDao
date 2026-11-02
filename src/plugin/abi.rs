@@ -720,6 +720,8 @@ impl PluginServiceRouter {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn plugin_route_persistence_round_trips() {
         let route = PluginRoute {
@@ -734,9 +736,6 @@ mod tests {
             toml::from_str(&encoded).expect("deserialize persisted plugin route");
         assert_eq!(route, decoded);
     }
-
-
-    use super::*;
 
     fn account(
         provider_id: &str,
