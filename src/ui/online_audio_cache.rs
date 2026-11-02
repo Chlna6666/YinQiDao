@@ -310,7 +310,10 @@ mod tests {
         route.provider_id = "provider-a".into();
         assert!(!valid_route_source(
             &route,
-            &SourceTrackRef { source_id: "".into(), ..source }
+            &SourceTrackRef {
+                source_id: "".into(),
+                ..source
+            }
         ));
     }
 
