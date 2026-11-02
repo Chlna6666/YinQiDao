@@ -1095,12 +1095,7 @@ impl Render for StageLyricsView {
             // Virtualize rows outside both the previous and target viewport
             // positions, with one-row overscan for easing/transform effects.
             let from_y = y + row_motion.map_or(0.0, |motion| motion.offset_y);
-            if !lyric_row_intersects_viewport(
-                from_y,
-                y,
-                row_height,
-                viewport_height,
-            ) {
+            if !lyric_row_intersects_viewport(from_y, y, row_height, viewport_height) {
                 continue;
             }
 
