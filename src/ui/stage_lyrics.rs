@@ -192,8 +192,6 @@ impl StageLyricLine {
     }
 }
 
-}
-
 /// Restore missing English word separators without changing source timestamps.
 fn display_word_segment(words: &[crate::lyrics::LyricWord], index: usize) -> String {
     let text = words[index].text.as_str();
