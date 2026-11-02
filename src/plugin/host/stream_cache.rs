@@ -93,6 +93,23 @@ impl EarlyReady {
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
     }
 
+    fn publish_if_ready(&self, session: &Arc<ProgressiveSession>) {
+        let available = match session.snapshot() {
+            crate::audio::progressive::DownloadState::Downloading { available }
+            | crate::audio::progressive::DownloadState::Complete { bytes: available } => available,
+            crate::audio::progressive::DownloadState::Failed(_) => 0,
+        };
+        if available >= INITIAL_PLAYABLE_BYTES {
+            self.send(Ok(PluginMaterializedStream {
+                path: session.file_path().to_path_buf(),
+                bytes: available,
+                cache_hit: false,
+                _lease: None,
+                _live: Some(session.clone()),
+            }));
+        }
+    }
+
     fn finish(&self, result: &Result<PluginMaterializedStream>) {
         let session = self
             .session
@@ -289,6 +306,8 @@ impl PluginStreamCache {
                 self.range_chunk_bytes,
                 self.max_stream_bytes,
                 &writer_tx,
+                live.as_ref(),
+                early.as_ref(),
             ),
         )
         .await
@@ -453,6 +472,8 @@ async fn download_stream(
     range_chunk_bytes: u64,
     max_stream_bytes: u64,
     writer: &mpsc::Sender<Vec<u8>>,
+    live: Option<&Arc<ProgressiveSession>>,
+    early: Option<&EarlyReady>,
 ) -> Result<u64> {
     if range_chunk_bytes == 0 || range_chunk_bytes > 8 * 1024 * 1024 {
         bail!("插件 stream range chunk 配置非法");
@@ -504,8 +525,15 @@ async fn download_stream(
             .cloned()
             .ok_or_else(|| anyhow!("插件 {} 尚未获得网络权限", route.plugin_id))?;
 
+        // A small first validated Range lets playback start without requiring
+        // the entire normal 4 MiB transfer to finish. Subsequent ranges are large.
+        let chunk_bytes = if offset == 0 {
+            range_chunk_bytes.min(1024 * 1024)
+        } else {
+            range_chunk_bytes
+        };
         let requested_end = offset
-            .saturating_add(range_chunk_bytes.saturating_sub(1))
+            .saturating_add(chunk_bytes.saturating_sub(1))
             .min(max_stream_bytes - 1);
         let requested_bytes = requested_end
             .checked_sub(offset)
@@ -566,6 +594,12 @@ async fn download_stream(
                     );
                 }
             }
+            if let Some(session) = live {
+                session.validated(response.body_bytes);
+                if let Some(early) = early {
+                    early.publish_if_ready(session);
+                }
+            }
             return Ok(response.body_bytes);
         }
 
@@ -621,6 +655,12 @@ async fn download_stream(
             .end
             .checked_add(1)
             .ok_or_else(|| anyhow!("插件 stream range offset 溢出"))?;
+        if let Some(session) = live {
+            session.validated(offset);
+            if let Some(early) = early {
+                early.publish_if_ready(session);
+            }
+        }
         if offset == content_range.total {
             return Ok(offset);
         }
@@ -866,16 +906,8 @@ fn write_temp_entry(
                 .context("写入插件 stream cache 音频失败")?;
             if let Some(session) = &live {
                 session.written(written);
-                if written >= INITIAL_PLAYABLE_BYTES
-                    && let Some(early) = &early
-                {
-                    early.send(Ok(PluginMaterializedStream {
-                        path: audio_path.clone(),
-                        bytes: written,
-                        cache_hit: false,
-                        _lease: None,
-                        _live: Some(session.clone()),
-                    }));
+                if let Some(early) = &early {
+                    early.publish_if_ready(session);
                 }
             }
         }
