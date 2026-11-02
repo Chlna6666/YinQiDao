@@ -2024,14 +2024,11 @@ fn karaoke_words_overlay(
         let progress = match karaoke_state {
             KaraokeLineState::Static | KaraokeLineState::Past => 1.0,
             KaraokeLineState::Future => 0.0,
-            KaraokeLineState::Active => {
-                let progress = match current_word {
-                    Some(current) if index < current => 1.0,
-                    Some(current) if index == current => word_reveal_progress(word, position_ms),
-                    _ => 0.0,
-                };
-                progress
-            }
+            KaraokeLineState::Active => match current_word {
+                Some(current) if index < current => 1.0,
+                Some(current) if index == current => word_reveal_progress(word, position_ms),
+                _ => 0.0,
+            },
         };
 
         overlay = overlay.child(karaoke_word(
