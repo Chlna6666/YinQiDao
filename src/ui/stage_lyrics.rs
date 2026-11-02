@@ -2233,14 +2233,13 @@ fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
     if line.words.is_empty() || line.text.is_empty() {
         return false;
     }
-    let mut remaining = line.text.as_str();
-    for word in line.words.iter() {
-        let Some(rest) = remaining.strip_prefix(word.text.as_str()) else {
-            return false;
-        };
-        remaining = rest;
-    }
-    remaining.is_empty()
+    // Timed provider syllables may omit spaces while the display transcript
+    // includes them (or vice versa). Compare meaningful characters only;
+    // never infer timing or allow mismatched punctuation/letters.
+    line.words
+        .iter()
+        .flat_map(|word| word.text.chars().filter(|ch| !ch.is_whitespace()))
+        .eq(line.text.chars().filter(|ch| !ch.is_whitespace()))
 }
 
 fn format_lyric_time(ms: u64) -> String {
@@ -2260,6 +2259,28 @@ fn format_lyric_time(ms: u64) -> String {
 mod tests {
     use super::*;
     use crate::lyrics::LyricWord;
+
+    #[test]
+    fn enhanced_tokens_allow_spacing_variants_but_not_different_lyrics() {
+        let words = ["And", "all", "the", "dreams"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| LyricWord {
+                timestamp_ms: index as u64 * 100,
+                duration_ms: Some(100),
+                text: text.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let mut line = LyricLine {
+            timestamp_ms: 0,
+            text: "And all the dreams".to_owned(),
+            translation: None,
+            words: words.into(),
+        };
+        assert!(enhanced_words_cover_primary_text(&line));
+        line.text = "And all the nights".to_owned();
+        assert!(!enhanced_words_cover_primary_text(&line));
+    }
 
     #[test]
     fn english_timed_word_spacing_keeps_source_immutable() {
