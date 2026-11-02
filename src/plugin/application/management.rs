@@ -23,6 +23,7 @@ use super::{
     },
 };
 
+#[path = "management/zip_import.rs"]
 mod zip_import;
 
 const DEFAULT_UI_PAGE_CACHE_ENTRIES: usize = 128;
