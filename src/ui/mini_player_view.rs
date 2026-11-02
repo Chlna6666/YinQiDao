@@ -558,7 +558,9 @@ fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyView {
                 .left(px(0.0))
                 .right(px(0.0))
                 .top(px(-MINI_PROGRESS_OUTWARD_REVEAL))
-                .h(px(MINI_PROGRESS_INTERACTION_HEIGHT + MINI_PROGRESS_OUTWARD_REVEAL)),
+                .h(px(
+                    MINI_PROGRESS_INTERACTION_HEIGHT + MINI_PROGRESS_OUTWARD_REVEAL
+                )),
         )
         .reuse_on_window_refresh()
 }

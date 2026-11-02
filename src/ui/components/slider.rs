@@ -327,7 +327,9 @@ fn slider_visual_with_group(
         let track = horizontal_track(clamped_ratio, style.track_height, style);
         let track = if style.edge_overlay {
             track
-                .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
+                .group_hover(hover_group.clone(), move |hover| {
+                hover.h(style.hover_track_height)
+            })
                 .transition(theme::hover_transition())
         } else {
             track
@@ -340,19 +342,20 @@ fn slider_visual_with_group(
         None
     } else {
         Some(
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .opacity(0.0)
-            .group_hover(rail_hover_group, |s| s.opacity(1.0))
-            .transition(theme::hover_transition())
-            .child(horizontal_track(
-                clamped_ratio,
-                style.hover_track_height,
-                style,
-            )))
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .opacity(0.0)
+                .group_hover(rail_hover_group, |s| s.opacity(1.0))
+                .transition(theme::hover_transition())
+                .child(horizontal_track(
+                    clamped_ratio,
+                    style.hover_track_height,
+                    style,
+                )),
+        )
     };
 
     let thumb_layer = if style.edge_overlay {
@@ -362,7 +365,9 @@ fn slider_visual_with_group(
             .right(half_thumb)
             .top(px(0.0))
             .h(style.interaction_height)
-            .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
+            .group_hover(hover_group.clone(), move |hover| {
+                hover.h(style.hover_track_height)
+            })
             .flex()
             .items_center()
             .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
@@ -498,15 +503,16 @@ fn slider_visual_with_group_animated(
         None
     } else {
         Some(
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .opacity(0.0)
-            .group_hover(rail_hover_group, |s| s.opacity(1.0))
-            .transition(theme::hover_transition())
-            .child(hover_track))
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .opacity(0.0)
+                .group_hover(rail_hover_group, |s| s.opacity(1.0))
+                .transition(theme::hover_transition())
+                .child(hover_track),
+        )
     };
 
     let thumb_layer = if style.edge_overlay {
@@ -516,7 +522,9 @@ fn slider_visual_with_group_animated(
             .right(half_thumb)
             .top(px(0.0))
             .h(style.interaction_height)
-            .group_hover(hover_group.clone(), move |hover| hover.h(style.hover_track_height))
+            .group_hover(hover_group.clone(), move |hover| {
+                hover.h(style.hover_track_height)
+            })
             .flex()
             .items_center()
             .child(div().flex_none().w_full().h(px(1.0)))
