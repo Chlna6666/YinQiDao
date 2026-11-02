@@ -279,6 +279,117 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Create a minimal stored archive without relying on a second ZIP library.
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut central = Vec::new();
+        for (name, payload) in entries {
+            let name = name.as_bytes();
+            let len = payload.len() as u32;
+            let offset = data.len() as u32;
+            let crc = crc32fast::hash(payload);
+            data.extend_from_slice(b"PK\x03\x04");
+            data.extend_from_slice(&20u16.to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&crc.to_le_bytes());
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(name);
+            data.extend_from_slice(payload);
+
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&len.to_le_bytes());
+            central.extend_from_slice(&len.to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name);
+        }
+        let cd_offset = data.len() as u32;
+        let cd_length = central.len() as u32;
+        data.extend(central);
+        data.extend_from_slice(b"PK\x05\x06");
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        data.extend_from_slice(&cd_length.to_le_bytes());
+        data.extend_from_slice(&cd_offset.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data
+    }
+
+    fn test_archive(bytes: &[u8], suffix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "yinqidao-zip-test-{}-{stamp}-{suffix}.zip",
+            std::process::id()
+        ));
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn imports_flat_and_nested_wasm_packages() {
+        for folder in ["", "io.yinqidao.qqmusic/"] {
+            let manifest = format!("{folder}plugin.toml");
+            let component = format!("{folder}provider.wasm");
+            let zip = stored_zip(&[
+                (&manifest, b"package_schema = 1"),
+                (&component, b"\0asm\x01\0\0\0"),
+            ]);
+            let archive = test_archive(&zip, "valid");
+            let extracted = extract(&archive).expect("import ZIP");
+            assert_eq!(
+                fs::read(extracted.package_dir.join("provider.wasm")).unwrap(),
+                b"\0asm\x01\0\0\0"
+            );
+            assert!(extracted.package_dir.join("plugin.toml").is_file());
+            let stage = extracted.root.clone();
+            drop(extracted);
+            assert!(!stage.exists(), "staging must clean up on drop");
+            fs::remove_file(archive).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_crc_mismatch() {
+        let malicious = stored_zip(&[
+            ("../outside.txt", b"unsafe"),
+            ("plugin.toml", b"package_schema = 1"),
+        ]);
+        let archive = test_archive(&malicious, "traversal");
+        assert!(extract(&archive).is_err());
+        fs::remove_file(archive).unwrap();
+
+        let mut invalid = stored_zip(&[
+            ("plugin.toml", b"package_schema = 1"),
+            ("provider.wasm", b"\0asm"),
+        ]);
+        // Tamper with the decompressed payload without changing the ZIP metadata.
+        let index = invalid.windows(4).position(|bytes| bytes == b"\0asm").unwrap();
+        invalid[index] ^= 0x40;
+        let archive = test_archive(&invalid, "crc");
+        assert!(extract(&archive).is_err());
+        fs::remove_file(archive).unwrap();
+    }
+
     #[test]
     fn rejects_parent_and_windows_absolute_paths() {
         for path in [
