@@ -242,8 +242,20 @@ impl MusicApp {
 
     pub(crate) fn toggle_desktop_lyrics_visible(&mut self, cx: &mut Context<Self>) {
         self.config.desktop_lyrics.visible = !self.config.desktop_lyrics.visible;
+        let target_visible = self.config.desktop_lyrics.visible;
         self.save_config();
-        self.sync_desktop_lyrics_window(cx);
+        // Do not open/configure a second native GPUI window while dispatching
+        // the mini-player mouse-down event. Defer the window transaction until
+        // after the input turn; it never touches AudioEngine or transport.
+        // Coalesce rapid opposite clicks: only the latest visibility wins.
+        let parent = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |app, cx| {
+                if app.config.desktop_lyrics.visible == target_visible {
+                    app.sync_desktop_lyrics_window(cx);
+                }
+            });
+        });
         cx.notify();
     }
 

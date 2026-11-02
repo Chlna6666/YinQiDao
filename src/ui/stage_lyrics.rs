@@ -676,8 +676,16 @@ impl StageLyricsView {
         // Mark a row measured without invalidating the full lyric tree when
         // its geometry is unchanged. Observers previously caused redundant
         // first-measurement redraws across every visible row during stage open.
-        if (self.row_heights[index] - height).abs() > 0.5 {
-            self.row_heights[index] = height;
+        // Absolute lyric slots derive their offsets from the prefix sum.
+        // GPUI can briefly report the text-only box (without row margins) as
+        // the first measurement while karaoke/blur layers are rebuilt. Never
+        // compress below one full line, or an adjacent lyric paints over it.
+        // A measured multiline row may grow; keep that footprint for this
+        // viewport until the next width change / track reset. Shrinking on
+        // each active-word transition caused unstable adjacent offsets.
+        let reserved = height.max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+        if reserved > self.row_heights[index] + 0.5 {
+            self.row_heights[index] = reserved;
             self.rebuild_row_prefix_sum();
             cx.notify();
         }
@@ -697,7 +705,9 @@ impl StageLyricsView {
         self.viewport_width = width;
         self.viewport_height = height;
         if width_changed {
-            self.row_height_measured.fill(false);
+            // A narrower column may wrap additional rows; a wider one may
+            // unwrap them. Recalculate only when the real column width changes.
+            self.reset_row_geometry();
         }
         cx.notify();
     }
@@ -1029,7 +1039,8 @@ impl Render for StageLyricsView {
                 .row_heights
                 .get(index)
                 .copied()
-                .unwrap_or(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+                .unwrap_or(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX)
+                .max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
             let hovered = self.hovered_index == Some(index);
 
             let (y, viewport_alpha, viewport_blur, row_motion) = if let Some(handoff) = handoff {
@@ -1355,6 +1366,7 @@ fn render_lyric_row(
         .w_full()
         .min_w(px(0.0))
         .flex_none()
+        .min_h(px(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX))
         .pl(px(16.0))
         .pr(px(104.0))
         .py(px(11.0))
@@ -2359,6 +2371,22 @@ mod tests {
         assert_eq!(stage_lyric_content_width(700.0, 1200.0), 580.0);
         // The lyric column reserves 120px of inner horizontal padding.
         assert_eq!(stage_lyric_content_width(200.0, 1200.0), 80.0);
+    }
+
+    #[test]
+    fn measured_lyric_rows_keep_a_full_line_spacing_floor() {
+        // Short compositor/text-only measurements must not collapse absolute
+        // row slots below the baseline for ordinary 28px lyric text.
+        let baseline = PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX;
+        assert_eq!(baseline.max(28.0), baseline);
+        let heights = [baseline, baseline.max(116.0), baseline];
+        let mut prefix = vec![0.0];
+        for height in heights {
+            prefix.push(prefix.last().copied().unwrap_or_default() + height);
+        }
+        let top = playback_stack_row_top(1, 1, &prefix, 320.0);
+        let next = playback_stack_row_top(2, 1, &prefix, 320.0);
+        assert!(next - top >= 116.0);
     }
 
     #[test]

@@ -278,6 +278,7 @@ impl Render for MiniPlayerView {
                                     .on_mouse_down(gpui::MouseButton::Left, {
                                         let parent = parent.clone();
                                         move |_, _, cx| {
+                                            cx.stop_propagation();
                                             let _ = parent.update(cx, |app, app_cx| {
                                                 app.open_stage(app_cx);
                                             });
