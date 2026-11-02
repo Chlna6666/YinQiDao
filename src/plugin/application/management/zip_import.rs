@@ -195,7 +195,9 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
     if !package_dir.join("plugin.toml").is_file() {
         bail!("插件 ZIP 缺少 plugin.toml");
     }
-    Ok(ExtractedPlugin { root: stage.root.clone(), package_dir })
+    let mut extracted = stage;
+    extracted.package_dir = package_dir;
+    Ok(extracted)
 }
 
 #[cfg(test)]
