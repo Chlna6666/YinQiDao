@@ -207,7 +207,8 @@ impl PluginStreamCache {
                                 if last_progress.elapsed() > Duration::from_secs(15) {
                                     bail!("渐进式音频头缓冲超时: {error}");
                                 }
-                                let _ = session.wait_for_change(available, Duration::from_millis(250));
+                                let _ =
+                                    session.wait_for_change(available, Duration::from_millis(250));
                             }
                         },
                     }
