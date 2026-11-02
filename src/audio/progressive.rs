@@ -181,7 +181,10 @@ impl Drop for ProgressiveSession {
 pub(crate) fn cancel_all() {
     let running = {
         let entries = sessions().lock().unwrap_or_else(|e| e.into_inner());
-        entries.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        entries
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>()
     };
     for session in running {
         session.cancel();
