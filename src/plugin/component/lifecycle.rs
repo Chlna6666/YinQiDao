@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
@@ -19,6 +20,7 @@ struct CompileEntry<C> {
     plugin_generation: u64,
     global_generation: u64,
     last_used: u64,
+    last_access: Instant,
     state: CompileEntryState<C>,
 }
 
@@ -63,6 +65,7 @@ impl<C> CompileCacheState<C> {
 /// Failed compilation does not poison the key: the placeholder is removed and a later call may retry.
 pub struct LazyCompiledComponentCache<C> {
     max_ready_entries: usize,
+    idle_ttl: Duration,
     state: Mutex<CompileCacheState<C>>,
     wake: Condvar,
 }
@@ -93,8 +96,14 @@ where
     C: Send + Sync + 'static,
 {
     pub fn new(max_ready_entries: usize) -> Self {
+        Self::new_with_ttl(max_ready_entries, Duration::from_secs(10 * 60))
+    }
+
+    /// Idle retention is Host policy, not a guest-maintained cache or gc() export.
+    pub fn new_with_ttl(max_ready_entries: usize, idle_ttl: Duration) -> Self {
         Self {
             max_ready_entries: max_ready_entries.max(1),
+            idle_ttl,
             state: Mutex::new(CompileCacheState::default()),
             wake: Condvar::new(),
         }
@@ -130,6 +139,7 @@ where
                         let clock = state.next_clock();
                         if let Some(entry) = state.entries.get_mut(&cache_key) {
                             entry.last_used = clock;
+                            entry.last_access = Instant::now();
                         }
                         return Ok(component);
                     }
@@ -153,6 +163,7 @@ where
                     plugin_generation,
                     global_generation,
                     last_used: clock,
+                    last_access: Instant::now(),
                     state: CompileEntryState::Compiling,
                 },
             );
@@ -198,6 +209,7 @@ where
                             plugin_generation,
                             global_generation,
                             last_used: clock,
+                            last_access: Instant::now(),
                             state: CompileEntryState::Ready(component.clone()),
                         },
                     );
@@ -246,6 +258,26 @@ where
         let removed = state.entries.len();
         state.entries.clear();
         self.wake.notify_all();
+        Ok(removed)
+    }
+
+    /// Sweep only idle, ready compiled Components. In-flight compilations are
+    /// retained, and active callers hold Arc clones independent of this cache.
+    pub fn collect_idle(&self) -> Result<usize> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| anyhow!("插件 compiled Component cache 锁已损坏: {error}"))?;
+        let now = Instant::now();
+        let before = state.entries.len();
+        state.entries.retain(|_, entry| {
+            !matches!(&entry.state, CompileEntryState::Ready(_))
+                || now.duration_since(entry.last_access) < self.idle_ttl
+        });
+        let removed = before.saturating_sub(state.entries.len());
+        if removed > 0 {
+            self.wake.notify_all();
+        }
         Ok(removed)
     }
 
@@ -496,6 +528,22 @@ mod tests {
             .expect("cached");
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn host_collects_idle_compiled_values_but_not_live_arc_handles() {
+        let cache = LazyCompiledComponentCache::new_with_ttl(4, Duration::ZERO);
+        let snapshot = snapshot("plugin.a", "component-a");
+        let in_flight = cache
+            .get_or_try_compile(&snapshot, |_| Ok::<_, anyhow::Error>(7_u32))
+            .expect("compile");
+        assert_eq!(cache.collect_idle().expect("sweep"), 1);
+        assert_eq!(cache.ready_len().expect("ready"), 0);
+        assert_eq!(*in_flight, 7);
+        let fresh = cache
+            .get_or_try_compile(&snapshot, |_| Ok::<_, anyhow::Error>(8_u32))
+            .expect("fresh compile");
+        assert_eq!(*fresh, 8);
     }
 
     #[test]

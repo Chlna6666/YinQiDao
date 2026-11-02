@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use wasmtime::Store;
 
 use super::{
+    gc,
     lifecycle::LazyCompiledComponentCache,
     registry::PluginComponentRegistry,
     wasmtime::{
@@ -53,11 +54,20 @@ impl WasmtimeComponentAdapter {
         host: Arc<RwLock<PluginHostState>>,
         max_compiled_components: usize,
     ) -> Self {
+        let compiled_cache = gc::global()
+            .and_then(|controller| match controller.new_compiled_cache(max_compiled_components) {
+                Ok(cache) => Some(cache),
+                Err(error) => {
+                    tracing::warn!(%error, "Host GC 注册 compiled Component 缓存失败");
+                    None
+                }
+            })
+            .unwrap_or_else(|| Arc::new(LazyCompiledComponentCache::new(max_compiled_components)));
         Self {
             runtime,
             components,
             host,
-            compiled_cache: Arc::new(LazyCompiledComponentCache::new(max_compiled_components)),
+            compiled_cache,
             ui_limits: UiSchemaLimits::default(),
         }
     }

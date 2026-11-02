@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::lifecycle::PluginInstanceKey;
+use super::lifecycle::{LazyCompiledComponentCache, PluginInstanceKey};
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -260,6 +260,19 @@ impl<I> HostOwnedInstancePool<I> {
     }
 }
 
+impl<C> PluginGcTarget for LazyCompiledComponentCache<C>
+where
+    C: Send + Sync + 'static,
+{
+    fn collect_idle(&self) -> Result<usize> {
+        LazyCompiledComponentCache::collect_idle(self)
+    }
+
+    fn invalidate_plugin(&self, plugin_id: &str) -> Result<usize> {
+        LazyCompiledComponentCache::invalidate_plugin(self, plugin_id)
+    }
+}
+
 impl<I> PluginGcTarget for HostOwnedInstancePool<I>
 where
     I: Send + 'static,
@@ -338,6 +351,27 @@ impl PluginGcController {
 
     pub fn cache_root(&self) -> &Path {
         &self.cache_root
+    }
+
+    /// Register a compiled Component cache as a live Host GC target. It is
+    /// automatically swept on the GC thread; plugins never call a GC export.
+    pub fn new_compiled_cache<C>(
+        self: &Arc<Self>,
+        capacity: usize,
+    ) -> Result<Arc<LazyCompiledComponentCache<C>>>
+    where
+        C: Send + Sync + 'static,
+    {
+        let cache = Arc::new(LazyCompiledComponentCache::new_with_ttl(
+            capacity.min(self.policy.max_compiled_components),
+            self.policy.compiled_component_idle_ttl,
+        ));
+        let target: Arc<dyn PluginGcTarget> = cache.clone();
+        self.targets
+            .lock()
+            .map_err(|error| anyhow!("插件 GC target registry 锁已损坏: {error}"))?
+            .push(Arc::downgrade(&target));
+        Ok(cache)
     }
 
     /// Create and register a Host-owned pool. This is the only warm-pool construction path the
@@ -625,6 +659,16 @@ mod tests {
         assert!(!pool.checkin(key("a", "qq", "c1"), 3).expect("route full"));
         assert!(pool.checkin(key("b", "ne", "c2"), 4).expect("global trim"));
         assert_eq!(pool.pooled_len().expect("len"), 2);
+    }
+
+    #[test]
+    fn host_gc_invalidates_registered_compiled_cache_without_guest_action() {
+        let gc = Arc::new(
+            PluginGcController::new("cache".into(), PluginGcPolicy::default()).expect("gc"),
+        );
+        let cache = gc.new_compiled_cache::<u32>(4).expect("cache");
+        assert_eq!(cache.ready_len().expect("size"), 0);
+        assert_eq!(gc.invalidate_plugin("unused").expect("invalidate"), 0);
     }
 
     #[test]

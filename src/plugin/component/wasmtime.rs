@@ -199,6 +199,7 @@ fn bounded_log_message(message: &str) -> &str {
 /// guest-owned resource table or WASI state is shared across accounts/routes.
 pub(crate) struct PluginWasmtimeRuntime {
     engine: Engine,
+    linker: Arc<Linker<PluginStoreData>>,
     services: Arc<PluginHostServices>,
     policy: PluginEnginePolicy,
 }
@@ -216,8 +217,12 @@ impl PluginWasmtimeRuntime {
 
         let engine = Engine::new(&config)
             .map_err(|error| anyhow!("创建 Wasmtime 插件 Engine 失败: {error}"))?;
+        // The linker contains only static host imports. Store/WASI data stays
+        // isolated per invocation; no guest resources are shared between accounts.
+        let linker = Arc::new(Self::build_linker(&engine)?);
         Ok(Self {
             engine,
+            linker,
             services,
             policy,
         })
@@ -227,8 +232,12 @@ impl PluginWasmtimeRuntime {
         &self.engine
     }
 
-    pub(crate) fn linker(&self) -> Result<Linker<PluginStoreData>> {
-        let mut linker = Linker::new(&self.engine);
+    pub(crate) fn linker(&self) -> Result<Arc<Linker<PluginStoreData>>> {
+        Ok(self.linker.clone())
+    }
+
+    fn build_linker(engine: &Engine) -> Result<Linker<PluginStoreData>> {
+        let mut linker = Linker::new(engine);
         bindings::MusicPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(|error| anyhow!("注册音栖岛插件 Host imports 失败: {error}"))?;
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
@@ -264,6 +273,7 @@ impl PluginWasmtimeRuntime {
             },
         );
         store.limiter(|state| &mut state.limits);
+        store.set_max_component_handles(self.policy.max_component_handles);
         store
             .set_fuel(self.policy.fuel_per_call)
             .map_err(|error| anyhow!("设置插件 Store fuel 失败: {error}"))?;
