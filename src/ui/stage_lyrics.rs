@@ -29,9 +29,9 @@ const MAX_READING_SCROLL_ROWS_PER_EVENT: usize = 3;
 const LYRIC_ANCHOR_RATIO: f32 = 0.32;
 
 // QueMusic/Apple-like focus channels are intentionally independent from row motion.
-const LYRIC_FOCUS_ALPHA_DURATION: Duration = Duration::from_millis(320);
-const LYRIC_FOCUS_SCALE_DURATION: Duration = Duration::from_millis(640);
-const LYRIC_FOCUS_TRANSITION_DURATION: Duration = LYRIC_FOCUS_SCALE_DURATION;
+// One compositor timeline owns focus opacity + scale, rather than two nested
+// animation trees with independent durations and retained element state.
+const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_ACTIVE_SCALE: f32 = 1.02;
 const LYRIC_INACTIVE_ALPHA: f32 = 0.50;
 const LYRIC_ACTIVE_ALPHA: f32 = 0.90;
@@ -1257,8 +1257,6 @@ fn render_lyric_row(
         .map(|previous| lyric_focus_scale(index, previous, reading_mode))
         .unwrap_or(target_scale);
 
-    // Focus is presentation-only. Keep final text geometry in the retained tree and let Nova own
-    // the 320ms opacity and 640ms scale timelines instead of rerendering all visible lyric rows.
     let target_alpha = if hovered { 1.0 } else { target_alpha };
     let previous_alpha = if hovered {
         1.0
@@ -1273,16 +1271,12 @@ fn render_lyric_row(
     } else {
         resolved_blur
     };
-    let focus_transition = previous_active.is_some() && focus_started_at.is_some();
-    let alpha_still_running = focus_started_at
-        .is_some_and(|started_at| frame_now < started_at + LYRIC_FOCUS_ALPHA_DURATION);
-    let animation_base_alpha = if focus_transition {
+    let focus_transition = previous_active.is_some()
+        && focus_started_at.is_some_and(|started_at| {
+            frame_now < started_at + LYRIC_FOCUS_TRANSITION_DURATION
+        });
+    let base_alpha = if focus_transition {
         previous_alpha.max(target_alpha)
-    } else {
-        target_alpha
-    };
-    let base_alpha = if focus_transition && alpha_still_running {
-        animation_base_alpha
     } else {
         target_alpha
     };
@@ -1302,52 +1296,33 @@ fn render_lyric_row(
     .scale(target_scale)
     .into_any_element();
 
-    if focus_transition {
-        let animation_id = lyric_animation_instance_id(motion_epoch, index);
-        if (previous_scale - target_scale).abs() > 0.0001 {
-            let target_scale_safe = target_scale.abs().max(0.0001);
-            let animation = Animation::from_spec(
-                AnimationSpec::new(LYRIC_FOCUS_SCALE_DURATION).ease(Easing::InOutCubic),
+    // The GPU applies scale and opacity together in one compositor pass;
+    // previously two independent nested animations doubled prepaint depth.
+    if focus_transition
+        && ((previous_scale - target_scale).abs() > 0.0001
+            || (previous_alpha - target_alpha).abs() > 0.0001)
+    {
+        let safe_alpha = base_alpha.max(0.0001);
+        let animation = Animation::from_spec(
+            AnimationSpec::new(LYRIC_FOCUS_TRANSITION_DURATION).ease(Easing::InOutCubic),
+        )
+        .with_property(AnimationProperty::scale_opacity(
+            previous_scale / target_scale.max(0.0001),
+            1.0,
+            (previous_alpha / safe_alpha).clamp(0.0, 1.0),
+            (target_alpha / safe_alpha).clamp(0.0, 1.0),
+            TransformOrigin::new(0.0, 1.0),
+        ));
+        text = text
+            .with_animation(
+                ElementId::NamedInteger(
+                    SharedString::new_static("lyric-focus"),
+                    lyric_animation_instance_id(motion_epoch, index),
+                ),
+                animation,
+                |element, _| element,
             )
-            .with_property(AnimationProperty::scale_opacity(
-                previous_scale / target_scale_safe,
-                1.0,
-                1.0,
-                1.0,
-                TransformOrigin::new(0.0, 1.0),
-            ));
-            text = text
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("lyric-focus-scale"),
-                        animation_id,
-                    ),
-                    animation,
-                    |element, _| element,
-                )
-                .into_any_element();
-        }
-
-        if alpha_still_running && (previous_alpha - target_alpha).abs() > 0.0001 {
-            let alpha_base = animation_base_alpha.max(0.0001);
-            let animation = Animation::from_spec(
-                AnimationSpec::new(LYRIC_FOCUS_ALPHA_DURATION).ease(Easing::Linear),
-            )
-            .with_property(AnimationProperty::opacity(
-                (previous_alpha / alpha_base).clamp(0.0, 1.0),
-                (target_alpha / alpha_base).clamp(0.0, 1.0),
-            ));
-            text = text
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("lyric-focus-opacity"),
-                        animation_id,
-                    ),
-                    animation,
-                    |element, _| element,
-                )
-                .into_any_element();
-        }
+            .into_any_element();
     }
 
     if let Some(motion) = blur_transition {
