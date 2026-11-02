@@ -13,7 +13,7 @@ use lucide_gpui::icon;
 
 use crate::{
     audio::AudioEngine,
-    lyrics::{LyricLine, LyricWord},
+    lyrics::LyricLine,
     model::{PlaybackState, TrackId},
 };
 
@@ -1919,11 +1919,7 @@ fn karaoke_word(
         .relative()
         .flex_none()
         .whitespace_nowrap()
-        .child(
-            div()
-                .text_color(dark::white(0.46))
-                .child(word.text.clone()),
-        )
+        .child(div().text_color(dark::white(0.46)).child(word.text.clone()))
         .child(div().absolute().inset_0().child(highlighted));
 
     // Long-note emphasis stays in the paint/transform layer: no duplicate
@@ -2209,17 +2205,20 @@ mod tests {
 
     #[test]
     fn english_timed_word_spacing_keeps_source_immutable() {
+        let words = ["and", "we'll", "get", "it", "right"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| LyricWord {
+                timestamp_ms: index as u64 * 100,
+                duration_ms: Some(100),
+                text: text.into(),
+            })
+            .collect::<Vec<_>>();
         let line = LyricLine {
             timestamp_ms: 0,
             text: "andwe'llgetitright".to_owned(),
             translation: None,
-            words: vec![
-                LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "and".into() },
-                LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "we'll".into() },
-                LyricWord { timestamp_ms: 200, duration_ms: Some(100), text: "get".into() },
-                LyricWord { timestamp_ms: 300, duration_ms: Some(100), text: "it".into() },
-                LyricWord { timestamp_ms: 400, duration_ms: Some(100), text: "right".into() },
-            ].into(),
+            words: words.into(),
         };
         let stage = StageLyricLine::from_source(&line);
         assert_eq!(stage.text.as_ref(), "and we'll get it right");
@@ -2229,15 +2228,20 @@ mod tests {
 
     #[test]
     fn cjk_and_existing_spaces_are_preserved() {
-        let cjk = vec![
-            LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "我".into() },
-            LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "爱".into() },
-        ];
+        let words = |parts: &[&str]| {
+            parts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| LyricWord {
+                    timestamp_ms: index as u64 * 100,
+                    duration_ms: Some(100),
+                    text: (*text).to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let cjk = words(&["我", "爱"]);
         assert_eq!(display_word_segment(&cjk, 0), "我");
-        let english = vec![
-            LyricWord { timestamp_ms: 0, duration_ms: Some(100), text: "I ".into() },
-            LyricWord { timestamp_ms: 100, duration_ms: Some(100), text: "know".into() },
-        ];
+        let english = words(&["I ", "know"]);
         assert_eq!(display_word_segment(&english, 0), "I ");
     }
 
