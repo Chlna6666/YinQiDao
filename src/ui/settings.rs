@@ -347,7 +347,7 @@ fn smart_audio_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoEle
     )
 }
 
-fn eq_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
+pub(super) fn eq_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
     let active_preset = EqPreset::ALL
         .into_iter()
         .find(|preset| preset.matches(&app.config.eq));
@@ -481,7 +481,7 @@ fn eq_band(
         )
 }
 
-fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
+pub(super) fn spatial_group(app: &MusicApp, cx: &mut Context<MusicApp>) -> impl IntoElement {
     let active_preset = SpatialPreset::ALL
         .into_iter()
         .find(|preset| preset.matches(&app.config.spatial));

@@ -739,6 +739,19 @@ impl MusicApp {
                 .copied()
                 .eq(library_track_ids.iter().copied());
 
+        // Rehydrate the online playlist context independently of ephemeral
+        // negative TrackId mappings. A plugin can resolve the next SourceTrackRef
+        // after the account session has been restored.
+        let restored_online_playlist_queue = config.online_playlist_queue.as_ref().and_then(|saved| {
+            (!saved.tracks.is_empty() && saved.current_index < saved.tracks.len()
+                && saved.tracks.len() <= 2000).then(|| OnlinePlaylistQueue {
+                    route: saved.route.clone(),
+                    playlist_title: saved.playlist_title.clone(),
+                    tracks: saved.tracks.clone(),
+                    current_index: saved.current_index,
+                })
+        });
+
         let initial_snapshot = PlayerSnapshot {
             state: PlaybackState::Paused,
             position_ms: initial_position,
@@ -893,7 +906,7 @@ impl MusicApp {
             online_playlist_page: None,
             active_modal: None,
             active_online_playlist: None,
-            online_playlist_queue: None,
+            online_playlist_queue: restored_online_playlist_queue,
             sidebar_created_playlists_collapsed: false,
             sidebar_collected_playlists_collapsed: false,
             search_input: None,
@@ -1861,6 +1874,7 @@ impl MusicApp {
         self.cancel_online_preload_tasks();
         self.online_preloaded_tracks.clear();
         self.online_playlist_queue = None;
+        self.config.online_playlist_queue = None;
         let Some(engine) = self.engine.clone() else {
             self.status = "音频输出不可用，请检查默认音频设备".into();
             cx.notify();
@@ -2564,6 +2578,26 @@ impl MusicApp {
         let artist = remote.artists.join("/");
         let cover_url = remote.cover_url.clone();
         let source = remote.source.clone();
+        // Remember the actual playlist + current index, not only temporary
+        // audio-engine IDs, which cannot identify online songs after restart.
+        if let Some(queue) = self.online_playlist_queue.as_mut() {
+            if let Some(index) = queue.tracks.iter().position(|entry| entry.source == source) {
+                queue.current_index = index;
+                self.config.online_playlist_queue =
+                    Some(crate::settings::SavedOnlinePlaylistQueue {
+                        route: queue.route.clone(),
+                        playlist_title: queue.playlist_title.clone(),
+                        tracks: queue.tracks.clone(),
+                        current_index: index,
+                    });
+            } else {
+                self.online_playlist_queue = None;
+                self.config.online_playlist_queue = None;
+            }
+        } else {
+            self.config.online_playlist_queue = None;
+        }
+        self.save_config();
         let source_key = online_source_key(&route, &source);
 
         // Reuse the single bounded look-ahead materialization before starting any new network work.

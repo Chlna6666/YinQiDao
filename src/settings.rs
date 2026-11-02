@@ -131,6 +131,16 @@ impl From<SavedTrackInfo> for Track {
     }
 }
 
+/// Playlist context is independent of transient audio TrackId values.
+/// Persist provider/source identity so an online playlist resumes after restart.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SavedOnlinePlaylistQueue {
+    pub route: crate::plugin::abi::PluginRoute,
+    pub playlist_title: String,
+    pub tracks: Arc<[crate::plugin::abi::RemoteTrack]>,
+    pub current_index: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "current_schema_version")]
@@ -159,6 +169,8 @@ pub struct AppConfig {
     pub shuffle: bool,
     #[serde(default)]
     pub queue: Arc<Vec<TrackId>>,
+    #[serde(default)]
+    pub online_playlist_queue: Option<SavedOnlinePlaylistQueue>,
     #[serde(default)]
     pub current_track: Option<TrackId>,
     #[serde(default)]
@@ -271,6 +283,7 @@ impl AppConfigV1 {
             repeat: self.repeat,
             shuffle: self.shuffle,
             queue: self.queue,
+            online_playlist_queue: None,
             current_track: self.current_track,
             last_played_track: None,
             position_ms: self.position_ms,
@@ -338,6 +351,7 @@ impl Default for AppConfig {
             repeat: RepeatMode::Off,
             shuffle: false,
             queue: Arc::new(Vec::new()),
+            online_playlist_queue: None,
             current_track: None,
             last_played_track: None,
             position_ms: 0,

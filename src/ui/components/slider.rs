@@ -705,7 +705,6 @@ fn interactive_slider_state(
     let bounds_for_up = state.bounds.clone();
     let bounds_for_up_out = state.bounds.clone();
     let id_for_down = state.id.clone();
-    let id_for_down_out = state.id.clone();
     let id_for_up = state.id.clone();
     let id_for_up_out = state.id.clone();
     let id_for_drag = state.id.clone();
@@ -756,9 +755,8 @@ fn interactive_slider_state(
                 );
             }
         })
-        .on_mouse_down_out(move |_event, _window, cx| {
-            let _ = end_active_drag(&id_for_down_out, cx);
-        })
+        // Leaving the 3px rail during press does not invalidate an active seek.
+        // Mouse-up-out commits the sampled release position.
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
             cx.stop_propagation();
             if !end_active_drag(&id_for_up, cx) {
