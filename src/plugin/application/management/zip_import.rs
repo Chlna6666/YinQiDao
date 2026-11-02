@@ -30,28 +30,44 @@ impl Drop for ExtractedPlugin {
 }
 
 fn u16le(s: &[u8], offset: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(s.get(offset..offset + 2).ok_or_else(|| anyhow!("ZIP header truncated"))?.try_into()?))
+    Ok(u16::from_le_bytes(
+        s.get(offset..offset + 2)
+            .ok_or_else(|| anyhow!("ZIP header truncated"))?
+            .try_into()?,
+    ))
 }
 
 fn u32le(s: &[u8], offset: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(s.get(offset..offset + 4).ok_or_else(|| anyhow!("ZIP header truncated"))?.try_into()?))
+    Ok(u32::from_le_bytes(
+        s.get(offset..offset + 4)
+            .ok_or_else(|| anyhow!("ZIP header truncated"))?
+            .try_into()?,
+    ))
 }
 
 fn checked_path(raw: &str) -> Result<PathBuf> {
-    if raw.is_empty() || raw.len() > MAX_PATH_BYTES || raw.contains('\\') || raw.contains(':')
+    if raw.is_empty()
+        || raw.len() > MAX_PATH_BYTES
+        || raw.contains('\\')
+        || raw.contains(':')
         || raw.bytes().any(|b| b == 0 || b < 0x20)
     {
         bail!("ZIP 包含非法路径");
     }
     let path = Path::new(raw);
-    if path.is_absolute() || path.components().any(|c| !matches!(c, Component::Normal(_))) {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
         bail!("ZIP 包含目录穿越路径: {raw}");
     }
     Ok(path.to_owned())
 }
 
 pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
-    let mut archive = File::open(path).with_context(|| format!("无法打开插件 ZIP: {}", path.display()))?;
+    let mut archive =
+        File::open(path).with_context(|| format!("无法打开插件 ZIP: {}", path.display()))?;
     let size = archive.metadata()?.len();
     if !(22..=MAX_ARCHIVE_BYTES).contains(&size) {
         bail!("ZIP 压缩包大小不合法或超过限制");
@@ -61,10 +77,14 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
     archive.seek(SeekFrom::End(-(search_len as i64)))?;
     let mut tail = vec![0; search_len];
     archive.read_exact(&mut tail)?;
-    let eocd = tail.windows(4).rposition(|s| s == b"PK\x05\x06")
+    let eocd = tail
+        .windows(4)
+        .rposition(|s| s == b"PK\x05\x06")
         .ok_or_else(|| anyhow!("ZIP 缺少 End of Central Directory"))?;
     let end = tail.get(eocd..).ok_or_else(|| anyhow!("invalid EOCD"))?;
-    if end.len() < 22 || u16le(end, 4)? != 0 || u16le(end, 6)? != 0
+    if end.len() < 22
+        || u16le(end, 4)? != 0
+        || u16le(end, 6)? != 0
         || u16le(end, 8)? != u16le(end, 10)?
     {
         bail!("不支持多卷或损坏的 ZIP 压缩包");
@@ -73,7 +93,9 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
     let cd_size = u64::from(u32le(end, 12)?);
     let cd_offset = u64::from(u32le(end, 16)?);
     let comment_len = usize::from(u16le(end, 20)?);
-    if count == 0 || count > MAX_ENTRIES || cd_size == u64::from(u32::MAX)
+    if count == 0
+        || count > MAX_ENTRIES
+        || cd_size == u64::from(u32::MAX)
         || cd_offset == u64::from(u32::MAX)
         || comment_len + 22 != end.len()
         || cd_offset.checked_add(cd_size).is_none_or(|end| end > size)
@@ -81,10 +103,16 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         bail!("ZIP 目录索引无效、超出预算或需要 ZIP64");
     }
 
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let root = std::env::temp_dir().join(format!("yinqidao-zip-{}-{stamp}", std::process::id()));
     fs::create_dir(&root).context("创建 ZIP 插件导入暂存目录失败")?;
-    let stage = ExtractedPlugin { root: root.clone(), package_dir: root.clone() };
+    let stage = ExtractedPlugin {
+        root: root.clone(),
+        package_dir: root.clone(),
+    };
     let mut seen = HashSet::new();
     let mut total = 0u64;
     let mut cursor = cd_offset;
@@ -106,11 +134,17 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         let disk = u16le(&central, 34)?;
         let mode = u32le(&central, 38)? >> 16;
         let local_offset = u64::from(u32le(&central, 42)?);
-        cursor = cursor.checked_add(46 + (name_len + extra_len + comment_len) as u64)
+        cursor = cursor
+            .checked_add(46 + (name_len + extra_len + comment_len) as u64)
             .ok_or_else(|| anyhow!("ZIP 目录偏移溢出"))?;
-        if cursor > cd_offset + cd_size || name_len == 0 || name_len > MAX_PATH_BYTES
-            || disk != 0 || flags & 1 != 0 || !matches!(method, 0 | 8)
-            || compressed > MAX_ARCHIVE_BYTES || uncompressed > MAX_FILE_BYTES
+        if cursor > cd_offset + cd_size
+            || name_len == 0
+            || name_len > MAX_PATH_BYTES
+            || disk != 0
+            || flags & 1 != 0
+            || !matches!(method, 0 | 8)
+            || compressed > MAX_ARCHIVE_BYTES
+            || uncompressed > MAX_FILE_BYTES
             || local_offset == u64::from(u32::MAX)
         {
             bail!("ZIP 文件存在不支持的加密、压缩方法、ZIP64 或资源超额");
@@ -119,7 +153,9 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         if kind != 0 && kind != 0o100000 && kind != 0o040000 {
             bail!("插件 ZIP 不允许符号链接或特殊文件");
         }
-        archive.seek(SeekFrom::Start(cursor - (name_len + extra_len + comment_len) as u64))?;
+        archive.seek(SeekFrom::Start(
+            cursor - (name_len + extra_len + comment_len) as u64,
+        ))?;
         let mut name_bytes = vec![0u8; name_len];
         archive.read_exact(&mut name_bytes)?;
         let name = std::str::from_utf8(&name_bytes).context("插件 ZIP 文件名必须是 UTF-8")?;
@@ -140,14 +176,17 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         if kind == 0o040000 {
             bail!("ZIP 文件类型与普通文件声明冲突");
         }
-        total = total.checked_add(uncompressed).ok_or_else(|| anyhow!("ZIP 解压大小溢出"))?;
+        total = total
+            .checked_add(uncompressed)
+            .ok_or_else(|| anyhow!("ZIP 解压大小溢出"))?;
         if total > MAX_TOTAL_BYTES {
             bail!("ZIP 解压总量超出限制");
         }
         archive.seek(SeekFrom::Start(local_offset))?;
         let mut local = [0u8; 30];
         archive.read_exact(&mut local)?;
-        if &local[..4] != b"PK\x03\x04" || u16le(&local, 8)? != method
+        if &local[..4] != b"PK\x03\x04"
+            || u16le(&local, 8)? != method
             || u16le(&local, 6)? != flags
             || usize::from(u16le(&local, 26)?) != name_len
         {
@@ -155,7 +194,10 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         }
         let local_extra = u64::from(u16le(&local, 28)?);
         let data_offset = local_offset + 30 + name_len as u64 + local_extra;
-        if data_offset.checked_add(compressed).is_none_or(|end| end > size) {
+        if data_offset
+            .checked_add(compressed)
+            .is_none_or(|end| end > size)
+        {
             bail!("ZIP 数据块超出压缩文件边界");
         }
         let mut local_name = vec![0u8; name_len];
@@ -171,7 +213,10 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
             Box::new(compressed_reader)
         };
         let mut payload = Vec::with_capacity((uncompressed as usize).min(1024 * 1024));
-        reader.by_ref().take(uncompressed + 1).read_to_end(&mut payload)?;
+        reader
+            .by_ref()
+            .take(uncompressed + 1)
+            .read_to_end(&mut payload)?;
         if payload.len() as u64 != uncompressed {
             bail!("ZIP 解压大小不匹配或超过索引声明");
         }
@@ -180,17 +225,26 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         if crc.finalize() != expected_crc {
             bail!("ZIP 插件文件校验失败: {raw_path}");
         }
-        if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&target, payload)?;
     }
     let package_dir = if root.join("plugin.toml").is_file() {
         root.clone()
     } else {
         let mut dirs = fs::read_dir(&root)?.collect::<std::io::Result<Vec<_>>>()?;
-        if dirs.len() != 1 || !dirs.pop().is_some_and(|entry| entry.path().join("plugin.toml").is_file()) {
+        if dirs.len() != 1
+            || !dirs
+                .pop()
+                .is_some_and(|entry| entry.path().join("plugin.toml").is_file())
+        {
             bail!("插件 ZIP 必须包含 plugin.toml 与 provider.wasm，可使用一层顶级目录");
         }
-        fs::read_dir(&root)?.next().ok_or_else(|| anyhow!("ZIP 空目录"))??.path()
+        fs::read_dir(&root)?
+            .next()
+            .ok_or_else(|| anyhow!("ZIP 空目录"))??
+            .path()
     };
     if !package_dir.join("plugin.toml").is_file() {
         bail!("插件 ZIP 缺少 plugin.toml");
@@ -205,7 +259,13 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_parent_and_windows_absolute_paths() {
-        for path in ["../escape", "/etc/passwd", "folder/../escape", "C:/Windows", "a\\..\\escape"] {
+        for path in [
+            "../escape",
+            "/etc/passwd",
+            "folder/../escape",
+            "C:/Windows",
+            "a\\..\\escape",
+        ] {
             assert!(checked_path(path).is_err(), "{path}");
         }
         assert!(checked_path("plugin.toml").is_ok());

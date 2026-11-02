@@ -372,7 +372,11 @@ fn auth_method_display_name(method: &AuthMethod) -> &'static str {
 pub fn inspect_plugin_file(file_path: &Path) -> Result<PluginImportCandidate> {
     let canonical = fs::canonicalize(file_path)
         .with_context(|| format!("读取插件文件路径失败: {}", file_path.display()))?;
-    if canonical.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+    if canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
         // Extract only into a transient private directory, then use exactly the
         // existing manifest/component validation path, including the UI preview.
         let extracted = zip_import::extract(&canonical)?;
