@@ -50,18 +50,6 @@ const STAGE_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 // playback timing is intentionally unchanged; only the offscreen immersive UI work is deferred.
 const STAGE_BACKGROUND_PREWARM_DELAY: Duration = Duration::from_millis(2_000);
 
-fn online_source_key(
-    route: &crate::plugin::abi::PluginRoute,
-    source: &crate::plugin::abi::SourceTrackRef,
-) -> (String, String, String, String) {
-    (
-        route.plugin_id.clone(),
-        route.provider_id.clone(),
-        route.account_id.clone(),
-        source.source_id.clone(),
-    )
-}
-
 async fn load_online_lyrics_cached_or_remote(
     playback_cache: Option<PlaybackAssetCache>,
     route: crate::plugin::abi::PluginRoute,
