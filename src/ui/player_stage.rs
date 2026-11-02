@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    AnimationProperty, IntoElement, ObjectFit, Render, SharedString, StyleRefinement,
-    Subscription, Window, div, img, linear_color_stop, linear_gradient, point, prelude::*, px,
+    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div,
+    img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -134,6 +134,16 @@ impl StageLayoutMetrics {
         }
         ((self.artwork_cluster_height() - self.cover_size) * 0.5)
             .min((self.content_height - self.cover_size).max(0.0) * 0.5)
+    }
+
+    /// Offset relative to the stable visible-chrome flex slot.
+    ///
+    /// In the compositor the sampled Translation animation on a descendant of
+    /// the Stage composite layer can be lost to retained replay. Relative
+    /// positioning is deterministic, preserves flex geometry/lyric columns and
+    /// is sampled by the same interruptible SampledMotion as the other chrome.
+    fn cover_visual_offset_y(self, visible_progress: f32) -> f32 {
+        self.immersive_cover_offset_y() * (1.0 - visible_progress.clamp(0.0, 1.0))
     }
 }
 
@@ -406,23 +416,18 @@ impl Render for StagePlayerView {
             .justify_center()
             .child(controls);
 
-        // Paint/compositor-only positioning: the retained square stays in
-        // its natural-height slot, while the hidden-chrome target centers the
-        // actual cover instead of the (now invisible) whole controls cluster.
-        // Use the same interruptible sampled motion as metadata/titlebar.
-        let cover_offset = layout.immersive_cover_offset_y();
+        // Do not use a frame-local sampled compositor Translation here: when
+        // Stage is wrapped in a retained composite layer, that nested binding
+        // can replay without moving the cover (verified in capture). A relative
+        // top offset is actually painted and leaves the flex slot unchanged.
+        // Only one cover node changes position; no lyric geometry is recomputed.
         let cover = div()
+            .relative()
+            .top(px(layout.cover_visual_offset_y(visible_progress)))
             .w(px(layout.cover_size))
             .h(px(layout.cover_size))
             .flex_none()
-            .child(stage_artwork(&self.cover, layout.cover_size))
-            .with_sampled_animation(
-                AnimationProperty::translation(
-                    point(px(0.0), px(0.0)),
-                    point(px(0.0), px(cover_offset)),
-                ),
-                (1.0 - visible_progress).clamp(0.0, 1.0),
-            );
+            .child(stage_artwork(&self.cover, layout.cover_size));
 
         let artwork_column = div()
             .w(px(layout.artwork_column_width))
@@ -611,13 +616,23 @@ mod tests {
         assert_eq!(hidden.lyrics_column_width, visible.lyrics_column_width);
         let original_cover_top =
             (hidden.content_height - hidden.artwork_cluster_height()) * 0.5;
-        let centered_cover_top = original_cover_top + hidden.immersive_cover_offset_y();
+        let centered_cover_top = original_cover_top + hidden.cover_visual_offset_y(0.0);
         assert!(
             (centered_cover_top - (hidden.content_height - hidden.cover_size) * 0.5).abs()
                 < 0.01
         );
+        let full_offset = hidden.cover_visual_offset_y(0.0);
+        assert!(full_offset > 100.0, "the cover must visibly move in immersion");
+        assert!((hidden.cover_visual_offset_y(0.5) - full_offset * 0.5).abs() < 0.01);
+        assert_eq!(hidden.cover_visual_offset_y(1.0), 0.0);
+        // The 1118x726 recording leaves the cover at y≈77 when chrome hides.
+        // Centering the square, not the invisible metadata/controls, requires
+        // a displacement of roughly 140px within the stable artwork column.
+        let captured = StageLayoutMetrics::compute(1118.0, 726.0, 0.0);
+        let captured_offset = captured.cover_visual_offset_y(0.0);
+        assert!(captured_offset > 125.0 && captured_offset < 160.0);
         assert_eq!(
-            StageLayoutMetrics::compute(640.0, 700.0, 0.0).immersive_cover_offset_y(),
+            StageLayoutMetrics::compute(640.0, 700.0, 0.0).cover_visual_offset_y(0.0),
             0.0
         );
     }
