@@ -328,8 +328,8 @@ fn slider_visual_with_group(
         let track = if style.edge_overlay {
             track
                 .group_hover(hover_group.clone(), move |hover| {
-                hover.h(style.hover_track_height)
-            })
+                    hover.h(style.hover_track_height)
+                })
                 .transition(theme::hover_transition())
         } else {
             track
