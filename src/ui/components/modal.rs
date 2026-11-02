@@ -49,7 +49,6 @@ pub struct ContextMenuData {
 pub enum GlobalModal {
     PluginImport(Box<PluginImportCandidate>),
     ServiceAuth,
-    QuickAudio,
     ContextMenu(Box<ContextMenuData>),
 }
 
@@ -59,88 +58,9 @@ pub fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> Option<AnyElement> 
             Some(render_plugin_import_modal(candidate, cx))
         }
         Some(GlobalModal::ServiceAuth) => Some(render_service_auth_modal(cx)),
-        Some(GlobalModal::QuickAudio) => Some(render_quick_audio_modal(app, cx)),
         Some(GlobalModal::ContextMenu(data)) => Some(render_context_menu_modal(data, cx)),
         None => None,
     }
-}
-
-fn render_quick_audio_modal(app: &MusicApp, cx: &mut Context<MusicApp>) -> AnyElement {
-    div()
-        .id("quick-audio-backdrop")
-        .absolute()
-        .inset_0()
-        .bg(dark::scrim(0.36))
-        .flex()
-        .items_center()
-        .justify_center()
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|app, _, _, cx| app.close_modal(cx)),
-        )
-        .child(
-            div()
-                .id("quick-audio-panel")
-                .occlude()
-                .w(px(820.0))
-                .max_w_full()
-                .max_h(px(650.0))
-                .overflow_y_scroll()
-                .rounded_2xl()
-                .border_1()
-                .border_color(theme::BORDER_CARD)
-                .bg(theme::BG_CANVAS)
-                .shadow_lg()
-                .p_5()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme::TEXT_PRIMARY)
-                                        .child("实时音效调节"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::TEXT_SECONDARY)
-                                        .child("与偏好设置共用 EQ 和空间音效参数，修改即时生效"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("quick-audio-close")
-                                .cursor_pointer()
-                                .rounded_full()
-                                .p_2()
-                                .hover(|s| s.bg(theme::bg_hover()))
-                                .child(theme::themed_icon(
-                                    icon!(x),
-                                    17.0,
-                                    theme::TEXT_SECONDARY.into(),
-                                ))
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|app, _, _, cx| app.close_modal(cx)),
-                                ),
-                        ),
-                )
-                .child(crate::ui::settings::render_quick_audio_content(app, cx)),
-        )
-        .into_any_element()
 }
 
 fn render_service_auth_modal(cx: &mut Context<MusicApp>) -> AnyElement {

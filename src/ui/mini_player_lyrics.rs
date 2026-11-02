@@ -52,10 +52,17 @@ pub(super) fn mini_player(
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|app, _, _, cx| {
-                        app.open_modal(super::components::modal::GlobalModal::QuickAudio, cx)
+                        if let Err(error) = super::quick_audio_window::open(cx.entity(), cx) {
+                            app.status = format!("打开音效窗口失败: {error:#}");
+                            cx.notify();
+                        }
                     }),
                 )
-                .child("音效"),
+                .child(theme::themed_icon(
+                    lucide_gpui::icon!(sliders-horizontal),
+                    17.0,
+                    theme::TEXT_TERTIARY.into(),
+                )),
         )
         .into_any_element()
 }

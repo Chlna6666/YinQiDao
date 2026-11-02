@@ -1,4 +1,5 @@
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use lucide_gpui::icon;
 
 use crate::{
     audio::{EqPreset, SpatialPreset, classify_smart_audio},
@@ -1435,12 +1436,13 @@ fn step_button(
         .bg(theme::bg_hover())
         .border_1()
         .border_color(BORDER_CARD)
-        .text_sm()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(TEXT_PRIMARY)
         .transition(press_transition())
         .active(|style| style.scale(0.92))
-        .child(label)
+        .child(theme::themed_icon(
+            if label == "−" { icon!(minus) } else { icon!(plus) },
+            14.0,
+            TEXT_PRIMARY.into(),
+        ))
         .on_mouse_down(gpui::MouseButton::Left, handler)
 }
 

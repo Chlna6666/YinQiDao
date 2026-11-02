@@ -747,6 +747,16 @@ impl StageLyricsView {
             _ => None,
         };
 
+        // The same lyric row changes from static text to a timed word
+        // layout when it becomes active. Old measured heights are no longer
+        // valid; without remeasuring, the next absolute row overlaps wrapped
+        // Japanese/Chinese/English lines.
+        for index in [previous, active].into_iter().flatten() {
+            if let Some(measured) = self.row_height_measured.get_mut(index) {
+                *measured = false;
+            }
+        }
+
         self.active_index = active;
         self.active_karaoke_index = None;
         self.active_karaoke_line = None;
@@ -1105,35 +1115,21 @@ impl Render for StageLyricsView {
                 reading_mode || handoff.is_none(),
                 karaoke_epoch,
                 active_karaoke_overlay,
+                !self.row_height_measured.get(index).copied().unwrap_or(false)
+                    || index == active,
                 view.clone(),
                 parent.clone(),
             );
 
-            let row_is_measured = self
-                .row_height_measured
-                .get(index)
-                .copied()
-                .unwrap_or(false);
-            let mut row_slot = div()
+            // Observe the REAL row below (including wrapped text, translation
+            // and padding), not the absolute slot which has no intrinsic
+            // height. The row itself registers its bounds observer.
+            let row_slot = div()
                 .absolute()
                 .left(px(0.0))
                 .right(px(0.0))
                 .top(px(y))
                 .child(row);
-
-            if !row_is_measured {
-                let row_measure_view = cx.entity().downgrade();
-                row_slot = row_slot.child(
-                    bounds_observer(move |bounds, _window, cx| {
-                        let height = f32::from(bounds.size.height);
-                        let _ = row_measure_view.update(cx, |this, cx| {
-                            this.update_row_height(index, height, cx);
-                        });
-                    })
-                    .absolute()
-                    .inset_0(),
-                );
-            }
 
             let row_slot = if let Some(motion) = row_motion {
                 let animation = Animation::from_spec(
@@ -1220,6 +1216,7 @@ fn render_lyric_row(
     interactive: bool,
     karaoke_epoch: u64,
     active_karaoke_overlay: Option<AnyView>,
+    measure_height: bool,
     view: WeakEntity<StageLyricsView>,
     parent: WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
@@ -1365,6 +1362,23 @@ fn render_lyric_row(
         .mb(px(10.0))
         .cursor_pointer()
         .child(text);
+
+    // Must be a child of the natural-height, relative row. Attaching this
+    // to an absolute row slot instead measured its layout box rather than
+    // the height of multiline/karaoke glyphs.
+    if measure_height {
+        let measure_view = view.clone();
+        row = row.child(
+            bounds_observer(move |bounds, _window, cx| {
+                let height = f32::from(bounds.size.height);
+                let _ = measure_view.update(cx, |this, cx| {
+                    this.update_row_height(index, height, cx);
+                });
+            })
+            .absolute()
+            .inset_0(),
+        );
+    }
 
     if interactive {
         let hover_enter = view.clone();
@@ -2469,6 +2483,17 @@ mod tests {
         assert_eq!(remainder, 0.0);
         assert_eq!(take_reading_wheel_steps(&mut remainder, 48.0), 1);
         assert_eq!(take_reading_wheel_steps(&mut remainder, -192.0), -3);
+    }
+
+    #[test]
+    fn multiline_height_offsets_every_following_row() {
+        let prefix = [0.0, 82.0, 82.0 + 156.0, 82.0 + 156.0 + 92.0];
+        let anchor = 260.0;
+        let first = playback_stack_row_top(0, 0, &prefix, anchor);
+        let second = playback_stack_row_top(1, 0, &prefix, anchor);
+        let third = playback_stack_row_top(2, 0, &prefix, anchor);
+        assert!((second - first - 82.0).abs() < 0.01);
+        assert!((third - second - 156.0).abs() < 0.01);
     }
 
     #[test]
