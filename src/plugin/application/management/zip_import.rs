@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -141,7 +141,7 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
             || name_len == 0
             || name_len > MAX_PATH_BYTES
             || disk != 0
-            || flags & 1 != 0
+            || flags & !0x0808 != 0
             || !matches!(method, 0 | 8)
             || compressed > MAX_ARCHIVE_BYTES
             || uncompressed > MAX_FILE_BYTES
@@ -212,23 +212,45 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         } else {
             Box::new(compressed_reader)
         };
-        let mut payload = Vec::with_capacity((uncompressed as usize).min(1024 * 1024));
-        reader
-            .by_ref()
-            .take(uncompressed + 1)
-            .read_to_end(&mut payload)?;
-        if payload.len() as u64 != uncompressed {
-            bail!("ZIP 解压大小不匹配或超过索引声明");
-        }
-        let mut crc = Hasher::new();
-        crc.update(&payload);
-        if crc.finalize() != expected_crc {
-            bail!("ZIP 插件文件校验失败: {raw_path}");
+        if method == 0 && compressed != uncompressed {
+            bail!("ZIP 未压缩条目长度不一致: {raw_path}");
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&target, payload)?;
+        // Stream decompressed data into the private staging directory. Avoid
+        // allocating an entire 128 MiB WASM file in the GUI import path.
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)?;
+        let mut crc = Hasher::new();
+        let mut received = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let remaining = uncompressed
+                .checked_sub(received)
+                .ok_or_else(|| anyhow!("ZIP 解压长度溢出"))?
+                .saturating_add(1)
+                .min(buffer.len() as u64) as usize;
+            let count = reader.read(&mut buffer[..remaining])?;
+            if count == 0 {
+                break;
+            }
+            received += count as u64;
+            if received > uncompressed {
+                bail!("ZIP 解压大小超过索引声明: {raw_path}");
+            }
+            output.write_all(&buffer[..count])?;
+            crc.update(&buffer[..count]);
+        }
+        if received != uncompressed {
+            bail!("ZIP 解压大小不匹配或提前结束: {raw_path}");
+        }
+        if crc.finalize() != expected_crc {
+            bail!("ZIP 插件文件校验失败: {raw_path}");
+        }
+        output.sync_all()?;
     }
     let package_dir = if root.join("plugin.toml").is_file() {
         root.clone()
