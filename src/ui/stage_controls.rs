@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnimationExt as _, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString,
-    StyleRefinement, Subscription, WeakEntity, Window, div, prelude::*, px,
+    AnimationExt as _, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement,
+    Render, SharedString, StyleRefinement, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use lucide_gpui::icon;
 

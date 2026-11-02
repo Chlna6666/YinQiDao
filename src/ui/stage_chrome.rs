@@ -7,7 +7,11 @@ use super::{
 
 /// Shared timeline for stage metadata, titlebar and transport controls.
 pub(super) fn fade_motion(visible: bool) -> SampledMotion {
-    SampledMotion::new(theme::DURATION_EMPHASIZED, theme::ease_in_out_cubic, visible)
+    SampledMotion::new(
+        theme::DURATION_EMPHASIZED,
+        theme::ease_in_out_cubic,
+        visible,
+    )
 }
 
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
