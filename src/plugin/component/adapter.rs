@@ -55,13 +55,15 @@ impl WasmtimeComponentAdapter {
         max_compiled_components: usize,
     ) -> Self {
         let compiled_cache = gc::global()
-            .and_then(|controller| match controller.new_compiled_cache(max_compiled_components) {
-                Ok(cache) => Some(cache),
-                Err(error) => {
-                    tracing::warn!(%error, "Host GC 注册 compiled Component 缓存失败");
-                    None
-                }
-            })
+            .and_then(
+                |controller| match controller.new_compiled_cache(max_compiled_components) {
+                    Ok(cache) => Some(cache),
+                    Err(error) => {
+                        tracing::warn!(%error, "Host GC 注册 compiled Component 缓存失败");
+                        None
+                    }
+                },
+            )
             .unwrap_or_else(|| Arc::new(LazyCompiledComponentCache::new(max_compiled_components)));
         Self {
             runtime,
