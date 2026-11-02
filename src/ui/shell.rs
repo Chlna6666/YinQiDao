@@ -38,7 +38,8 @@ use super::{
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
-const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_secs(8);
+// Small navigation debounce without postponing preload until eight seconds.
+const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_millis(500);
 const ONLINE_SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(250);
 /// Coalesces library filter rebuilds while typing; fast typists see one rebuild per pause.
 const LIBRARY_FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
@@ -265,7 +266,8 @@ pub struct MusicApp {
     online_preload_generation: u64,
     online_audio_preload_task: Option<gpui::Task<()>>,
     online_asset_preload_task: Option<gpui::Task<()>>,
-    online_preloaded_tracks: HashMap<(String, String, String, String), Track>,
+    /// Shared bounded memory index over the Host's persistent stream cache.
+    online_audio_cache: Arc<super::online_audio_cache::OnlineAudioCache>,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
     pub(crate) online_track_cache: HashMap<TrackId, Track>,
     pub(crate) online_remote_tracks: HashMap<
@@ -899,7 +901,7 @@ impl MusicApp {
             online_preload_generation: 0,
             online_audio_preload_task: None,
             online_asset_preload_task: None,
-            online_preloaded_tracks: HashMap::new(),
+            online_audio_cache: super::online_audio_cache::OnlineAudioCache::new(),
             online_playlist_cache: HashMap::new(),
             online_track_cache: initial_online_cache,
             online_remote_tracks: initial_online_remote_tracks,
@@ -953,7 +955,7 @@ impl MusicApp {
         if !has_plugins {
             self.cancel_online_play_request();
             self.cancel_online_preload_tasks();
-            self.online_preloaded_tracks.clear();
+            self.online_audio_cache.clear();
             self.online_daily_tracks.clear();
             self.online_playlists.clear();
             self.online_user_playlists.clear();
@@ -1444,13 +1446,33 @@ impl MusicApp {
     }
 
     fn schedule_online_playlist_prefetch(&mut self, cx: &mut Context<Self>) {
+        // Cancelling UI scheduling does not cancel completed/in-flight Host
+        // materializations, so fast switching does not discard downloaded audio.
         self.cancel_online_preload_tasks();
 
-        let Some((route, candidates)) = self.online_playlist_lookahead(ONLINE_ASSET_LOOKAHEAD)
+        let Some((route, mut candidates)) = self.online_playlist_lookahead(ONLINE_ASSET_LOOKAHEAD)
         else {
-            self.online_preloaded_tracks.clear();
             return;
         };
+        // Priority: next, previous, then next-next. Include wraparound
+        // previous under Repeat All, matching the transport implementation.
+        if let Some(queue) = self.online_playlist_queue.as_ref()
+            && queue.tracks.len() > 1
+        {
+            let previous_index = if queue.current_index > 0 {
+                Some(queue.current_index - 1)
+            } else if self.config.repeat == RepeatMode::All {
+                Some(queue.tracks.len() - 1)
+            } else {
+                None
+            };
+            if let Some(index) = previous_index {
+                let previous = queue.tracks[index].clone();
+                if !candidates.iter().any(|item| item.source == previous.source) {
+                    candidates.insert(candidates.len().min(1), previous);
+                }
+            }
+        }
         let generation = self.online_preload_generation;
 
         // Artwork is tiny after image_cache normalization and already deduplicated by URL. Warm at
@@ -1496,18 +1518,9 @@ impl MusicApp {
             let _ = asset_task.await;
         }));
 
-        // Full stream materialization is deliberately limited to exactly one track ahead. It starts
-        // after a short dwell so rapid browsing does not download every skipped song. Once that next
-        // track becomes current the pipeline advances and warms the following track.
-        let next_remote = candidates[0].clone();
-        let next_key = online_source_key(&route, &next_remote.source);
-        self.online_preloaded_tracks
-            .retain(|key, _| key == &next_key);
-        if self.online_preloaded_tracks.contains_key(&next_key) {
-            return;
-        }
-
-        let audio_route = route;
+        // Detached prefetch workers remain available across transport changes,
+        // while this lightweight scheduling task is safe to cancel.
+        let audio_cache = Arc::clone(&self.online_audio_cache);
         self.online_audio_preload_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(ONLINE_AUDIO_PRELOAD_DELAY).await;
             let should_start = this
@@ -1522,31 +1535,9 @@ impl MusicApp {
             if !should_start {
                 return;
             }
-
-            let remote_for_prepare = next_remote.clone();
-            let route_for_prepare = audio_route.clone();
-            let task = Tokio::spawn_result(cx, async move {
-                let frontend = crate::plugin::frontend::global()
-                    .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
-                let result = frontend
-                    .prepare_remote_track_for_route(&route_for_prepare, &remote_for_prepare, None)
-                    .await?;
-                result
-                    .value
-                    .map(|prepared| prepared.into_track())
-                    .ok_or_else(|| anyhow!("预加载下一首在线音频失败"))
-            });
-            let result = task.await;
-
-            let _ = this.update(cx, |app, _| {
-                if app.online_preload_generation != generation {
-                    return;
-                }
-                if let Ok(track) = result {
-                    app.online_preloaded_tracks.clear();
-                    app.online_preloaded_tracks.insert(next_key, track);
-                }
-            });
+            for remote in candidates {
+                audio_cache.prefetch(route.clone(), remote);
+            }
         }));
     }
 
@@ -1558,7 +1549,6 @@ impl MusicApp {
             self.cancel_online_play_request();
             if self.snapshot.current_track.is_none() {
                 self.cancel_online_preload_tasks();
-                self.online_preloaded_tracks.clear();
                 self.snapshot.state = PlaybackState::Stopped;
                 app_ui_events::emit_music(
                     cx,
@@ -1631,7 +1621,6 @@ impl MusicApp {
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
-        self.online_preloaded_tracks.clear();
         self.snapshot.state = PlaybackState::Stopped;
         self.snapshot.position_ms = 0;
         self.position_ms = 0;
@@ -1883,7 +1872,6 @@ impl MusicApp {
     pub(crate) fn play_track(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
-        self.online_preloaded_tracks.clear();
         self.online_playlist_queue = None;
         self.config.online_playlist_queue = None;
         let Some(engine) = self.engine.clone() else {
@@ -2609,11 +2597,9 @@ impl MusicApp {
             self.config.online_playlist_queue = None;
         }
         self.save_config();
-        let source_key = online_source_key(&route, &source);
-
-        // Reuse the single bounded look-ahead materialization before starting any new network work.
-        let preloaded = self.online_preloaded_tracks.remove(&source_key);
-        self.online_preloaded_tracks.clear();
+        // Replay previously materialized music immediately, even when it was
+        // cached several tracks earlier or was reached via Previous.
+        let preloaded = self.online_audio_cache.ready(&route, &source);
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
         self.online_play_request_generation = self.online_play_request_generation.wrapping_add(1);
@@ -2659,16 +2645,9 @@ impl MusicApp {
         let route_for_prep = route.clone();
         let remote_for_prep = remote.clone();
         let remote_for_cache = remote.clone();
+        let audio_cache = Arc::clone(&self.online_audio_cache);
         let audio_task = Tokio::spawn_result(cx, async move {
-            let frontend =
-                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
-            let result = frontend
-                .prepare_remote_track_for_route(&route_for_prep, &remote_for_prep, None)
-                .await?;
-            result
-                .value
-                .map(|prepared| prepared.into_track())
-                .ok_or_else(|| anyhow!("物化在线音频流失败"))
+            audio_cache.prepare(route_for_prep, remote_for_prep).await
         });
 
         // Lyrics are independent of stream materialization. Start them at the same time instead of

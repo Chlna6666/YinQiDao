@@ -13,6 +13,7 @@ mod library;
 pub(crate) mod lyrics_overlay;
 mod mini_player_lyrics;
 mod mini_player_view;
+mod online_audio_cache;
 mod online_playlist;
 mod player_facade;
 #[allow(dead_code)]
