@@ -124,7 +124,7 @@ impl SliderStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct HorizontalGesture {
+struct SliderGesture {
     last_ratio: f32,
     dragged: bool,
 }
@@ -132,7 +132,7 @@ struct HorizontalGesture {
 #[derive(Debug, Default, PartialEq)]
 struct SliderInteractionState {
     active_drag_id: Option<ElementId>,
-    horizontal: Option<HorizontalGesture>,
+    gesture: Option<SliderGesture>,
 }
 
 impl Global for SliderInteractionState {}
@@ -225,26 +225,26 @@ fn begin_active_drag(id: &ElementId, cx: &mut App) {
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
         state.active_drag_id = Some(id.clone());
-        state.horizontal = None;
+        state.gesture = None;
     });
 }
 
-fn begin_horizontal_drag(id: &ElementId, ratio: f32, cx: &mut App) {
+fn begin_slider_gesture(id: &ElementId, ratio: f32, cx: &mut App) {
     begin_active_drag(id, cx);
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.horizontal = Some(HorizontalGesture {
+        state.gesture = Some(SliderGesture {
             last_ratio: ratio,
             dragged: false,
         });
     });
 }
 
-fn update_horizontal_drag(id: &ElementId, ratio: f32, cx: &mut App) -> bool {
+fn update_slider_gesture(id: &ElementId, ratio: f32, cx: &mut App) -> bool {
     if !is_active_drag(id, cx) {
         return false;
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        if let Some(drag) = state.horizontal.as_mut() {
+        if let Some(drag) = state.gesture.as_mut() {
             drag.last_ratio = ratio;
             drag.dragged = true;
         }
@@ -252,14 +252,14 @@ fn update_horizontal_drag(id: &ElementId, ratio: f32, cx: &mut App) -> bool {
     true
 }
 
-fn take_horizontal_drag(id: &ElementId, cx: &mut App) -> Option<HorizontalGesture> {
+fn take_slider_gesture(id: &ElementId, cx: &mut App) -> Option<SliderGesture> {
     if !is_active_drag(id, cx) {
         return None;
     }
     let mut gesture = None;
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
         state.active_drag_id = None;
-        gesture = state.horizontal.take();
+        gesture = state.gesture.take();
     });
     gesture
 }
@@ -278,16 +278,7 @@ fn commit_on_release(dragged: bool, deferred: bool) -> bool {
     dragged || deferred
 }
 
-fn end_active_drag(id: &ElementId, cx: &mut App) -> bool {
-    if !is_active_drag(id, cx) {
-        return false;
-    }
-    cx.update_global(|state: &mut SliderInteractionState, _cx| {
-        state.active_drag_id = None;
-        state.horizontal = None;
-    });
-    true
-}
+
 
 fn horizontal_ratio(position_x: Pixels, bounds: Bounds<Pixels>, _thumb_size: Pixels) -> f32 {
     let width = f32::from(bounds.size.width).max(1.0);
@@ -812,13 +803,13 @@ fn interactive_slider_state(
             }
             let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
             cx.stop_propagation();
-            begin_horizontal_drag(&id_for_down, ratio, cx);
+            begin_slider_gesture(&id_for_down, ratio, cx);
             (click_for_down)(ratio, cx);
         })
         // Leaving the 3px rail during press does not invalidate an active seek.
         // Mouse-up-out commits the sampled release position.
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
-            let Some(gesture) = take_horizontal_drag(&id_for_up, cx) else {
+            let Some(gesture) = take_slider_gesture(&id_for_up, cx) else {
                 return;
             };
             cx.stop_propagation();
@@ -836,7 +827,7 @@ fn interactive_slider_state(
             (drag_for_up)(ratio, cx);
         })
         .on_mouse_up_out(MouseButton::Left, move |_, _window, cx| {
-            let Some(gesture) = take_horizontal_drag(&id_for_up_out, cx) else {
+            let Some(gesture) = take_slider_gesture(&id_for_up_out, cx) else {
                 return;
             };
             cx.stop_propagation();
@@ -862,7 +853,7 @@ fn interactive_slider_state(
                     vertical_ratio(event.event.position.y, event.bounds, style.thumb_size)
                 }
             };
-            if update_horizontal_drag(&drag_id, value, cx) {
+            if update_slider_gesture(&drag_id, value, cx) {
                 cx.stop_propagation();
                 (on_change)(value, cx);
             }
@@ -883,9 +874,7 @@ pub fn interactive_vertical_slider(
 
     let bounds_for_down = bounds.clone();
     let bounds_for_up = bounds.clone();
-    let bounds_for_up_out = bounds.clone();
     let id_for_down = id.clone();
-    let id_for_down_out = id.clone();
     let id_for_up = id.clone();
     let id_for_up_out = id.clone();
     let id_for_drag = id.clone();
@@ -910,38 +899,38 @@ pub fn interactive_vertical_slider(
             let Some(bounds) = bounds_for_down.get() else {
                 return;
             };
-            begin_active_drag(&id_for_down, cx);
-            (change_for_down)(
-                vertical_ratio(event.position.y, bounds, style.thumb_size),
-                cx,
-            );
-        })
-        .on_mouse_down_out(move |_event, _window, cx| {
-            let _ = end_active_drag(&id_for_down_out, cx);
+            if !pointer_inside_bounds(event.position, bounds) {
+                return;
+            }
+            let ratio = vertical_ratio(event.position.y, bounds, style.thumb_size);
+            cx.stop_propagation();
+            begin_slider_gesture(&id_for_down, ratio, cx);
+            (change_for_down)(ratio, cx);
         })
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
-            if !end_active_drag(&id_for_up, cx) {
-                return;
-            }
-            let Some(bounds) = bounds_for_up.get() else {
+            let Some(gesture) = take_slider_gesture(&id_for_up, cx) else {
                 return;
             };
-            (change_for_up)(
-                vertical_ratio(event.position.y, bounds, style.thumb_size),
-                cx,
-            );
+            cx.stop_propagation();
+            if !gesture.dragged {
+                return;
+            }
+            let ratio = bounds_for_up
+                .get()
+                .filter(|bounds| pointer_inside_bounds(event.position, *bounds))
+                .map_or(gesture.last_ratio, |bounds| {
+                    vertical_ratio(event.position.y, bounds, style.thumb_size)
+                });
+            (change_for_up)(ratio, cx);
         })
-        .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
-            if !end_active_drag(&id_for_up_out, cx) {
-                return;
-            }
-            let Some(bounds) = bounds_for_up_out.get() else {
+        .on_mouse_up_out(MouseButton::Left, move |_, _window, cx| {
+            let Some(gesture) = take_slider_gesture(&id_for_up_out, cx) else {
                 return;
             };
-            (change_for_up_out)(
-                vertical_ratio(event.position.y, bounds, style.thumb_size),
-                cx,
-            );
+            cx.stop_propagation();
+            if gesture.dragged {
+                (change_for_up_out)(gesture.last_ratio, cx);
+            }
         })
         .on_drag_move::<SliderDrag>(move |event, _window, cx| {
             let (drag_id, on_change) = {
@@ -951,10 +940,11 @@ pub fn interactive_vertical_slider(
             if drag_id != id_for_drag || !is_active_drag(&drag_id, cx) {
                 return;
             }
-            (on_change)(
-                vertical_ratio(event.event.position.y, event.bounds, style.thumb_size),
-                cx,
-            );
+            let ratio = vertical_ratio(event.event.position.y, event.bounds, style.thumb_size);
+            if update_slider_gesture(&drag_id, ratio, cx) {
+                cx.stop_propagation();
+                (on_change)(ratio, cx);
+            }
         })
 }
 
