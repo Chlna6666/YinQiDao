@@ -13,7 +13,7 @@ use lucide_gpui::icon;
 
 use crate::{
     audio::AudioEngine,
-    lyrics::LyricLine,
+    lyrics::{LyricLine, LyricWord},
     model::{PlaybackState, TrackId},
 };
 
@@ -1744,7 +1744,9 @@ fn karaoke_reveal_word(
     // No animation wrapper is necessary for the numerous already-complete
     // or not-yet-started words. This also bounds recursion depth in GPUI's
     // layout, prepaint and retained animation traversal when entering Stage.
-    if progress <= 0.0 {
+    // A 0%-revealed current word must still animate from zero; returning
+    // an empty element here made the highlight appear only at the next tick.
+    if progress <= 0.0 && !animate {
         return div().into_any_element();
     }
     if progress >= 1.0 {
@@ -1866,6 +1868,11 @@ fn sustained_animation_segment(
     }
 }
 
+/// A single stable flex item per authored syllable.
+///
+/// Past/future words use ONE GPUI text element, not an invisible word, a
+/// duplicate foreground, a glow layer and several nested animations. Only
+/// the currently revealing syllable uses one dim text + one clipped text.
 fn karaoke_word(
     word: &StageLyricWord,
     index: usize,
@@ -1874,140 +1881,35 @@ fn karaoke_word(
     is_current_word: bool,
     is_last_word: bool,
     karaoke_epoch: u64,
+    playback_animating: bool,
 ) -> gpui::AnyElement {
     let progress = reveal_progress.clamp(0.0, 1.0);
-    let animate = is_current_word && word_reveal_remaining_duration(word, position_ms).is_some();
-    let peak = sustained_word_peak_emphasis(word, is_last_word);
-    let sustained = is_current_word && peak.glow_alpha > 0.0;
-    let static_emphasis = sustained_word_emphasis(word, position_ms, is_current_word, is_last_word);
+    let animate = is_current_word
+        && playback_animating
+        && word_reveal_remaining_duration(word, position_ms).is_some();
 
-    // One visible glyph run owns both intrinsic word width and karaoke paint. The renderer-owned
-    // ClipReveal masks this full-width subtree without changing flex geometry, eliminating the old
-    // hidden sizing glyph + absolute white-glyph duplicate.
-    // Each word owns its layout ONCE. Dim glyphs and the white
-    // clipping layer use exactly the same word box, so the line cannot
-    // wrap differently between the base and karaoke layers.
-    let dim = div()
-        .flex_none()
-        .whitespace_nowrap()
-        .text_color(dark::white(0.46))
-        .child(word.text.clone());
-    let foreground = div()
-        .whitespace_nowrap()
-        .text_color(dark::white(1.0))
-        .child(word.text.clone());
-
-    if sustained {
-        let mut glow = div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
+    if progress >= 1.0 && !animate {
+        return div()
+            .flex_none()
             .whitespace_nowrap()
-            .text_color(dark::white(0.92))
-            .blur(px(peak.glow_blur_px))
+            .text_color(dark::white(1.0))
             .child(word.text.clone())
             .into_any_element();
-
-        if animate {
-            if let Some((from_envelope, to_envelope, duration)) =
-                sustained_animation_segment(word, position_ms)
-            {
-                glow = glow
-                    .with_animation(
-                        ElementId::NamedInteger(
-                            SharedString::new_static("lyric-word-glow"),
-                            lyric_animation_instance_id(karaoke_epoch, index),
-                        ),
-                        Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
-                            .with_property(AnimationProperty::opacity(
-                                from_envelope.clamp(0.0, 1.0),
-                                to_envelope.clamp(0.0, 1.0),
-                            )),
-                        |element, _| element,
-                    )
-                    .into_any_element();
-            }
-            glow = div()
-                .opacity(peak.glow_alpha)
-                .child(glow)
-                .into_any_element();
-        } else {
-            glow = div()
-                .opacity(static_emphasis.glow_alpha)
-                .child(glow)
-                .into_any_element();
-        }
-
-        // Glow shares the same outer ClipReveal as the foreground glyph, so there is only one
-        // retained reveal timeline per word. Paint it before foreground so blur never washes over
-        // the sharp white glyph.
-        let glyph = div()
-            .relative()
+    }
+    if progress <= 0.0 && !animate {
+        return div()
             .flex_none()
             .whitespace_nowrap()
-            .child(glow)
-            .child(foreground);
-        let revealed = karaoke_reveal_word(
-            glyph,
-            word,
-            index,
-            progress,
-            position_ms,
-            animate,
-            karaoke_epoch,
-        );
-
-        let word_root = div()
-            .relative()
-            .flex_none()
-            .whitespace_nowrap()
-            .child(dim)
-            .child(div().absolute().inset_0().child(revealed));
-
-        if animate {
-            if let Some((from_envelope, to_envelope, duration)) =
-                sustained_animation_segment(word, position_ms)
-            {
-                let from_scale = 1.0 + (peak.scale - 1.0) * from_envelope;
-                let to_scale = 1.0 + (peak.scale - 1.0) * to_envelope;
-                let peak_scale = peak.scale.max(0.0001);
-                let animation =
-                    Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
-                        .with_property(AnimationProperty::scale_opacity(
-                            from_scale / peak_scale,
-                            to_scale / peak_scale,
-                            1.0,
-                            1.0,
-                            TransformOrigin::new(0.0, 1.0),
-                        ));
-                return word_root
-                    .top(px(-peak.lift_px))
-                    .scale(peak.scale)
-                    .with_animation(
-                        ElementId::NamedInteger(
-                            SharedString::new_static("lyric-word-emphasis"),
-                            lyric_animation_instance_id(karaoke_epoch, index),
-                        ),
-                        animation,
-                        |element, _| element,
-                    )
-                    .into_any_element();
-            }
-
-            return word_root
-                .top(px(-peak.lift_px))
-                .scale(peak.scale)
-                .into_any_element();
-        }
-
-        return word_root
-            .top(px(-static_emphasis.lift_px))
-            .scale(static_emphasis.scale)
+            .text_color(dark::white(0.46))
+            .child(word.text.clone())
             .into_any_element();
     }
 
-    let revealed = karaoke_reveal_word(
-        foreground,
+    let highlighted = karaoke_reveal_word(
+        div()
+            .whitespace_nowrap()
+            .text_color(dark::white(1.0))
+            .child(word.text.clone()),
         word,
         index,
         progress,
@@ -2015,13 +1917,55 @@ fn karaoke_word(
         animate,
         karaoke_epoch,
     );
-    div()
+    let root = div()
         .relative()
         .flex_none()
         .whitespace_nowrap()
-        .child(dim)
-        .child(div().absolute().inset_0().child(revealed))
-        .into_any_element()
+        .child(
+            div()
+                .text_color(dark::white(0.46))
+                .child(word.text.clone()),
+        )
+        .child(div().absolute().inset_0().child(highlighted));
+
+    // Long-note emphasis stays in the paint/transform layer: no duplicate
+    // blurred glyph tree and no change to the line's flex dimensions.
+    let emphasis = sustained_word_emphasis(word, position_ms, is_current_word, is_last_word);
+    let scale = emphasis.scale.clamp(1.0, 1.035);
+    if animate
+        && let Some((from, to, duration)) = sustained_animation_segment(word, position_ms)
+        && scale > 1.0001
+    {
+        let peak = sustained_word_peak_emphasis(word, is_last_word);
+        let from_scale = (1.0 + (peak.scale - 1.0) * from).clamp(1.0, 1.035);
+        let to_scale = (1.0 + (peak.scale - 1.0) * to).clamp(1.0, 1.035);
+        return root
+            .scale(scale)
+            .transform_origin(TransformOrigin::new(0.0, 1.0))
+            .with_animation(
+                ElementId::NamedInteger(
+                    SharedString::new_static("lyric-word-emphasis"),
+                    lyric_animation_instance_id(karaoke_epoch, index),
+                ),
+                Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
+                    .with_property(AnimationProperty::scale_opacity(
+                        from_scale / scale,
+                        to_scale / scale,
+                        1.0,
+                        1.0,
+                        TransformOrigin::new(0.0, 1.0),
+                    )),
+                |element, _| element,
+            )
+            .into_any_element();
+    }
+    if scale > 1.0001 {
+        return root
+            .scale(scale)
+            .transform_origin(TransformOrigin::new(0.0, 1.0))
+            .into_any_element();
+    }
+    root.into_any_element()
 }
 
 fn karaoke_words_overlay(
@@ -2041,16 +1985,16 @@ fn karaoke_words_overlay(
         .font_weight(gpui::FontWeight::SEMIBOLD);
 
     for (index, word) in line.words.iter().enumerate() {
-        let (progress, word_animate) = match karaoke_state {
-            KaraokeLineState::Static | KaraokeLineState::Past => (1.0, false),
-            KaraokeLineState::Future => (0.0, false),
+        let progress = match karaoke_state {
+            KaraokeLineState::Static | KaraokeLineState::Past => 1.0,
+            KaraokeLineState::Future => 0.0,
             KaraokeLineState::Active => {
                 let progress = match current_word {
                     Some(current) if index < current => 1.0,
                     Some(current) if index == current => word_reveal_progress(word, position_ms),
                     _ => 0.0,
                 };
-                (progress, animate && current_word == Some(index))
+                progress
             }
         };
 
@@ -2059,9 +2003,10 @@ fn karaoke_words_overlay(
             index,
             progress,
             position_ms,
-            word_animate,
+            karaoke_state == KaraokeLineState::Active && current_word == Some(index),
             index + 1 == line.words.len(),
             karaoke_epoch,
+            animate,
         ));
     }
 
