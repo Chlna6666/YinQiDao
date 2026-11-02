@@ -997,10 +997,8 @@ impl Render for StageLyricsView {
         let motion_epoch = self.motion_epoch;
         // Explicit width sidesteps Taffy 0.11's percent-width text measurement
         // mismatch when a padded flex parent contains wrapped lyric text.
-        let lyric_text_width = stage_lyric_content_width(
-            self.viewport_width,
-            f32::from(fallback_viewport.width),
-        );
+        let lyric_text_width =
+            stage_lyric_content_width(self.viewport_width, f32::from(fallback_viewport.width));
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
             lyric_motion_spring_value(handoff.from_active, handoff.to_active, &self.row_prefix_sum)
         });
