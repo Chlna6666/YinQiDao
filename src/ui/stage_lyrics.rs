@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
-    SharedString, StyleRefinement, Subscription, TransformOrigin, WeakEntity, Window,
+    SharedString, Subscription, TransformOrigin, WeakEntity, Window,
     bounds_observer, div, point, prelude::*, px,
 };
 use lucide_gpui::icon;
@@ -652,9 +652,17 @@ impl StageLyricsView {
     }
 
     fn reset_row_geometry(&mut self) {
-        self.row_heights.clear();
-        self.row_heights
-            .resize(self.lines.len(), PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
+        // Multi-line primary lyrics and their translations must be allocated
+        // BEFORE the first paint. A live cached karaoke leaf can temporarily
+        // report a zero-sized intrinsic box; reserving only the 82px single-
+        // line slot makes the translation and following line paint on top of
+        // the active English lyric until an observer updates the prefix sum.
+        let content_width = stage_lyric_content_width(self.viewport_width, 1100.0);
+        self.row_heights = self
+            .lines
+            .iter()
+            .map(|line| estimated_lyric_row_height(line, content_width))
+            .collect();
         self.row_height_measured.clear();
         self.row_height_measured.resize(self.lines.len(), false);
         self.rebuild_row_prefix_sum();
@@ -1129,12 +1137,11 @@ impl Render for StageLyricsView {
 
             let active_karaoke_overlay = if !reading_mode && index == active {
                 active_karaoke_line.as_ref().map(|view| {
-                    // The active enhanced line is the ONLY text layout owner.
-                    // An absolute overlay over a separately wrapped sentence
-                    // caused two incompatible line breaks and duplicated glyphs.
+                    // Keep the active karaoke view in the NORMAL layout tree.
+                    // Cached/reuse-on-window-refresh AnyView could report an
+                    // out-of-date height while its 28px words rewrapped,
+                    // placing the 17px translation over the English text.
                     AnyView::from(view.clone())
-                        .cached(StyleRefinement::default().w_full().min_w(px(0.0)))
-                        .reuse_on_window_refresh()
                 })
             } else {
                 None
@@ -1489,13 +1496,25 @@ fn lyric_text_layer(
         .flex_col()
         .gap_1()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(stage_primary_lyric(
-            line,
-            karaoke_state,
-            karaoke_detail,
-            karaoke_epoch,
-            active_karaoke_overlay,
-        ));
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                // Child AnyView is independently updated at word boundaries.
+                // The flex column must reserve primary glyph height even
+                // when that child has a transient zero-height layout cache.
+                .min_h(px(estimated_primary_lyric_height(
+                    line,
+                    content_width_px,
+                )))
+                .child(stage_primary_lyric(
+                    line,
+                    karaoke_state,
+                    karaoke_detail,
+                    karaoke_epoch,
+                    active_karaoke_overlay,
+                )),
+        );
 
     if let Some(translation) = &line.translation {
         text = text.child(
@@ -2147,6 +2166,54 @@ fn take_reading_wheel_steps(remainder: &mut f32, delta: f32) -> isize {
     signed
 }
 
+/// Conservative first-paint geometry for 28px semibold primary lyrics.
+///
+/// Actual bounds observers may grow a row afterwards. This approximation
+/// gives a safe minimum for translated English wrap lines while avoiding a
+/// full shaping pass for every lyric on the render thread. Recompute only on
+/// a track change or actual lyrics viewport width change.
+fn approximate_lyric_lines(text: &str, width_px: f32, font_px: f32) -> usize {
+    let max_width = (width_px * 0.92).max(font_px);
+    let mut lines = 0usize;
+    for paragraph in text.split('\n') {
+        lines += 1;
+        let mut width = 0.0f32;
+        for ch in paragraph.chars() {
+            let glyph_width = if ch.is_whitespace() {
+                font_px * 0.36
+            } else if ch.is_ascii() {
+                if matches!(ch, 'M' | 'W' | 'm' | 'w' | '@' | '%') {
+                    font_px * 0.86
+                } else if matches!(ch, 'i' | 'l' | 'I' | '1' | '.' | ',' | '\'' | '!' | ':' | ';') {
+                    font_px * 0.34
+                } else {
+                    font_px * 0.64
+                }
+            } else {
+                font_px
+            };
+            if width > 0.0 && width + glyph_width > max_width {
+                lines += 1;
+                width = 0.0;
+            }
+            width += glyph_width;
+        }
+    }
+    lines.max(1)
+}
+
+fn estimated_primary_lyric_height(line: &StageLyricLine, width: f32) -> f32 {
+    approximate_lyric_lines(line.text.as_str(), width, 28.0) as f32 * 38.0 + 4.0
+}
+
+fn estimated_lyric_row_height(line: &StageLyricLine, width: f32) -> f32 {
+    let primary = estimated_primary_lyric_height(line, width);
+    let translation = line.translation.as_ref().map_or(0.0, |text| {
+        approximate_lyric_lines(text.as_str(), width, 17.0) as f32 * 25.0 + 4.0
+    });
+    (primary + translation + 40.0).max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX)
+}
+
 /// Resolve the lyric column before measuring wrapped text. Current Taffy
 /// 0.11 can otherwise measure at the outer flex width and paint at the
 /// content width after 16px left + 104px right padding.
@@ -2422,6 +2489,42 @@ mod tests {
         assert!(!should_render_karaoke_detail(8, active, false));
         assert!(!should_render_karaoke_detail(11, active, false));
         assert!(!should_render_karaoke_detail(10, active, true));
+    }
+
+    #[test]
+    fn multiline_english_and_chinese_translation_reserve_distinct_row_space() {
+        let mut line = StageLyricLine::from_plain(
+            "We were both young when I first saw you",
+        );
+        line.translation = Some(SharedString::from(
+            "第一次见到你的时候我们都还很年轻",
+        ));
+        let width = 450.0;
+        assert!(approximate_lyric_lines(line.text.as_str(), width, 28.0) >= 2);
+        let primary = estimated_primary_lyric_height(&line, width);
+        let row = estimated_lyric_row_height(&line, width);
+        assert!(primary >= 80.0);
+        assert!(row >= primary + 25.0 + 40.0);
+        let prefix = [0.0, row, row + 82.0];
+        let current = playback_stack_row_top(0, 0, &prefix, 310.0);
+        let next = playback_stack_row_top(1, 0, &prefix, 310.0);
+        assert!(next - current >= row);
+    }
+
+    #[test]
+    fn long_translations_reserve_multiple_lines() {
+        let mut line = StageLyricLine::from_plain("I'll be waiting");
+        line.translation = Some(SharedString::from(
+            "我会一直在这里等待，直到最后一个夜晚过去，我仍会等着你",
+        ));
+        let narrow = estimated_lyric_row_height(&line, 215.0);
+        let wide = estimated_lyric_row_height(&line, 580.0);
+        assert!(narrow > wide);
+        assert!(approximate_lyric_lines(
+            line.translation.as_ref().unwrap().as_str(),
+            215.0,
+            17.0,
+        ) >= 2);
     }
 
     #[test]
