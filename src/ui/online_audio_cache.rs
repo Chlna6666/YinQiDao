@@ -25,6 +25,7 @@ struct AudioKey {
     provider: String,
     account: String,
     source: String,
+    package_generation: u64,
 }
 
 impl AudioKey {
@@ -34,6 +35,7 @@ impl AudioKey {
             provider: route.provider_id.clone(),
             account: route.account_id.clone(),
             source: source.source_id.clone(),
+            package_generation: crate::plugin::runtime_ports::package_mutation_generation(),
         }
     }
 }
@@ -90,7 +92,9 @@ impl OnlineAudioCache {
         if track.is_some() {
             state.mark_used(&key);
         }
-        track
+        // Every new playback receives a fresh transient ID: reusing the ID
+        // of the original prefetch would alias an old track/crossfade state.
+        track.and_then(|track| fresh_playback_track(track).ok())
     }
 
     /// A low-priority speculative fetch; limited to two concurrent tracks.
@@ -115,7 +119,9 @@ impl OnlineAudioCache {
         loop {
             let outcome = rx.borrow_and_update().clone();
             if let Some(outcome) = outcome {
-                return outcome.map_err(anyhow::Error::msg);
+                return outcome
+                    .map_err(anyhow::Error::msg)
+                    .and_then(fresh_playback_track);
             }
             rx.changed()
                 .await
@@ -221,6 +227,13 @@ impl OnlineAudioCache {
         state.order.clear();
         state.ready.clear();
     }
+}
+
+/// Clone the Host-backed Track metadata without copying the downloaded
+/// audio; each transport activation gets a distinct negative process-local ID.
+fn fresh_playback_track(mut track: Track) -> Result<Track> {
+    track.id = crate::plugin::streaming::allocate_remote_track_id()?;
+    Ok(track)
 }
 
 #[cfg(test)]
