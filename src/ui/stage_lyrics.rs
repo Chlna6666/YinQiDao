@@ -2062,15 +2062,8 @@ fn stage_primary_lyric(
                 .child(active_overlay)
                 .into_any_element();
         }
-        return karaoke_words_overlay(
-            line,
-            karaoke_state,
-            None,
-            0,
-            false,
-            karaoke_epoch,
-        )
-        .into_any_element();
+        return karaoke_words_overlay(line, karaoke_state, None, 0, false, karaoke_epoch)
+            .into_any_element();
     }
 
     let base_alpha = match karaoke_state {
