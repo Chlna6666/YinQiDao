@@ -995,6 +995,12 @@ impl Render for StageLyricsView {
         let focus_started_at = self.focus_started_at;
         let karaoke_epoch = self.karaoke_epoch;
         let motion_epoch = self.motion_epoch;
+        // Explicit width sidesteps Taffy 0.11's percent-width text measurement
+        // mismatch when a padded flex parent contains wrapped lyric text.
+        let lyric_text_width = stage_lyric_content_width(
+            self.viewport_width,
+            f32::from(fallback_viewport.width),
+        );
         let motion_spring_value = handoff.map_or(0.0, |handoff| {
             lyric_motion_spring_value(handoff.from_active, handoff.to_active, &self.row_prefix_sum)
         });
@@ -1083,6 +1089,7 @@ impl Render for StageLyricsView {
 
             let row = render_lyric_row(
                 &lines[index],
+                lyric_text_width,
                 index,
                 active,
                 focus_from_index,
@@ -1197,6 +1204,7 @@ impl Render for StageLyricsView {
 #[allow(clippy::too_many_arguments)]
 fn render_lyric_row(
     line: &StageLyricLine,
+    content_width_px: f32,
     index: usize,
     active: usize,
     focus_from_index: Option<usize>,
@@ -1279,6 +1287,7 @@ fn render_lyric_row(
         should_render_karaoke_detail(index, active, reading_mode),
         karaoke_epoch,
         active_karaoke_overlay,
+        content_width_px,
         static_blur,
         text_id,
         index,
@@ -1442,13 +1451,14 @@ fn lyric_text_layer(
     karaoke_detail: bool,
     karaoke_epoch: u64,
     active_karaoke_overlay: Option<AnyView>,
+    content_width_px: f32,
     blur_sigma: f32,
     text_id: &'static str,
     index: usize,
 ) -> gpui::Stateful<gpui::Div> {
     let mut text = div()
         .id(ElementId::named_usize(text_id, index))
-        .w_full()
+        .w(px(content_width_px))
         .min_w(px(0.0))
         .flex()
         .flex_col()
@@ -2068,6 +2078,19 @@ fn take_reading_wheel_steps(remainder: &mut f32, delta: f32) -> isize {
     signed
 }
 
+/// Resolve the lyric column before measuring wrapped text. Current Taffy
+/// 0.11 can otherwise measure at the outer flex width and paint at the
+/// content width after 16px left + 104px right padding.
+#[inline]
+fn stage_lyric_content_width(viewport_width: f32, window_width: f32) -> f32 {
+    let column_width = if viewport_width > 1.0 {
+        viewport_width
+    } else {
+        window_width * 0.55
+    };
+    (column_width - 120.0).max(180.0)
+}
+
 #[inline]
 fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
     let index_prefix = prefix_sum
@@ -2316,6 +2339,12 @@ mod tests {
         assert!(!should_render_karaoke_detail(8, active, false));
         assert!(!should_render_karaoke_detail(11, active, false));
         assert!(!should_render_karaoke_detail(10, active, true));
+    }
+
+    #[test]
+    fn lyric_width_uses_the_measured_stage_column() {
+        assert_eq!(stage_lyric_content_width(700.0, 1200.0), 580.0);
+        assert_eq!(stage_lyric_content_width(200.0, 1200.0), 180.0);
     }
 
     #[test]
