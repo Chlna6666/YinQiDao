@@ -351,16 +351,57 @@ fn merge_lrc(original: &str, translated: &str) -> Vec<types::LyricLine> {
         .collect::<std::collections::BTreeMap<_, _>>();
     lines
         .into_iter()
-        .map(|(timestamp_ms, text)| types::LyricLine {
-            timestamp_ms,
-            text,
-            translation: translations
-                .get(&timestamp_ms)
-                .filter(|translation| !translation.trim().is_empty())
-                .cloned(),
-            words: Vec::new(),
+        .map(|(timestamp_ms, original)| {
+            // Extended LRC sometimes includes real <mm:ss.xx> word stamps.
+            // Preserve those authored timestamps rather than discarding them.
+            // Plain LRC still has line timing only; never synthesize words.
+            let (text, words) =
+                parse_enhanced_lrc_words(&original).unwrap_or((original, Vec::new()));
+            types::LyricLine {
+                timestamp_ms,
+                text,
+                translation: translations
+                    .get(&timestamp_ms)
+                    .filter(|translation| !translation.trim().is_empty())
+                    .cloned(),
+                words,
+            }
         })
         .collect()
+}
+
+fn parse_enhanced_lrc_words(source: &str) -> Option<(String, Vec<types::LyricWord>)> {
+    let mut remaining = source;
+    let mut text = String::new();
+    let mut words = Vec::<types::LyricWord>::new();
+    while let Some(after_open) = remaining.strip_prefix('<') {
+        let end = after_open.find('>')?;
+        let timestamp_ms = parse_lrc_timestamp(&after_open[..end])?;
+        let body = &after_open[end + 1..];
+        let next = body.find('<').unwrap_or(body.len());
+        let syllable = &body[..next];
+        if syllable.is_empty()
+            || words
+                .last()
+                .is_some_and(|previous| previous.timestamp_ms >= timestamp_ms)
+        {
+            return None;
+        }
+        text.push_str(syllable);
+        if let Some(previous) = words.last_mut() {
+            previous.duration_ms = Some(timestamp_ms - previous.timestamp_ms);
+        }
+        words.push(types::LyricWord {
+            timestamp_ms,
+            duration_ms: None,
+            text: syllable.to_owned(),
+        });
+        remaining = &body[next..];
+    }
+    if words.is_empty() || !remaining.is_empty() {
+        return None;
+    }
+    Some((text, words))
 }
 
 fn parse_lrc(input: &str) -> Vec<(u64, String)> {
@@ -412,6 +453,23 @@ fn parse_lrc_timestamp(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhanced_lrc_preserves_real_word_timestamps_without_guessing() {
+        let lines = merge_lrc(
+            "[00:10.00]<00:10.00>你<00:10.40>好<00:10.70>世界",
+            "",
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "你好世界");
+        assert_eq!(lines[0].words.len(), 3);
+        assert_eq!(lines[0].words[0].timestamp_ms, 10_000);
+        assert_eq!(lines[0].words[0].duration_ms, Some(400));
+        assert_eq!(lines[0].words[1].duration_ms, Some(300));
+        assert_eq!(lines[0].words[2].duration_ms, None);
+        assert!(merge_lrc("[00:10.00]没有逐字数据", "")[0].words.is_empty());
+        assert!(parse_enhanced_lrc_words("<00:01.00>甲<00:00.50>乙").is_none());
+    }
 
     #[test]
     fn lrc_parser_supports_multiple_timestamps_and_translation_merge() {
