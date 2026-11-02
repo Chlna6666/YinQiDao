@@ -937,8 +937,15 @@ impl MusicApp {
         } else {
             false
         };
+        let was_authenticated = self.online_authenticated;
         self.has_online_plugins = has_plugins;
         self.online_authenticated = is_auth;
+        // Previously authenticated media must not stay in the in-memory
+        // immediate-play cache after the account is revoked or logged out.
+        if was_authenticated && !is_auth {
+            self.cancel_online_preload_tasks();
+            self.online_audio_cache.clear();
+        }
 
         if !has_plugins {
             self.cancel_online_play_request();
