@@ -175,9 +175,48 @@ impl PluginStreamCache {
                 .await;
             worker_notice.finish(&result);
         });
-        rx.await
+        let stream = rx
+            .await
             .context("等待渐进式音源首批数据失败")?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        // A validated network prefix may still end in the middle of ID3, Vorbis
+        // or FLAC metadata. Probe before giving this Track to the AudioWorker:
+        // otherwise a transient incomplete header is reported as a fatal file
+        // error rather than a recoverable network-buffering state.
+        if let Some(session) = stream._live.as_ref() {
+            let session = session.clone();
+            let path = stream.path.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut last_progress = std::time::Instant::now();
+                let mut observed = 0u64;
+                loop {
+                    match crate::audio::DecoderStream::open(&path) {
+                        Ok(_) => return Ok(()),
+                        Err(error) => match session.snapshot() {
+                            crate::audio::progressive::DownloadState::Failed(reason) => {
+                                bail!("渐进式音频下载失败: {reason}");
+                            }
+                            crate::audio::progressive::DownloadState::Complete { .. } => {
+                                bail!("渐进式音频文件无法解码: {error}");
+                            }
+                            crate::audio::progressive::DownloadState::Downloading { available } => {
+                                if available != observed {
+                                    observed = available;
+                                    last_progress = std::time::Instant::now();
+                                }
+                                if last_progress.elapsed() > Duration::from_secs(15) {
+                                    bail!("渐进式音频头缓冲超时: {error}");
+                                }
+                                let _ = session.wait_for_change(available, Duration::from_millis(250));
+                            }
+                        },
+                    }
+                }
+            })
+            .await
+            .context("等待渐进式音频格式预探测任务失败")??;
+        }
+        Ok(stream)
     }
 
     pub fn new(root: PathBuf) -> Self {

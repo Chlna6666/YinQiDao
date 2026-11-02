@@ -21,6 +21,7 @@ pub use debug::{
     audio_debug_latest_snapshot, set_audio_debug_enabled, set_audio_debug_monitor_mode,
 };
 pub use dsp::{EqPreset, SpatialPreset, clamp_eq, clamp_spatial};
+pub(crate) use decoder::DecoderStream;
 #[allow(unused_imports)]
 pub use engine::{OutputDeviceInfo, PlayerCommand, PlayerEvent};
 pub use facade::{AudioEngine, AudioUiEvent};

@@ -124,6 +124,10 @@ impl ProgressiveSession {
 
     pub(crate) fn snapshot(&self) -> DownloadState {
         let state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        Self::state_snapshot(&state)
+    }
+
+    fn state_snapshot(state: &Progress) -> DownloadState {
         match &state.error {
             Some(error) => DownloadState::Failed(error.clone()),
             None if state.complete => DownloadState::Complete {
@@ -133,6 +137,20 @@ impl ProgressiveSession {
                 available: state.available,
             },
         }
+    }
+
+    /// Wait for a newly verified prefix, completion or a terminal network error.
+    /// Used only by the decode-probe worker, never from the realtime audio callback.
+    pub(crate) fn wait_for_change(&self, available: u64, timeout: Duration) -> DownloadState {
+        let state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if state.available != available || state.complete {
+            return Self::state_snapshot(&state);
+        }
+        let (state, _) = self
+            .changed
+            .wait_timeout(state, timeout)
+            .unwrap_or_else(|err| err.into_inner());
+        Self::state_snapshot(&state)
     }
 
     fn available_at(&self, pos: u64) -> io::Result<usize> {
