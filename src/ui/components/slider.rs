@@ -123,9 +123,16 @@ impl SliderStyle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HorizontalGesture {
+    last_ratio: f32,
+    dragged: bool,
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct SliderInteractionState {
     active_drag_id: Option<ElementId>,
+    horizontal: Option<HorizontalGesture>,
 }
 
 impl Global for SliderInteractionState {}
@@ -218,7 +225,57 @@ fn begin_active_drag(id: &ElementId, cx: &mut App) {
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
         state.active_drag_id = Some(id.clone());
+        state.horizontal = None;
     });
+}
+
+fn begin_horizontal_drag(id: &ElementId, ratio: f32, cx: &mut App) {
+    begin_active_drag(id, cx);
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.horizontal = Some(HorizontalGesture {
+            last_ratio: ratio,
+            dragged: false,
+        });
+    });
+}
+
+fn update_horizontal_drag(id: &ElementId, ratio: f32, cx: &mut App) -> bool {
+    if !is_active_drag(id, cx) {
+        return false;
+    }
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        if let Some(drag) = state.horizontal.as_mut() {
+            drag.last_ratio = ratio;
+            drag.dragged = true;
+        }
+    });
+    true
+}
+
+fn take_horizontal_drag(id: &ElementId, cx: &mut App) -> Option<HorizontalGesture> {
+    if !is_active_drag(id, cx) {
+        return None;
+    }
+    let mut gesture = None;
+    cx.update_global(|state: &mut SliderInteractionState, _cx| {
+        state.active_drag_id = None;
+        gesture = state.horizontal.take();
+    });
+    gesture
+}
+
+/// Accept only presses on the actual slider interaction rect. A stale
+/// retained hit-test target cannot capture clicks intended for other buttons.
+fn pointer_inside_bounds(position: gpui::Point<Pixels>, bounds: Bounds<Pixels>) -> bool {
+    position.x >= bounds.left()
+        && position.x <= bounds.left() + bounds.size.width
+        && position.y >= bounds.top()
+        && position.y <= bounds.top() + bounds.size.height
+}
+
+#[inline]
+fn commit_on_release(dragged: bool, deferred: bool) -> bool {
+    dragged || deferred
 }
 
 fn end_active_drag(id: &ElementId, cx: &mut App) -> bool {
@@ -227,6 +284,7 @@ fn end_active_drag(id: &ElementId, cx: &mut App) -> bool {
     }
     cx.update_global(|state: &mut SliderInteractionState, _cx| {
         state.active_drag_id = None;
+        state.horizontal = None;
     });
     true
 }
@@ -703,7 +761,6 @@ fn interactive_slider_state(
     let bounds_for_children = state.bounds.clone();
     let bounds_for_down = state.bounds.clone();
     let bounds_for_up = state.bounds.clone();
-    let bounds_for_up_out = state.bounds.clone();
     let id_for_down = state.id.clone();
     let id_for_up = state.id.clone();
     let id_for_up_out = state.id.clone();
@@ -715,6 +772,7 @@ fn interactive_slider_state(
     };
     let drag_for_up = state.on_drag_end.clone();
     let drag_for_up_out = state.on_drag_end.clone();
+    let deferred_release = state.defer_commit_until_release;
     let on_drag = state.on_drag.clone();
 
     let visual = animation.map_or_else(
@@ -744,47 +802,51 @@ fn interactive_slider_state(
             |_: &SliderDrag, _, _, cx| cx.new(|_| Empty),
         )
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-            // Match the proven BMCBL slider semantics: a track press updates immediately, while
-            // subsequent drag samples stay in the preview callback and mouse-up commits the drag.
-            cx.stop_propagation();
-            begin_active_drag(&id_for_down, cx);
-            if let Some(bounds) = bounds_for_down.get() {
-                (click_for_down)(
-                    horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                    cx,
-                );
+            let Some(bounds) = bounds_for_down.get() else {
+                return;
+            };
+            // Hit testing can be stale after retained GPUI layer replay.
+            // A play/queue/lyrics click must never become SetVolume(0).
+            if !pointer_inside_bounds(event.position, bounds) {
+                return;
             }
+            let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
+            cx.stop_propagation();
+            begin_horizontal_drag(&id_for_down, ratio, cx);
+            (click_for_down)(ratio, cx);
         })
         // Leaving the 3px rail during press does not invalidate an active seek.
         // Mouse-up-out commits the sampled release position.
         .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
-            cx.stop_propagation();
-            if !end_active_drag(&id_for_up, cx) {
-                return;
-            }
-            let Some(bounds) = bounds_for_up.get() else {
+            let Some(gesture) = take_horizontal_drag(&id_for_up, cx) else {
                 return;
             };
-            let ratio = horizontal_ratio(event.position.x, bounds, style.thumb_size);
+            cx.stop_propagation();
+            // For volume the press already committed. A second release
+            // callback is only needed for a real drag or a deferred seek.
+            if !commit_on_release(gesture.dragged, deferred_release) {
+                return;
+            }
+            let ratio = bounds_for_up
+                .get()
+                .filter(|bounds| pointer_inside_bounds(event.position, *bounds))
+                .map_or(gesture.last_ratio, |bounds| {
+                    horizontal_ratio(event.position.x, bounds, style.thumb_size)
+                });
             (drag_for_up)(ratio, cx);
         })
-        .on_mouse_up_out(MouseButton::Left, move |event, _window, cx| {
-            cx.stop_propagation();
-            if !end_active_drag(&id_for_up_out, cx) {
-                return;
-            }
-            let Some(bounds) = bounds_for_up_out.get() else {
+        .on_mouse_up_out(MouseButton::Left, move |_, _window, cx| {
+            let Some(gesture) = take_horizontal_drag(&id_for_up_out, cx) else {
                 return;
             };
-            (drag_for_up_out)(
-                horizontal_ratio(event.position.x, bounds, style.thumb_size),
-                cx,
-            );
+            cx.stop_propagation();
+            if commit_on_release(gesture.dragged, deferred_release) {
+                // Outside coordinates belong to another control: never
+                // clamp its X to zero and mute/seek unintentionally.
+                (drag_for_up_out)(gesture.last_ratio, cx);
+            }
         })
         .on_drag_move::<SliderDrag>(move |event, _window, cx| {
-            // Do not let high-frequency drag motion bubble into stage-drawer-root's generic
-            // pointer-activity handler. At 240 Hz that otherwise adds a MusicApp update per sample.
-            cx.stop_propagation();
             let (drag_id, axis, on_change) = {
                 let drag = event.drag(cx);
                 (drag.id.clone(), drag.axis, drag.on_change.clone())
@@ -800,7 +862,10 @@ fn interactive_slider_state(
                     vertical_ratio(event.event.position.y, event.bounds, style.thumb_size)
                 }
             };
-            (on_change)(value, cx);
+            if update_horizontal_drag(&drag_id, value, cx) {
+                cx.stop_propagation();
+                (on_change)(value, cx);
+            }
         })
 }
 
@@ -896,6 +961,22 @@ pub fn interactive_vertical_slider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrelated_control_press_cannot_start_or_complete_volume_drag() {
+        let volume = Bounds::new(
+            gpui::point(px(700.0), px(650.0)),
+            gpui::size(px(72.0), px(22.0)),
+        );
+        assert!(pointer_inside_bounds(gpui::point(px(730.0), px(660.0)), volume));
+        assert!(!pointer_inside_bounds(gpui::point(px(390.0), px(660.0)), volume));
+        assert!(!pointer_inside_bounds(gpui::point(px(650.0), px(660.0)), volume));
+        assert!(!pointer_inside_bounds(gpui::point(px(730.0), px(550.0)), volume));
+        // A click already committed on mouse down; up/out must never write 0.
+        assert!(!commit_on_release(false, false));
+        assert!(commit_on_release(true, false));
+        assert!(commit_on_release(false, true));
+    }
 
     #[test]
     fn pointer_mapping_matches_visible_track() {
