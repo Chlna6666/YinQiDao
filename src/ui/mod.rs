@@ -18,8 +18,8 @@ mod online_playlist;
 mod player_facade;
 #[allow(dead_code)]
 mod player_legacy;
-mod quick_audio_window;
 mod queue_drawer;
+mod quick_audio_window;
 #[rustfmt::skip]
 mod player_stage;
 #[path = "plugin/command_palette.rs"]

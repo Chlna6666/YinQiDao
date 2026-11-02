@@ -31,9 +31,9 @@ use crate::{
 use super::{
     app_runtime_events, app_ui_events, home, library as library_page, mini_player_view, player,
     player::NowPlaying,
-    player_stage,
+    player_stage, queue_drawer,
     route::{self, AppRoute},
-    queue_drawer, settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
+    settings as settings_page, stage_chrome, stage_controls, stage_lyrics, theme,
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
@@ -1202,11 +1202,7 @@ impl MusicApp {
 
     /// Reverses the current animation from its sampled presentation value.
     /// No route change or content width animation is involved.
-    pub(crate) fn begin_queue_drawer_transition(
-        &mut self,
-        open: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn begin_queue_drawer_transition(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.queue_drawer_open == open {
             return;
         }

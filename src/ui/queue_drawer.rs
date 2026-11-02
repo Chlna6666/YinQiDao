@@ -10,7 +10,10 @@ use lucide_gpui::icon;
 use super::{
     library,
     shell::{MusicApp, OnlinePlaylistQueue, app_listener},
-    theme::{self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, format_time, themed_icon},
+    theme::{
+        self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, format_time,
+        themed_icon,
+    },
 };
 
 const DRAWER_MAX_WIDTH: f32 = 420.0;
@@ -56,7 +59,7 @@ pub(super) fn render(
         .absolute()
         .inset_0()
         .bg(theme::dark::scrim(0.18))
-        .opacity(to)
+        .opacity(if animating { 1.0 } else { to })
         .occlude()
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -280,7 +283,11 @@ fn online_queue_items(
                                         .w(px(24.0))
                                         .text_xs()
                                         .text_color(if active { ACCENT_RED } else { TEXT_TERTIARY })
-                                        .child(if active { "▶".to_owned() } else { format!("{}", index + 1) }),
+                                        .child(if active {
+                                            "▶".to_owned()
+                                        } else {
+                                            format!("{}", index + 1)
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -293,7 +300,11 @@ fn online_queue_items(
                                             div()
                                                 .text_sm()
                                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(if active { ACCENT_RED } else { TEXT_PRIMARY })
+                                                .text_color(if active {
+                                                    ACCENT_RED
+                                                } else {
+                                                    TEXT_PRIMARY
+                                                })
                                                 .truncate()
                                                 .child(title),
                                         )
@@ -305,12 +316,7 @@ fn online_queue_items(
                                                 .child(artist),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(TEXT_TERTIARY)
-                                        .child(duration),
-                                )
+                                .child(div().text_xs().text_color(TEXT_TERTIARY).child(duration))
                                 .on_mouse_down(
                                     gpui::MouseButton::Left,
                                     app_listener(&parent, move |app, _, _, cx| {
