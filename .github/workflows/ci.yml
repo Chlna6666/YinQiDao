@@ -34,7 +34,7 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked -- --test-threads=1 --nocapture
 
   commits:
     name: Conventional commits

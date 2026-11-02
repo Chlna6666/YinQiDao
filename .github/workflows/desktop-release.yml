@@ -55,7 +55,7 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release
       - name: Test main application before packaging
-        run: cargo test --locked
+        run: cargo test --locked -- --test-threads=1 --nocapture
       - name: Assemble Windows distribution
         if: runner.os == 'Windows'
         shell: pwsh

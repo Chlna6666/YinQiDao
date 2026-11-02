@@ -623,6 +623,8 @@ mod tests {
         let metrics = StageLayoutMetrics::compute(700.0, 720.0, 0.0);
         assert!(!metrics.horizontal);
         assert!((metrics.artwork_column_width - metrics.lyrics_column_width).abs() < 0.01);
-        assert!(metrics.artwork_cluster_height() < 400.0);
+        // The stacked stage reserves 180px for lyrics after artwork/metadata/controls.
+        // Fixed chrome geometry intentionally preserves this space while fading.
+        assert!(metrics.artwork_cluster_height() <= metrics.content_height - 180.0 + 0.01);
     }
 }
