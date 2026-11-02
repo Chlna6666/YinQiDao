@@ -975,13 +975,22 @@ impl AudioWorker {
             if !self.handle_commands() {
                 break;
             }
-            if self.state != PlaybackState::Playing || self.decoder.is_none() {
+            if !matches!(self.state, PlaybackState::Playing | PlaybackState::Buffering)
+                || self.decoder.is_none()
+            {
                 thread::sleep(Duration::from_millis(8));
                 continue;
             }
             match self.decode_next() {
                 Ok(true) => {}
                 Ok(false) => self.finish_track(),
+                Err(DecodeError::Buffering) => {
+                    if self.state != PlaybackState::Buffering {
+                        self.state = PlaybackState::Buffering;
+                        self.emit(PlayerEvent::StateChanged(self.state));
+                    }
+                    thread::sleep(Duration::from_millis(12));
+                }
                 Err(error) => {
                     self.state = PlaybackState::Error;
                     self.emit(PlayerEvent::Error(error.into()));
@@ -1017,7 +1026,7 @@ impl AudioWorker {
                 }
             }
             PlayerCommand::Pause => {
-                if self.state == PlaybackState::Playing {
+                if matches!(self.state, PlaybackState::Playing | PlaybackState::Buffering) {
                     self.state = PlaybackState::Paused;
                     self.paused.store(true, Ordering::Release);
                     self.emit(PlayerEvent::StateChanged(self.state));
@@ -1419,6 +1428,11 @@ impl AudioWorker {
                 None => None,
             }
         };
+
+        if decoded.is_some() && self.state == PlaybackState::Buffering {
+            self.state = PlaybackState::Playing;
+            self.emit(PlayerEvent::StateChanged(self.state));
+        }
 
         let Some((sample_rate, channels, position)) = decoded else {
             if self.crossfade.is_some() {

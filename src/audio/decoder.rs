@@ -21,12 +21,19 @@ use yinqidao_codec_avs3::{
     Av3aIsoBmffDemuxer, Avs3SpecificConfig, ChannelConfiguration, parse_dca3, probe_av3a_path,
 };
 
-use super::{avs3_backend::Av3aRustBackend, dsp::request_transport_reset};
+use super::{
+    avs3_backend::Av3aRustBackend,
+    dsp::request_transport_reset,
+    progressive::{self, ProgressiveMediaSource},
+};
 
 const AV3A_PCM_FRAMES_PER_CHUNK: usize = 1024;
 
 #[derive(Debug, Error)]
 pub enum DecodeError {
+    /// Download is temporarily behind the playback head. Not a final EOF.
+    #[error("等待网络音频缓冲")]
+    Buffering,
     #[error("无法打开音频文件 {path}: {source}")]
     Open { path: PathBuf, source: io::Error },
     #[error("无法识别音频格式 {path}: {reason}")]
@@ -216,10 +223,15 @@ pub struct DecoderStream {
 
 impl DecoderStream {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
-        let av3a = probe_av3a_path(path).map_err(|source| DecodeError::Open {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let av3a = if progressive::lookup(path).is_some() {
+            // Non-streamable AVS3 containers use the full-download fallback.
+            None
+        } else {
+            probe_av3a_path(path).map_err(|source| DecodeError::Open {
+                path: path.to_path_buf(),
+                source,
+            })?
+        };
         if let Some(entry) = av3a {
             let mut spatial_layout_hint = avs3_spatial_layout_hint(&entry.decoder_config);
 
@@ -334,7 +346,19 @@ impl DecoderStream {
             path: path.to_path_buf(),
             source,
         })?;
-        let source = MediaSourceStream::new(Box::new(file), Default::default());
+        let source: Box<dyn symphonia::core::io::MediaSource> = if let Some(session) =
+            progressive::lookup(path)
+        {
+            Box::new(ProgressiveMediaSource::open(path, session).map_err(|source| {
+                DecodeError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?)
+        } else {
+            Box::new(file)
+        };
+        let source = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -457,6 +481,11 @@ impl DecoderStream {
                     Err(SymphoniaError::ResetRequired) => {
                         backend.decoder.reset();
                         continue;
+                    }
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == io::ErrorKind::WouldBlock =>
+                    {
+                        return Err(DecodeError::Buffering);
                     }
                     Err(SymphoniaError::IoError(error))
                         if error.kind() == io::ErrorKind::UnexpectedEof =>

@@ -8,6 +8,7 @@ mod engine;
 #[rustfmt::skip]
 mod facade;
 mod fingerprint;
+pub(crate) mod progressive;
 mod head_tracking;
 mod head_tracking_opentrack;
 mod smart_profile;

@@ -51,6 +51,12 @@ pub struct PluginMaterializedStream {
     _live: Option<Arc<ProgressiveSession>>,
 }
 
+impl PluginMaterializedStream {
+    pub fn is_progressive(&self) -> bool {
+        self._live.is_some()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CachedStreamEntry {
     path: PathBuf,

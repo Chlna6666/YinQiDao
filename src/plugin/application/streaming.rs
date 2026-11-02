@@ -130,6 +130,11 @@ impl PluginPlaybackSource {
         self.materialized.cache_hit
     }
 
+    /// Provider-neutral partial playback; signed URLs remain private to Host.
+    pub fn is_progressive(&self) -> bool {
+        self.materialized.is_progressive()
+    }
+
     fn into_prepared_track(self, remote: &RemoteTrack) -> Result<PluginPreparedTrack> {
         validate_remote_playback_track(remote)?;
         if self.source != remote.source {
@@ -324,7 +329,12 @@ impl PluginServiceFrontend {
         let cache =
             stream_cache::global().ok_or_else(|| anyhow!("插件 Stream cache 尚未初始化"))?;
         match cache
-            .materialize(runtime.as_ref(), &route, &cache_request, &descriptor)
+            .materialize_progressively(
+                runtime.clone(),
+                route.clone(),
+                cache_request.clone(),
+                descriptor.clone(),
+            )
             .await
         {
             Ok(materialized) => {
