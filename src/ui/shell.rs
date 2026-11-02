@@ -1268,7 +1268,14 @@ impl MusicApp {
         self.stage_last_mouse_pos = Some(pointer_pos);
         self.stage_suppress_wake_until = Some(now);
         if needs_notify {
-            self.sync_stage_chrome_surfaces(cx);
+            // This event is emitted by StageTitlebarView itself. Synchronously
+            // calling sync_stage_chrome_surfaces would update the same titlebar
+            // and its sibling entity from inside their own mouse dispatch,
+            // repeatedly descending into the retained Stage tree on the UI
+            // thread (observed as STATUS_STACK_OVERFLOW on quick-hide).
+            // Invalidate only the app shell here; its next render synchronizes
+            // the cached Stage children after event dispatch has completed.
+            cx.notify();
         }
     }
 

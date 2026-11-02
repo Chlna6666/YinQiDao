@@ -49,10 +49,10 @@ const LYRIC_MOTION_BEZIER_Y2: f32 = 1.03;
 // Blur is deliberately an edge-only depth cue. Keep the broad middle band sharp, cap the expensive
 // Gaussian pass at a subtle radius, and quantize sigma so moving rows do not rebuild a new blur
 // effect for every sub-pixel position.
-const LYRIC_VIEWPORT_FADE_TOP_RATIO: f32 = 0.10;
-const LYRIC_VIEWPORT_FADE_BOTTOM_RATIO: f32 = 0.18;
-const LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO: f32 = 0.18;
-const LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO: f32 = 0.78;
+const LYRIC_VIEWPORT_FADE_TOP_RATIO: f32 = 0.20;
+const LYRIC_VIEWPORT_FADE_BOTTOM_RATIO: f32 = 0.28;
+const LYRIC_VIEWPORT_BLUR_CLEAR_TOP_RATIO: f32 = 0.23;
+const LYRIC_VIEWPORT_BLUR_CLEAR_BOTTOM_RATIO: f32 = 0.73;
 const LYRIC_VIEWPORT_MAX_BLUR_PX: f32 = 2.50;
 const LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX: f32 = 0.50;
 const LYRIC_VIEWPORT_BLUR_QUANTUM_PX: f32 = 0.25;
@@ -63,6 +63,9 @@ const PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX: f32 = 82.0;
 const READING_STACK_HISTORY_ROWS: usize = 5;
 const READING_STACK_FUTURE_ROWS: usize = 7;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
+// Limit malformed enhanced lyrics from expanding into an unbounded number of
+// per-word renderer trees on the main UI stack.
+const MAX_KARAOKE_WORDS_PER_LINE: usize = 96;
 
 #[derive(Clone, Copy, Debug)]
 struct LyricPlaybackStackHandoff {
@@ -177,7 +180,8 @@ impl StageLyricLine {
                 .filter(|translation| !translation.trim().is_empty())
                 .map(|translation| SharedString::from(translation.to_owned())),
             words,
-            enhanced_complete: enhanced_words_cover_primary_text(line),
+            enhanced_complete: line.words.len() <= MAX_KARAOKE_WORDS_PER_LINE
+                && enhanced_words_cover_primary_text(line),
             time_label: SharedString::from(format_lyric_time(line.timestamp_ms)),
         }
     }
@@ -997,7 +1001,9 @@ impl Render for StageLyricsView {
                 let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
                 let (mut viewport_alpha, mut viewport_blur) =
                     playback_stack_viewport_profile(y, row_height, viewport_height);
-                if reading_mode || hovered {
+                // Reading mode still benefits from the same top/bottom depth
+                // field; only the row under the pointer becomes fully sharp.
+                if hovered {
                     viewport_alpha = 1.0;
                     viewport_blur = 0.0;
                 }
@@ -1006,8 +1012,11 @@ impl Render for StageLyricsView {
 
             let active_karaoke_overlay = if !reading_mode && index == active {
                 active_karaoke_line.as_ref().map(|view| {
+                    // The active enhanced line is the ONLY text layout owner.
+                    // An absolute overlay over a separately wrapped sentence
+                    // caused two incompatible line breaks and duplicated glyphs.
                     AnyView::from(view.clone())
-                        .cached(StyleRefinement::default().absolute().inset_0())
+                        .cached(StyleRefinement::default().w_full().min_w(px(0.0)))
                         .reuse_on_window_refresh()
                 })
             } else {
@@ -1025,7 +1034,7 @@ impl Render for StageLyricsView {
                 viewport_blur,
                 row_motion,
                 reading_mode,
-                !reading_mode,
+                true,
                 "lyric-text",
                 hovered,
                 reading_mode || handoff.is_none(),
@@ -1460,7 +1469,14 @@ fn lyric_visual_profile(
     depth_blur_active: bool,
 ) -> (f32, f32) {
     if reading_mode {
-        return (1.0, 0.0);
+        return (
+            1.0,
+            if depth_blur_active {
+                viewport_blur.clamp(0.0, LYRIC_VIEWPORT_MAX_BLUR_PX)
+            } else {
+                0.0
+            },
+        );
     }
 
     // QueMusic keeps inactive rows around 0.5 opacity and promotes only the current row. Focus
@@ -1700,6 +1716,16 @@ fn karaoke_reveal_word(
         (Duration::ZERO, progress)
     };
 
+    // No animation wrapper is necessary for the numerous already-complete
+    // or not-yet-started words. This also bounds recursion depth in GPUI's
+    // layout, prepaint and retained animation traversal when entering Stage.
+    if progress <= 0.0 {
+        return div().into_any_element();
+    }
+    if progress >= 1.0 {
+        return content.into_any_element();
+    }
+
     let animation =
         Animation::from_spec(AnimationSpec::new(duration).ease(Easing::Linear)).with_property(
             AnimationProperty::horizontal_reveal(HorizontalRevealEdge::Left, progress, to_progress),
@@ -1833,8 +1859,15 @@ fn karaoke_word(
     // One visible glyph run owns both intrinsic word width and karaoke paint. The renderer-owned
     // ClipReveal masks this full-width subtree without changing flex geometry, eliminating the old
     // hidden sizing glyph + absolute white-glyph duplicate.
-    let foreground = div()
+    // Each word owns its layout ONCE. Dim glyphs and the white
+    // clipping layer use exactly the same word box, so the line cannot
+    // wrap differently between the base and karaoke layers.
+    let dim = div()
         .flex_none()
+        .whitespace_nowrap()
+        .text_color(dark::white(0.46))
+        .child(word.text.clone());
+    let foreground = div()
         .whitespace_nowrap()
         .text_color(dark::white(1.0))
         .child(word.text.clone());
@@ -1903,7 +1936,8 @@ fn karaoke_word(
             .relative()
             .flex_none()
             .whitespace_nowrap()
-            .child(revealed);
+            .child(dim)
+            .child(div().absolute().inset_0().child(revealed));
 
         if animate {
             if let Some((from_envelope, to_envelope, duration)) =
@@ -1947,7 +1981,7 @@ fn karaoke_word(
             .into_any_element();
     }
 
-    karaoke_reveal_word(
+    let revealed = karaoke_reveal_word(
         foreground,
         word,
         index,
@@ -1955,7 +1989,14 @@ fn karaoke_word(
         position_ms,
         animate,
         karaoke_epoch,
-    )
+    );
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(dim)
+        .child(div().absolute().inset_0().child(revealed))
+        .into_any_element()
 }
 
 fn karaoke_words_overlay(
@@ -2009,57 +2050,40 @@ fn stage_primary_lyric(
     karaoke_epoch: u64,
     active_karaoke_overlay: Option<AnyView>,
 ) -> gpui::AnyElement {
-    const DIM_ALPHA: f32 = 0.46;
-    const STATIC_ALPHA: f32 = 1.0;
+    // Enhanced lines must be laid out exactly once. A full-sentence text
+    // under an independently flex-wrapped word overlay breaks at different
+    // positions (especially with long English words), making two copies of
+    // the playing lyric overlap.
+    if line.enhanced_complete && karaoke_detail {
+        if let Some(active_overlay) = active_karaoke_overlay {
+            return div()
+                .w_full()
+                .min_w(px(0.0))
+                .child(active_overlay)
+                .into_any_element();
+        }
+        return karaoke_words_overlay(
+            line,
+            karaoke_state,
+            None,
+            0,
+            false,
+            karaoke_epoch,
+        )
+        .into_any_element();
+    }
 
-    // A single full-line text node always owns wrapping and row height. Non-adjacent rows stop here,
-    // so a 12-row viewport no longer expands every enhanced line into one subtree per authored word.
-    // Old history rows keep their already-completed brightness; current/future rows keep the dim
-    // base that the white karaoke mask reveals over.
     let base_alpha = match karaoke_state {
-        KaraokeLineState::Static | KaraokeLineState::Past if !karaoke_detail => STATIC_ALPHA,
-        KaraokeLineState::Static => STATIC_ALPHA,
-        KaraokeLineState::Past | KaraokeLineState::Active | KaraokeLineState::Future => DIM_ALPHA,
+        KaraokeLineState::Static | KaraokeLineState::Past => 1.0,
+        KaraokeLineState::Active | KaraokeLineState::Future => 0.46,
     };
-    let base = div()
+    div()
         .w_full()
         .min_w(px(0.0))
         .text_size(px(28.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(dark::white(base_alpha))
-        .child(line.text.clone());
-
-    if !line.enhanced_complete || !karaoke_detail {
-        return base.into_any_element();
-    }
-
-    // The current line's moving word state lives in a dedicated cached Entity. The previous line
-    // is static/completed and can be rebuilt only when the parent changes line.
-    let overlay = if let Some(active_overlay) = active_karaoke_overlay {
-        active_overlay.into_any_element()
-    } else {
-        div()
-            .absolute()
-            .left(px(0.0))
-            .right(px(0.0))
-            .top(px(0.0))
-            .child(karaoke_words_overlay(
-                line,
-                karaoke_state,
-                None,
-                0,
-                false,
-                karaoke_epoch,
-            ))
-            .into_any_element()
-    };
-
-    div()
-        .relative()
-        .w_full()
-        .min_w(px(0.0))
-        .child(base)
-        .child(overlay)
+        .child(line.text.clone())
         .into_any_element()
 }
 
@@ -2223,6 +2247,24 @@ mod tests {
     use crate::lyrics::LyricWord;
 
     #[test]
+    fn dense_enhanced_lyrics_fall_back_to_single_text_layout() {
+        let words = (0..=MAX_KARAOKE_WORDS_PER_LINE)
+            .map(|index| LyricWord {
+                timestamp_ms: index as u64 * 10,
+                duration_ms: Some(10),
+                text: "a".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let line = LyricLine {
+            timestamp_ms: 0,
+            text: "a".repeat(words.len()),
+            translation: None,
+            words: words.into(),
+        };
+        assert!(!StageLyricLine::from_source(&line).enhanced_complete);
+    }
+
+    #[test]
     fn karaoke_detail_is_limited_to_current_and_previous_rows() {
         let active = 10;
         assert!(should_render_karaoke_detail(10, active, false));
@@ -2326,6 +2368,10 @@ mod tests {
         assert_eq!(lower_middle.1, 0.0);
         assert!(top.0 < center.0);
         assert!(bottom.0 < center.0);
+        // The fade and blur fields are continuous between sampled rows,
+        // with stronger depth cues near the viewport extremes.
+        assert!(top.0 < 0.4);
+        assert!(bottom.0 < 0.4);
         assert!(top.1 > 0.0 && top.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
         assert!(bottom.1 > 0.0 && bottom.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
         assert_eq!(quantize_viewport_blur(0.20), 0.0);
