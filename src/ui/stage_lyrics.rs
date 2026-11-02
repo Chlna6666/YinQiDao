@@ -24,6 +24,8 @@ use super::{
 };
 
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
+const READING_WHEEL_STEP_PX: f32 = 48.0;
+const MAX_READING_SCROLL_ROWS_PER_EVENT: usize = 3;
 const LYRIC_ANCHOR_RATIO: f32 = 0.32;
 
 // QueMusic/Apple-like focus channels are intentionally independent from row motion.
@@ -354,6 +356,7 @@ pub(super) struct StageLyricsView {
     transport_generation: u64,
     reading_until: Option<Instant>,
     reading_center_index: Option<usize>,
+    reading_scroll_remainder: f32,
     playback_stack_handoff: Option<LyricPlaybackStackHandoff>,
     row_heights: Vec<f32>,
     row_height_measured: Vec<bool>,
@@ -401,6 +404,7 @@ impl StageLyricsView {
             transport_generation,
             reading_until: None,
             reading_center_index: None,
+            reading_scroll_remainder: 0.0,
             playback_stack_handoff: None,
             row_heights: Vec::new(),
             row_height_measured: Vec::new(),
@@ -535,6 +539,7 @@ impl StageLyricsView {
             self.hovered_index = None;
             self.reading_until = None;
             self.reading_center_index = None;
+            self.reading_scroll_remainder = 0.0;
             self.playback_stack_handoff = None;
             self.reset_row_geometry();
             self.scrubbing = false;
@@ -583,6 +588,7 @@ impl StageLyricsView {
             } else {
                 self.reading_until = None;
                 self.reading_center_index = None;
+                self.reading_scroll_remainder = 0.0;
             }
             changed = true;
         }
@@ -810,25 +816,56 @@ impl StageLyricsView {
     }
 
     fn begin_reading_mode(&mut self, wheel_delta_y: f32, cx: &mut Context<Self>) {
+        if !wheel_delta_y.is_finite() || self.lines.is_empty() {
+            return;
+        }
+        let was_reading = self.is_reading();
         self.reading_until = Some(Instant::now() + READING_MODE_DURATION);
         self.focus_from_index = None;
         self.focus_started_at = None;
-        self.playback_stack_handoff = None;
         self.hovered_index = None;
 
+        let wheel_steps = take_reading_wheel_steps(
+            &mut self.reading_scroll_remainder,
+            wheel_delta_y,
+        );
+        if wheel_steps == 0 {
+            if !was_reading {
+                cx.notify();
+            }
+            return;
+        }
+
         let max_index = self.lines.len().saturating_sub(1);
-        let base = self
+        let previous = self
             .reading_center_index
             .or(self.active_index)
             .unwrap_or(0)
             .min(max_index);
-        self.reading_center_index = Some(if wheel_delta_y < 0.0 {
-            base.saturating_add(1).min(max_index)
-        } else if wheel_delta_y > 0.0 {
-            base.saturating_sub(1)
+        let next = if wheel_steps < 0 {
+            previous.saturating_add(wheel_steps.unsigned_abs()).min(max_index)
         } else {
-            base
+            previous.saturating_sub(wheel_steps as usize)
+        };
+        if previous == next {
+            return;
+        }
+
+        // Reuse the compositor-owned row motion used by playback, rather
+        // than remounting a different set of rows instantly on every wheel
+        // message. Include BOTH sets of visible rows for the transition.
+        self.playback_stack_handoff = Some(LyricPlaybackStackHandoff {
+            from_active: previous,
+            to_active: next,
+            first_index: previous.min(next).saturating_sub(READING_STACK_HISTORY_ROWS),
+            last_index: previous
+                .max(next)
+                .saturating_add(READING_STACK_FUTURE_ROWS)
+                .min(max_index),
+            started_at: Instant::now(),
         });
+        self.reading_center_index = Some(next);
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
         cx.notify();
     }
 
@@ -923,22 +960,25 @@ impl Render for StageLyricsView {
         }
         .min(self.lines.len().saturating_sub(1));
 
-        let handoff = (!reading_mode)
-            .then_some(self.playback_stack_handoff)
-            .flatten()
+        let handoff = self
+            .playback_stack_handoff
             .filter(|handoff| !handoff.finished(frame_now));
 
         let first_index = if reading_mode {
-            center_index.saturating_sub(READING_STACK_HISTORY_ROWS)
+            handoff
+                .map(|motion| motion.first_index)
+                .unwrap_or_else(|| center_index.saturating_sub(READING_STACK_HISTORY_ROWS))
         } else {
             handoff
                 .map(|handoff| handoff.first_index)
                 .unwrap_or_else(|| active.saturating_sub(PLAYBACK_STACK_HISTORY_ROWS))
         };
         let last_index = if reading_mode {
-            center_index
-                .saturating_add(READING_STACK_FUTURE_ROWS)
-                .min(self.lines.len().saturating_sub(1))
+            handoff.map(|motion| motion.last_index).unwrap_or_else(|| {
+                center_index
+                    .saturating_add(READING_STACK_FUTURE_ROWS)
+                    .min(self.lines.len().saturating_sub(1))
+            })
         } else {
             handoff
                 .map(|handoff| handoff.last_index)
@@ -2044,6 +2084,24 @@ fn stage_primary_lyric(
         .into_any_element()
 }
 
+/// Convert high-resolution trackpad deltas into bounded logical rows.
+/// Positive delta scrolls toward earlier lines; negative toward later ones.
+fn take_reading_wheel_steps(remainder: &mut f32, delta: f32) -> isize {
+    if !delta.is_finite() {
+        return 0;
+    }
+    *remainder = (*remainder + delta.clamp(-192.0, 192.0)).clamp(-192.0, 192.0);
+    let rows = ((*remainder).abs() / READING_WHEEL_STEP_PX)
+        .floor()
+        .min(MAX_READING_SCROLL_ROWS_PER_EVENT as f32) as isize;
+    if rows == 0 {
+        return 0;
+    }
+    let signed = if *remainder < 0.0 { -rows } else { rows };
+    *remainder -= signed as f32 * READING_WHEEL_STEP_PX;
+    signed
+}
+
 #[inline]
 fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
     let index_prefix = prefix_sum
@@ -2384,6 +2442,17 @@ mod tests {
         assert_eq!(lyric_focus_scale(4, 4, false), LYRIC_ACTIVE_SCALE);
         assert_eq!(lyric_focus_scale(3, 4, false), 1.0);
         assert_eq!(lyric_focus_scale(4, 4, true), 1.0);
+    }
+
+    #[test]
+    fn trackpad_scroll_accumulates_without_skipping_rows_on_tiny_events() {
+        let mut remainder = 0.0;
+        assert_eq!(take_reading_wheel_steps(&mut remainder, -12.0), 0);
+        assert_eq!(take_reading_wheel_steps(&mut remainder, -12.0), 0);
+        assert_eq!(take_reading_wheel_steps(&mut remainder, -24.0), -1);
+        assert_eq!(remainder, 0.0);
+        assert_eq!(take_reading_wheel_steps(&mut remainder, 48.0), 1);
+        assert_eq!(take_reading_wheel_steps(&mut remainder, -192.0), -3);
     }
 
     #[test]
