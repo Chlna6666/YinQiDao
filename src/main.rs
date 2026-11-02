@@ -101,7 +101,15 @@ fn main() -> Result<()> {
 
     lucide_assets::install();
     let window_icon = embedded_window_icon()?;
+    // GPUI trims window-local GPU/image caches after 10 seconds unfocused.
+    // On some adapters the retained image scene is replayed before all atlas
+    // tiles have been restored, leaving album covers flickering or blank.
+    // Preserve image residency across ordinary alt-tab/background sessions;
+    // the global idle image budget still caps unused decoded assets.
+    let mut image_pipeline = gpui::ImagePipelineConfig::default();
+    image_pipeline.trim_memory_on_hidden = false;
     let app = Application::new()
+        .with_image_pipeline_config(image_pipeline)
         .with_assets(lucide_gpui::Assets)
         .with_default_window_icon(window_icon);
     app.run(move |cx: &mut App| {

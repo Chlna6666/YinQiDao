@@ -326,22 +326,34 @@ fn slider_visual_with_group(
         } else {
             layer.items_center()
         };
-        let track = horizontal_track(clamped_ratio, style.track_height, style);
-        let track = if style.edge_overlay {
-            track
-                .group_hover(hover_group.clone(), move |hover| {
-                    hover.h(style.hover_track_height)
-                })
-                .transition(theme::hover_transition())
-        } else {
-            track
-        };
-        layer.child(track)
+        layer.child(horizontal_track(clamped_ratio, style.track_height, style))
     };
     let hover_track_layer = if style.edge_overlay {
-        // Avoid a hidden 6px overlay that can receive pointer input
-        // even while the resting progress rail is only 2px tall.
-        None
+        // GPUI computes layout before hover hit-testing: changing `.h()`
+        // with group_hover never changes the 2px track's layout. Instead,
+        // fade in a separate, pre-sized 6px paint layer anchored to the
+        // SAME bottom edge. The hover listener stays inside the 3px root.
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(0.0)
+                .group_hover(rail_hover_group, |hover| hover.opacity(1.0))
+                .transition(theme::hover_transition())
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px(1.0))
+                        .h(style.hover_track_height)
+                        .child(horizontal_track(
+                            clamped_ratio,
+                            style.hover_track_height,
+                            style,
+                        )),
+                ),
+        )
     } else {
         Some(
             div()
@@ -367,9 +379,6 @@ fn slider_visual_with_group(
             .right(half_thumb)
             .top(px(0.0))
             .h(style.interaction_height)
-            .group_hover(hover_group.clone(), move |hover| {
-                hover.h(style.hover_track_height)
-            })
             .flex()
             .items_center()
             .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
@@ -504,7 +513,23 @@ fn slider_visual_with_group_animated(
         animation,
     );
     let hover_track_layer = if style.edge_overlay {
-        None
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(0.0)
+                .group_hover(rail_hover_group, |hover| hover.opacity(1.0))
+                .transition(theme::hover_transition())
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px(1.0))
+                        .h(style.hover_track_height)
+                        .child(hover_track),
+                ),
+        )
     } else {
         Some(
             div()
@@ -526,9 +551,6 @@ fn slider_visual_with_group_animated(
             .right(half_thumb)
             .top(px(0.0))
             .h(style.interaction_height)
-            .group_hover(hover_group.clone(), move |hover| {
-                hover.h(style.hover_track_height)
-            })
             .flex()
             .items_center()
             .child(div().flex_none().w_full().h(px(1.0)))
@@ -912,6 +934,10 @@ mod tests {
         assert_eq!(f32::from(style.hover_track_height), 6.0);
         // On hover expand 4px above the player, never farther below it.
         assert_eq!(f32::from(resting_height) + f32::from(reveal_height), 7.0);
+        // Hover is paint-only; the resting hitbox does not resize or
+        // extend into the transport controls when the visual grows.
+        assert!(style.edge_overlay);
+        assert_eq!(f32::from(horizontal_interaction_height(style)), 3.0);
     }
 
     #[test]
