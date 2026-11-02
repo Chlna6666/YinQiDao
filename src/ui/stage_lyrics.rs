@@ -35,8 +35,8 @@ const LYRIC_ANCHOR_RATIO: f32 = 0.42;
 // animation trees with independent durations and retained element state.
 const LYRIC_FOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_ACTIVE_SCALE: f32 = 1.02;
-const LYRIC_INACTIVE_ALPHA: f32 = 0.50;
-const LYRIC_ACTIVE_ALPHA: f32 = 0.90;
+const LYRIC_INACTIVE_ALPHA: f32 = 0.40;
+const LYRIC_ACTIVE_ALPHA: f32 = 1.0;
 
 // Match QueMusic's authored stagger/settle curve exactly. Jitter must be fixed in retained capture
 // and frame traversal rather than by shortening the animation until individual row steps become
@@ -244,9 +244,18 @@ impl StageKaraokeLineView {
             AppUiEvent::ProgressChanged { position_ms, ratio } => {
                 let scrubbing = ratio.is_some();
                 if this.position_ms != position_ms || this.scrubbing != scrubbing {
+                    // Do not restart a running GPU word-reveal animation on
+                    // every routine position notification.
+                    if karaoke_seek_discontinuity(
+                        this.position_ms,
+                        position_ms,
+                        this.scrubbing,
+                        scrubbing,
+                    ) {
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                    }
                     this.position_ms = position_ms;
                     this.scrubbing = scrubbing;
-                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
                     cx.notify();
                 }
             }
@@ -1599,6 +1608,16 @@ fn next_enhanced_word_timestamp(line: &StageLyricLine, position_ms: u64) -> Opti
         .map(|word| word.timestamp_ms)
 }
 
+#[inline]
+fn karaoke_seek_discontinuity(
+    previous_ms: u64,
+    position_ms: u64,
+    was_scrubbing: bool,
+    scrubbing: bool,
+) -> bool {
+    was_scrubbing != scrubbing || previous_ms.abs_diff(position_ms) > 1_500
+}
+
 fn next_karaoke_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64> {
     let mut next_timestamp = next_enhanced_word_timestamp(line, position_ms);
 
@@ -1918,7 +1937,7 @@ fn karaoke_word(
         return div()
             .flex_none()
             .whitespace_nowrap()
-            .text_color(dark::white(0.46))
+            .text_color(dark::white(0.64))
             .child(word.text.clone())
             .into_any_element();
     }
@@ -1935,16 +1954,52 @@ fn karaoke_word(
         animate,
         karaoke_epoch,
     );
-    let root = div()
-        .relative()
-        .flex_none()
-        .whitespace_nowrap()
-        .child(div().text_color(dark::white(0.46)).child(word.text.clone()))
-        .child(div().absolute().inset_0().child(highlighted));
-
-    // Long-note emphasis stays in the paint/transform layer: no duplicate
-    // blurred glyph tree and no change to the line's flex dimensions.
+    // Only one current, sustained syllable may own a blurred glow layer.
+    // It is absolute and cannot alter text wrapping or lyric line spacing.
     let emphasis = sustained_word_emphasis(word, position_ms, is_current_word, is_last_word);
+    let mut root = div().relative().flex_none().whitespace_nowrap();
+    if is_current_word && should_emphasize_sustained_word(word) {
+        let peak = sustained_word_peak_emphasis(word, is_last_word);
+        if peak.glow_alpha > 0.001 {
+            let segment = if animate {
+                sustained_animation_segment(word, position_ms)
+            } else {
+                None
+            };
+            let alpha = if segment.is_some() {
+                peak.glow_alpha
+            } else {
+                emphasis.glow_alpha
+            };
+            let mut halo = div()
+                .absolute()
+                .inset_0()
+                .opacity(alpha)
+                .text_color(dark::white(1.0))
+                .blur(px(peak.glow_blur_px.clamp(2.0, 4.0)))
+                .child(word.text.clone())
+                .into_any_element();
+            if let Some((from, to, duration)) = segment {
+                halo = halo
+                    .with_animation(
+                        ElementId::NamedInteger(
+                            SharedString::new_static("lyric-syllable-halo"),
+                            lyric_animation_instance_id(karaoke_epoch, index),
+                        ),
+                        Animation::from_spec(
+                            AnimationSpec::new(duration).ease(Easing::InOutCubic),
+                        )
+                        .with_property(AnimationProperty::opacity(from, to)),
+                        |element, _| element,
+                    )
+                    .into_any_element();
+            }
+            root = root.child(halo);
+        }
+    }
+    let root = root
+        .child(div().text_color(dark::white(0.58)).child(word.text.clone()))
+        .child(div().absolute().inset_0().child(highlighted));
     let scale = emphasis.scale.clamp(1.0, 1.035);
     if animate
         && let Some((from, to, duration)) = sustained_animation_segment(word, position_ms)
@@ -2048,8 +2103,8 @@ fn stage_primary_lyric(
     }
 
     let base_alpha = match karaoke_state {
-        KaraokeLineState::Static | KaraokeLineState::Past => 1.0,
-        KaraokeLineState::Active | KaraokeLineState::Future => 0.46,
+        KaraokeLineState::Static | KaraokeLineState::Past | KaraokeLineState::Active => 1.0,
+        KaraokeLineState::Future => 0.68,
     };
     div()
         .w_full()
@@ -2489,6 +2544,23 @@ mod tests {
         assert!(bottom.1 > 0.0 && bottom.1 <= LYRIC_VIEWPORT_MAX_BLUR_PX);
         assert_eq!(quantize_viewport_blur(0.20), 0.0);
         assert_eq!(quantize_viewport_blur(8.0), LYRIC_VIEWPORT_MAX_BLUR_PX);
+    }
+
+    #[test]
+    fn plain_active_lyric_is_not_dimmed_when_word_timing_is_missing() {
+        let line = StageLyricLine::from_plain("无逐字时间戳");
+        assert!(!line.enhanced_complete);
+        assert_eq!(lyric_focus_alpha(0.0), 1.0);
+        assert!(lyric_focus_alpha(0.0) > 2.0 * lyric_focus_alpha(1.0));
+    }
+
+    #[test]
+    fn routine_progress_does_not_restart_karaoke_reveal() {
+        assert!(!karaoke_seek_discontinuity(1_000, 1_250, false, false));
+        assert!(!karaoke_seek_discontinuity(1_000, 2_000, false, false));
+        assert!(karaoke_seek_discontinuity(1_000, 4_000, false, false));
+        assert!(karaoke_seek_discontinuity(4_000, 4_000, false, true));
+        assert!(karaoke_seek_discontinuity(4_000, 4_000, true, false));
     }
 
     #[test]
