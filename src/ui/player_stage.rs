@@ -21,17 +21,16 @@ use super::{
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
 
-const STAGE_LEFT_VISIBLE_WIDTH_PX: f32 = 340.0;
-const STAGE_LEFT_HIDDEN_WIDTH_PX: f32 = 250.0;
+// Desktop split follows the golden ratio: 38.2% artwork, 61.8% lyrics.
+// The ratio applies to usable column space, not to the square cover image.
+const STAGE_LYRICS_GOLDEN_SHARE: f32 = 0.618_034;
+const STAGE_STACKED_BREAKPOINT_PX: f32 = 800.0;
 const STAGE_CONTROLS_SLOT_HEIGHT_PX: f32 = 158.0;
 const STAGE_METADATA_SLOT_HEIGHT_PX: f32 = 72.0;
 const STAGE_CONTENT_VISIBLE_TOP_PX: f32 = 54.0;
 const STAGE_CONTENT_HIDDEN_TOP_PX: f32 = 24.0;
 const STAGE_CONTENT_VISIBLE_BOTTOM_PX: f32 = 32.0;
 const STAGE_CONTENT_HIDDEN_BOTTOM_PX: f32 = 24.0;
-const STAGE_COLUMN_VISIBLE_GAP_PX: f32 = 48.0;
-const STAGE_COLUMN_HIDDEN_GAP_PX: f32 = 28.0;
-
 /// 舞台 chrome 布局位移：统一走 theme::SampledMotion（300ms ease-out cubic）。
 type StageChromeLayoutMotion = SampledMotion;
 
@@ -42,6 +41,104 @@ fn stage_chrome_layout_motion(visible: bool) -> StageChromeLayoutMotion {
 #[inline]
 fn stage_lerp(hidden: f32, visible: f32, visible_progress: f32) -> f32 {
     hidden + (visible - hidden) * visible_progress.clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StageLayoutMetrics {
+    /// The content column split never changes when the chrome fades away.
+    horizontal: bool,
+    gutter: f32,
+    column_gap: f32,
+    artwork_column_width: f32,
+    lyrics_column_width: f32,
+    cover_size: f32,
+    controls_width: f32,
+    content_top: f32,
+    content_bottom: f32,
+    metadata_height: f32,
+    controls_height: f32,
+    cluster_gap: f32,
+    metadata_offset_y: f32,
+}
+
+impl StageLayoutMetrics {
+    fn compute(viewport_width: f32, viewport_height: f32, visible_progress: f32) -> Self {
+        let width = viewport_width.max(320.0);
+        let height = viewport_height.max(320.0);
+        let progress = visible_progress.clamp(0.0, 1.0);
+        let horizontal = width >= STAGE_STACKED_BREAKPOINT_PX;
+        let gutter = (width * 0.035).clamp(20.0, 48.0);
+        let content_width = (width - 2.0 * gutter).max(1.0);
+        let column_gap = (content_width * 0.04).clamp(24.0, 48.0);
+        let column_space = (content_width - column_gap).max(1.0);
+        let artwork_column_width = if horizontal {
+            column_space * (1.0 - STAGE_LYRICS_GOLDEN_SHARE)
+        } else {
+            content_width
+        };
+        let lyrics_column_width = if horizontal {
+            column_space - artwork_column_width
+        } else {
+            content_width
+        };
+        let content_top = stage_lerp(
+            STAGE_CONTENT_HIDDEN_TOP_PX,
+            STAGE_CONTENT_VISIBLE_TOP_PX,
+            progress,
+        );
+        let content_bottom = stage_lerp(
+            STAGE_CONTENT_HIDDEN_BOTTOM_PX,
+            STAGE_CONTENT_VISIBLE_BOTTOM_PX,
+            progress,
+        );
+        let metadata_height = STAGE_METADATA_SLOT_HEIGHT_PX * progress;
+        let controls_height = STAGE_CONTROLS_SLOT_HEIGHT_PX * progress;
+        let cluster_gap = 16.0 * progress;
+        let available_height = (height - content_top - content_bottom).max(1.0);
+        let cover_height_limit = if horizontal {
+            (available_height - metadata_height - controls_height - cluster_gap * 2.0)
+                .max(1.0)
+                * 0.90
+        } else {
+            // Keep part of the viewport available for lyrics on narrow windows.
+            (available_height
+                - metadata_height
+                - controls_height
+                - cluster_gap * 2.0
+                - 180.0)
+                .max(1.0)
+        };
+        let cover_width_limit = if horizontal {
+            artwork_column_width * 0.88
+        } else {
+            content_width * 0.60
+        };
+        let cover_size = cover_width_limit
+            .min(cover_height_limit)
+            .min(if horizontal { 400.0 } else { 280.0 })
+            .max(1.0);
+        let controls_width = (artwork_column_width - 12.0).min(320.0).max(1.0);
+
+        Self {
+            horizontal,
+            gutter,
+            column_gap,
+            artwork_column_width,
+            lyrics_column_width,
+            cover_size,
+            controls_width,
+            content_top,
+            content_bottom,
+            metadata_height,
+            controls_height,
+            cluster_gap,
+            metadata_offset_y: -18.0 * (1.0 - progress),
+        }
+    }
+
+    fn artwork_cluster_height(self) -> f32 {
+        self.cover_size + self.metadata_height + self.controls_height + 2.0 * self.cluster_gap
+    }
 }
 
 #[derive(Default)]
@@ -260,61 +357,98 @@ impl Render for StagePlayerView {
         let layout_animating = self.chrome_layout.advance(window.animation_time());
 
         let visible_progress = self.chrome_layout.value();
-        let viewport_height = f32::from(window.viewport_size().height).max(1.0);
-        let visible_cover_size = (viewport_height * 0.34).clamp(220.0, 260.0);
-        let hidden_cover_size = (visible_cover_size * 0.88).clamp(194.0, 228.0);
-        let cover_size = stage_lerp(hidden_cover_size, visible_cover_size, visible_progress);
-        let left_width = stage_lerp(
-            STAGE_LEFT_HIDDEN_WIDTH_PX,
-            STAGE_LEFT_VISIBLE_WIDTH_PX,
+        let viewport = window.viewport_size();
+        let layout = StageLayoutMetrics::compute(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
             visible_progress,
         );
-        let column_gap = stage_lerp(
-            STAGE_COLUMN_HIDDEN_GAP_PX,
-            STAGE_COLUMN_VISIBLE_GAP_PX,
-            visible_progress,
-        );
-        let content_top = stage_lerp(
-            STAGE_CONTENT_HIDDEN_TOP_PX,
-            STAGE_CONTENT_VISIBLE_TOP_PX,
-            visible_progress,
-        );
-        let content_bottom = stage_lerp(
-            STAGE_CONTENT_HIDDEN_BOTTOM_PX,
-            STAGE_CONTENT_VISIBLE_BOTTOM_PX,
-            visible_progress,
-        );
-        let metadata_height = STAGE_METADATA_SLOT_HEIGHT_PX * visible_progress;
-        let controls_height = STAGE_CONTROLS_SLOT_HEIGHT_PX * visible_progress;
-        let cluster_gap = 16.0 * visible_progress;
-        let metadata_offset_y = -18.0 * (1.0 - visible_progress);
 
+        // The exact same golden split is passed to both renderer branches.
+        // No independent window-width estimates are used in the lyric column.
         let lyrics = AnyView::from(self.lyrics.clone())
-            .cached(
+            .cached(if layout.horizontal {
                 StyleRefinement::default()
-                    .flex_1()
+                    .w(px(layout.lyrics_column_width))
                     .h_full()
                     .min_w(px(0.0))
-                    .min_h(px(0.0)),
-            )
+                    .min_h(px(0.0))
+            } else {
+                StyleRefinement::default()
+                    .w_full()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+            })
             .reuse_on_window_refresh();
         let controls = AnyView::from(self.controls.clone())
             .cached(
                 StyleRefinement::default()
-                    .w(px(320.0))
+                    .w(px(layout.controls_width))
                     .h(px(STAGE_CONTROLS_SLOT_HEIGHT_PX)),
             )
             .reuse_on_window_refresh();
 
-        let metadata = stage_metadata(&self.cover, visible_progress, metadata_offset_y);
+        let metadata = stage_metadata(
+            &self.cover,
+            visible_progress,
+            layout.metadata_offset_y,
+        );
         let control_slot = div()
             .w_full()
-            .h(px(controls_height))
+            .h(px(layout.controls_height))
             .flex_none()
             .overflow_hidden()
             .flex()
             .justify_center()
             .child(controls);
+
+        let artwork_column = div()
+            .w(px(layout.artwork_column_width))
+            .h(if layout.horizontal {
+                px(f32::from(viewport.height) - layout.content_top - layout.content_bottom)
+            } else {
+                px(layout.artwork_cluster_height())
+            })
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(layout.cluster_gap))
+            .child(stage_artwork(&self.cover, layout.cover_size))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(layout.metadata_height))
+                    .flex_none()
+                    .overflow_hidden()
+                    .child(metadata),
+            )
+            .child(control_slot);
+
+        let columns = if layout.horizontal {
+            div()
+                .relative()
+                .flex()
+                .flex_1()
+                .min_h(px(0.0))
+                .gap(px(layout.column_gap))
+                .items_center()
+                .child(artwork_column)
+                .child(lyrics)
+        } else {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .gap(px(12.0))
+                .items_center()
+                .child(artwork_column)
+                .child(lyrics)
+        };
 
         div()
             .id("stage-player-root")
@@ -332,40 +466,10 @@ impl Render for StagePlayerView {
                     .inset_0()
                     .flex()
                     .flex_col()
-                    .px_8()
-                    .pt(px(content_top))
-                    .pb(px(content_bottom))
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .gap(px(column_gap))
-                            .items_center()
-                            .child(
-                                div()
-                                    .w(px(left_width))
-                                    .h_full()
-                                    .flex_none()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap(px(cluster_gap))
-                                    .child(stage_artwork(&self.cover, cover_size))
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(metadata_height))
-                                            .flex_none()
-                                            .overflow_hidden()
-                                            .child(metadata),
-                                    )
-                                    .child(control_slot),
-                            )
-                            .child(lyrics),
-                    ),
+                    .px(px(layout.gutter))
+                    .pt(px(layout.content_top))
+                    .pb(px(layout.content_bottom))
+                    .child(columns),
             )
             .with_layout_animation_target(layout_animating)
     }
@@ -468,4 +572,47 @@ fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElem
         .bg(STAGE_BG)
         .child(fluid)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn golden_ratio_allocates_desktop_columns_without_hidden_chrome_drift() {
+        let hidden = StageLayoutMetrics::compute(1116.0, 713.0, 0.0);
+        let visible = StageLayoutMetrics::compute(1116.0, 713.0, 1.0);
+        assert!(hidden.horizontal);
+        let usable = 1116.0 - hidden.gutter * 2.0 - hidden.column_gap;
+        assert!((hidden.artwork_column_width / usable - 0.381_966).abs() < 0.0001);
+        assert!((hidden.lyrics_column_width / usable - 0.618_034).abs() < 0.0001);
+        assert!((hidden.artwork_column_width - visible.artwork_column_width).abs() < 0.01);
+        assert!((hidden.lyrics_column_width - visible.lyrics_column_width).abs() < 0.01);
+        assert!(hidden.cover_size > 280.0);
+        assert!(hidden.cover_size <= hidden.artwork_column_width);
+    }
+
+    #[test]
+    fn artwork_and_controls_fit_at_visible_and_hidden_extremes() {
+        for width in [640.0, 800.0, 1116.0, 1920.0] {
+            for height in [540.0, 713.0, 1080.0] {
+                for progress in [0.0, 0.5, 1.0] {
+                    let metrics = StageLayoutMetrics::compute(width, height, progress);
+                    let available = height - metrics.content_top - metrics.content_bottom;
+                    assert!(metrics.cover_size <= metrics.artwork_column_width);
+                    assert!(metrics.controls_width <= metrics.artwork_column_width);
+                    assert!(metrics.artwork_cluster_height() <= available + 0.01);
+                    assert!(metrics.lyrics_column_width > 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_windows_stack_without_horizontal_overflow() {
+        let metrics = StageLayoutMetrics::compute(700.0, 720.0, 0.0);
+        assert!(!metrics.horizontal);
+        assert!((metrics.artwork_column_width - metrics.lyrics_column_width).abs() < 0.01);
+        assert!(metrics.artwork_cluster_height() < 400.0);
+    }
 }

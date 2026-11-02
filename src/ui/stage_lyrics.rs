@@ -26,7 +26,9 @@ use super::{
 const READING_MODE_DURATION: Duration = Duration::from_secs(3);
 const READING_WHEEL_STEP_PX: f32 = 48.0;
 const MAX_READING_SCROLL_ROWS_PER_EVENT: usize = 3;
-const LYRIC_ANCHOR_RATIO: f32 = 0.32;
+// Focus the active lyric just above the artwork's visual center, rather than
+// anchoring it close to the top of the fullscreen viewport.
+const LYRIC_ANCHOR_RATIO: f32 = 0.42;
 
 // QueMusic/Apple-like focus channels are intentionally independent from row motion.
 // One compositor timeline owns focus opacity + scale, rather than two nested
