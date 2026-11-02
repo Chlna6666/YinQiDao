@@ -34,8 +34,17 @@ const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
 const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_CACHE_IDENTITY_BYTES: usize = 32 * 1024;
 const WRITER_QUEUE_DEPTH: usize = 4;
-/// Playback may begin before full download; probes still require enough contiguous bytes.
-const INITIAL_PLAYABLE_BYTES: u64 = 768 * 1024;
+/// Buffer approximately three seconds of encoded audio, capped to avoid excessive
+/// first-byte latency on high-rate FLAC. Probe retries handle large ID3 metadata.
+fn startup_buffer_bytes(bitrate: Option<u32>) -> u64 {
+    (u64::from(bitrate.unwrap_or(256_000)) * 3 / 8).clamp(96 * 1024, 768 * 1024)
+}
+
+fn first_range_bytes(bitrate: Option<u32>) -> u64 {
+    startup_buffer_bytes(bitrate)
+        .next_power_of_two()
+        .clamp(128 * 1024, 1024 * 1024)
+}
 
 static PLUGIN_STREAM_CACHE: OnceLock<Arc<PluginStreamCache>> = OnceLock::new();
 static TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -80,6 +89,7 @@ type EarlyResponse = Result<PluginMaterializedStream, String>;
 struct EarlyReady {
     tx: Arc<Mutex<Option<oneshot::Sender<EarlyResponse>>>>,
     session: Arc<Mutex<Option<Arc<ProgressiveSession>>>>,
+    startup_bytes: u64,
 }
 
 impl EarlyReady {
@@ -99,7 +109,7 @@ impl EarlyReady {
             | crate::audio::progressive::DownloadState::Complete { bytes: available } => available,
             crate::audio::progressive::DownloadState::Failed(_) => 0,
         };
-        if available >= INITIAL_PLAYABLE_BYTES {
+        if available >= self.startup_bytes {
             self.send(Ok(PluginMaterializedStream {
                 path: session.file_path().to_path_buf(),
                 bytes: available,
@@ -149,6 +159,7 @@ impl PluginStreamCache {
         let notice = EarlyReady {
             tx: Arc::new(Mutex::new(Some(tx))),
             session: Arc::new(Mutex::new(None)),
+            startup_bytes: startup_buffer_bytes(descriptor.bitrate),
         };
         let worker_notice = notice.clone();
         let cache = Arc::clone(self);
@@ -525,10 +536,10 @@ async fn download_stream(
             .cloned()
             .ok_or_else(|| anyhow!("插件 {} 尚未获得网络权限", route.plugin_id))?;
 
-        // A small first validated Range lets playback start without requiring
-        // the entire normal 4 MiB transfer to finish. Subsequent ranges are large.
+        // The first validated transfer targets a few seconds of encoded audio.
+        // Later transfers use the normal large chunks to avoid excessive requests.
         let chunk_bytes = if offset == 0 {
-            range_chunk_bytes.min(1024 * 1024)
+            range_chunk_bytes.min(first_range_bytes(descriptor.bitrate))
         } else {
             range_chunk_bytes
         };
@@ -1295,6 +1306,15 @@ mod tests {
             select_if_range_validator(&weak).as_deref(),
             Some("Wed, 16 Sep 2026 00:00:00 GMT")
         );
+    }
+
+    #[test]
+    fn startup_range_adapts_to_actual_bitrate() {
+        assert_eq!(startup_buffer_bytes(Some(128_000)), 96 * 1024);
+        assert_eq!(first_range_bytes(Some(128_000)), 128 * 1024);
+        assert_eq!(first_range_bytes(Some(320_000)), 128 * 1024);
+        assert_eq!(first_range_bytes(Some(1_411_200)), 1024 * 1024);
+        assert_eq!(first_range_bytes(None), 128 * 1024);
     }
 
     #[test]
