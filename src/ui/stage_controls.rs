@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{
-    AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString,
+    AnimationExt as _, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement, Render, SharedString,
     StyleRefinement, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use lucide_gpui::icon;
@@ -31,16 +31,8 @@ const TRANSPORT_MAX_SLEEP_MS: u64 = 1_000;
 const STAGE_TRANSPORT_HEIGHT: f32 = 48.0;
 const STAGE_PROGRESS_HEIGHT: f32 = 30.0;
 
-/// 舞台 chrome 淡入淡出：统一走 theme::SampledMotion（220ms ease-in-out cubic）。
+/// All stage chrome surfaces use one motion origin and easing curve.
 type StageChromeFade = theme::SampledMotion;
-
-fn stage_chrome_fade(visible: bool) -> StageChromeFade {
-    theme::SampledMotion::new(
-        theme::DURATION_EMPHASIZED,
-        theme::ease_in_out_cubic,
-        visible,
-    )
-}
 
 #[derive(Default)]
 struct StageControlsViewCache {
@@ -167,7 +159,7 @@ impl StageControlsView {
             volume_slider: None,
             volume_drag_ratio: None,
             stage_active: false,
-            fade: stage_chrome_fade(true),
+            fade: stage_chrome::fade_motion(true),
             playback_state: PlaybackState::Paused,
             shuffle: false,
             repeat: RepeatMode::Off,
@@ -244,7 +236,6 @@ impl StageControlsView {
     }
 
     fn sync_from_app(&mut self, app: &MusicApp, stage_active: bool, cx: &mut Context<Self>) {
-        let target_visible = stage_chrome::target_visible(app);
         let playback_state = app.snapshot.state;
         let shuffle = app.snapshot.shuffle;
         let repeat = app.snapshot.repeat;
@@ -262,7 +253,10 @@ impl StageControlsView {
             || self.shuffle != shuffle
             || self.repeat != repeat
             || volume_changed;
-        let fade_changed = self.fade.set_target(target_visible);
+        let fade_changed = self.fade.target_value() != app.stage_chrome_motion.target_value();
+        if fade_changed {
+            self.fade = app.stage_chrome_motion;
+        }
 
         if engine_changed {
             self.engine = app.engine.clone();
@@ -487,6 +481,7 @@ impl Render for StageControlsView {
             .child(cached_stage_transport(self.transport.clone()))
             .child(transport_buttons)
             .child(volume_row)
+            .with_layout_animation_target(animating)
             .into_any_element()
     }
 }
@@ -502,14 +497,17 @@ impl StageTitlebarView {
     fn new(parent: WeakEntity<MusicApp>) -> Self {
         Self {
             parent,
-            fade: stage_chrome_fade(true),
+            fade: stage_chrome::fade_motion(true),
             title_key: 0,
             title: SharedString::new_static("沉浸音乐大舞台"),
         }
     }
 
     fn sync_from_app(&mut self, app: &MusicApp, cx: &mut Context<Self>) {
-        let fade_changed = self.fade.set_target(stage_chrome::target_visible(app));
+        let fade_changed = self.fade.target_value() != app.stage_chrome_motion.target_value();
+        if fade_changed {
+            self.fade = app.stage_chrome_motion;
+        }
         let title_key = stage_title_fingerprint(app);
         let title_changed = title_key != self.title_key;
         if title_changed {
@@ -534,7 +532,11 @@ impl Render for StageTitlebarView {
         // Sample the motion each frame (see StageControlsView::render).
         let visibility = self.fade.value();
         if visibility <= 0.001 {
-            return div().w_full().h(px(38.0)).into_any_element();
+            return div()
+                .w_full()
+                .h(px(38.0))
+                .with_layout_animation_target(animating)
+                .into_any_element();
         }
 
         let parent = self.parent.clone();
@@ -700,6 +702,7 @@ impl Render for StageTitlebarView {
                             ),
                     ),
             )
+            .with_layout_animation_target(animating)
             .into_any_element()
     }
 }

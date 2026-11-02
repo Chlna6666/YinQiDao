@@ -203,6 +203,8 @@ pub struct MusicApp {
     pub(crate) stage_last_mouse_pos: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) stage_controls_hovered: bool,
     pub(crate) stage_suppress_wake_until: Option<std::time::Instant>,
+    /// Shared chrome transition, copied into each retained stage child.
+    pub(crate) stage_chrome_motion: theme::SampledMotion,
     // Transport buttons update their retained controls optimistically. Defer the heavy MusicApp
     // root repaint until AudioEngine ACK arrives so mouse-down never competes with a full-window
     // layout generation frame.
@@ -853,6 +855,7 @@ impl MusicApp {
             stage_last_mouse_pos: None,
             stage_controls_hovered: false,
             stage_suppress_wake_until: None,
+            stage_chrome_motion: stage_chrome::fade_motion(false),
             transport_root_notify_pending: false,
             track_root_notify_pending: false,
             fluid_background: None,
@@ -1238,7 +1241,13 @@ impl MusicApp {
         }
     }
 
+    fn sync_stage_chrome_motion(&mut self) {
+        let visible = stage_chrome::target_visible(self);
+        self.stage_chrome_motion.set_target(visible);
+    }
+
     fn sync_stage_chrome_surfaces(&mut self, cx: &mut Context<Self>) {
+        self.sync_stage_chrome_motion();
         if self.stage_prepared || self.stage_open || self.stage_animating {
             player_stage::sync_chrome_if_created(self, cx);
             let _ = stage_controls::view(self, cx);
@@ -4857,6 +4866,8 @@ impl Render for MusicApp {
         if current_route == AppRoute::Player && !self.stage_open && self.stage_progress < 0.001 {
             self.open_stage(cx);
         }
+        // All retained chrome children sample exactly the same transition epoch.
+        self.sync_stage_chrome_motion();
 
         let stage_prewarm = !self.stage_prepared
             && !self.stage_open

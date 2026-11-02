@@ -14,9 +14,9 @@ use crate::{
 
 use super::{
     app_ui_events::{self, AppUiEvent},
-    player_legacy, stage_chrome, stage_controls, stage_lyrics,
+    player_legacy, stage_controls, stage_lyrics,
     shell::MusicApp,
-    theme::{dark, DURATION_LAYOUT, SampledMotion, STAGE_BG, TEXT_WHITE, ease_out_cubic, elegant_gradient_for, themed_icon},
+    theme::{dark, SampledMotion, STAGE_BG, TEXT_WHITE, elegant_gradient_for, themed_icon},
 };
 
 pub(super) use player_legacy::{NowPlaying, PlaybackProgress, PlaybackTime};
@@ -28,20 +28,9 @@ const STAGE_STACKED_BREAKPOINT_PX: f32 = 800.0;
 const STAGE_CONTROLS_SLOT_HEIGHT_PX: f32 = 158.0;
 const STAGE_METADATA_SLOT_HEIGHT_PX: f32 = 92.0;
 const STAGE_CONTENT_VISIBLE_TOP_PX: f32 = 54.0;
-const STAGE_CONTENT_HIDDEN_TOP_PX: f32 = 24.0;
 const STAGE_CONTENT_VISIBLE_BOTTOM_PX: f32 = 32.0;
-const STAGE_CONTENT_HIDDEN_BOTTOM_PX: f32 = 24.0;
-/// 舞台 chrome 布局位移：统一走 theme::SampledMotion（300ms ease-out cubic）。
+/// The stage keeps fixed geometry during pure-immersion fade: no lyric reflow.
 type StageChromeLayoutMotion = SampledMotion;
-
-fn stage_chrome_layout_motion(visible: bool) -> StageChromeLayoutMotion {
-    SampledMotion::new(DURATION_LAYOUT, ease_out_cubic, visible)
-}
-
-#[inline]
-fn stage_lerp(hidden: f32, visible: f32, visible_progress: f32) -> f32 {
-    hidden + (visible - hidden) * visible_progress.clamp(0.0, 1.0)
-}
 
 #[derive(Clone, Copy, Debug)]
 struct StageLayoutMetrics {
@@ -63,10 +52,9 @@ struct StageLayoutMetrics {
 }
 
 impl StageLayoutMetrics {
-    fn compute(viewport_width: f32, viewport_height: f32, visible_progress: f32) -> Self {
+    fn compute(viewport_width: f32, viewport_height: f32, _visible_progress: f32) -> Self {
         let width = viewport_width.max(320.0);
         let height = viewport_height.max(320.0);
-        let progress = visible_progress.clamp(0.0, 1.0);
         let horizontal = width >= STAGE_STACKED_BREAKPOINT_PX;
         let gutter = (width * 0.035).clamp(20.0, 48.0);
         let content_width = (width - 2.0 * gutter).max(1.0);
@@ -82,19 +70,12 @@ impl StageLayoutMetrics {
         } else {
             content_width
         };
-        let content_top = stage_lerp(
-            STAGE_CONTENT_HIDDEN_TOP_PX,
-            STAGE_CONTENT_VISIBLE_TOP_PX,
-            progress,
-        );
-        let content_bottom = stage_lerp(
-            STAGE_CONTENT_HIDDEN_BOTTOM_PX,
-            STAGE_CONTENT_VISIBLE_BOTTOM_PX,
-            progress,
-        );
-        let metadata_height = STAGE_METADATA_SLOT_HEIGHT_PX * progress;
-        let controls_height = STAGE_CONTROLS_SLOT_HEIGHT_PX * progress;
-        let cluster_gap = 16.0 * progress;
+        // Keep text, artwork and lyric viewport metrics invariant across fade frames.
+        let content_top = STAGE_CONTENT_VISIBLE_TOP_PX;
+        let content_bottom = STAGE_CONTENT_VISIBLE_BOTTOM_PX;
+        let metadata_height = STAGE_METADATA_SLOT_HEIGHT_PX;
+        let controls_height = STAGE_CONTROLS_SLOT_HEIGHT_PX;
+        let cluster_gap = 16.0;
         let available_height = (height - content_top - content_bottom).max(1.0);
         let cover_height_limit = if horizontal {
             (available_height - metadata_height - controls_height - cluster_gap * 2.0)
@@ -204,9 +185,9 @@ pub(super) fn sync_chrome_if_created(app: &MusicApp, cx: &mut Context<MusicApp>)
         return;
     };
 
-    let chrome_visible = stage_chrome::target_visible(app);
     stage.update(cx, |stage, cx| {
-        if stage.chrome_layout.set_target(chrome_visible) {
+        if stage.chrome_layout.target_value() != app.stage_chrome_motion.target_value() {
+            stage.chrome_layout = app.stage_chrome_motion;
             cx.notify();
         }
     });
@@ -259,7 +240,7 @@ pub(super) fn render(
         artwork_len: artwork.as_ref().map_or(0, |bytes| bytes.len()),
     };
     let playing = app.snapshot.state == PlaybackState::Playing;
-    let chrome_visible = stage_chrome::target_visible(app);
+    let initial_chrome_motion = app.stage_chrome_motion;
 
     let ui_events = app_ui_events::bridge(cx);
     let initial_fluid = fluid_background.clone();
@@ -288,7 +269,7 @@ pub(super) fn render(
                 cover: StageCoverRenderData::default(),
                 key: StagePlayerRenderKey::default(),
                 playing: false,
-                chrome_layout: stage_chrome_layout_motion(chrome_visible),
+                chrome_layout: initial_chrome_motion,
                 _ui_subscription: ui_subscription,
             }
         });
@@ -324,7 +305,8 @@ pub(super) fn render(
             stage.controls = controls.clone();
             changed = true;
         }
-        if stage.chrome_layout.set_target(chrome_visible) {
+        if stage.chrome_layout.target_value() != app.stage_chrome_motion.target_value() {
+            stage.chrome_layout = app.stage_chrome_motion;
             changed = true;
         }
         if changed {
@@ -596,6 +578,23 @@ mod tests {
         assert!((hidden.lyrics_column_width - visible.lyrics_column_width).abs() < 0.01);
         assert!(hidden.cover_size > 280.0);
         assert!(hidden.cover_size <= hidden.artwork_column_width);
+    }
+
+    #[test]
+    fn chrome_fade_does_not_reflow_lyrics_or_artwork() {
+        for (width, height) in [(640.0, 540.0), (1116.0, 713.0), (1920.0, 1080.0)] {
+            let visible = StageLayoutMetrics::compute(width, height, 1.0);
+            for progress in [0.75, 0.5, 0.25, 0.0] {
+                let faded = StageLayoutMetrics::compute(width, height, progress);
+                assert_eq!(visible.content_height, faded.content_height);
+                assert_eq!(visible.cover_size, faded.cover_size);
+                assert_eq!(visible.content_top, faded.content_top);
+                assert_eq!(visible.content_bottom, faded.content_bottom);
+                assert_eq!(visible.metadata_height, faded.metadata_height);
+                assert_eq!(visible.controls_height, faded.controls_height);
+                assert_eq!(visible.lyrics_column_width, faded.lyrics_column_width);
+            }
+        }
     }
 
     #[test]
