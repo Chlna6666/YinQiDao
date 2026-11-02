@@ -1272,9 +1272,8 @@ fn render_lyric_row(
         resolved_blur
     };
     let focus_transition = previous_active.is_some()
-        && focus_started_at.is_some_and(|started_at| {
-            frame_now < started_at + LYRIC_FOCUS_TRANSITION_DURATION
-        });
+        && focus_started_at
+            .is_some_and(|started_at| frame_now < started_at + LYRIC_FOCUS_TRANSITION_DURATION);
     let base_alpha = if focus_transition {
         previous_alpha.max(target_alpha)
     } else {
