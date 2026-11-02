@@ -198,17 +198,18 @@ pub fn stream(
         format!("{base}/{purl}")
     };
 
-    let bitrate = filenames
-        .iter()
-        .position(|filename| purl.ends_with(filename.as_str()))
-        .or_else(|| {
-            purl.find(&mid)
-                .map(|index| match purl.as_bytes().get(index.saturating_sub(1)) {
-                    Some(b'F') => 999_000,
-                    Some(b'M') if index > 0 && purl.as_bytes()[index - 1] == b'8' => 320_000,
-                    _ => 128_000,
-                })
-        });
+    // vkey may pick a lower quality than requested; the actual returned filename
+    // decides the stream codec and bitrate. Never advertise FLAC as MP3.
+    let selected_name = purl.split('?').next().unwrap_or(&purl).to_ascii_lowercase();
+    let (codec, bitrate) = if selected_name.ends_with(".flac") {
+        ("flac", Some(999_000u32))
+    } else if selected_name.contains("m800") && selected_name.ends_with(".mp3") {
+        ("mp3", Some(320_000u32))
+    } else if selected_name.contains("m500") && selected_name.ends_with(".mp3") {
+        ("mp3", Some(128_000u32))
+    } else {
+        ("mp3", None)
+    };
 
     Ok(types::StreamDescriptor {
         url,
@@ -216,8 +217,8 @@ pub fn stream(
             key: "Referer".into(),
             value: "https://y.qq.com/".into(),
         }],
-        codec: Some("mp3".into()),
-        bitrate: bitrate.map(|value| u32::try_from(value).unwrap_or(128_000)),
+        codec: Some(codec.into()),
+        bitrate,
         sample_rate: None,
         channels: None,
         expires_at_ms: None,
