@@ -1437,6 +1437,11 @@ impl MusicApp {
             }
             tracks.push(queue.tracks[index].clone());
         }
+        // At the end of a Repeat Off playlist there is no next track;
+        // Previous must still be warmed for a quick backward navigation.
+        if tracks.is_empty() && queue.current_index > 0 {
+            tracks.push(queue.tracks[queue.current_index - 1].clone());
+        }
         (!tracks.is_empty()).then(|| (queue.route.clone(), tracks))
     }
 
