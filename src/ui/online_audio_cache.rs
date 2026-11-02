@@ -41,6 +41,15 @@ impl AudioKey {
     }
 }
 
+// Enforce the provider boundary before any expensive WIT/RPC call, so a
+// future third-party plugin cannot poison another provider's hot cache.
+fn valid_route_source(route: &PluginRoute, source: &SourceTrackRef) -> bool {
+    !route.plugin_id.trim().is_empty()
+        && !route.provider_id.trim().is_empty()
+        && !source.source_id.trim().is_empty()
+        && route.provider_id == source.provider_id
+}
+
 type PreparedResult = Result<Track, String>;
 
 struct Pending {
@@ -89,6 +98,9 @@ impl OnlineAudioCache {
     }
 
     pub(super) fn ready(&self, route: &PluginRoute, source: &SourceTrackRef) -> Option<Track> {
+        if !valid_route_source(route, source) {
+            return None;
+        }
         let key = AudioKey::new(route, source);
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let track = state.ready.get(&key).cloned();
@@ -103,7 +115,9 @@ impl OnlineAudioCache {
     /// A low-priority speculative fetch; limited to two concurrent tracks.
     /// Duplicate keys do not create duplicate provider requests.
     pub(super) fn prefetch(self: &Arc<Self>, route: PluginRoute, remote: RemoteTrack) {
-        let _ = self.start(route, remote, true);
+        if valid_route_source(&route, &remote.source) {
+            let _ = self.start(route, remote, true);
+        }
     }
 
     /// Foreground requests join the exact same materialization as prefetch.
@@ -113,6 +127,9 @@ impl OnlineAudioCache {
         route: PluginRoute,
         remote: RemoteTrack,
     ) -> Result<Track> {
+        if !valid_route_source(&route, &remote.source) {
+            return Err(anyhow!("在线音频插件路由与歌曲来源不一致"));
+        }
         if let Some(track) = self.ready(&route, &remote.source) {
             return Ok(track);
         }
@@ -272,6 +289,29 @@ mod tests {
         other = route.clone();
         other.provider_id = "qqmusic".into();
         assert_ne!(key, AudioKey::new(&other, &source));
+    }
+
+    #[test]
+    fn shared_provider_protocol_rejects_cross_provider_track_sources() {
+        let mut route = PluginRoute {
+            plugin_id: "new-provider-plugin".into(),
+            provider_id: "provider-a".into(),
+            account_id: "session-a".into(),
+            priority: 0,
+            is_default: false,
+        };
+        let source = SourceTrackRef {
+            provider_id: "provider-a".into(),
+            source_id: "song-42".into(),
+        };
+        assert!(valid_route_source(&route, &source));
+        route.provider_id = "provider-b".into();
+        assert!(!valid_route_source(&route, &source));
+        route.provider_id = "provider-a".into();
+        assert!(!valid_route_source(
+            &route,
+            &SourceTrackRef { source_id: "".into(), ..source }
+        ));
     }
 
     #[test]
