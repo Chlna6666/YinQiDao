@@ -166,7 +166,12 @@ impl OnlineAudioCache {
                 .iter()
                 .filter(|(_, pending)| pending.background)
                 .min_by_key(|(_, pending)| pending.sequence)
-                .or_else(|| state.pending.iter().min_by_key(|(_, pending)| pending.sequence))
+                .or_else(|| {
+                    state
+                        .pending
+                        .iter()
+                        .min_by_key(|(_, pending)| pending.sequence)
+                })
                 .map(|(key, _)| key.clone());
             if let Some(victim) = victim
                 && let Some(pending) = state.pending.remove(&victim)
