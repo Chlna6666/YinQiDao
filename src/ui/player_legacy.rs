@@ -172,8 +172,10 @@ impl PlaybackProgress {
                     });
                 }
             },
-        )
-        .defer_commit_until_release());
+        ));
+        if let Some(slider) = self.slider.as_mut() {
+            slider.defer_commit_until_release();
+        }
     }
 
     pub(super) fn sync(

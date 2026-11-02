@@ -175,9 +175,8 @@ impl InteractiveSliderState {
         }
     }
 
-    pub fn defer_commit_until_release(mut self) -> Self {
+    pub fn defer_commit_until_release(&mut self) {
         self.defer_commit_until_release = true;
-        self
     }
 
     pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
@@ -889,9 +888,10 @@ mod tests {
 
     #[test]
     fn transport_slider_defers_seek_until_release() {
-        let slider = InteractiveSliderState::new("test-seek", |_, _| {}, |_, _| {}, |_, _| {});
+        let mut slider = InteractiveSliderState::new("test-seek", |_, _| {}, |_, _| {}, |_, _| {});
         assert!(!slider.defer_commit_until_release);
-        assert!(slider.defer_commit_until_release().defer_commit_until_release);
+        slider.defer_commit_until_release();
+        assert!(slider.defer_commit_until_release);
     }
 
     #[test]
