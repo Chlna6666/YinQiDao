@@ -825,10 +825,8 @@ impl StageLyricsView {
         self.focus_started_at = None;
         self.hovered_index = None;
 
-        let wheel_steps = take_reading_wheel_steps(
-            &mut self.reading_scroll_remainder,
-            wheel_delta_y,
-        );
+        let wheel_steps =
+            take_reading_wheel_steps(&mut self.reading_scroll_remainder, wheel_delta_y);
         if wheel_steps == 0 {
             if !was_reading {
                 cx.notify();
@@ -843,7 +841,9 @@ impl StageLyricsView {
             .unwrap_or(0)
             .min(max_index);
         let next = if wheel_steps < 0 {
-            previous.saturating_add(wheel_steps.unsigned_abs()).min(max_index)
+            previous
+                .saturating_add(wheel_steps.unsigned_abs())
+                .min(max_index)
         } else {
             previous.saturating_sub(wheel_steps as usize)
         };
@@ -857,7 +857,9 @@ impl StageLyricsView {
         self.playback_stack_handoff = Some(LyricPlaybackStackHandoff {
             from_active: previous,
             to_active: next,
-            first_index: previous.min(next).saturating_sub(READING_STACK_HISTORY_ROWS),
+            first_index: previous
+                .min(next)
+                .saturating_sub(READING_STACK_HISTORY_ROWS),
             last_index: previous
                 .max(next)
                 .saturating_add(READING_STACK_FUTURE_ROWS)
