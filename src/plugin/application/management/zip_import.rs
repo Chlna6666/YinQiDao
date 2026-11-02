@@ -61,7 +61,7 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
     archive.seek(SeekFrom::End(-(search_len as i64)))?;
     let mut tail = vec![0; search_len];
     archive.read_exact(&mut tail)?;
-    let eocd = tail.windows(4).rposition(|s| s == b"PK\\x05\\x06")
+    let eocd = tail.windows(4).rposition(|s| s == b"PK\x05\x06")
         .ok_or_else(|| anyhow!("ZIP 缺少 End of Central Directory"))?;
     let end = tail.get(eocd..).ok_or_else(|| anyhow!("invalid EOCD"))?;
     if end.len() < 22 || u16le(end, 4)? != 0 || u16le(end, 6)? != 0
@@ -92,7 +92,7 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         archive.seek(SeekFrom::Start(cursor))?;
         let mut central = [0u8; 46];
         archive.read_exact(&mut central)?;
-        if &central[..4] != b"PK\\x01\\x02" {
+        if &central[..4] != b"PK\x01\x02" {
             bail!("ZIP 中央目录签名不合法");
         }
         let flags = u16le(&central, 8)?;
@@ -147,7 +147,7 @@ pub(super) fn extract(path: &Path) -> Result<ExtractedPlugin> {
         archive.seek(SeekFrom::Start(local_offset))?;
         let mut local = [0u8; 30];
         archive.read_exact(&mut local)?;
-        if &local[..4] != b"PK\\x03\\x04" || u16le(&local, 8)? != method
+        if &local[..4] != b"PK\x03\x04" || u16le(&local, 8)? != method
             || u16le(&local, 6)? != flags
             || usize::from(u16le(&local, 26)?) != name_len
         {
