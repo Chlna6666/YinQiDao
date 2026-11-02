@@ -26,6 +26,8 @@ pub(crate) enum DownloadState {
 #[derive(Debug)]
 struct Progress {
     available: u64,
+    written: u64,
+    validated: u64,
     complete: bool,
     error: Option<String>,
 }
@@ -62,6 +64,8 @@ impl ProgressiveSession {
             file: file.clone(),
             progress: Mutex::new(Progress {
                 available: 0,
+                written: 0,
+                validated: 0,
                 complete: false,
                 error: None,
             }),
@@ -80,7 +84,16 @@ impl ProgressiveSession {
 
     pub(crate) fn written(&self, available: u64) {
         let mut state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        state.available = state.available.max(available);
+        state.written = state.written.max(available);
+        state.available = state.written.min(state.validated);
+        self.changed.notify_all();
+    }
+
+    /// Network range metadata must validate before bytes become visible to decoders.
+    pub(crate) fn validated(&self, offset: u64) {
+        let mut state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        state.validated = state.validated.max(offset);
+        state.available = state.written.min(state.validated);
         self.changed.notify_all();
     }
 
@@ -256,6 +269,11 @@ mod tests {
         writer.write_all(b"abc").unwrap();
         session.written(3);
         let mut bytes = [0; 4];
+        assert_eq!(
+            reader.read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        session.validated(3);
         assert_eq!(reader.read(&mut bytes).unwrap(), 3);
         assert_eq!(&bytes[..3], b"abc");
         assert_eq!(
