@@ -383,7 +383,10 @@ mod tests {
             ("provider.wasm", b"\0asm"),
         ]);
         // Tamper with the decompressed payload without changing the ZIP metadata.
-        let index = invalid.windows(4).position(|bytes| bytes == b"\0asm").unwrap();
+        let index = invalid
+            .windows(4)
+            .position(|bytes| bytes == b"\0asm")
+            .unwrap();
         invalid[index] ^= 0x40;
         let archive = test_archive(&invalid, "crc");
         assert!(extract(&archive).is_err());
