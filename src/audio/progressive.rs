@@ -99,9 +99,24 @@ impl ProgressiveSession {
 
     pub(crate) fn finish(&self, error: Option<String>) {
         let mut state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        state.error = error;
+        if state.error.is_none() {
+            state.error = error;
+        }
         state.complete = true;
         self.changed.notify_all();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.finish(Some("progressive playback session cancelled".into()));
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .error
+            .as_deref()
+            == Some("progressive playback session cancelled")
     }
 
     pub(crate) fn snapshot(&self) -> DownloadState {
@@ -156,6 +171,17 @@ impl Drop for ProgressiveSession {
         if let Some(dir) = self.file.parent() {
             let _ = fs::remove_dir_all(dir);
         }
+    }
+}
+
+/// Cancel active Host-owned transfers on provider revocation / logout.
+pub(crate) fn cancel_all() {
+    let running = {
+        let entries = sessions().lock().unwrap_or_else(|e| e.into_inner());
+        entries.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
+    };
+    for session in running {
+        session.cancel();
     }
 }
 
@@ -286,6 +312,21 @@ mod tests {
         drop(writer);
         drop(session);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn cancellation_preserves_terminal_error_state() {
+        let root = std::env::temp_dir().join(format!("yqd-cancel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("audio.mp3");
+        File::create(&path).unwrap();
+        let session = ProgressiveSession::register(path.clone());
+        session.cancel();
+        session.finish(None);
+        assert!(matches!(session.snapshot(), DownloadState::Failed(_)));
+        assert!(session.is_cancelled());
+        drop(session);
     }
 
     #[test]
