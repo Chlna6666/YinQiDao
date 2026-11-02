@@ -1373,7 +1373,7 @@ fn render_lyric_row(
         .w_full()
         .min_w(px(0.0))
         .flex_none()
-        .min_h(px(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX))
+        .min_h(px(estimated_lyric_row_height(line, content_width_px)))
         .pl(px(16.0))
         .pr(px(104.0))
         .py(px(11.0))
@@ -2170,24 +2170,27 @@ fn take_reading_wheel_steps(remainder: &mut f32, delta: f32) -> isize {
 /// full shaping pass for every lyric on the render thread. Recompute only on
 /// a track change or actual lyrics viewport width change.
 fn approximate_lyric_lines(text: &str, width_px: f32, font_px: f32) -> usize {
-    let max_width = (width_px * 0.92).max(font_px);
+    // Word-level karaoke uses flex-wrap: each token is indivisible, so a
+    // character-only estimate at the full width undercounts wrapped rows.
+    // Reserve slack for font shaping, word boundaries and focal scaling.
+    let max_width = (width_px * 0.80).max(font_px);
     let mut lines = 0usize;
     for paragraph in text.split('\n') {
         lines += 1;
         let mut width = 0.0f32;
         for ch in paragraph.chars() {
             let glyph_width = if ch.is_whitespace() {
-                font_px * 0.36
+                font_px * 0.42
             } else if ch.is_ascii() {
                 if matches!(ch, 'M' | 'W' | 'm' | 'w' | '@' | '%') {
-                    font_px * 0.86
+                    font_px * 0.98
                 } else if matches!(
                     ch,
                     'i' | 'l' | 'I' | '1' | '.' | ',' | '\'' | '!' | ':' | ';'
                 ) {
-                    font_px * 0.34
+                    font_px * 0.40
                 } else {
-                    font_px * 0.64
+                    font_px * 0.76
                 }
             } else {
                 font_px
@@ -2211,7 +2214,9 @@ fn estimated_lyric_row_height(line: &StageLyricLine, width: f32) -> f32 {
     let translation = line.translation.as_ref().map_or(0.0, |text| {
         approximate_lyric_lines(text.as_str(), width, 17.0) as f32 * 25.0 + 4.0
     });
-    (primary + translation + 40.0).max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX)
+    // Keep measured/estimated rows in the same coordinate system. A
+    // scaled karaoke leaf can be taller than its initial cached bounds.
+    (primary + translation + 52.0).max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX)
 }
 
 /// Resolve the lyric column before measuring wrapped text. Current Taffy
@@ -2505,6 +2510,22 @@ mod tests {
         let current = playback_stack_row_top(0, 0, &prefix, 310.0);
         let next = playback_stack_row_top(1, 0, &prefix, 310.0);
         assert!(next - current >= row);
+    }
+
+    #[test]
+    fn active_karaoke_long_english_and_translation_do_not_share_row_space() {
+        let mut line = StageLyricLine::from_plain(
+            "I'll be waiting all there's left to do is run",
+        );
+        line.translation = Some(SharedString::from("我会一直等到最后"));
+        let width = 380.0;
+        let primary = estimated_primary_lyric_height(&line, width);
+        let row = estimated_lyric_row_height(&line, width);
+        assert!(primary >= 80.0, "English lyric must reserve at least two lines");
+        assert!(row >= primary + 25.0 + 52.0);
+        let prefix = [0.0, row, row + 82.0];
+        assert!(playback_stack_row_top(1, 0, &prefix, 300.0)
+            - playback_stack_row_top(0, 0, &prefix, 300.0) >= row);
     }
 
     #[test]
