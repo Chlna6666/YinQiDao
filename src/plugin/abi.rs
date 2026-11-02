@@ -527,7 +527,7 @@ impl ServiceKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PluginRoute {
     pub plugin_id: String,
     pub provider_id: String,
@@ -720,6 +720,22 @@ impl PluginServiceRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_route_persistence_round_trips() {
+        let route = PluginRoute {
+            plugin_id: "io.yinqidao.qqmusic".into(),
+            provider_id: "qqmusic".into(),
+            account_id: "account-1".into(),
+            priority: 7,
+            is_default: true,
+        };
+        let encoded = toml::to_string(&route).expect("serialize persisted plugin route");
+        let decoded: PluginRoute =
+            toml::from_str(&encoded).expect("deserialize persisted plugin route");
+        assert_eq!(route, decoded);
+    }
+
+
     use super::*;
 
     fn account(
