@@ -6,8 +6,8 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, BorrowAppContext as _,
     Context, Easing, ElementId, Entity, Global, HorizontalRevealEdge, IntoElement, Render,
-    SharedString, Subscription, TransformOrigin, WeakEntity, Window,
-    bounds_observer, div, point, prelude::*, px,
+    SharedString, Subscription, TransformOrigin, WeakEntity, Window, bounds_observer, div, point,
+    prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -1503,10 +1503,7 @@ fn lyric_text_layer(
                 // Child AnyView is independently updated at word boundaries.
                 // The flex column must reserve primary glyph height even
                 // when that child has a transient zero-height layout cache.
-                .min_h(px(estimated_primary_lyric_height(
-                    line,
-                    content_width_px,
-                )))
+                .min_h(px(estimated_primary_lyric_height(line, content_width_px)))
                 .child(stage_primary_lyric(
                     line,
                     karaoke_state,
@@ -2184,7 +2181,10 @@ fn approximate_lyric_lines(text: &str, width_px: f32, font_px: f32) -> usize {
             } else if ch.is_ascii() {
                 if matches!(ch, 'M' | 'W' | 'm' | 'w' | '@' | '%') {
                     font_px * 0.86
-                } else if matches!(ch, 'i' | 'l' | 'I' | '1' | '.' | ',' | '\'' | '!' | ':' | ';') {
+                } else if matches!(
+                    ch,
+                    'i' | 'l' | 'I' | '1' | '.' | ',' | '\'' | '!' | ':' | ';'
+                ) {
                     font_px * 0.34
                 } else {
                     font_px * 0.64
@@ -2493,12 +2493,8 @@ mod tests {
 
     #[test]
     fn multiline_english_and_chinese_translation_reserve_distinct_row_space() {
-        let mut line = StageLyricLine::from_plain(
-            "We were both young when I first saw you",
-        );
-        line.translation = Some(SharedString::from(
-            "第一次见到你的时候我们都还很年轻",
-        ));
+        let mut line = StageLyricLine::from_plain("We were both young when I first saw you");
+        line.translation = Some(SharedString::from("第一次见到你的时候我们都还很年轻"));
         let width = 450.0;
         assert!(approximate_lyric_lines(line.text.as_str(), width, 28.0) >= 2);
         let primary = estimated_primary_lyric_height(&line, width);
@@ -2520,11 +2516,9 @@ mod tests {
         let narrow = estimated_lyric_row_height(&line, 215.0);
         let wide = estimated_lyric_row_height(&line, 580.0);
         assert!(narrow > wide);
-        assert!(approximate_lyric_lines(
-            line.translation.as_ref().unwrap().as_str(),
-            215.0,
-            17.0,
-        ) >= 2);
+        assert!(
+            approximate_lyric_lines(line.translation.as_ref().unwrap().as_str(), 215.0, 17.0,) >= 2
+        );
     }
 
     #[test]
