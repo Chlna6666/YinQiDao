@@ -968,10 +968,22 @@ mod tests {
             gpui::point(px(700.0), px(650.0)),
             gpui::size(px(72.0), px(22.0)),
         );
-        assert!(pointer_inside_bounds(gpui::point(px(730.0), px(660.0)), volume));
-        assert!(!pointer_inside_bounds(gpui::point(px(390.0), px(660.0)), volume));
-        assert!(!pointer_inside_bounds(gpui::point(px(650.0), px(660.0)), volume));
-        assert!(!pointer_inside_bounds(gpui::point(px(730.0), px(550.0)), volume));
+        assert!(pointer_inside_bounds(
+            gpui::point(px(730.0), px(660.0)),
+            volume
+        ));
+        assert!(!pointer_inside_bounds(
+            gpui::point(px(390.0), px(660.0)),
+            volume
+        ));
+        assert!(!pointer_inside_bounds(
+            gpui::point(px(650.0), px(660.0)),
+            volume
+        ));
+        assert!(!pointer_inside_bounds(
+            gpui::point(px(730.0), px(550.0)),
+            volume
+        ));
         // A click already committed on mouse down; up/out must never write 0.
         assert!(!commit_on_release(false, false));
         assert!(commit_on_release(true, false));
