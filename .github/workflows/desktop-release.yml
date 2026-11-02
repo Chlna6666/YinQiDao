@@ -18,11 +18,11 @@ on:
 permissions:
   contents: read
 
-# Superseded PR builds cannot consume 4 runners indefinitely. Tagged releases
-# are never cancelled after a new commit arrives.
+# A main-branch build must be allowed to finish and publish its own SHA.
+# Only obsolete PR builds may be cancelled by subsequent commits.
 concurrency:
   group: desktop-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   desktop:

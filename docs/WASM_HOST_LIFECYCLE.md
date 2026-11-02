@@ -29,7 +29,6 @@ Defaults (Host policy, not plugin settings):
 | Resource | Limit |
 | --- | ---: |
 | Linear memory per Store | 64 MiB |
-| Component resource handles per Store | 4096 |
 | Wasm tables per Store | 4 |
 | Core/component instances per Store | 32 |
 | Guest execution fuel per Store | 500,000,000 |
@@ -38,6 +37,11 @@ Defaults (Host policy, not plugin settings):
 | Compiled Component cache | 16 ready entries |
 | Compiled Component idle TTL | 10 minutes |
 | Background Host GC interval | 30 seconds |
+
+Wasmtime 48.0.1 does not expose a Store-level `set_max_component_handles` API.
+The Host bounds linear memory, core instances/tables and invocation duration;
+Component resource tables are destroyed with the per-call Store, rather than
+advertising an unsupported per-Store handle-count limit.
 
 The Host combines an outer wall-clock timeout with a Wasmtime
 fuel/epoch budget. The real-time audio callback never invokes guest WASM,

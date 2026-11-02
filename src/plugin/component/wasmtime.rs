@@ -273,7 +273,6 @@ impl PluginWasmtimeRuntime {
             },
         );
         store.limiter(|state| &mut state.limits);
-        store.set_max_component_handles(self.policy.max_component_handles);
         store
             .set_fuel(self.policy.fuel_per_call)
             .map_err(|error| anyhow!("设置插件 Store fuel 失败: {error}"))?;

@@ -22,8 +22,6 @@ pub struct PluginEnginePolicy {
     pub max_tables: usize,
     /// Maximum number of core/component instances owned by one Store.
     pub max_instances: usize,
-    /// Maximum component-model resource handle slots in a Store.
-    pub max_component_handles: usize,
     /// Maximum warm instances retained for one plugin/provider route.
     pub max_pooled_instances_per_route: usize,
     /// Fuel replenished for one guest export call when Wasmtime fuel accounting is enabled.
@@ -46,7 +44,6 @@ impl Default for PluginEnginePolicy {
             max_memories: 2,
             max_tables: 4,
             max_instances: 32,
-            max_component_handles: 4_096,
             max_pooled_instances_per_route: 2,
             fuel_per_call: 500_000_000,
             epoch_tick_interval: Duration::from_millis(10),
@@ -75,9 +72,6 @@ impl PluginEnginePolicy {
         }
         if self.max_instances == 0 || self.max_instances > 256 {
             bail!("插件 Store instance count limit 非法");
-        }
-        if self.max_component_handles == 0 || self.max_component_handles > 65_536 {
-            bail!("插件 Component 句柄预算必须在 1..=65536");
         }
         if self.max_pooled_instances_per_route == 0
             || self.max_pooled_instances_per_route > self.max_instances
@@ -137,15 +131,6 @@ mod tests {
             ..PluginEnginePolicy::default()
         };
         assert_eq!(policy.epoch_deadline_ticks(), 3);
-    }
-
-    #[test]
-    fn rejects_unbounded_component_handle_budget() {
-        let policy = PluginEnginePolicy {
-            max_component_handles: 65_537,
-            ..PluginEnginePolicy::default()
-        };
-        assert!(policy.validate().is_err());
     }
 
     #[test]
