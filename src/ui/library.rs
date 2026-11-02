@@ -1563,7 +1563,7 @@ pub(super) fn queue_drawer_items(
     );
     let view_for_rows = view.clone();
 
-    let queue_body = if queue_ids.is_empty() {
+    if queue_ids.is_empty() {
         div()
             .flex_1()
             .min_h(px(0.0))
@@ -1645,9 +1645,7 @@ pub(super) fn queue_drawer_items(
                 .size_full(),
             )
             .into_any_element()
-    };
-
-    queue_body
+    }
 }
 
 fn local_playlists_section(
