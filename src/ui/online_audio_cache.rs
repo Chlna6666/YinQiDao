@@ -117,7 +117,7 @@ impl OnlineAudioCache {
             .start(route, remote, false)
             .ok_or_else(|| anyhow!("无法启动在线音频准备任务"))?;
         loop {
-            let outcome = rx.borrow_and_update().clone();
+            let outcome = (*rx.borrow_and_update()).clone();
             if let Some(outcome) = outcome {
                 return outcome
                     .map_err(anyhow::Error::msg)
