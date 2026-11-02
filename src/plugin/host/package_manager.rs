@@ -973,7 +973,12 @@ auth_methods = ["qr_code"]
         let _ = ui_registry::initialize();
 
         let real_netease = Path::new("plugins/netease");
-        if real_netease.join("plugin.toml").is_file() {
+        // A source checkout does not ship the compiled provider.wasm. Only
+        // exercise this integration check when an installable package exists;
+        // the synthetic fixture above always covers the copy/filter behavior.
+        if real_netease.join("plugin.toml").is_file()
+            && real_netease.join("provider.wasm").is_file()
+        {
             let manager = PluginPackageManager::load(&app_base);
             let result = manager
                 .import_directory(real_netease)
