@@ -393,6 +393,7 @@ impl Render for StagePlayerView {
             &self.cover,
             visible_progress,
             layout.metadata_offset_y,
+            layout.cover_size,
         );
         let control_slot = div()
             .w_full()
@@ -518,6 +519,7 @@ fn stage_metadata(
     data: &StageCoverRenderData,
     visibility: f32,
     offset_y: f32,
+    artwork_width: f32,
 ) -> gpui::AnyElement {
     div()
         .relative()
@@ -528,7 +530,9 @@ fn stage_metadata(
         .opacity(visibility)
         .child(
             div()
-                .w(px(280.0))
+                // Text aligns with the artwork's leading edge instead
+                // of retaining a fixed 280px width when the cover grows.
+                .w(px(artwork_width))
                 .flex()
                 .flex_col()
                 .items_start()
