@@ -52,7 +52,8 @@ impl SliderStyle {
             hover_track_height: px(6.0),
             thumb_size: px(10.0),
             hover_thumb_scale: 1.20,
-            interaction_height: px(30.0),
+            // The previous 30px strip reached into the play/pause controls.
+            interaction_height: px(12.0),
             track_bg: theme::BORDER_HAIRLINE.into(),
             filled_color: theme::ACCENT_RED.into(),
             thumb_color: dark::white(1.0),
@@ -150,6 +151,8 @@ pub struct InteractiveSliderState {
     on_click: SliderCallback,
     on_drag: SliderCallback,
     on_drag_end: SliderCallback,
+    /// Progress seeks may preview on press and commit once on release.
+    defer_commit_until_release: bool,
 }
 
 impl InteractiveSliderState {
@@ -168,7 +171,13 @@ impl InteractiveSliderState {
             on_click: Rc::new(on_click),
             on_drag: Rc::new(on_drag),
             on_drag_end: Rc::new(on_drag_end),
+            defer_commit_until_release: false,
         }
+    }
+
+    pub fn defer_commit_until_release(mut self) -> Self {
+        self.defer_commit_until_release = true;
+        self
     }
 
     pub fn render(&self, ratio: f32, style: SliderStyle) -> Stateful<Div> {
@@ -655,7 +664,11 @@ fn interactive_slider_state(
     let id_for_up = state.id.clone();
     let id_for_up_out = state.id.clone();
     let id_for_drag = state.id.clone();
-    let click_for_down = state.on_click.clone();
+    let click_for_down = if state.defer_commit_until_release {
+        state.on_drag.clone()
+    } else {
+        state.on_click.clone()
+    };
     let drag_for_up = state.on_drag_end.clone();
     let drag_for_up_out = state.on_drag_end.clone();
     let on_drag = state.on_drag.clone();
@@ -870,6 +883,15 @@ mod tests {
         let style = SliderStyle::mini_progress();
         assert!(f32::from(style.hover_track_height) > f32::from(style.track_height));
         assert!(f32::from(style.track_height) - f32::from(style.hover_track_height) < 0.0);
+        // Constrain seeking to the rail, rather than transport control buttons.
+        assert!(f32::from(style.interaction_height) <= 12.0);
+    }
+
+    #[test]
+    fn transport_slider_defers_seek_until_release() {
+        let slider = InteractiveSliderState::new("test-seek", |_, _| {}, |_, _| {}, |_, _| {});
+        assert!(!slider.defer_commit_until_release);
+        assert!(slider.defer_commit_until_release().defer_commit_until_release);
     }
 
     #[test]

@@ -172,7 +172,8 @@ impl PlaybackProgress {
                     });
                 }
             },
-        ));
+        )
+        .defer_commit_until_release());
     }
 
     pub(super) fn sync(
