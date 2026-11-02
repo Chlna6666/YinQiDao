@@ -647,19 +647,35 @@ impl MusicApp {
             .enumerate()
             .map(|(index, track)| (track.id, index))
             .collect::<HashMap<_, _>>();
-        let output_devices = AudioEngine::output_devices().unwrap_or_default();
+        // Render-key/state unit tests must not create native audio endpoints or
+        // register OS media callbacks. On Windows CI these can outlive their
+        // test owners and crash the process with STATUS_ACCESS_VIOLATION.
+        // AudioEngine has its own dedicated engine tests.
+        let output_devices = if cfg!(test) {
+            Vec::new()
+        } else {
+            AudioEngine::output_devices().unwrap_or_default()
+        };
         let (library_update_tx, library_update_rx) = std::sync::mpsc::channel();
         let (media_event_tx, media_event_rx) = std::sync::mpsc::channel();
-        let system_media = crate::media_controls::SystemMediaBridge::new(media_event_tx.clone());
-        let engine = AudioEngine::new_with_device(
-            config.output_device.as_deref(),
-            config.volume,
-            config.eq.clone(),
-            config.spatial.clone(),
-        )
-        .or_else(|_| AudioEngine::new(config.volume, config.eq.clone(), config.spatial.clone()))
-        .ok()
-        .map(Arc::new);
+        let system_media = if cfg!(test) {
+            None
+        } else {
+            crate::media_controls::SystemMediaBridge::new(media_event_tx.clone())
+        };
+        let engine = if cfg!(test) {
+            None
+        } else {
+            AudioEngine::new_with_device(
+                config.output_device.as_deref(),
+                config.volume,
+                config.eq.clone(),
+                config.spatial.clone(),
+            )
+            .or_else(|_| AudioEngine::new(config.volume, config.eq.clone(), config.spatial.clone()))
+            .ok()
+            .map(Arc::new)
+        };
 
         let mut initial_track = config
             .current_track

@@ -2357,7 +2357,8 @@ mod tests {
     #[test]
     fn lyric_width_uses_the_measured_stage_column() {
         assert_eq!(stage_lyric_content_width(700.0, 1200.0), 580.0);
-        assert_eq!(stage_lyric_content_width(200.0, 1200.0), 180.0);
+        // The lyric column reserves 120px of inner horizontal padding.
+        assert_eq!(stage_lyric_content_width(200.0, 1200.0), 80.0);
     }
 
     #[test]
@@ -2420,12 +2421,12 @@ mod tests {
     }
 
     #[test]
-    fn quemusic_alignment_uses_thirty_two_percent_of_local_lyrics_viewport() {
+    fn active_lyric_alignment_uses_forty_two_percent_of_local_viewport() {
         let viewport_height = 600.0;
         let prefix = [0.0, 82.0, 164.0];
         let anchor = viewport_height * LYRIC_ANCHOR_RATIO;
-        assert_eq!(LYRIC_ANCHOR_RATIO, 0.32);
-        assert!((playback_stack_row_top(1, 1, &prefix, anchor) - 192.0).abs() < 0.001);
+        assert_eq!(LYRIC_ANCHOR_RATIO, 0.42);
+        assert!((playback_stack_row_top(1, 1, &prefix, anchor) - 252.0).abs() < 0.001);
     }
 
     #[test]

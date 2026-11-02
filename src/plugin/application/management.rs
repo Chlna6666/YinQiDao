@@ -1018,7 +1018,12 @@ auth_methods = ["qr_code"]
         let renamed = inspect_plugin_file(&cargo_wasm).expect("accept compiled filename");
         assert_eq!(renamed.component_file, "provider.wasm");
         assert_eq!(renamed.component_bytes, newer_wasm.len() as u64);
-        assert_eq!(renamed.package_dir, temp);
+        // Windows CI may return an 8.3 short temp path, whereas plugin inspection
+        // canonicalizes it into an extended-length long path (\\\\?\\ prefix).
+        assert_eq!(
+            renamed.package_dir,
+            fs::canonicalize(&temp).expect("canonical test package directory")
+        );
         let staged = stage_selected_wasm(&renamed).expect("stage selected WASM");
         assert_eq!(
             fs::read(staged.package_dir.join("provider.wasm")).expect("staged component"),
