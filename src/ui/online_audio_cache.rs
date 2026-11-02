@@ -17,7 +17,8 @@ use crate::{
 };
 
 const MAX_READY_TRACKS: usize = 6;
-const MAX_BACKGROUND_DOWNLOADS: usize = 2;
+// All online downloads (foreground AND background) share the same budget.
+const MAX_ACTIVE_DOWNLOADS: usize = 2;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct AudioKey {
@@ -46,6 +47,7 @@ struct Pending {
     receiver: watch::Receiver<Option<PreparedResult>>,
     abort: tokio::task::AbortHandle,
     background: bool,
+    sequence: u64,
 }
 
 #[derive(Default)]
@@ -54,6 +56,7 @@ struct CacheState {
     order: VecDeque<AudioKey>,
     pending: HashMap<AudioKey, Pending>,
     epoch: u64,
+    next_sequence: u64,
 }
 
 impl CacheState {
@@ -149,29 +152,32 @@ impl OnlineAudioCache {
             }
             return Some(pending.receiver.clone());
         }
-        if background
-            && state
-                .pending
-                .values()
-                .filter(|pending| pending.background)
-                .count()
-                >= MAX_BACKGROUND_DOWNLOADS
-        {
-            return None;
-        }
-        // Foreground click wins over an unrelated speculative download.
-        if !background
-            && let Some(evict_key) = state
+        if state.pending.len() >= MAX_ACTIVE_DOWNLOADS {
+            if background {
+                // Never displace an audible/foreground request just to warm
+                // another song. The following transport switch will rescan.
+                return None;
+            }
+            // The newest user click is authoritative. Evict an unrelated
+            // speculative download first; otherwise evict the oldest request
+            // left behind by a superseded foreground click.
+            let victim = state
                 .pending
                 .iter()
-                .find_map(|(key, pending)| pending.background.then(|| key.clone()))
-        {
-            if let Some(pending) = state.pending.remove(&evict_key) {
+                .filter(|(_, pending)| pending.background)
+                .min_by_key(|(_, pending)| pending.sequence)
+                .or_else(|| state.pending.iter().min_by_key(|(_, pending)| pending.sequence))
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim
+                && let Some(pending) = state.pending.remove(&victim)
+            {
                 pending.abort.abort();
             }
         }
 
         let epoch = state.epoch;
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.wrapping_add(1);
         let (tx, rx) = watch::channel(None);
         let cache = Arc::clone(self);
         let worker_key = key.clone();
@@ -211,6 +217,7 @@ impl OnlineAudioCache {
                 receiver: rx.clone(),
                 abort: join.abort_handle(),
                 background,
+                sequence,
             },
         );
         Some(rx)
