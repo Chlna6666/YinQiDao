@@ -9,6 +9,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock, Weak},
+    any::Any,
     time::Duration,
 };
 use symphonia::core::io::MediaSource;
@@ -29,11 +30,12 @@ struct Progress {
     error: Option<String>,
 }
 
-#[derive(Debug)]
 pub(crate) struct ProgressiveSession {
     file: PathBuf,
     progress: Mutex<Progress>,
     changed: Condvar,
+    // Keep the Host disk reservation alive for the lifetime of any streaming reader.
+    reservation: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
 }
 
 static SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Weak<ProgressiveSession>>>> = OnceLock::new();
@@ -52,11 +54,16 @@ impl ProgressiveSession {
                 error: None,
             }),
             changed: Condvar::new(),
+            reservation: Mutex::new(None),
         });
         let mut entries = sessions().lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|_, weak| weak.strong_count() > 0);
         entries.insert(file, Arc::downgrade(&session));
         session
+    }
+
+    pub(crate) fn hold_reservation<T: Any + Send + Sync>(&self, reservation: Arc<T>) {
+        *self.reservation.lock().unwrap_or_else(|e| e.into_inner()) = Some(reservation);
     }
 
     pub(crate) fn written(&self, available: u64) {
