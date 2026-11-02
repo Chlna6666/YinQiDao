@@ -522,3 +522,48 @@ RecommendationEngine
 4. 再迁移 Spotify/咪咕/酷狗等。
 
 真实 Provider 插件应该独立于 Host 发布周期；Host 在稳定 ABI 发布后再承担正式兼容承诺。
+
+## 18. 通用 Provider 路由与媒体缓存一致性
+
+所有后续音乐平台必须复用 `plugins/wit/yinqidao-plugin.wit` 的
+`provider` / `types` 接口，通过声明的 Capability 和 AuthMethod 接入，不在
+`MusicApp` / `AudioEngine` 添加按平台名称分支。每个插件可以声明多个 Provider。
+
+### 18.1 统一身份命名空间
+
+- **插件实例**：`manifest.id`，在安装管理器中唯一；新增插件不得占用其他插件 ID。
+- **Provider**：`(plugin_id, provider_id)`；`SourceTrackRef.provider_id`
+  必须与本次路由 `PluginRoute.provider_id` 完全相同。
+- **认证账号**：`(plugin_id, provider_id, account_id)`；即使两个平台返回相同
+  `account_id`，也绝不能共享 Secret、登录会话或缓存所有权。
+- **歌曲来源**：`(plugin_id, provider_id, account_id, source_id, quality,
+  plugin_revision)`；不同 Provider 的相同 `source_id` 是完全不同的歌曲。
+- **本地播放 ID**：`TrackId` 是一次播放实例的临时进程内 ID，不是在线歌曲的
+  持久标识；重播缓存音频时需分配新 ID，不允许把旧 ID 回写为在线来源。
+
+### 18.2 缓存与任务去重
+
+在线音频采用两层缓存，且二者都属于 Host/应用层，不由 WASM Guest 自行控制：
+
+1. 内存层只保留少量已准备 `Track` 的引用和 Host 文件租约；同一规范化
+   路由/来源的预加载和正式播放共享在途任务，避免重复调用 Provider。
+2. 磁盘层使用 `PluginStreamCache` 的合法身份指纹、完成后原子提交、
+   受限并发和 GC 租约；不得把签名 URL、Cookie、Authorization 等敏感值
+   当作持久缓存身份或写入日志。
+3. 取消队列预加载的**调度**不应丢弃已经完成的缓存；取消网络请求、账号注销、
+   禁用插件和热更新必须遵守 Host 的租约、授权与版本失效机制。
+4. 一个来源解析失败时仅影响本次 Provider，不能污染其他账号或其他音乐插件。
+   跨平台识别使用 `TrackQuery` 的语义匹配，而不是把各平台的 `source_id`
+   强行视为同一个对象。
+
+### 18.3 插件兼容性和验证
+
+- 新增能力以 Host 的 WIT/ABI 版本协商为准；不支持的 Capability 应安全降级，
+  不允许因为某平台缺少歌词、音质或认证方式就影响其他 Provider。
+- 插件热更新必须使不兼容的已准备音频缓存失效；真实播放请求需重新验证
+  Provider/账号/来源一致性。
+- 每个新增 Provider 的回归测试应包括：不同插件相同 `source_id`、不同账号
+  相同 `source_id`、Provider/source 不匹配、热更新后缓存失效、并发切歌、
+  登录失效及缓存磁盘 GC。
+
+上述约定兼容当前 WIT v0.1 接口；它不意味着现有插件已支持所有可选能力。
