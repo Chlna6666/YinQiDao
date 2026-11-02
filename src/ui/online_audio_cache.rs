@@ -74,6 +74,22 @@ impl CacheState {
         self.order.push_back(key.clone());
     }
 
+    fn usable(&mut self, key: &AudioKey) -> Option<Track> {
+        let track = self.ready.get(key).cloned()?;
+        if let Some(session) = crate::audio::progressive::lookup(&track.path)
+            && matches!(
+                session.snapshot(),
+                crate::audio::progressive::DownloadState::Failed(_)
+            )
+        {
+            self.ready.remove(key);
+            self.order.retain(|candidate| candidate != key);
+            return None;
+        }
+        self.mark_used(key);
+        Some(track)
+    }
+
     fn insert(&mut self, key: AudioKey, track: Track) {
         self.ready.insert(key.clone(), track);
         self.mark_used(&key);
@@ -103,10 +119,7 @@ impl OnlineAudioCache {
         }
         let key = AudioKey::new(route, source);
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        let track = state.ready.get(&key).cloned();
-        if track.is_some() {
-            state.mark_used(&key);
-        }
+        let track = state.usable(&key);
         // Every new playback receives a fresh transient ID: reusing the ID
         // of the original prefetch would alias an old track/crossfade state.
         track.and_then(|track| fresh_playback_track(track).ok())
@@ -158,7 +171,7 @@ impl OnlineAudioCache {
         let key = AudioKey::new(&route, &remote.source);
         let handle = crate::runtime::io_handle().ok()?;
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some(track) = state.ready.get(&key).cloned() {
+        if let Some(track) = state.usable(&key) {
             let (tx, rx) = watch::channel(Some(Ok(track)));
             drop(tx);
             return Some(rx);
@@ -248,6 +261,9 @@ impl OnlineAudioCache {
     /// Clear account-bound audio and cancel outstanding requests when plugins
     /// are disabled or the account session is revoked.
     pub(super) fn clear(&self) {
+        // Host must stop detached progressive transfers too: aborting a frontend
+        // waiter alone does not cancel the shared HTTP writer after early Ready.
+        crate::audio::progressive::cancel_all();
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         state.epoch = state.epoch.wrapping_add(1);
         for (_, pending) in state.pending.drain() {

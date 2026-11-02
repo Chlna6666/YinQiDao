@@ -99,6 +99,9 @@ impl ProgressiveSession {
 
     pub(crate) fn finish(&self, error: Option<String>) {
         let mut state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if state.complete {
+            return;
+        }
         if state.error.is_none() {
             state.error = error;
         }

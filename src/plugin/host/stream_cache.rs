@@ -895,6 +895,9 @@ fn write_temp_entry(
 
         let mut written = 0u64;
         while let Some(chunk) = receiver.blocking_recv() {
+            if live.as_ref().is_some_and(|session| session.is_cancelled()) {
+                bail!("Host 已取消在线音频下载");
+            }
             written = written
                 .checked_add(chunk.len() as u64)
                 .ok_or_else(|| anyhow!("插件 stream cache 写入长度溢出"))?;
