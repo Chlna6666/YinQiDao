@@ -144,7 +144,11 @@ impl OnlineAudioCache {
             return Some(pending.receiver.clone());
         }
         if background
-            && state.pending.values().filter(|pending| pending.background).count()
+            && state
+                .pending
+                .values()
+                .filter(|pending| pending.background)
+                .count()
                 >= MAX_BACKGROUND_DOWNLOADS
         {
             return None;
@@ -257,7 +261,10 @@ mod tests {
         };
         let first = AudioKey::new(
             &route,
-            &SourceTrackRef { provider_id: "netease".into(), source_id: "0".into() },
+            &SourceTrackRef {
+                provider_id: "netease".into(),
+                source_id: "0".into(),
+            },
         );
         for index in 0..(MAX_READY_TRACKS + 3) {
             let key = AudioKey::new(
