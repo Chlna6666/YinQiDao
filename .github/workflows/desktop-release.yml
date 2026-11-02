@@ -1,0 +1,173 @@
+name: Desktop builds and releases
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'assets/**'
+      - 'vendor/**'
+      - '.github/workflows/desktop-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: YinQiDao (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+          - platform: linux-x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang cmake libasound2-dev libudev-dev libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev \
+            libxcb-composite0-dev libxcb-xkb-dev libxrandr-dev \
+            libfontconfig1-dev libfreetype6-dev libdbus-1-dev \
+            libvulkan-dev libgl1-mesa-dev libgtk-3-dev
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Assemble Windows distribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/YinQiDao-windows-x64" | Out-Null
+          Copy-Item target/release/yin_qi_dao.exe dist/YinQiDao-windows-x64/YinQiDao.exe
+          Copy-Item LICENSE dist/YinQiDao-windows-x64/
+          Copy-Item README.md dist/YinQiDao-windows-x64/
+          Compress-Archive -Path dist/YinQiDao-windows-x64 -DestinationPath dist/YinQiDao-windows-x64.zip -Force
+          Get-FileHash dist/YinQiDao-windows-x64.zip -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  YinQiDao-windows-x64.zip" } |
+            Set-Content dist/YinQiDao-windows-x64.zip.sha256 -Encoding ascii
+      - name: Assemble Linux distribution
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/YinQiDao-linux-x64
+          install -m755 target/release/yin_qi_dao dist/YinQiDao-linux-x64/yin_qi_dao
+          cp LICENSE README.md dist/YinQiDao-linux-x64/
+          tar -C dist -czf dist/YinQiDao-linux-x64.tar.gz YinQiDao-linux-x64
+          cd dist
+          sha256sum YinQiDao-linux-x64.tar.gz > YinQiDao-linux-x64.tar.gz.sha256
+      - name: Upload executable and SHA256
+        uses: actions/upload-artifact@v4
+        with:
+          name: YinQiDao-${{ matrix.platform }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  plugins:
+    name: Shared WASM plug-in (${{ matrix.plugin }})
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [netease, qqmusic]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/${{ matrix.plugin }}
+      - name: Build WASI component once for all platforms
+        run: cargo build --manifest-path plugins/${{ matrix.plugin }}/Cargo.toml --target wasm32-wasip2 --release --locked
+      - name: Produce an installable ZIP archive
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import zipfile
+          import hashlib
+          plugin = os.environ["PLUGIN"]
+          component = f"yinqidao_{plugin}_plugin.wasm"
+          folder = pathlib.Path("plugins") / plugin
+          wasm = folder / "target" / "wasm32-wasip2" / "release" / component
+          if wasm.read_bytes()[:4] != b"\\0asm":
+              raise SystemExit("Invalid component magic")
+          dist = pathlib.Path("dist")
+          dist.mkdir(exist_ok=True)
+          output = dist / f"YinQiDao-{plugin}-plugin.zip"
+          with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+              archive.write(folder / "plugin.toml", "plugin.toml")
+              archive.write(wasm, "provider.wasm")
+          digest = hashlib.sha256(output.read_bytes()).hexdigest()
+          (dist / f"{output.name}.sha256").write_text(f"{digest}  {output.name}\\n")
+          print(output, output.stat().st_size)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YinQiDao-plugin-${{ matrix.plugin }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  github-release:
+    name: Publish tagged desktop release
+    needs: [desktop, plugins]
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches application version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          assert os.environ["GITHUB_REF_NAME"] == f"v{version}", "Release tag differs from Cargo package version"
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: YinQiDao-*
+          path: release-files
+          merge-multiple: true
+      - name: Verify release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-files
+          for file in *.sha256; do sha256sum --check "$file"; done
+          test -s YinQiDao-windows-x64.zip
+          test -s YinQiDao-linux-x64.tar.gz
+          test -s YinQiDao-netease-plugin.zip
+          test -s YinQiDao-qqmusic-plugin.zip
+      - name: Publish GitHub Release only after all builds succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release-files/* --verify-tag --generate-notes --title "YinQiDao ${GITHUB_REF_NAME}"
