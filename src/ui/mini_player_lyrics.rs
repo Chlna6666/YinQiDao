@@ -51,7 +51,9 @@ pub(super) fn mini_player(
                 .active(|style| style.scale(0.94))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(|app, _, _, cx| app.open_modal(super::components::modal::GlobalModal::QuickAudio, cx)),
+                    cx.listener(|app, _, _, cx| {
+                        app.open_modal(super::components::modal::GlobalModal::QuickAudio, cx)
+                    }),
                 )
                 .child("音效"),
         )

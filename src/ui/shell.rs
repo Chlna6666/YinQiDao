@@ -742,15 +742,18 @@ impl MusicApp {
         // Rehydrate the online playlist context independently of ephemeral
         // negative TrackId mappings. A plugin can resolve the next SourceTrackRef
         // after the account session has been restored.
-        let restored_online_playlist_queue = config.online_playlist_queue.as_ref().and_then(|saved| {
-            (!saved.tracks.is_empty() && saved.current_index < saved.tracks.len()
-                && saved.tracks.len() <= 2000).then(|| OnlinePlaylistQueue {
-                    route: saved.route.clone(),
-                    playlist_title: saved.playlist_title.clone(),
-                    tracks: saved.tracks.clone(),
-                    current_index: saved.current_index,
-                })
-        });
+        let restored_online_playlist_queue =
+            config.online_playlist_queue.as_ref().and_then(|saved| {
+                (!saved.tracks.is_empty()
+                    && saved.current_index < saved.tracks.len()
+                    && saved.tracks.len() <= 2000)
+                    .then(|| OnlinePlaylistQueue {
+                        route: saved.route.clone(),
+                        playlist_title: saved.playlist_title.clone(),
+                        tracks: saved.tracks.clone(),
+                        current_index: saved.current_index,
+                    })
+            });
 
         let initial_snapshot = PlayerSnapshot {
             state: PlaybackState::Paused,

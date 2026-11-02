@@ -1,4 +1,3 @@
-use lucide_gpui::icon;
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, hsla, prelude::*, px};
 use lucide_gpui::icon;
 
@@ -75,7 +74,10 @@ fn render_quick_audio_modal(app: &MusicApp, cx: &mut Context<MusicApp>) -> AnyEl
         .flex()
         .items_center()
         .justify_center()
-        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|app, _, _, cx| app.close_modal(cx)))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|app, _, _, cx| app.close_modal(cx)),
+        )
         .child(
             div()
                 .id("quick-audio-panel")
@@ -104,10 +106,19 @@ fn render_quick_audio_modal(app: &MusicApp, cx: &mut Context<MusicApp>) -> AnyEl
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .child(div().text_lg().font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::TEXT_PRIMARY).child("实时音效调节"))
-                                .child(div().text_xs().text_color(theme::TEXT_SECONDARY)
-                                    .child("与偏好设置共用 EQ 和空间音效参数，修改即时生效")),
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme::TEXT_PRIMARY)
+                                        .child("实时音效调节"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::TEXT_SECONDARY)
+                                        .child("与偏好设置共用 EQ 和空间音效参数，修改即时生效"),
+                                ),
                         )
                         .child(
                             div()
@@ -116,9 +127,15 @@ fn render_quick_audio_modal(app: &MusicApp, cx: &mut Context<MusicApp>) -> AnyEl
                                 .rounded_full()
                                 .p_2()
                                 .hover(|s| s.bg(theme::bg_hover()))
-                                .child(theme::themed_icon(icon!(x), 17.0, theme::TEXT_SECONDARY.into()))
-                                .on_mouse_down(gpui::MouseButton::Left,
-                                    cx.listener(|app, _, _, cx| app.close_modal(cx))),
+                                .child(theme::themed_icon(
+                                    icon!(x),
+                                    17.0,
+                                    theme::TEXT_SECONDARY.into(),
+                                ))
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(|app, _, _, cx| app.close_modal(cx)),
+                                ),
                         ),
                 )
                 .child(crate::ui::settings::render_quick_audio_content(app, cx)),

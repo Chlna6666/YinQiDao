@@ -65,7 +65,10 @@ pub(crate) fn render_quick_audio_content(
     app: &MusicApp,
     cx: &mut Context<MusicApp>,
 ) -> gpui::AnyElement {
-    div().flex().flex_col().gap_4()
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
         .child(base::eq_group(app, cx))
         .child(base::spatial_group(app, cx))
         .into_any_element()
@@ -100,7 +103,10 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
                 .is_some_and(|current| current.pathname == target.pathname);
             let target_for_click = target.clone();
             nav = nav.child(workspace_button_dynamic(
-                SharedString::from(format!("settings-plugin-route-{}", target.summary.qualified_id)),
+                SharedString::from(format!(
+                    "settings-plugin-route-{}",
+                    target.summary.qualified_id
+                )),
                 target.summary.title.clone(),
                 active,
                 cx.listener(move |this, _, _, cx| {
@@ -116,8 +122,10 @@ pub(super) fn render(app: &MusicApp, cx: &mut Context<MusicApp>) -> gpui::AnyEle
         .flex()
         .flex_col()
         .bg(theme::BG_CANVAS)
-        .children((active_plugin_route.is_some() || selected == SettingsWorkspace::Extensions)
-            .then_some(nav))
+        .children(
+            (active_plugin_route.is_some() || selected == SettingsWorkspace::Extensions)
+                .then_some(nav),
+        )
         .child(div().flex_1().min_h(px(0.0)).overflow_hidden().child(body))
         .into_any_element()
 }
