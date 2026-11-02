@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    AnimationProperty, IntoElement, ObjectFit, Render, SharedString, StyleRefinement,
+    Subscription, Window, div, img, linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -121,6 +121,19 @@ impl StageLayoutMetrics {
 
     fn artwork_cluster_height(self) -> f32 {
         self.cover_size + self.metadata_height + self.controls_height + 2.0 * self.cluster_gap
+    }
+
+    /// The visible player centers the whole artwork/metadata/controls cluster.
+    /// When chrome vanishes, move only the cover into the column's center,
+    /// leaving the column width and lyrics layout perfectly stationary.
+    fn immersive_cover_offset_y(self) -> f32 {
+        if !self.horizontal {
+            // On narrow stacked layouts vertical translation would overlap
+            // lyrics below the artwork; do not move the cover in that mode.
+            return 0.0;
+        }
+        ((self.artwork_cluster_height() - self.cover_size) * 0.5)
+            .min((self.content_height - self.cover_size).max(0.0) * 0.5)
     }
 }
 
@@ -393,6 +406,24 @@ impl Render for StagePlayerView {
             .justify_center()
             .child(controls);
 
+        // Paint/compositor-only positioning: the retained square stays in
+        // its natural-height slot, while the hidden-chrome target centers the
+        // actual cover instead of the (now invisible) whole controls cluster.
+        // Use the same interruptible sampled motion as metadata/titlebar.
+        let cover_offset = layout.immersive_cover_offset_y();
+        let cover = div()
+            .w(px(layout.cover_size))
+            .h(px(layout.cover_size))
+            .flex_none()
+            .child(stage_artwork(&self.cover, layout.cover_size))
+            .with_sampled_animation(
+                AnimationProperty::translation(
+                    point(px(0.0), px(0.0)),
+                    point(px(0.0), px(cover_offset)),
+                ),
+                (1.0 - visible_progress).clamp(0.0, 1.0),
+            );
+
         let artwork_column = div()
             .w(px(layout.artwork_column_width))
             .h(if layout.horizontal {
@@ -406,7 +437,7 @@ impl Render for StagePlayerView {
             .items_center()
             .justify_center()
             .gap(px(layout.cluster_gap))
-            .child(stage_artwork(&self.cover, layout.cover_size))
+            .child(cover)
             .child(
                 div()
                     .w_full()
@@ -570,6 +601,26 @@ fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_hidden_centers_cover_without_changing_column_geometry() {
+        let hidden = StageLayoutMetrics::compute(1099.0, 706.0, 0.0);
+        let visible = StageLayoutMetrics::compute(1099.0, 706.0, 1.0);
+        assert!(hidden.horizontal);
+        assert_eq!(hidden.cover_size, visible.cover_size);
+        assert_eq!(hidden.lyrics_column_width, visible.lyrics_column_width);
+        let original_cover_top =
+            (hidden.content_height - hidden.artwork_cluster_height()) * 0.5;
+        let centered_cover_top = original_cover_top + hidden.immersive_cover_offset_y();
+        assert!(
+            (centered_cover_top - (hidden.content_height - hidden.cover_size) * 0.5).abs()
+                < 0.01
+        );
+        assert_eq!(
+            StageLayoutMetrics::compute(640.0, 700.0, 0.0).immersive_cover_offset_y(),
+            0.0
+        );
+    }
 
     #[test]
     fn golden_ratio_allocates_desktop_columns_without_hidden_chrome_drift() {

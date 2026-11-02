@@ -102,8 +102,6 @@ struct LyricRowVisualMotion {
     curve_x2: f32,
     from_viewport_alpha: f32,
     to_viewport_alpha: f32,
-    from_viewport_blur: f32,
-    to_viewport_blur: f32,
 }
 
 #[derive(Default)]
@@ -1056,15 +1054,13 @@ impl Render for StageLyricsView {
                     &self.row_prefix_sum,
                     anchor_y,
                 );
-                let (mut from_alpha, mut from_blur) =
+                let (mut from_alpha, _) =
                     playback_stack_viewport_profile(from_y, row_height, viewport_height);
-                let (mut to_alpha, mut to_blur) =
+                let (mut to_alpha, _) =
                     playback_stack_viewport_profile(to_y, row_height, viewport_height);
                 if hovered {
                     from_alpha = 1.0;
                     to_alpha = 1.0;
-                    from_blur = 0.0;
-                    to_blur = 0.0;
                 }
 
                 let relative = index as isize - handoff.to_active as isize;
@@ -1078,10 +1074,11 @@ impl Render for StageLyricsView {
                     curve_x2,
                     from_viewport_alpha: from_alpha,
                     to_viewport_alpha: to_alpha,
-                    from_viewport_blur: from_blur,
-                    to_viewport_blur: to_blur,
                 });
-                (to_y, to_alpha, to_blur, motion)
+                // No animated Gaussian blur on moving glyphs: that requires
+                // a new text offscreen pass during each lyric-scroll frame.
+                // Restore the quantized edge depth cue once motion settles.
+                (to_y, to_alpha, 0.0, motion)
             } else {
                 let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
                 let (mut viewport_alpha, mut viewport_blur) =
@@ -1094,6 +1091,18 @@ impl Render for StageLyricsView {
                 }
                 (y, viewport_alpha, viewport_blur, None)
             };
+
+            // Virtualize rows outside both the previous and target viewport
+            // positions, with one-row overscan for easing/transform effects.
+            let from_y = y + row_motion.map_or(0.0, |motion| motion.offset_y);
+            if !lyric_row_intersects_viewport(
+                from_y,
+                y,
+                row_height,
+                viewport_height,
+            ) {
+                continue;
+            }
 
             let active_karaoke_overlay = if !reading_mode && index == active {
                 active_karaoke_line.as_ref().map(|view| {
@@ -1271,13 +1280,12 @@ fn render_lyric_row(
     } else {
         previous_profile.map_or(target_alpha, |previous| previous.0)
     };
-    let resolved_blur = if hovered { 0.0 } else { target_blur };
-    let blur_transition = row_motion
-        .filter(|motion| (motion.from_viewport_blur - motion.to_viewport_blur).abs() > 0.001);
-    let static_blur = if blur_transition.is_some() {
+    // Do not animate GPU blur simultaneously with row translation. This
+    // avoids repeatedly allocating/rasterizing text blur layers on movement.
+    let static_blur = if hovered || row_motion.is_some() {
         0.0
     } else {
-        resolved_blur
+        target_blur
     };
     let focus_transition = previous_active.is_some()
         && focus_started_at
@@ -1325,33 +1333,6 @@ fn render_lyric_row(
             .with_animation(
                 ElementId::NamedInteger(
                     SharedString::new_static("lyric-focus"),
-                    lyric_animation_instance_id(motion_epoch, index),
-                ),
-                animation,
-                |element, _| element,
-            )
-            .into_any_element();
-    }
-
-    if let Some(motion) = blur_transition {
-        let animation = Animation::from_spec(
-            AnimationSpec::new(motion.duration)
-                .delay(motion.delay)
-                .ease(Easing::CubicBezier {
-                    x1: LYRIC_MOTION_BEZIER_X1,
-                    y1: LYRIC_MOTION_BEZIER_Y1,
-                    x2: motion.curve_x2,
-                    y2: LYRIC_MOTION_BEZIER_Y2,
-                }),
-        )
-        .with_property(AnimationProperty::blur(
-            px(motion.from_viewport_blur),
-            px(motion.to_viewport_blur),
-        ));
-        text = text
-            .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("lyric-viewport-blur"),
                     lyric_animation_instance_id(motion_epoch, index),
                 ),
                 animation,
@@ -2116,6 +2097,20 @@ fn stage_lyric_content_width(viewport_width: f32, window_width: f32) -> f32 {
     (column_width - 120.0).max(1.0)
 }
 
+/// Keep one measured row outside either endpoint of an interrupted scroll.
+#[inline]
+fn lyric_row_intersects_viewport(
+    from_top: f32,
+    to_top: f32,
+    row_height: f32,
+    viewport_height: f32,
+) -> bool {
+    let overscan = PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX;
+    let bottom = from_top.max(to_top) + row_height;
+    let top = from_top.min(to_top);
+    bottom >= -overscan && top <= viewport_height + overscan
+}
+
 #[inline]
 fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
     let index_prefix = prefix_sum
@@ -2371,6 +2366,14 @@ mod tests {
         assert_eq!(stage_lyric_content_width(700.0, 1200.0), 580.0);
         // The lyric column reserves 120px of inner horizontal padding.
         assert_eq!(stage_lyric_content_width(200.0, 1200.0), 80.0);
+    }
+
+    #[test]
+    fn moving_lyric_overscan_keeps_entering_rows_and_culls_far_rows() {
+        assert!(lyric_row_intersects_viewport(-110.0, 40.0, 82.0, 600.0));
+        assert!(lyric_row_intersects_viewport(670.0, 550.0, 82.0, 600.0));
+        assert!(!lyric_row_intersects_viewport(900.0, 850.0, 82.0, 600.0));
+        assert!(!lyric_row_intersects_viewport(-400.0, -300.0, 82.0, 600.0));
     }
 
     #[test]
