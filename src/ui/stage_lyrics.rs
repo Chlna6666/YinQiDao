@@ -1115,7 +1115,11 @@ impl Render for StageLyricsView {
                 reading_mode || handoff.is_none(),
                 karaoke_epoch,
                 active_karaoke_overlay,
-                !self.row_height_measured.get(index).copied().unwrap_or(false)
+                !self
+                    .row_height_measured
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
                     || index == active,
                 view.clone(),
                 parent.clone(),

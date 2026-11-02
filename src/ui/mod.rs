@@ -15,10 +15,10 @@ mod mini_player_lyrics;
 mod mini_player_view;
 mod online_audio_cache;
 mod online_playlist;
-mod quick_audio_window;
 mod player_facade;
 #[allow(dead_code)]
 mod player_legacy;
+mod quick_audio_window;
 #[rustfmt::skip]
 mod player_stage;
 #[path = "plugin/command_palette.rs"]

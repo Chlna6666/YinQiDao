@@ -59,7 +59,7 @@ pub(super) fn mini_player(
                     }),
                 )
                 .child(theme::themed_icon(
-                    lucide_gpui::icon!(sliders-horizontal),
+                    lucide_gpui::icon!(sliders_horizontal),
                     17.0,
                     theme::TEXT_TERTIARY.into(),
                 )),
