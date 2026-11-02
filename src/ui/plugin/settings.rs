@@ -161,7 +161,7 @@ pub(crate) fn confirm_import(
     cx: &mut Context<MusicApp>,
 ) {
     let plugin_id = candidate.plugin_id.clone();
-    let action_verb = match candidate.install_status {
+    let action_verb = match &candidate.install_status {
         management::PluginInstallStatus::NewInstall => "导入",
         management::PluginInstallStatus::Upgrade { .. } => "升级",
         management::PluginInstallStatus::SameVersion { .. } => "覆盖",
@@ -171,11 +171,9 @@ pub(crate) fn confirm_import(
         return;
     }
     let task = Tokio::spawn_result(cx, async move {
-        let package_dir = candidate.package_dir;
-        let imported =
-            tokio::task::spawn_blocking(move || management::import_directory(&package_dir))
-                .await
-                .map_err(|_| anyhow!("插件导入任务异常退出"))??;
+        let imported = tokio::task::spawn_blocking(move || management::import_candidate(&candidate))
+            .await
+            .map_err(|_| anyhow!("插件导入任务异常退出"))??;
         let plugins = tokio::task::spawn_blocking(management::list_installed)
             .await
             .map_err(|_| anyhow!("插件列表刷新任务异常退出"))??;

@@ -39,4 +39,20 @@ cargo check --manifest-path plugins/qqmusic/Cargo.toml --target wasm32-wasip2 --
 cargo build --manifest-path plugins/qqmusic/Cargo.toml --target wasm32-wasip2 --release --locked
 ```
 
-产物 `target/wasm32-wasip2/release/yinqidao_qqmusic_plugin.wasm` 经 `wasm-tools component new` 适配后，在应用「设置 → 插件」中导入（目录内含 `plugin.toml` + `provider.wasm`）。
+构建产物：`plugins/qqmusic/target/wasm32-wasip2/release/yinqidao_qqmusic_plugin.wasm`。
+
+`wasm32-wasip2` 目标通常直接生成 WebAssembly Component，无需再运行
+`wasm-tools component new`。在「插件中心 → 导入插件」中直接选择该文件即可；
+导入器从上级 `plugins/qqmusic/plugin.toml` 读取元数据，并临时将所选 WASM
+规范化为清单中的 `provider.wasm`，不会修改构建输出或复制整个 `target/`。
+
+手动打包时使用：
+
+```text
+io.yinqidao.qqmusic/
+├── plugin.toml
+└── provider.wasm
+```
+
+`plugin.toml` 复制自 `plugins/qqmusic/plugin.toml`，将编译产物复制并命名为
+`provider.wasm`。注意 QQ 与网易云插件的 `plugin.toml`、WASM 不能混用。

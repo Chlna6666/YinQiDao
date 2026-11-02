@@ -217,61 +217,91 @@ pub fn import_directory(path: &Path) -> Result<PluginImportSummary> {
     })
 }
 
-pub fn import_file(file_path: &Path) -> Result<PluginImportSummary> {
-    let canonical = fs::canonicalize(file_path)
-        .with_context(|| format!("读取插件文件路径失败: {}", file_path.display()))?;
-    if canonical.is_dir() {
-        return import_directory(&canonical);
+/// Import exactly the WASM chosen during preflight. Cargo's output name does not
+/// need to match the installed filename declared by plugin.toml.
+pub fn import_candidate(candidate: &PluginImportCandidate) -> Result<PluginImportSummary> {
+    // The source could change while the confirmation dialog is open.
+    let current = inspect_plugin_file(&candidate.source_path)?;
+    if current.plugin_id != candidate.plugin_id
+        || current.name != candidate.name
+        || current.version != candidate.version
+        || current.component_file != candidate.component_file
+        || current.component_bytes != candidate.component_bytes
+    {
+        bail!("插件文件在确认期间已更改，请重新选择并检查插件信息");
     }
-    let parent = canonical
-        .parent()
-        .ok_or_else(|| anyhow!("无法解析插件文件所在目录: {}", file_path.display()))?;
 
-    let extension = canonical
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_default();
+    if !current.source_path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("wasm")) {
+        return import_directory(&current.package_dir);
+    }
 
-    if extension == "toml" || extension == "wasm" {
-        let manifest_path = if extension == "toml" {
-            canonical.clone()
-        } else {
-            let direct = parent.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
-            if direct.is_file() {
-                direct
-            } else {
-                let mut current = parent;
-                let mut found = None;
-                for _ in 0..4 {
-                    if let Some(p) = current.parent() {
-                        let candidate = p.join(super::host::catalog::PLUGIN_PACKAGE_FILE);
-                        if candidate.is_file() {
-                            found = Some(candidate);
-                            break;
-                        }
-                        current = p;
-                    }
-                }
-                found.unwrap_or(direct)
-            }
-        };
+    // Do not copy the Cargo workspace, which may include an enormous target tree.
+    let staged = stage_selected_wasm(&current)?;
+    import_directory(&staged.package_dir)
+}
 
-        if !manifest_path.is_file() {
-            bail!(
-                "未在所选插件同级或上级目录中找到 plugin.toml 清单文件。请确保插件包含 plugin.toml 与 .wasm 文件。"
-            );
-        }
+/// Normalize the selected compiled WASM and its manifest without modifying build outputs.
+fn stage_selected_wasm(candidate: &PluginImportCandidate) -> Result<StagedPluginDirectory> {
+    if !super::host::catalog::valid_identifier(&candidate.plugin_id) {
+        bail!("插件清单中的 id 非法");
+    }
+    let relative_component = Path::new(&candidate.component_file);
+    if relative_component.is_absolute()
+        || relative_component.as_os_str().is_empty()
+        || relative_component.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || relative_component.extension().and_then(|ext| ext.to_str()) != Some("wasm")
+    {
+        bail!("插件清单中的 component 路径无效");
+    }
 
-        let package_dir = manifest_path
-            .parent()
-            .ok_or_else(|| anyhow!("无法解析插件清单所在目录"))?;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "yinqidao-plugin-import-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).with_context(|| format!("创建临时插件目录失败: {}", root.display()))?;
+    let package_dir = root.join(&candidate.plugin_id);
+    let staged = StagedPluginDirectory { root, package_dir };
+    let component_destination = staged.package_dir.join(relative_component);
+    if let Some(parent) = component_destination.parent() {
+        fs::create_dir_all(parent).context("创建临时组件目录失败")?;
+    }
+    fs::copy(
+        candidate.package_dir.join(super::host::catalog::PLUGIN_PACKAGE_FILE),
+        staged.package_dir.join(super::host::catalog::PLUGIN_PACKAGE_FILE),
+    )
+    .context("复制插件清单失败")?;
+    fs::copy(&candidate.source_path, component_destination)
+        .context("复制所选 WASM 组件失败")?;
+    Ok(staged)
+}
 
-        import_directory(package_dir)
-    } else {
-        bail!("不支持的文件类型 (.{extension})。请选择 .wasm 插件文件或 plugin.toml 清单");
+struct StagedPluginDirectory {
+    root: PathBuf,
+    package_dir: PathBuf,
+}
+
+impl Drop for StagedPluginDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
+
+pub fn import_file(file_path: &Path) -> Result<PluginImportSummary> {
+    let candidate = inspect_plugin_file(file_path)?;
+    import_candidate(&candidate)
+}
+
 
 fn compare_versions(v1: &str, v2: &str) -> std::cmp::Ordering {
     let parse = |v: &str| -> Vec<u64> {
@@ -388,29 +418,13 @@ pub fn inspect_plugin_file(file_path: &Path) -> Result<PluginImportCandidate> {
         bail!("插件清单中的 version 不能为空");
     }
 
-    if let Some(chosen) = chosen_component_path.as_ref() {
-        let chosen_name = chosen
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let declared_name = Path::new(&package.component)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if !chosen_name.is_empty() && !declared_name.is_empty() && chosen_name != declared_name {
-            bail!(
-                "所选 WASM 文件 ({chosen_name}) 与插件清单 {} 中声明的组件文件名 ({declared_name}) 不一致",
-                super::host::catalog::PLUGIN_PACKAGE_FILE
-            );
-        }
-    }
-
     // Validate component wasm file
     let component_path = package_dir.join(&package.component);
-    let resolved_component = if component_path.is_file() {
-        component_path
-    } else if let Some(chosen) = chosen_component_path.filter(|p| p.is_file()) {
+    // The explicitly selected compiled WASM wins over any stale provider.wasm.
+    let resolved_component = if let Some(chosen) = chosen_component_path {
         chosen
+    } else if component_path.is_file() {
+        component_path
     } else {
         bail!(
             "找不到清单声明的插件组件: {}（查找路径: {}）",
@@ -960,12 +974,26 @@ auth_methods = ["qr_code"]
         assert_eq!(candidate_from_toml.plugin_id, "test-plugin");
         assert_eq!(candidate_from_toml.component_bytes, 8);
 
-        // Mismatched wasm filename check
-        let mismatched_wasm = temp.join("other.wasm");
-        fs::write(&mismatched_wasm, wasm_bytes).expect("write other wasm");
-        let mismatch_err =
-            inspect_plugin_file(&mismatched_wasm).expect_err("should reject mismatched wasm");
-        assert!(mismatch_err.to_string().contains("不一致"));
+        // Cargo's filename is different from the installed component name.
+        // The selected output must win even when a stale provider.wasm exists.
+        let cargo_output = temp.join("target/wasm32-wasip2/release");
+        fs::create_dir_all(&cargo_output).expect("create cargo output");
+        let cargo_wasm = cargo_output.join("yinqidao_qqmusic_plugin.wasm");
+        let newer_wasm = b"\0asm\x01\0\0\0extra";
+        fs::write(&cargo_wasm, newer_wasm).expect("write cargo wasm");
+        let renamed = inspect_plugin_file(&cargo_wasm).expect("accept compiled filename");
+        assert_eq!(renamed.component_file, "provider.wasm");
+        assert_eq!(renamed.component_bytes, newer_wasm.len() as u64);
+        assert_eq!(renamed.package_dir, temp);
+        let staged = stage_selected_wasm(&renamed).expect("stage selected WASM");
+        assert_eq!(
+            fs::read(staged.package_dir.join("provider.wasm")).expect("staged component"),
+            newer_wasm.to_vec()
+        );
+        assert!(staged.package_dir.join("plugin.toml").is_file());
+        let stage_root = staged.root.clone();
+        drop(staged);
+        assert!(!stage_root.exists(), "temporary import must be cleaned up");
 
         // Corrupted wasm error check in isolated directory
         let bad_temp =

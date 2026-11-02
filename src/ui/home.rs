@@ -580,11 +580,13 @@ fn discover_feature_cards<V: 'static>(
     let card6_sub_rc = card6_subtitle.clone();
     let card6_cov_rc = card6_cover.map(String::from);
 
+    // No horizontal wheel-scrolling nested inside the vertically scrollable home:
+    // wheel/trackpad gestures otherwise compete and the last cards get clipped.
     div()
         .id("discover-feature-cards")
         .w_full()
-        .overflow_x_scroll()
         .flex()
+        .flex_wrap()
         .flex_none()
         .gap_4()
         .child(feature_card(
