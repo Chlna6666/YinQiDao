@@ -320,7 +320,9 @@ fn slider_visual_with_group(
     let base_track_layer = {
         let layer = div().absolute().inset_0().flex();
         let layer = if style.edge_overlay {
-            layer.items_start()
+            // The 2px line stays anchored at the player boundary, and
+            // the increased hover height grows only upward.
+            layer.items_end().pb(px(1.0))
         } else {
             layer.items_center()
         };
@@ -479,7 +481,9 @@ fn slider_visual_with_group_animated(
     let base_track_layer = {
         let layer = div().absolute().inset_0().flex();
         let layer = if style.edge_overlay {
-            layer.items_start()
+            // The 2px line stays anchored at the player boundary, and
+            // the increased hover height grows only upward.
+            layer.items_end().pb(px(1.0))
         } else {
             layer.items_center()
         };
