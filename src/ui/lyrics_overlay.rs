@@ -9,6 +9,7 @@ use gpui::{
     WindowControlArea, div, hsla, point, prelude::*, px, rgb,
 };
 
+use crate::gpu::{ShaderKind, ShaderParams16, next_shader_effect_id, shader_effect_canvas};
 use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
@@ -41,6 +42,8 @@ pub(crate) struct DesktopLyricsView {
     playback_state: crate::model::PlaybackState,
     word_animation_epoch: u64,
     scrub_preview_ms: Option<u64>,
+    /// Stable GPU slot in this popup; hover and lyric frames reuse the same pipeline.
+    optical_glass_effect_id: u64,
 }
 
 impl DesktopLyricsView {
@@ -98,6 +101,7 @@ impl DesktopLyricsView {
             playback_state: crate::model::PlaybackState::Stopped,
             word_animation_epoch: 0,
             scrub_preview_ms: None,
+            optical_glass_effect_id: next_shader_effect_id(),
         }
     }
 
@@ -372,7 +376,23 @@ impl gpui::Render for DesktopLyricsView {
         }
 
         if background_opacity > 0.001 {
-            root = root.child(liquid_glass_surface(background_opacity, interacting));
+            let logical_width = if cfg!(windows) {
+                config.width.clamp(420.0, 1_600.0)
+            } else {
+                f32::from(window.bounds().size.width)
+            };
+            let logical_height = if cfg!(windows) {
+                config.height.clamp(92.0, 520.0)
+            } else {
+                f32::from(window.bounds().size.height)
+            };
+            root = root.child(liquid_glass_surface(
+                self.optical_glass_effect_id,
+                background_opacity,
+                interacting,
+                (logical_width, logical_height),
+                window.scale_factor(),
+            ));
         }
 
         root = root.child(
@@ -1026,28 +1046,47 @@ fn settings_row(
         )
 }
 
-/// Stable translucent panel inside a transparent auxiliary swapchain.
+/// GPU optical-glass material, clipped in WGSL to the stable popup bounds.
 ///
-/// Native renderer extensions can briefly replay stale full-window bounds on a
-/// NOACTIVATE/TOOLWINDOW DirectComposition surface when the host moves or resizes
-/// it. A GPUI-clipped rounded panel keeps the same dark material without leaking
-/// a huge gray quad onto the rest of the desktop during native frame transitions.
-fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
-    let alpha = opacity.clamp(0.0, 0.85);
-    div()
-        .absolute()
-        .inset_0()
-        .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
-        .overflow_hidden()
-        .bg(hsla(0.64, 0.08, 0.19, alpha))
-        .border_1()
-        .border_color(hsla(
-            0.60,
-            0.07,
-            0.70,
-            if interacting { 0.18 } else { 0.09 },
-        ))
-        .into_any_element()
+/// No extra swapchain, CPU readback, background bitmap or timer. The clear
+/// interior, anti-aliased rounded corners and bevel reflections are drawn by
+/// Nova in one premultiplied-alpha pass. The desktop itself is transmitted by
+/// the host compositor; live refraction requires a separate native backdrop
+/// sampler and must not be fabricated from synthetic desktop colors.
+fn optical_glass_uniforms(
+    opacity: f32,
+    interacting: bool,
+    logical_size: (f32, f32),
+    device_scale: f32,
+) -> ShaderParams16 {
+    ShaderParams16::from_columns([
+        [
+            opacity.clamp(0.0, 0.85),
+            if interacting { 1.0 } else { 0.0 },
+            LIQUID_GLASS_CORNER_RADIUS,
+            logical_size.0.max(1.0),
+        ],
+        [logical_size.1.max(1.0), device_scale.max(1.0), 0.0, 0.0],
+        [0.0; 4],
+        [0.0; 4],
+    ])
+}
+
+fn liquid_glass_surface(
+    effect_id: u64,
+    opacity: f32,
+    interacting: bool,
+    logical_size: (f32, f32),
+    device_scale: f32,
+) -> gpui::AnyElement {
+    // Alpha is constant across hover state; only edge light intensity changes.
+    // The renderer owns its cached shader and 96-byte per-draw parameter buffer.
+    shader_effect_canvas(
+        ShaderKind::LiquidGlass,
+        effect_id,
+        optical_glass_uniforms(opacity, interacting, logical_size, device_scale),
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -1067,6 +1106,17 @@ mod tests {
     fn native_snap_geometry_cannot_be_persisted_as_lyric_popup_size() {
         assert!(desktop_popup_size_mismatch((1114.0, 640.0), (760.0, 148.0)));
         assert!(!desktop_popup_size_mismatch((763.0, 151.0), (760.0, 148.0)));
+    }
+
+    #[test]
+    fn optical_glass_hover_does_not_mutate_transmission_opacity() {
+        let idle = optical_glass_uniforms(0.22, false, (760.0, 148.0), 1.5);
+        let hovered = optical_glass_uniforms(0.22, true, (760.0, 148.0), 1.5);
+        assert_ne!(idle, hovered);
+        assert_eq!(
+            optical_glass_uniforms(0.22, false, (760.0, 148.0), 1.5),
+            idle,
+        );
     }
 
     #[test]
