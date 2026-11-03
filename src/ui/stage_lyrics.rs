@@ -1718,7 +1718,7 @@ fn next_karaoke_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64
             word,
             line.words.get(word_index + 1).map(|next| next.timestamp_ms),
         );
-        if let Some(release_timestamp) = sustained_release_timestamp(&visual_word)
+        if let Some(release_timestamp) = sustained_tail_end_timestamp(&visual_word)
             && release_timestamp > position_ms
         {
             next_timestamp = Some(
@@ -1957,7 +1957,7 @@ fn sustained_attack_release_ms(word: &StageLyricWord) -> Option<(u64, u64)> {
     ))
 }
 
-fn sustained_release_timestamp(word: &StageLyricWord) -> Option<u64> {
+fn sustained_tail_end_timestamp(word: &StageLyricWord) -> Option<u64> {
     if !should_emphasize_sustained_word(word) {
         return None;
     }
@@ -2068,7 +2068,16 @@ fn karaoke_word(
     );
     // The same scalar drives zoom and bloom through the full reveal and
     // immediately following settle. Amplitude stays tied to original duration.
-    let emphasis = sustained_visual_emphasis(word, &visual_word, position_ms, is_last_word);
+    let emphasis = if !emphasize {
+        SustainedWordEmphasis {
+            scale: 1.0,
+            ..SustainedWordEmphasis::default()
+        }
+    } else if visual_word.duration_ms == word.duration_ms {
+        sustained_word_emphasis(word, position_ms, true, is_last_word)
+    } else {
+        sustained_visual_emphasis(word, &visual_word, position_ms, is_last_word)
+    };
     let mut root = div().relative().flex_none().whitespace_nowrap();
     if emphasize {
         let peak = sustained_word_peak_emphasis(word, is_last_word);
@@ -2811,7 +2820,7 @@ mod tests {
         };
         let visual = bounded_sustained_word(&original, Some(2_600));
         assert_eq!(visual.duration_ms, Some(1_600));
-        let tail_end = sustained_release_timestamp(&visual).unwrap();
+        let tail_end = sustained_tail_end_timestamp(&visual).unwrap();
         assert!(tail_end > 2_600);
         assert_eq!(sustained_time_envelope(&visual, 2_500), 1.0);
         assert_eq!(sustained_time_envelope(&visual, 2_600), 1.0);
@@ -3059,7 +3068,7 @@ mod tests {
             time_label: SharedString::new_static(""),
         };
 
-        let release = sustained_release_timestamp(&line.words[0]).unwrap();
+        let release = sustained_tail_end_timestamp(&line.words[0]).unwrap();
         assert_eq!(
             next_karaoke_timestamp(&line, 1_100),
             Some(release.min(3_000))
