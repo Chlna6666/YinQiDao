@@ -8,8 +8,8 @@ use gpui::{
 };
 use lucide_gpui::icon;
 
-use crate::model::PlaybackState;
 use super::theme::{self, dark, themed_icon};
+use crate::model::PlaybackState;
 
 const COVER_SIZE: f32 = 42.0;
 
@@ -61,11 +61,13 @@ pub(super) fn tile(
         } else {
             AnimationProperty::opacity(0.52, 1.0)
         };
-        glyph.with_animation(
-            ElementId::NamedInteger(SharedString::new_static("queue-cover-svg"), animation_key),
-            Animation::from_spec(spec).with_property(property),
-            |element, _| element,
-        ).into_any_element()
+        glyph
+            .with_animation(
+                ElementId::NamedInteger(SharedString::new_static("queue-cover-svg"), animation_key),
+                Animation::from_spec(spec).with_property(property),
+                |element, _| element,
+            )
+            .into_any_element()
     } else {
         glyph.into_any_element()
     };
@@ -83,7 +85,11 @@ pub(super) fn tile(
                 .inset_0()
                 .rounded(px(9.0))
                 .bg(dark::scrim(if current { 0.38 } else { 0.52 }))
-                .opacity(if current || hovered || buffering { 1.0 } else { 0.0 })
+                .opacity(if current || hovered || buffering {
+                    1.0
+                } else {
+                    0.0
+                })
                 .transition(theme::hover_transition())
                 .flex()
                 .items_center()
