@@ -22,7 +22,7 @@ pub enum DesktopLyricsAlignment {
     Right,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DesktopLyricsConfig {
     /// Whether the desktop lyric widget should be visible.

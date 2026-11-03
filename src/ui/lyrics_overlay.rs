@@ -9,7 +9,6 @@ use gpui::{
     WindowControlArea, div, hsla, point, prelude::*, px, rgb,
 };
 
-use crate::gpu::{ShaderKind, ShaderParams16, next_shader_effect_id, shader_effect_canvas};
 use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
@@ -37,7 +36,12 @@ pub(crate) struct DesktopLyricsView {
     previous_display: Option<LyricsDisplay>,
     line_transition_epoch: u64,
     line_transition_deadline: Option<Instant>,
-    effect_id: u64,
+    /// The popup observes only semantic source/config changes, not every main-window frame.
+    observed_config: Option<crate::settings::DesktopLyricsConfig>,
+    observed_track_id: Option<TrackId>,
+    playback_state: crate::model::PlaybackState,
+    word_animation_epoch: u64,
+    scrub_preview_ms: Option<u64>,
 }
 
 impl DesktopLyricsView {
@@ -47,18 +51,35 @@ impl DesktopLyricsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let parent_subscription = parent.upgrade().map(|parent_entity| {
-            cx.observe(&parent_entity, |_this, _parent, cx| {
-                // Structural transport/config changes re-render this View immediately. The next
-                // render computes a new GPUI deadline; stale deadlines are coalesced per entity.
-                cx.notify();
+            cx.observe(&parent_entity, |this, app, cx| {
+                // MainWindow/playlist updates can notify hundreds of times without changing
+                // desktop lyrics. Keep this secondary HWND isolated from unrelated UI frames.
+                let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
+                if this.observed_track_id != track_id
+                    || this.observed_config.as_ref() != Some(&app.config.desktop_lyrics)
+                {
+                    cx.notify();
+                }
             })
         });
-        let ui_subscription = cx.subscribe(&ui_events, |_this, _bridge, event, cx| {
-            if matches!(
-                *event,
-                AppUiEvent::PlaybackStateChanged(_) | AppUiEvent::ProgressChanged { .. }
-            ) {
-                cx.notify();
+        let ui_subscription = cx.subscribe(&ui_events, |this, _bridge, event, cx| {
+            match *event {
+                AppUiEvent::PlaybackStateChanged(state) => {
+                    if this.playback_state != state {
+                        this.playback_state = state;
+                        this.word_animation_epoch = this.word_animation_epoch.wrapping_add(1);
+                    }
+                    cx.notify();
+                }
+                AppUiEvent::ProgressChanged { position_ms, ratio } => {
+                    // One local preview for the independent lyric HWND. Commit/seek creates a
+                    // new animation generation so a stale retained reveal cannot keep running.
+                    this.scrub_preview_ms = ratio.map(|_| position_ms);
+                    if ratio.is_none() {
+                        this.word_animation_epoch = this.word_animation_epoch.wrapping_add(1);
+                    }
+                    cx.notify();
+                }
             }
         });
         Self {
@@ -73,7 +94,11 @@ impl DesktopLyricsView {
             previous_display: None,
             line_transition_epoch: 0,
             line_transition_deadline: None,
-            effect_id: next_shader_effect_id(),
+            observed_config: None,
+            observed_track_id: None,
+            playback_state: crate::model::PlaybackState::Stopped,
+            word_animation_epoch: 0,
+            scrub_preview_ms: None,
         }
     }
 
@@ -109,20 +134,40 @@ impl gpui::Render for DesktopLyricsView {
         // lyric transitions still need the visible inactive-window cadence.
         super::enable_inactive_window_animations(window);
         self.attach_bounds_observer(window, cx);
-        self.schedule_transport_deadline(window, cx);
+        if self.scrub_preview_ms.is_none() {
+            self.schedule_transport_deadline(window, cx);
+        }
 
         let Some(parent) = self.parent.upgrade() else {
             return div().size_full().into_any_element();
         };
-        let (config, display) = {
+        let (config, display, playback_state, track_id) = {
             let app = parent.read(cx);
             (
                 app.config.desktop_lyrics.clone(),
-                app.desktop_lyrics_display(),
+                app.desktop_lyrics_display_at(self.scrub_preview_ms),
+                app.snapshot.state,
+                app.snapshot.current_track.as_ref().map(|track| track.id),
             )
         };
+        self.observed_config = Some(config.clone());
+        self.observed_track_id = track_id;
+        if self.playback_state != playback_state {
+            self.playback_state = playback_state;
+            self.word_animation_epoch = self.word_animation_epoch.wrapping_add(1);
+        }
+        let playing = playback_state == crate::model::PlaybackState::Playing
+            && self.scrub_preview_ms.is_none();
+        let lyric_width = (f32::from(window.bounds().size.width) - 48.0).max(1.0);
 
-        let now = window.animation_time();
+        // Real monotonic time is required: inactive NOACTIVATE windows may temporarily
+        // suspend GPUI's UI animation clock while audio continues.
+        let now = Instant::now();
+        if !playing {
+            // Hold the current lyric without a stale outgoing layer while paused.
+            self.previous_display = None;
+            self.line_transition_deadline = None;
+        }
         if self
             .line_transition_deadline
             .is_some_and(|deadline| deadline <= now)
@@ -133,7 +178,10 @@ impl gpui::Render for DesktopLyricsView {
 
         let next_key = desktop_lyrics_display_key(display.as_ref());
         if next_key != self.display_key {
-            if self.display_key.is_some() && next_key.is_some() {
+            // Never crossfade unrelated tracks or stale lines during a scrub.
+            if playing && self.display_key.is_some() && next_key.is_some()
+                && self.display_key.map(|key| key.0) == next_key.map(|key| key.0)
+            {
                 self.previous_display = self.last_display.clone();
                 self.line_transition_epoch = self.line_transition_epoch.wrapping_add(1);
                 self.line_transition_deadline = Some(now + LYRIC_LINE_TRANSITION_DURATION);
@@ -165,7 +213,7 @@ impl gpui::Render for DesktopLyricsView {
         .clamp(0.0, 0.85);
 
         let lyrics = if let Some(display) = &display {
-            desktop_lyrics_stack(display, &config)
+            desktop_lyrics_stack(display, &config, playing, self.word_animation_epoch, lyric_width)
         } else {
             div()
                 .w_full()
@@ -190,7 +238,7 @@ impl gpui::Render for DesktopLyricsView {
             .min_w(px(0.0))
             .h_full()
             .overflow_hidden();
-        let incoming = div().absolute().inset_0().flex().child(lyrics);
+        let incoming = div().absolute().inset_0().flex().min_w(px(0.0)).child(lyrics);
 
         if let Some(previous) = self.previous_display.as_ref()
             && line_transition_active
@@ -228,7 +276,13 @@ impl gpui::Render for DesktopLyricsView {
                 // Preserve the same current/next/translation geometry while
                 // fading the previous line. A current-only outgoing layer
                 // was vertically centered differently from a two-line stack.
-                .child(desktop_lyrics_stack(&previous_complete, &config))
+                .child(desktop_lyrics_stack(
+                    &previous_complete,
+                    &config,
+                    false,
+                    self.word_animation_epoch,
+                    lyric_width,
+                ))
                 .with_animation(
                     ElementId::NamedInteger(
                         SharedString::new_static("desktop-lyrics-line-out"),
@@ -284,11 +338,7 @@ impl gpui::Render for DesktopLyricsView {
         }
 
         if background_opacity > 0.001 {
-            root = root.child(liquid_glass_surface(
-                self.effect_id,
-                background_opacity,
-                interacting,
-            ));
+            root = root.child(liquid_glass_surface(background_opacity, interacting));
         }
 
         root = root.child(
@@ -378,8 +428,17 @@ fn desktop_lyrics_display_key(display: Option<&LyricsDisplay>) -> Option<(TrackI
 fn desktop_lyrics_stack(
     display: &LyricsDisplay,
     config: &crate::settings::DesktopLyricsConfig,
+    playing: bool,
+    animation_epoch: u64,
+    available_width: f32,
 ) -> gpui::AnyElement {
-    let mut lyrics = desktop_stack_shell(config).child(desktop_current_group(display, config));
+    let mut lyrics = desktop_stack_shell(config).child(desktop_current_group(
+        display,
+        config,
+        playing,
+        animation_epoch,
+        available_width,
+    ));
 
     if config.two_line
         && let Some(next) = display.next.as_ref().filter(|text| !text.trim().is_empty())
@@ -432,6 +491,9 @@ fn desktop_stack_shell(config: &crate::settings::DesktopLyricsConfig) -> gpui::D
 fn desktop_current_group(
     display: &LyricsDisplay,
     config: &crate::settings::DesktopLyricsConfig,
+    playing: bool,
+    animation_epoch: u64,
+    available_width: f32,
 ) -> gpui::AnyElement {
     let mut group = div()
         .w_full()
@@ -444,6 +506,9 @@ fn desktop_current_group(
             config.alignment,
             config.font_size,
             config.active_color,
+            playing,
+            animation_epoch,
+            available_width,
         ));
 
     if config.show_translation
@@ -470,7 +535,11 @@ fn animated_current_line(
     alignment: DesktopLyricsAlignment,
     font_size: f32,
     color: u32,
+    playing: bool,
+    animation_epoch: u64,
+    available_width: f32,
 ) -> gpui::AnyElement {
+    let font_size = fit_desktop_lyric_font(&display.current, font_size, available_width);
     if display.current_words.is_empty()
         || !words_cover_primary_text(&display.current, &display.current_words)
     {
@@ -489,7 +558,7 @@ fn animated_current_line(
         .partition_point(|word| word.timestamp_ms <= display.position_ms)
         .checked_sub(1);
     let mut content = div()
-        .max_w(px(1_420.0))
+        .max_w(px(available_width))
         .min_w(px(0.0))
         .flex()
         .items_center()
@@ -505,6 +574,8 @@ fn animated_current_line(
             current_word,
             display.position_ms,
             color,
+            playing,
+            animation_epoch,
             desktop_word_animation_id(
                 display.track_id,
                 display.line_index,
@@ -536,6 +607,8 @@ fn desktop_karaoke_word(
     current_word: Option<usize>,
     position_ms: u64,
     color: u32,
+    playing: bool,
+    animation_epoch: u64,
     animation_id: u64,
 ) -> gpui::AnyElement {
     const DIM_ALPHA: f32 = 0.34;
@@ -591,17 +664,30 @@ fn desktop_karaoke_word(
         let end_ms = duration_ms
             .map(|duration| word.timestamp_ms.saturating_add(duration))
             .unwrap_or(position_ms);
-        let remaining = Duration::from_millis(end_ms.saturating_sub(position_ms).max(1));
+        let active = desktop_word_reveal_running(
+            playing,
+            position_ms,
+            word.timestamp_ms,
+            end_ms,
+        );
+        // A paused/scrubbing lyric must not keep advancing a GPU reveal. Zero
+        // duration paints exactly the requested fraction without a hidden timer.
+        let remaining = if active {
+            Duration::from_millis(end_ms.saturating_sub(position_ms).max(1))
+        } else {
+            Duration::ZERO
+        };
+        let target = if active { 1.0 } else { progress };
         overlay
             .with_animation(
                 ElementId::NamedInteger(
                     SharedString::new_static("desktop-lyrics-word-reveal"),
-                    animation_id,
+                    animation_id.wrapping_add(animation_epoch.rotate_left(29)),
                 ),
                 Animation::new(remaining).with_property(AnimationProperty::horizontal_reveal(
                     HorizontalRevealEdge::Left,
                     progress,
-                    1.0,
+                    target,
                 )),
                 |element, _| element,
             )
@@ -629,6 +715,16 @@ fn authored_or_inferred_word_duration(words: &[LyricWord], index: usize) -> Opti
                 (duration > 0).then_some(duration)
             })
         })
+}
+
+#[inline]
+fn desktop_word_reveal_running(
+    playing: bool,
+    position_ms: u64,
+    word_start_ms: u64,
+    word_end_ms: u64,
+) -> bool {
+    playing && position_ms >= word_start_ms && position_ms < word_end_ms
 }
 
 fn word_reveal_progress(word: &LyricWord, duration_ms: Option<u64>, position_ms: u64) -> f32 {
@@ -677,6 +773,26 @@ fn desktop_word_animation_id(
 fn desktop_smootherstep(progress: f32) -> f32 {
     let t = progress.clamp(0.0, 1.0);
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// Approximate static text fitting for a narrow desktop widget. This changes
+/// font size only at lyric boundaries, not per frame or karaoke word progress.
+fn fit_desktop_lyric_font(text: &str, preferred_px: f32, available_width: f32) -> f32 {
+    let advance_em: f32 = text
+        .chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                0.32
+            } else if ch.is_ascii() {
+                if "ilI1.,'!:;".contains(ch) { 0.30 } else { 0.57 }
+            } else {
+                1.0
+            }
+        })
+        .sum();
+    let needed = (advance_em * preferred_px).max(1.0);
+    let max_width = (available_width * 0.94).max(1.0);
+    (preferred_px * (max_width / needed).min(1.0)).clamp(16.0, preferred_px.max(16.0))
 }
 
 fn aligned_line(
@@ -871,19 +987,23 @@ fn settings_row(
         )
 }
 
-/// Native translucent shader, compiled at build time for Nova DX/Vulkan/Metal.
-fn liquid_glass_surface(id: u64, opacity: f32, interacting: bool) -> gpui::AnyElement {
-    let mut metadata = [[0.0_f32; 4]; 4];
-    metadata[0][0] = opacity;
-    metadata[0][1] = if interacting { 1.0 } else { 0.0 };
-    metadata[0][2] = LIQUID_GLASS_CORNER_RADIUS;
-    metadata[3][3] = 1.0;
-    shader_effect_canvas(
-        ShaderKind::LiquidGlass,
-        id,
-        ShaderParams16::from_columns(metadata),
-        false,
-    )
+/// Stable translucent panel inside a transparent auxiliary swapchain.
+///
+/// Native renderer extensions can briefly replay stale full-window bounds on a
+/// NOACTIVATE/TOOLWINDOW DirectComposition surface when the host moves or resizes
+/// it. A GPUI-clipped rounded panel keeps the same dark material without leaking
+/// a huge gray quad onto the rest of the desktop during native frame transitions.
+fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
+    let alpha = (opacity + if interacting { 0.025 } else { 0.0 }).clamp(0.0, 0.88);
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
+        .overflow_hidden()
+        .bg(hsla(0.64, 0.08, 0.19, alpha))
+        .border_1()
+        .border_color(hsla(0.60, 0.07, 0.70, if interacting { 0.18 } else { 0.09 }))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -896,6 +1016,28 @@ mod tests {
             duration_ms,
             text: text.to_owned(),
         }
+    }
+
+    #[test]
+    fn desktop_karaoke_reveal_stops_without_audio_playback() {
+        assert!(desktop_word_reveal_running(true, 1_100, 1_000, 1_500));
+        assert!(!desktop_word_reveal_running(false, 1_100, 1_000, 1_500));
+        assert!(!desktop_word_reveal_running(true, 900, 1_000, 1_500));
+        assert!(!desktop_word_reveal_running(true, 1_500, 1_000, 1_500));
+    }
+
+    #[test]
+    fn desktop_long_english_line_fits_without_window_resizing() {
+        let base = 58.0;
+        let width = 712.0;
+        let fitted = fit_desktop_lyric_font(
+            "I couldn't lie couldn't lie couldn't",
+            base,
+            width,
+        );
+        assert!(fitted < base);
+        assert!(fitted >= 16.0);
+        assert_eq!(fit_desktop_lyric_font("Hi", base, width), base);
     }
 
     #[test]

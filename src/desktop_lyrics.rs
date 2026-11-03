@@ -86,25 +86,10 @@ impl MusicApp {
                 });
             }
 
-            let always_on_top = self.config.desktop_lyrics.always_on_top;
-            if window
-                .update(cx, |_view, window, _cx| {
-                    // Style first, show second. On Windows this prevents the shell from ever seeing
-                    // the lyric surface as a normal app/taskbar window.
-                    let applied = crate::window_platform::configure_desktop_lyrics_window(
-                        window,
-                        always_on_top,
-                    );
-                    window.show_window();
-                    // A hidden NOACTIVATE popup does not automatically get an input-driven first
-                    // frame. Force GPUI to build/present immediately instead of waiting for the
-                    // first mouse move to wake the inactive widget.
-                    window.refresh();
-                    window.request_animation_frame();
-                    applied
-                })
-                .is_ok()
-            {
+            // Already-visible NOACTIVATE popups must not be shown/configured on
+            // every lyric/cache refresh: repeating ShowWindow + refresh can
+            // expose an unfinished transparent DComp frame and flicker.
+            if window.update(cx, |_view, _window, view_cx| view_cx.notify()).is_ok() {
                 return;
             }
             cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
@@ -238,6 +223,23 @@ impl MusicApp {
         if !request_overlay_close(cx, true) {
             self.sync_desktop_lyrics_window(cx);
         }
+    }
+
+    /// Refresh the existing auxiliary entity without touching the native HWND.
+    /// Song metadata and lyric downloads must never show/recreate the popup.
+    pub(crate) fn refresh_desktop_lyrics_content(&mut self, cx: &mut Context<Self>) {
+        if !self.config.desktop_lyrics.visible {
+            return;
+        }
+        ensure_window_state(cx);
+        let overlay =
+            cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| state.window.clone());
+        if let Some(overlay) = overlay
+            && overlay.update(cx, |_view, _window, cx| cx.notify()).is_ok()
+        {
+            return;
+        }
+        self.sync_desktop_lyrics_window(cx);
     }
 
     pub(crate) fn toggle_desktop_lyrics_visible(&mut self, cx: &mut Context<Self>) {
@@ -444,7 +446,12 @@ impl MusicApp {
         }
     }
 
-    pub(crate) fn desktop_lyrics_display(&self) -> Option<LyricsDisplay> {
+    /// A window-local scrub preview is applied only to the desktop lyric
+    /// presentation. It never mutates AudioEngine or the main player state.
+    pub(crate) fn desktop_lyrics_display_at(
+        &self,
+        preview_position_ms: Option<u64>,
+    ) -> Option<LyricsDisplay> {
         let track = self.snapshot.current_track.as_ref()?;
         let document = self.lyrics.get(&track.id)?;
         let lines = document.timed_lines();
@@ -456,10 +463,11 @@ impl MusicApp {
                 .map(str::trim)
                 .find(|line| !line.is_empty())?
                 .to_owned();
-            let position_ms = self
-                .engine
-                .as_ref()
-                .map_or(self.snapshot.position_ms, |engine| engine.progress().1);
+            let position_ms = preview_position_ms.unwrap_or_else(|| {
+                self.engine
+                    .as_ref()
+                    .map_or(self.snapshot.position_ms, |engine| engine.progress().1)
+            });
             return Some(LyricsDisplay {
                 track_id: track.id,
                 line_index: 0,
@@ -472,10 +480,11 @@ impl MusicApp {
             });
         }
 
-        let position_ms = self
-            .engine
-            .as_ref()
-            .map_or(self.snapshot.position_ms, |engine| engine.progress().1);
+        let position_ms = preview_position_ms.unwrap_or_else(|| {
+            self.engine
+                .as_ref()
+                .map_or(self.snapshot.position_ms, |engine| engine.progress().1)
+        });
         let index = lines
             .iter()
             .rposition(|line| line.timestamp_ms <= position_ms)

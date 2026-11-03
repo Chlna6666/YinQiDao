@@ -1489,7 +1489,7 @@ impl MusicApp {
 
         stage_lyrics::sync_if_created(self, cx);
         if self.config.desktop_lyrics.visible {
-            self.sync_desktop_lyrics_window(cx);
+            self.refresh_desktop_lyrics_content(cx);
         }
     }
 
