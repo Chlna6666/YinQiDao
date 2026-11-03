@@ -4155,6 +4155,12 @@ impl MusicApp {
         // A retained compositor animation may have finished while the main
         // entity was inactive. A focus/visibility edge is a safe one-shot point
         // to reconcile its logical state before enabling the shader clock.
+        // If the first post-present callback never ran during a hidden-window
+        // transition, re-arm it on the newly visible frame. Both callbacks
+        // check the same epoch and cannot start the transition twice.
+        if self.stage_animating && self.stage_transition_started_at.is_none() {
+            self.stage_transition_start_armed = false;
+        }
         self.finish_stage_transition_if_due(std::time::Instant::now(), cx);
         let track_id = self
             .snapshot
@@ -4998,13 +5004,15 @@ impl Render for MusicApp {
                 }));
         }
         if self.stage_visibility_subscription.is_none() {
-            self.stage_visibility_subscription =
-                Some(cx.observe_window_visibility(window, |app, visibility, _window, cx| {
+            self.stage_visibility_subscription = Some(cx.observe_window_visibility(
+                window,
+                |app, visibility, _window, cx| {
                     app.sync_immersive_after_visibility(
                         visibility == WindowVisibility::Visible,
                         cx,
                     );
-                }));
+                },
+            ));
         }
         self.start_background_work(cx);
         self.start_runtime_events(cx);
