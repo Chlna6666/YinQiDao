@@ -3,17 +3,20 @@
 //! independent window renderer. Each window owns its pipelines and uniform slots.
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
 use gfx_core::{
     BackendKind, BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BlendMode,
-    BufferBinding, BufferDescriptor, BufferId, BufferUsage, DrawCommand, Format,
-    MemoryLocation, PipelineLayoutDescriptor, PipelineLayoutId, PrimitiveTopology,
-    RasterState, RenderCommand, RenderPassId, RenderPipelineDescriptor, RenderPipelineId,
-    ShaderModuleDescriptor, ShaderModuleId, ShaderStage, ShaderStages, bind_group_list,
+    BufferBinding, BufferDescriptor, BufferId, BufferUsage, DrawCommand, Format, MemoryLocation,
+    PipelineLayoutDescriptor, PipelineLayoutId, PrimitiveTopology, RasterState, RenderCommand,
+    RenderPassId, RenderPipelineDescriptor, RenderPipelineId, ShaderModuleDescriptor,
+    ShaderModuleId, ShaderStage, ShaderStages, bind_group_list,
 };
 use gpui::{
     AnyElement, ExtensionDevice, RendererExtension, RendererExtensionContext,
@@ -90,7 +93,11 @@ pub(crate) fn shader_effect_canvas(
     running: bool,
 ) -> AnyElement {
     let input = Arc::new(EffectSnapshot {
-        id, kind, params, running, sample_time: Instant::now(),
+        id,
+        kind,
+        params,
+        running,
+        sample_time: Instant::now(),
     });
     canvas(
         |bounds, _window, _cx| bounds,
@@ -149,7 +156,10 @@ fn embedded_shader(
 }
 
 impl EffectRenderer {
-    fn new(device: &mut dyn ExtensionDevice, context: RendererExtensionContext) -> gpui::Result<Self> {
+    fn new(
+        device: &mut dyn ExtensionDevice,
+        context: RendererExtensionContext,
+    ) -> gpui::Result<Self> {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("YinQiDao shader effects uniforms".into()),
             entries: vec![BindGroupLayoutEntry {
@@ -216,24 +226,30 @@ impl EffectRenderer {
                 return Err(error.into());
             }
         };
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some(format!("YinQiDao {fs_entry} pipeline")),
-            vertex_shader: vertex,
-            vertex_entry_point: vs_entry.into(),
-            fragment_shader: fragment,
-            fragment_entry_point: fs_entry.into(),
-            vertex_buffers: Vec::new(),
-            render_pass: context.render_pass(),
-            pipeline_layout: Some(self.pipeline_layout),
-            color_format: context.color_format(),
-            blend_mode: match kind {
-                ShaderKind::Fluid => BlendMode::Replace,
-                ShaderKind::LiquidGlass => BlendMode::PremultipliedAlpha,
+        let pipeline = device.create_render_pipeline(
+            &RenderPipelineDescriptor {
+                label: Some(format!("YinQiDao {fs_entry} pipeline")),
+                vertex_shader: vertex,
+                vertex_entry_point: vs_entry.into(),
+                fragment_shader: fragment,
+                fragment_entry_point: fs_entry.into(),
+                vertex_buffers: Vec::new(),
+                render_pass: context.render_pass(),
+                pipeline_layout: Some(self.pipeline_layout),
+                color_format: context.color_format(),
+                blend_mode: match kind {
+                    ShaderKind::Fluid => BlendMode::Replace,
+                    ShaderKind::LiquidGlass => BlendMode::PremultipliedAlpha,
+                },
+                primitive_topology: PrimitiveTopology::TriangleList,
+                raster: RasterState {
+                    front_face: gfx_core::FrontFace::Ccw,
+                    cull_mode: None,
+                },
+                depth_state: None,
             },
-            primitive_topology: PrimitiveTopology::TriangleList,
-            raster: RasterState { front_face: gfx_core::FrontFace::Ccw, cull_mode: None },
-            depth_state: None,
-        }, context.viewport());
+            context.viewport(),
+        );
         let pipeline = match pipeline {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -242,7 +258,14 @@ impl EffectRenderer {
                 return Err(error.into());
             }
         };
-        self.programs.insert(kind, Program { vertex, fragment, pipeline });
+        self.programs.insert(
+            kind,
+            Program {
+                vertex,
+                fragment,
+                pipeline,
+            },
+        );
         Ok(pipeline)
     }
 
@@ -284,10 +307,7 @@ impl EffectRenderer {
         Ok(self.slots.get(&id).expect("created slot must exist"))
     }
 
-    fn write_parameters(
-        input: &EffectSnapshot,
-        context: &RendererExtensionContext,
-    ) -> [u8; 96] {
+    fn write_parameters(input: &EffectSnapshot, context: &RendererExtensionContext) -> [u8; 96] {
         let bounds = context.bounds();
         let mut values = [0.0_f32; 24];
         for (column, items) in input.params.columns.iter().enumerate() {
@@ -301,7 +321,10 @@ impl EffectRenderer {
         values[21] = context.viewport().height() as f32;
         // One compositor-owned clock; no view notifications and no extra RAF timer.
         let elapsed = if input.running {
-            context.frame_time().saturating_duration_since(input.sample_time).as_secs_f32()
+            context
+                .frame_time()
+                .saturating_duration_since(input.sample_time)
+                .as_secs_f32()
         } else {
             0.0
         };
@@ -322,7 +345,8 @@ impl RendererExtensionRenderer for EffectRenderer {
         context: RendererExtensionContext,
         steps: &mut Vec<RenderCommand>,
     ) -> gpui::Result<()> {
-        let input = extension.downcast_ref::<EffectSnapshot>()
+        let input = extension
+            .downcast_ref::<EffectSnapshot>()
             .ok_or_else(|| anyhow::anyhow!("unexpected native shader effect type"))?;
         let pipeline = self.ensure_pipeline(input.kind, device, &context)?;
         let slot = self.uniform_slot((input.kind, input.id), device)?;

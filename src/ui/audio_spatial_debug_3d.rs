@@ -117,35 +117,34 @@ impl SpatialDebug3dScene {
             return;
         }
 
-        match build_scene_mesh(snapshot, self.mesh.as_ref())
-            .and_then(|(mesh, fit_radius)| {
-                let mut scene = Scene::new();
-                let opaque = Arc::new(Material {
-                    shading_model: ShadingModel::Unlit,
-                    double_sided: true,
-                    ..Material::new()
-                });
-                let transparent = Arc::new(Material {
-                    alpha_mode: AlphaMode::Blend,
-                    shading_model: ShadingModel::Unlit,
-                    double_sided: true,
-                    ..Material::new()
-                });
-                scene.insert(
+        match build_scene_mesh(snapshot, self.mesh.as_ref()).and_then(|(mesh, fit_radius)| {
+            let mut scene = Scene::new();
+            let opaque = Arc::new(Material {
+                shading_model: ShadingModel::Unlit,
+                double_sided: true,
+                ..Material::new()
+            });
+            let transparent = Arc::new(Material {
+                alpha_mode: AlphaMode::Blend,
+                shading_model: ShadingModel::Unlit,
+                double_sided: true,
+                ..Material::new()
+            });
+            scene
+                .insert(
                     None,
                     Node::new()
                         .with_mesh(mesh.clone())
                         .with_materials([opaque, transparent]),
                 )
                 .map_err(|error| error.to_string())?;
-                let scene = Arc::new(scene);
-                let view = self.scene_view.as_ref().map_or_else(
-                    || SceneView::new(scene.clone(), Self::camera(SpatialDebug3dCamera::default())),
-                    |previous| previous.with_scene(scene),
-                );
-                Ok((mesh, fit_radius, view))
-            })
-        {
+            let scene = Arc::new(scene);
+            let view = self.scene_view.as_ref().map_or_else(
+                || SceneView::new(scene.clone(), Self::camera(SpatialDebug3dCamera::default())),
+                |previous| previous.with_scene(scene),
+            );
+            Ok((mesh, fit_radius, view))
+        }) {
             Ok((mesh, fit_radius, view)) => {
                 self.mesh = Some(mesh);
                 self.scene_view = Some(Arc::new(view));
@@ -163,9 +162,9 @@ impl SpatialDebug3dScene {
     }
 
     pub(crate) fn view(&self, camera: SpatialDebug3dCamera) -> Option<Arc<SceneView>> {
-        self.scene_view.as_ref().map(|scene| {
-            Arc::new(scene.with_camera(Self::camera(camera)))
-        })
+        self.scene_view
+            .as_ref()
+            .map(|scene| Arc::new(scene.with_camera(Self::camera(camera))))
     }
 
     pub(crate) fn error(&self) -> Option<Arc<str>> {

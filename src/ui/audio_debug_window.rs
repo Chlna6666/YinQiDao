@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     App, AppContext, BorrowAppContext, Bounds, Context, Global, IntoElement, MouseButton, Render,
-    Subscription, Task, Timer, Window, WindowBounds, WindowHandle, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    Subscription, Task, Timer, Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*,
+    px, rgb, size,
 };
 use yinqidao_audio_spatial::{
     ChannelLayout, SpatialDebugReflectionWall, SpatialDebugSnapshot, SpatialDebugSourceKind,

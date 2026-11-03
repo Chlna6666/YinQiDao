@@ -5,12 +5,12 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity,
-    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity,
-    Window, WindowControlArea, div, hsla, point, prelude::*, px, rgb,
+    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity, Window,
+    WindowControlArea, div, hsla, point, prelude::*, px, rgb,
 };
 
-use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
 use crate::gpu::{ShaderKind, ShaderParams16, next_shader_effect_id, shader_effect_canvas};
+use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
     settings::DesktopLyricsAlignment,
