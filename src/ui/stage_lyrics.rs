@@ -305,15 +305,26 @@ impl StageKaraokeLineView {
                         .max(TRANSPORT_MIN_SLEEP),
                 )
             });
-        let animated_delay =
-            active_enhanced_word_index(&self.line, self.position_ms).and_then(|index| {
-                let word = self.line.words.get(index)?;
+        let mut animated_delay: Option<Duration> = None;
+        if let Some(active) = active_enhanced_word_index(&self.line, self.position_ms) {
+            // Drive both the newly expanding glyph and the previous glyph's
+            // post-highlight settle; no full-row polling while they hold.
+            for index in [Some(active), active.checked_sub(1)].into_iter().flatten() {
+                let Some(word) = self.line.words.get(index) else {
+                    continue;
+                };
+                if !should_emphasize_sustained_word(word) {
+                    continue;
+                }
                 let visual = bounded_sustained_word(
                     word,
                     self.line.words.get(index + 1).map(|next| next.timestamp_ms),
                 );
-                sustained_transition_frame_delay(&visual, self.position_ms)
-            });
+                if let Some(delay) = sustained_transition_frame_delay(&visual, self.position_ms) {
+                    animated_delay = Some(animated_delay.map_or(delay, |current| current.min(delay)));
+                }
+            }
+        }
         match (boundary_delay, animated_delay) {
             (Some(boundary), Some(frame)) => Some(boundary.min(frame)),
             (Some(boundary), None) => Some(boundary),
@@ -1576,6 +1587,13 @@ fn smoothstep01(value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+#[inline]
+fn smootherstep01(value: f32) -> f32 {
+    // Fifth-order eased attack/settle, with no velocity or acceleration jump.
+    let t = value.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
 fn lyric_visual_profile(
     index: usize,
     active: usize,
@@ -1778,29 +1796,27 @@ fn sustained_time_envelope(word: &StageLyricWord, position_ms: u64) -> f32 {
     };
     let start_ms = word.timestamp_ms;
     let end_ms = start_ms.saturating_add(duration_ms);
-    if position_ms < start_ms || position_ms >= end_ms {
+    if position_ms < start_ms {
         return 0.0;
     }
-
-    let elapsed_ms = position_ms.saturating_sub(start_ms);
-    let remaining_ms = end_ms.saturating_sub(position_ms);
-
-    // Long-note emphasis is clock-driven, not mask-driven. Give it a short attack, keep the bloom
-    // through the sustained body, and release only near the authored syllable end.
-    let (attack_ms, release_ms) = sustained_attack_release_ms(word).unwrap_or((120, 140));
-
-    if elapsed_ms < attack_ms {
-        smoothstep01(elapsed_ms as f32 / attack_ms.max(1) as f32)
-    } else if remaining_ms < release_ms {
-        smoothstep01(remaining_ms as f32 / release_ms.max(1) as f32)
-    } else {
+    let (attack_ms, release_ms) = sustained_attack_release_ms(word).unwrap_or((280, 320));
+    if position_ms >= end_ms.saturating_add(release_ms) {
+        return 0.0;
+    }
+    let attack_ms = attack_ms.min(duration_ms);
+    if position_ms < start_ms.saturating_add(attack_ms) {
+        smootherstep01(position_ms.saturating_sub(start_ms) as f32 / attack_ms.max(1) as f32)
+    } else if position_ms < end_ms {
         1.0
+    } else {
+        // At 100% highlight, keep the glyph enlarged and settle afterwards.
+        1.0 - smootherstep01(position_ms.saturating_sub(end_ms) as f32 / release_ms.max(1) as f32)
     }
 }
 
-/// A provider may overlap syllable durations. The next authored syllable owns
-/// the handoff, so finish the old note's release before its successor starts.
-/// This only changes the emphasis envelope, never the original reveal timing.
+/// The next authored onset bounds the previous note's visible hold.
+/// Its smooth release continues after that onset rather than snapping.
+
 fn bounded_sustained_word(word: &StageLyricWord, next_start_ms: Option<u64>) -> StageLyricWord {
     let mut visual = word.clone();
     if let Some(next_start_ms) = next_start_ms
@@ -1816,18 +1832,49 @@ fn bounded_sustained_word(word: &StageLyricWord, next_start_ms: Option<u64>) -> 
 /// ONLY while the scalar envelope is changing; a steady sustained vowel
 /// costs zero scheduled layout frames and retains its GPU word reveal.
 fn sustained_transition_frame_delay(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
-    if !should_emphasize_sustained_word(word) {
-        return None;
-    }
-    let duration_ms = word.duration_ms?;
+    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
     let (attack_ms, release_ms) = sustained_attack_release_ms(word)?;
     let elapsed_ms = position_ms.checked_sub(word.timestamp_ms)?;
-    if elapsed_ms >= duration_ms {
+    if elapsed_ms >= duration_ms.saturating_add(release_ms) {
         return None;
     }
-    let remaining_ms = duration_ms - elapsed_ms;
-    (elapsed_ms < attack_ms || remaining_ms <= release_ms)
+    (elapsed_ms < attack_ms.min(duration_ms) || elapsed_ms >= duration_ms)
         .then_some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+}
+
+fn sustained_visual_emphasis(
+    original: &StageLyricWord,
+    visual: &StageLyricWord,
+    position_ms: u64,
+    is_last_word: bool,
+) -> SustainedWordEmphasis {
+    let peak = sustained_word_peak_emphasis(original, is_last_word);
+    if peak.glow_alpha <= 0.0 {
+        return peak;
+    }
+    let envelope = sustained_time_envelope(visual, position_ms);
+    SustainedWordEmphasis {
+        glow_alpha: peak.glow_alpha * envelope,
+        glow_blur_px: peak.glow_blur_px,
+        scale: 1.0 + (peak.scale.clamp(1.0, 1.035) - 1.0) * envelope,
+        lift_px: peak.lift_px * envelope,
+    }
+}
+
+fn sustained_tail_active(
+    original: &StageLyricWord,
+    visual: &StageLyricWord,
+    position_ms: u64,
+) -> bool {
+    if !should_emphasize_sustained_word(original) {
+        return false;
+    }
+    let Some(duration_ms) = visual.duration_ms.filter(|duration| *duration > 0) else {
+        return false;
+    };
+    let end_ms = visual.timestamp_ms.saturating_add(duration_ms);
+    let (_, release_ms) = sustained_attack_release_ms(visual).unwrap_or((280, 320));
+    position_ms >= end_ms && position_ms < end_ms.saturating_add(release_ms)
 }
 
 fn sustained_word_emphasis(
@@ -1843,20 +1890,7 @@ fn sustained_word_emphasis(
         };
     }
 
-    let peak = sustained_word_peak_emphasis(word, is_last_word);
-    if peak.glow_alpha <= 0.0 {
-        return peak;
-    }
-    let envelope = sustained_time_envelope(word, position_ms);
-    SustainedWordEmphasis {
-        glow_alpha: peak.glow_alpha * envelope,
-        glow_blur_px: peak.glow_blur_px,
-        // Clamp the *target* before interpolation. Clamping the animated
-        // result flattened the middle of the attack/release and caused a
-        // visible kink whenever a strong/last syllable hit the 3.5% cap.
-        scale: 1.0 + (peak.scale.clamp(1.0, 1.035) - 1.0) * envelope,
-        lift_px: peak.lift_px * envelope,
-    }
+    sustained_visual_emphasis(word, word, position_ms, is_last_word)
 }
 
 fn karaoke_reveal_word(
@@ -1919,8 +1953,8 @@ fn word_reveal_remaining_duration(word: &StageLyricWord, position_ms: u64) -> Op
 fn sustained_attack_release_ms(word: &StageLyricWord) -> Option<(u64, u64)> {
     let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
     Some((
-        (duration_ms as f32 * 0.18).clamp(120.0, 260.0) as u64,
-        (duration_ms as f32 * 0.20).clamp(140.0, 300.0) as u64,
+        (duration_ms as f32 * 0.22).clamp(280.0, 440.0) as u64,
+        (duration_ms as f32 * 0.20).clamp(260.0, 420.0) as u64,
     ))
 }
 
@@ -1933,7 +1967,7 @@ fn sustained_release_timestamp(word: &StageLyricWord) -> Option<u64> {
     Some(
         word.timestamp_ms
             .saturating_add(duration_ms)
-            .saturating_sub(release_ms),
+            .saturating_add(release_ms),
     )
 }
 
@@ -1999,8 +2033,12 @@ fn karaoke_word(
     let animate = is_current_word
         && playback_animating
         && word_reveal_remaining_duration(word, position_ms).is_some();
-
-    if progress >= 1.0 && !animate {
+    let visual_word = bounded_sustained_word(word, next_word_start_ms);
+    let emphasize = should_emphasize_sustained_word(word)
+        && (is_current_word || sustained_tail_active(word, &visual_word, position_ms));
+    // Never replace the animated glyph at precisely 100% reveal. Keep its
+    // transform and glow until the post-completion settling tail finishes.
+    if progress >= 1.0 && !animate && !emphasize {
         return div()
             .flex_none()
             .whitespace_nowrap()
@@ -2008,7 +2046,7 @@ fn karaoke_word(
             .child(word.text.clone())
             .into_any_element();
     }
-    if progress <= 0.0 && !animate {
+    if progress <= 0.0 && !animate && !emphasize {
         return div()
             .flex_none()
             .whitespace_nowrap()
@@ -2029,20 +2067,12 @@ fn karaoke_word(
         animate,
         karaoke_epoch,
     );
-    // One time source owns BOTH glow and scale. Previously a base .scale()
-    // was compounded with a second scale_opacity animation, and the glow
-    // had its own independent easing. Rebuilding on the attack/hold/release
-    // boundaries therefore jumped, flashed or briefly overshot.
-    //
-    // Keep the overlay geometry stable and sample only the short transitions
-    // from the audio clock (scheduled on the active karaoke leaf).
-    let visual_word = bounded_sustained_word(word, next_word_start_ms);
-    let emphasize = is_current_word && should_emphasize_sustained_word(&visual_word);
-    let emphasis =
-        sustained_word_emphasis(&visual_word, position_ms, is_current_word, is_last_word);
+    // The same scalar drives zoom and bloom through the full reveal and
+    // immediately following settle. Amplitude stays tied to original duration.
+    let emphasis = sustained_visual_emphasis(word, &visual_word, position_ms, is_last_word);
     let mut root = div().relative().flex_none().whitespace_nowrap();
     if emphasize {
-        let peak = sustained_word_peak_emphasis(&visual_word, is_last_word);
+        let peak = sustained_word_peak_emphasis(word, is_last_word);
         root = root.child(
             div()
                 .absolute()
@@ -2054,7 +2084,7 @@ fn karaoke_word(
         );
     }
     let root = root
-        .child(div().text_color(dark::white(0.58)).child(word.text.clone()))
+        .child(div().text_color(dark::white(0.64)).child(word.text.clone()))
         .child(div().absolute().inset_0().child(highlighted));
     if emphasize {
         return root
