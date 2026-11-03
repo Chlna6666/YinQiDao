@@ -104,8 +104,7 @@ impl LyricPlaybackStackHandoff {
 
     #[inline]
     fn scroll_px(self, now: Instant) -> f32 {
-        self.from_scroll_px
-            + (self.to_scroll_px - self.from_scroll_px) * self.progress(now)
+        self.from_scroll_px + (self.to_scroll_px - self.from_scroll_px) * self.progress(now)
     }
 
     #[inline]
@@ -1093,40 +1092,32 @@ impl Render for StageLyricsView {
                 .max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
             let hovered = self.hovered_index == Some(index);
 
-            let (y, viewport_alpha, previous_viewport_alpha, viewport_blur) =
-                if let Some(handoff) = handoff {
-                    let to_y = playback_stack_row_top(
-                        index,
-                        center_index,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    );
-                    let from_y = to_y + handoff.to_scroll_px - handoff.from_scroll_px;
-                    let (mut from_alpha, _) =
-                        playback_stack_viewport_profile(from_y, row_height, viewport_height);
-                    let (mut to_alpha, mut to_blur) =
-                        playback_stack_viewport_profile(to_y, row_height, viewport_height);
-                    if hovered {
-                        from_alpha = 1.0;
-                        to_alpha = 1.0;
-                        to_blur = 0.0;
-                    }
-                    (to_y, to_alpha, from_alpha, to_blur)
-                } else {
-                    let y = playback_stack_row_top(
-                        index,
-                        center_index,
-                        &self.row_prefix_sum,
-                        anchor_y,
-                    );
-                    let (mut alpha, mut blur) =
-                        playback_stack_viewport_profile(y, row_height, viewport_height);
-                    if hovered {
-                        alpha = 1.0;
-                        blur = 0.0;
-                    }
-                    (y, alpha, alpha, blur)
-                };
+            let (y, viewport_alpha, previous_viewport_alpha, viewport_blur) = if let Some(handoff) =
+                handoff
+            {
+                let to_y =
+                    playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
+                let from_y = to_y + handoff.to_scroll_px - handoff.from_scroll_px;
+                let (mut from_alpha, _) =
+                    playback_stack_viewport_profile(from_y, row_height, viewport_height);
+                let (mut to_alpha, mut to_blur) =
+                    playback_stack_viewport_profile(to_y, row_height, viewport_height);
+                if hovered {
+                    from_alpha = 1.0;
+                    to_alpha = 1.0;
+                    to_blur = 0.0;
+                }
+                (to_y, to_alpha, from_alpha, to_blur)
+            } else {
+                let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
+                let (mut alpha, mut blur) =
+                    playback_stack_viewport_profile(y, row_height, viewport_height);
+                if hovered {
+                    alpha = 1.0;
+                    blur = 0.0;
+                }
+                (y, alpha, alpha, blur)
+            };
 
             // During a handoff the compositor may still paint a previous
             // visual position even after a newer line boundary is reported.
@@ -1186,38 +1177,35 @@ impl Render for StageLyricsView {
 
             // Edge fades share the same easing and duration as the ONE scroll
             // transform. Only opacity is per-row: no glyph moves separately.
-            let row_slot = if handoff.is_some()
-                && (previous_viewport_alpha - viewport_alpha).abs() > 0.001
-            {
-                let animation = Animation::from_spec(
-                    AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION)
-                        .ease(lyric_stack_easing()),
-                )
-                .with_property(AnimationProperty::opacity(
-                    previous_viewport_alpha,
-                    viewport_alpha,
-                ));
-                row_slot
-                    .with_animation(
-                        ElementId::NamedInteger(
-                            SharedString::new_static("lyric-edge-fade"),
-                            lyric_animation_instance_id(motion_epoch, index),
-                        ),
-                        animation,
-                        |element, _| element,
+            let row_slot =
+                if handoff.is_some() && (previous_viewport_alpha - viewport_alpha).abs() > 0.001 {
+                    let animation = Animation::from_spec(
+                        AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION).ease(lyric_stack_easing()),
                     )
-                    .into_any_element()
-            } else {
-                row_slot.opacity(viewport_alpha).into_any_element()
-            };
+                    .with_property(AnimationProperty::opacity(
+                        previous_viewport_alpha,
+                        viewport_alpha,
+                    ));
+                    row_slot
+                        .with_animation(
+                            ElementId::NamedInteger(
+                                SharedString::new_static("lyric-edge-fade"),
+                                lyric_animation_instance_id(motion_epoch, index),
+                            ),
+                            animation,
+                            |element, _| element,
+                        )
+                        .into_any_element()
+                } else {
+                    row_slot.opacity(viewport_alpha).into_any_element()
+                };
             stack = stack.child(row_slot);
         }
 
         let stack = if let Some(handoff) = handoff {
             let initial_offset = handoff.to_scroll_px - handoff.from_scroll_px;
             let animation = Animation::from_spec(
-                AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION)
-                    .ease(lyric_stack_easing()),
+                AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION).ease(lyric_stack_easing()),
             )
             .with_property(AnimationProperty::translation_opacity(
                 point(px(0.0), px(initial_offset)),
@@ -2470,18 +2458,22 @@ mod tests {
 
     #[test]
     fn active_karaoke_long_english_and_translation_do_not_share_row_space() {
-        let mut line = StageLyricLine::from_plain(
-            "I'll be waiting all there's left to do is run",
-        );
+        let mut line = StageLyricLine::from_plain("I'll be waiting all there's left to do is run");
         line.translation = Some(SharedString::from("我会一直等到最后"));
         let width = 380.0;
         let primary = estimated_primary_lyric_height(&line, width);
         let row = estimated_lyric_row_height(&line, width);
-        assert!(primary >= 80.0, "English lyric must reserve at least two lines");
+        assert!(
+            primary >= 80.0,
+            "English lyric must reserve at least two lines"
+        );
         assert!(row >= primary + 25.0 + 52.0);
         let prefix = [0.0, row, row + 82.0];
-        assert!(playback_stack_row_top(1, 0, &prefix, 300.0)
-            - playback_stack_row_top(0, 0, &prefix, 300.0) >= row);
+        assert!(
+            playback_stack_row_top(1, 0, &prefix, 300.0)
+                - playback_stack_row_top(0, 0, &prefix, 300.0)
+                >= row
+        );
     }
 
     #[test]
