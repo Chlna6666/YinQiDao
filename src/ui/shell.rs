@@ -316,6 +316,12 @@ fn text_fingerprint(text: &str) -> u64 {
 }
 
 #[inline]
+/// Mount the immersive surface only for an explicit open/close transition.
+#[inline]
+fn stage_drawer_needs_surface(progress: f32, animating: bool) -> bool {
+    animating || progress > 0.001
+}
+
 fn stage_ease_in_out_cubic(progress: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
     if progress < 0.5 {
@@ -4951,6 +4957,22 @@ impl Render for MusicApp {
         if stage_prewarm {
             self.stage_prepared = true;
             self.stage_prewarm_after = None;
+
+            // Prepare retained Stage entities without exposing a fullscreen
+            // prewarm compositor layer over the Home page.
+            let fluid_background = self.ensure_fluid_background(cx);
+            let track_id = self
+                .snapshot
+                .current_track
+                .as_ref()
+                .map_or(0, |track| track.id);
+            let palette = self.artwork_palettes.get(&track_id).cloned();
+            let dynamic_blur = self.config.dynamic_blur;
+            fluid_background.update(cx, |view, cx| {
+                view.sync(track_id, palette, dynamic_blur, false, cx);
+            });
+            let _ = player::render(self, cx, fluid_background);
+            let _ = stage_controls::titlebar_view(self, cx);
         }
 
         let is_idle = self.stage_open
@@ -4972,8 +4994,10 @@ impl Render for MusicApp {
             }
         }
 
+        // Prewarming does not imply visibility: only the actual Stage
+        // transition may mount a fullscreen composited/hit-test surface.
         let stage_surface_needed =
-            self.stage_progress > 0.001 || self.stage_animating || stage_prewarm;
+            stage_drawer_needs_surface(self.stage_progress, self.stage_animating);
         let fluid_background = stage_surface_needed.then(|| {
             let fluid_background = self.ensure_fluid_background(cx);
             let fluid_track_id = self
@@ -4985,7 +5009,7 @@ impl Render for MusicApp {
             // Do not run a full-screen shader RAF while the whole stage is itself moving. The
             // retained drawer animation replays the already painted stage; fluid resumes once the
             // drawer settles.
-            let fluid_active = !stage_prewarm && self.stage_open && !self.stage_animating;
+            let fluid_active = self.stage_open && !self.stage_animating;
             let fluid_dynamic = self.config.dynamic_blur;
             fluid_background.update(cx, |view, cx| {
                 view.sync(
@@ -5116,8 +5140,6 @@ impl Render for MusicApp {
                 stage_position(self.stage_transition_from),
                 stage_position(self.stage_transition_to),
             );
-            let hidden_stage =
-                AnimationProperty::translation(stage_position(0.0), stage_position(1.0));
             let stage_titlebar = AnyView::from(stage_controls::titlebar_view(self, cx))
                 .cached(StyleRefinement::default().w_full().h(px(38.0)))
                 .reuse_on_window_refresh();
@@ -5188,11 +5210,7 @@ impl Render for MusicApp {
                 )
                 .composite_layer();
 
-            let stage_surface = if stage_prewarm {
-                stage_layer
-                    .with_sampled_animation(hidden_stage, 0.0)
-                    .into_any_element()
-            } else if self.stage_animating {
+            let stage_surface = if self.stage_animating {
                 if self.stage_transition_started_at.is_some() {
                     let animation = Animation::from_spec(
                         AnimationSpec::new(self.stage_transition_duration).ease(Easing::InOutCubic),
@@ -6139,6 +6157,25 @@ mod tests {
     #[test]
     fn stage_idle_policy_is_twenty_seconds() {
         assert_eq!(stage_chrome::IDLE_TIMEOUT, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn cold_stage_prewarm_never_mounts_fullscreen_overlay() {
+        let mut app = MusicApp::new(false);
+        assert!(!app.stage_open);
+        assert!(!app.stage_animating);
+        assert!(!stage_drawer_needs_surface(app.stage_progress, app.stage_animating));
+
+        // Completing the background prewarm must not paint a second screen
+        // or intercept the first Home-page click.
+        app.stage_prepared = true;
+        app.stage_prewarm_after = None;
+        assert!(!stage_drawer_needs_surface(app.stage_progress, app.stage_animating));
+
+        assert!(stage_drawer_needs_surface(0.0, true));
+        assert!(stage_drawer_needs_surface(0.2, false));
+        assert!(stage_drawer_needs_surface(1.0, false));
+        assert!(!stage_drawer_needs_surface(0.0, false));
     }
 
     #[test]
