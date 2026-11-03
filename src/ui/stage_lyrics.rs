@@ -38,17 +38,20 @@ const LYRIC_ACTIVE_SCALE: f32 = 1.02;
 const LYRIC_INACTIVE_ALPHA: f32 = 0.40;
 const LYRIC_ACTIVE_ALPHA: f32 = 1.0;
 
-// Match QueMusic's authored stagger/settle curve exactly. Jitter must be fixed in retained capture
-// and frame traversal rather than by shortening the animation until individual row steps become
-// visually abrupt.
-const LYRIC_MOTION_DELAY_BASE_MS: f32 = 24.0;
-const LYRIC_MOTION_DELAY_POWER: f32 = 1.20;
-const LYRIC_MOTION_BASE_DURATION_MS: f32 = 460.0;
-const LYRIC_MOTION_DURATION_STEP_MS: f32 = 32.0;
-const LYRIC_MOTION_BEZIER_X1: f32 = 0.24;
-const LYRIC_MOTION_BEZIER_Y1: f32 = 0.06;
-const LYRIC_MOTION_BEZIER_X2: f32 = 0.0;
-const LYRIC_MOTION_BEZIER_Y2: f32 = 1.03;
+// Treat the lyrics as one continuous scroll surface. The entire visible
+// stack shares a single compositor translation; only focus and timed syllables
+// have independent animations. Staggering each row made the top and bottom
+// look like different wheels and desynchronized edge transitions.
+const LYRIC_STACK_SCROLL_DURATION: Duration = Duration::from_millis(560);
+
+fn lyric_stack_easing() -> Easing {
+    Easing::CubicBezier {
+        x1: 0.22,
+        y1: 0.05,
+        x2: 0.12,
+        y2: 1.0,
+    }
+}
 
 // Blur is deliberately an edge-only depth cue. Keep the broad middle band sharp, cap the expensive
 // Gaussian pass at a subtle radius, and quantize sigma so moving rows do not rebuild a new blur
@@ -73,8 +76,10 @@ const MAX_KARAOKE_WORDS_PER_LINE: usize = 96;
 
 #[derive(Clone, Copy, Debug)]
 struct LyricPlaybackStackHandoff {
-    from_active: usize,
-    to_active: usize,
+    // Store pixel offsets instead of only row indices so an interrupted
+    // transition can resume from the compositor's actual sampled position.
+    from_scroll_px: f32,
+    to_scroll_px: f32,
     first_index: usize,
     last_index: usize,
     started_at: Instant,
@@ -83,25 +88,30 @@ struct LyricPlaybackStackHandoff {
 impl LyricPlaybackStackHandoff {
     #[inline]
     fn duration(self) -> Duration {
-        let relative = self.last_index as isize - self.to_active as isize;
-        let (delay, duration) = lyric_row_motion_timing(relative);
-        delay + duration
+        LYRIC_STACK_SCROLL_DURATION
+    }
+
+    #[inline]
+    fn progress(self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        let t = (elapsed.as_secs_f32() / self.duration().as_secs_f32()).clamp(0.0, 1.0);
+        if t >= 1.0 {
+            1.0
+        } else {
+            lyric_stack_easing().sample(t)
+        }
+    }
+
+    #[inline]
+    fn scroll_px(self, now: Instant) -> f32 {
+        self.from_scroll_px
+            + (self.to_scroll_px - self.from_scroll_px) * self.progress(now)
     }
 
     #[inline]
     fn finished(self, now: Instant) -> bool {
         now.saturating_duration_since(self.started_at) >= self.duration()
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct LyricRowVisualMotion {
-    offset_y: f32,
-    delay: Duration,
-    duration: Duration,
-    curve_x2: f32,
-    from_viewport_alpha: f32,
-    to_viewport_alpha: f32,
 }
 
 #[derive(Default)]
@@ -761,12 +771,20 @@ impl StageLyricsView {
                 let last_index = to_active
                     .saturating_add(PLAYBACK_STACK_FUTURE_ROWS)
                     .min(self.lines.len().saturating_sub(1));
+                let now = Instant::now();
+                let from_scroll_px = self
+                    .playback_stack_handoff
+                    .filter(|handoff| !handoff.finished(now))
+                    .map_or_else(
+                        || lyric_stack_scroll_offset(&self.row_prefix_sum, from_active),
+                        |handoff| handoff.scroll_px(now),
+                    );
                 Some(LyricPlaybackStackHandoff {
-                    from_active,
-                    to_active,
+                    from_scroll_px,
+                    to_scroll_px: lyric_stack_scroll_offset(&self.row_prefix_sum, to_active),
                     first_index,
                     last_index,
-                    started_at: Instant::now(),
+                    started_at: now,
                 })
             }
             _ => None,
@@ -884,9 +902,17 @@ impl StageLyricsView {
         // Reuse the compositor-owned row motion used by playback, rather
         // than remounting a different set of rows instantly on every wheel
         // message. Include BOTH sets of visible rows for the transition.
+        let now = Instant::now();
+        let from_scroll_px = self
+            .playback_stack_handoff
+            .filter(|handoff| !handoff.finished(now))
+            .map_or_else(
+                || lyric_stack_scroll_offset(&self.row_prefix_sum, previous),
+                |handoff| handoff.scroll_px(now),
+            );
         self.playback_stack_handoff = Some(LyricPlaybackStackHandoff {
-            from_active: previous,
-            to_active: next,
+            from_scroll_px,
+            to_scroll_px: lyric_stack_scroll_offset(&self.row_prefix_sum, next),
             first_index: previous
                 .min(next)
                 .saturating_sub(READING_STACK_HISTORY_ROWS),
@@ -894,7 +920,7 @@ impl StageLyricsView {
                 .max(next)
                 .saturating_add(READING_STACK_FUTURE_ROWS)
                 .min(max_index),
-            started_at: Instant::now(),
+            started_at: now,
         });
         self.reading_center_index = Some(next);
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
@@ -1048,9 +1074,6 @@ impl Render for StageLyricsView {
         // mismatch when a padded flex parent contains wrapped lyric text.
         let lyric_text_width =
             stage_lyric_content_width(self.viewport_width, f32::from(fallback_viewport.width));
-        let motion_spring_value = handoff.map_or(0.0, |handoff| {
-            lyric_motion_spring_value(handoff.from_active, handoff.to_active, &self.row_prefix_sum)
-        });
         let lines = self.lines.clone();
         let active_karaoke_line = self.active_karaoke_line.clone();
         let view = cx.entity().downgrade();
@@ -1070,58 +1093,40 @@ impl Render for StageLyricsView {
                 .max(PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
             let hovered = self.hovered_index == Some(index);
 
-            let (y, viewport_alpha, viewport_blur, row_motion) = if let Some(handoff) = handoff {
-                let from_y = playback_stack_row_top(
-                    index,
-                    handoff.from_active,
-                    &self.row_prefix_sum,
-                    anchor_y,
-                );
-                let to_y = playback_stack_row_top(
-                    index,
-                    handoff.to_active,
-                    &self.row_prefix_sum,
-                    anchor_y,
-                );
-                let (mut from_alpha, _) =
-                    playback_stack_viewport_profile(from_y, row_height, viewport_height);
-                let (mut to_alpha, mut to_blur) =
-                    playback_stack_viewport_profile(to_y, row_height, viewport_height);
-                if hovered {
-                    from_alpha = 1.0;
-                    to_alpha = 1.0;
-                    to_blur = 0.0;
-                }
-
-                let relative = index as isize - handoff.to_active as isize;
-                let (delay, duration) = lyric_row_motion_timing(relative);
-                let offset_y = from_y - to_y;
-                let curve_x2 = motion_spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2);
-                let motion = (offset_y.abs() > 0.01).then_some(LyricRowVisualMotion {
-                    offset_y,
-                    delay,
-                    duration,
-                    curve_x2,
-                    from_viewport_alpha: from_alpha,
-                    to_viewport_alpha: to_alpha,
-                });
-                // Keep the final quantized edge blur on moving glyphs as well.
-                // The value is constant throughout the compositor timeline:
-                // no per-frame blur re-rasterization and no sudden blur pop
-                // when the row animation finishes.
-                (to_y, to_alpha, to_blur, motion)
-            } else {
-                let y = playback_stack_row_top(index, center_index, &self.row_prefix_sum, anchor_y);
-                let (mut viewport_alpha, mut viewport_blur) =
-                    playback_stack_viewport_profile(y, row_height, viewport_height);
-                // Reading mode still benefits from the same top/bottom depth
-                // field; only the row under the pointer becomes fully sharp.
-                if hovered {
-                    viewport_alpha = 1.0;
-                    viewport_blur = 0.0;
-                }
-                (y, viewport_alpha, viewport_blur, None)
-            };
+            let (y, viewport_alpha, previous_viewport_alpha, viewport_blur) =
+                if let Some(handoff) = handoff {
+                    let to_y = playback_stack_row_top(
+                        index,
+                        center_index,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    );
+                    let from_y = to_y + handoff.to_scroll_px - handoff.from_scroll_px;
+                    let (mut from_alpha, _) =
+                        playback_stack_viewport_profile(from_y, row_height, viewport_height);
+                    let (mut to_alpha, mut to_blur) =
+                        playback_stack_viewport_profile(to_y, row_height, viewport_height);
+                    if hovered {
+                        from_alpha = 1.0;
+                        to_alpha = 1.0;
+                        to_blur = 0.0;
+                    }
+                    (to_y, to_alpha, from_alpha, to_blur)
+                } else {
+                    let y = playback_stack_row_top(
+                        index,
+                        center_index,
+                        &self.row_prefix_sum,
+                        anchor_y,
+                    );
+                    let (mut alpha, mut blur) =
+                        playback_stack_viewport_profile(y, row_height, viewport_height);
+                    if hovered {
+                        alpha = 1.0;
+                        blur = 0.0;
+                    }
+                    (y, alpha, alpha, blur)
+                };
 
             // During a handoff the compositor may still paint a previous
             // visual position even after a newer line boundary is reported.
@@ -1179,27 +1184,23 @@ impl Render for StageLyricsView {
                 .top(px(y))
                 .child(row);
 
-            let row_slot = if let Some(motion) = row_motion {
+            // Edge fades share the same easing and duration as the ONE scroll
+            // transform. Only opacity is per-row: no glyph moves separately.
+            let row_slot = if handoff.is_some()
+                && (previous_viewport_alpha - viewport_alpha).abs() > 0.001
+            {
                 let animation = Animation::from_spec(
-                    AnimationSpec::new(motion.duration)
-                        .delay(motion.delay)
-                        .ease(Easing::CubicBezier {
-                            x1: LYRIC_MOTION_BEZIER_X1,
-                            y1: LYRIC_MOTION_BEZIER_Y1,
-                            x2: motion.curve_x2,
-                            y2: LYRIC_MOTION_BEZIER_Y2,
-                        }),
+                    AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION)
+                        .ease(lyric_stack_easing()),
                 )
-                .with_property(AnimationProperty::translation_opacity(
-                    point(px(0.0), px(motion.offset_y)),
-                    point(px(0.0), px(0.0)),
-                    motion.from_viewport_alpha,
-                    motion.to_viewport_alpha,
+                .with_property(AnimationProperty::opacity(
+                    previous_viewport_alpha,
+                    viewport_alpha,
                 ));
                 row_slot
                     .with_animation(
                         ElementId::NamedInteger(
-                            SharedString::new_static("lyric-row-motion"),
+                            SharedString::new_static("lyric-edge-fade"),
                             lyric_animation_instance_id(motion_epoch, index),
                         ),
                         animation,
@@ -1212,7 +1213,31 @@ impl Render for StageLyricsView {
             stack = stack.child(row_slot);
         }
 
-        let stack = stack.into_any_element();
+        let stack = if let Some(handoff) = handoff {
+            let initial_offset = handoff.to_scroll_px - handoff.from_scroll_px;
+            let animation = Animation::from_spec(
+                AnimationSpec::new(LYRIC_STACK_SCROLL_DURATION)
+                    .ease(lyric_stack_easing()),
+            )
+            .with_property(AnimationProperty::translation_opacity(
+                point(px(0.0), px(initial_offset)),
+                point(px(0.0), px(0.0)),
+                1.0,
+                1.0,
+            ));
+            stack
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::new_static("lyric-stack-scroll"),
+                        motion_epoch,
+                    ),
+                    animation,
+                    |element, _| element,
+                )
+                .into_any_element()
+        } else {
+            stack.into_any_element()
+        };
 
         let viewport_measure_view = cx.entity().downgrade();
         let viewport_measure = bounds_observer(move |bounds, _window, cx| {
@@ -2247,37 +2272,17 @@ fn lyric_row_intersects_viewport(
 }
 
 #[inline]
-fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
-    let index_prefix = prefix_sum
+fn lyric_stack_scroll_offset(prefix_sum: &[f32], index: usize) -> f32 {
+    prefix_sum
         .get(index)
         .copied()
-        .unwrap_or(index as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
-    let active_prefix = prefix_sum
-        .get(active)
-        .copied()
-        .unwrap_or(active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
-
-    // QueMusic: prefixSum[i] - prefixSum[currentLine] + lyricContent.height * alignPos.
-    anchor_y + index_prefix - active_prefix
+        .unwrap_or(index as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX)
 }
 
 #[inline]
-fn lyric_motion_spring_value(from_active: usize, to_active: usize, prefix_sum: &[f32]) -> f32 {
-    let from = prefix_sum
-        .get(from_active)
-        .copied()
-        .unwrap_or(from_active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
-    let to = prefix_sum
-        .get(to_active)
-        .copied()
-        .unwrap_or(to_active as f32 * PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX);
-    let anime_height = (to - from).max(0.0);
-
-    if anime_height <= 400.0 {
-        return 0.0;
-    }
-
-    (((anime_height - 400.0) / 20.0).floor() / -200.0).max(-0.50)
+fn playback_stack_row_top(index: usize, active: usize, prefix_sum: &[f32], anchor_y: f32) -> f32 {
+    anchor_y + lyric_stack_scroll_offset(prefix_sum, index)
+        - lyric_stack_scroll_offset(prefix_sum, active)
 }
 
 #[inline]
@@ -2322,55 +2327,6 @@ fn playback_stack_viewport_profile(
         fade.clamp(0.0, 1.0),
         quantize_viewport_blur(LYRIC_VIEWPORT_MAX_BLUR_PX * blur_k),
     )
-}
-
-#[inline]
-fn lyric_row_motion_timing(relative_to_active: isize) -> (Duration, Duration) {
-    if relative_to_active < -3 {
-        return (
-            Duration::ZERO,
-            Duration::from_secs_f32(LYRIC_MOTION_BASE_DURATION_MS / 1_000.0),
-        );
-    }
-
-    let shifted = (relative_to_active + 4).max(0) as f32;
-    let delay_ms = shifted.powf(LYRIC_MOTION_DELAY_POWER) * LYRIC_MOTION_DELAY_BASE_MS;
-    let duration_ms = LYRIC_MOTION_BASE_DURATION_MS + shifted * LYRIC_MOTION_DURATION_STEP_MS;
-
-    (
-        Duration::from_secs_f32(delay_ms / 1_000.0),
-        Duration::from_secs_f32(duration_ms / 1_000.0),
-    )
-}
-
-#[cfg(test)]
-#[inline]
-fn lyric_row_motion_progress(
-    index: usize,
-    target_active: usize,
-    spring_value: f32,
-    started_at: Instant,
-    now: Instant,
-) -> f32 {
-    let relative = index as isize - target_active as isize;
-    let (delay, duration) = lyric_row_motion_timing(relative);
-    let elapsed = now.saturating_duration_since(started_at);
-    if elapsed <= delay {
-        return 0.0;
-    }
-    let local = elapsed.saturating_sub(delay);
-    if local >= duration {
-        return 1.0;
-    }
-
-    let raw = (local.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
-    Easing::CubicBezier {
-        x1: LYRIC_MOTION_BEZIER_X1,
-        y1: LYRIC_MOTION_BEZIER_Y1,
-        x2: spring_value.clamp(-0.50, LYRIC_MOTION_BEZIER_X2),
-        y2: LYRIC_MOTION_BEZIER_Y2,
-    }
-    .sample(raw)
 }
 
 fn enhanced_words_cover_primary_text(line: &LyricLine) -> bool {
@@ -2589,47 +2545,57 @@ mod tests {
     }
 
     #[test]
-    fn quemusic_motion_constants_match_reference_schedule() {
-        assert_eq!(LYRIC_MOTION_DELAY_BASE_MS, 24.0);
-        assert_eq!(LYRIC_MOTION_DELAY_POWER, 1.20);
-        assert_eq!(LYRIC_MOTION_BASE_DURATION_MS, 460.0);
-        assert_eq!(LYRIC_MOTION_DURATION_STEP_MS, 32.0);
-
-        let (delay, duration) = lyric_row_motion_timing(0);
-        let expected_delay_ms = 4.0_f32.powf(1.20) * 24.0;
-        assert!((delay.as_secs_f32() * 1_000.0 - expected_delay_ms).abs() < 0.05);
-        assert!((duration.as_secs_f32() * 1_000.0 - 588.0).abs() < 0.05);
+    fn all_rows_move_as_one_continuous_scroll() {
+        let prefix = [0.0, 82.0, 206.0, 300.0];
+        let now = Instant::now();
+        let motion = LyricPlaybackStackHandoff {
+            from_scroll_px: prefix[1],
+            to_scroll_px: prefix[2],
+            first_index: 0,
+            last_index: 2,
+            started_at: now,
+        };
+        let anchor_y = 300.0;
+        let second = playback_stack_row_top(1, 2, &prefix, anchor_y);
+        let third = playback_stack_row_top(2, 2, &prefix, anchor_y);
+        for time in [
+            now,
+            now + motion.duration() / 4,
+            now + motion.duration() / 2,
+            now + motion.duration(),
+        ] {
+            let offset = motion.to_scroll_px - motion.scroll_px(time);
+            let second_visual = second + offset;
+            let third_visual = third + offset;
+            // Every row keeps its exact spacing through the entire scroll.
+            assert!((third_visual - second_visual - (prefix[2] - prefix[1])).abs() < 0.001);
+        }
+        assert_eq!(motion.scroll_px(now), prefix[1]);
+        assert_eq!(motion.scroll_px(now + motion.duration()), prefix[2]);
     }
 
     #[test]
-    fn quemusic_row_delay_and_duration_grow_down_the_stack() {
-        let (top_delay, top_duration) = lyric_row_motion_timing(-4);
-        let (near_delay, near_duration) = lyric_row_motion_timing(-3);
-        let (active_delay, active_duration) = lyric_row_motion_timing(0);
-        let (future_delay, future_duration) = lyric_row_motion_timing(3);
-
-        assert_eq!(top_delay, Duration::ZERO);
-        assert!(near_delay > top_delay);
-        assert!(active_delay > near_delay);
-        assert!(future_delay > active_delay);
-        assert!(near_duration > top_duration);
-        assert!(active_duration > near_duration);
-        assert!(future_duration > active_duration);
-    }
-
-    #[test]
-    fn quemusic_motion_curve_starts_slow_and_settles_with_soft_overshoot() {
-        let start = Instant::now();
-        let (delay, duration) = lyric_row_motion_timing(0);
-        let p0 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay);
-        let p25 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration / 4);
-        let p75 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration * 3 / 4);
-        let p100 = lyric_row_motion_progress(10, 10, 0.0, start, start + delay + duration);
-
-        assert_eq!(p0, 0.0);
-        assert!(p25 > 0.0);
-        assert!(p75 > p25);
-        assert_eq!(p100, 1.0);
+    fn interrupted_scroll_uses_sampled_pixel_offset() {
+        let now = Instant::now();
+        let first = LyricPlaybackStackHandoff {
+            from_scroll_px: 82.0,
+            to_scroll_px: 206.0,
+            first_index: 0,
+            last_index: 3,
+            started_at: now,
+        };
+        let half_time = now + first.duration() / 2;
+        let sampled = first.scroll_px(half_time);
+        assert!(sampled > 82.0 && sampled < 206.0);
+        let second = LyricPlaybackStackHandoff {
+            from_scroll_px: sampled,
+            to_scroll_px: 300.0,
+            first_index: 0,
+            last_index: 4,
+            started_at: half_time,
+        };
+        assert!((second.scroll_px(half_time) - sampled).abs() < 0.001);
+        assert!((second.scroll_px(half_time + second.duration()) - 300.0).abs() < 0.001);
     }
 
     #[test]
@@ -2639,17 +2605,6 @@ mod tests {
         let anchor = viewport_height * LYRIC_ANCHOR_RATIO;
         assert_eq!(LYRIC_ANCHOR_RATIO, 0.42);
         assert!((playback_stack_row_top(1, 1, &prefix, anchor) - 252.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn quemusic_dynamic_spring_only_changes_for_large_line_jumps() {
-        let short_prefix = [0.0, 82.0, 164.0];
-        assert_eq!(lyric_motion_spring_value(0, 1, &short_prefix), 0.0);
-
-        let tall_prefix = [0.0, 510.0, 1020.0];
-        let spring = lyric_motion_spring_value(0, 1, &tall_prefix);
-        assert!(spring < 0.0);
-        assert!(spring >= -0.50);
     }
 
     #[test]
