@@ -1,9 +1,12 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity,
     HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity,
-    Window, WindowControlArea, div, point, prelude::*, px, rgb,
+    Window, WindowControlArea, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
