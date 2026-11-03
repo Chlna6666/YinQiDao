@@ -54,12 +54,15 @@ impl DesktopLyricsView {
     ) -> Self {
         let parent_subscription = parent.upgrade().map(|parent_entity| {
             cx.observe(&parent_entity, |this, app, cx| {
-                // MainWindow/playlist updates can notify hundreds of times without changing
-                // desktop lyrics. Keep this secondary HWND isolated from unrelated UI frames.
-                let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
-                if this.observed_track_id != track_id
-                    || this.observed_config.as_ref() != Some(&app.config.desktop_lyrics)
-                {
+                // observe() yields Entity<MusicApp>, not &MusicApp. Read the
+                // model through GPUI's context before comparing semantic state.
+                let changed = {
+                    let app = app.read(cx);
+                    let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
+                    this.observed_track_id != track_id
+                        || this.observed_config.as_ref() != Some(&app.config.desktop_lyrics)
+                };
+                if changed {
                     cx.notify();
                 }
             })
