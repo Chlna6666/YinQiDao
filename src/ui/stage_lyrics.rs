@@ -1538,7 +1538,7 @@ fn lyric_text_layer(
     }
 
     if blur_sigma >= LYRIC_VIEWPORT_BLUR_MIN_APPLY_PX {
-        text = text.blur(px(blur_sigma));
+        text = text.filter_blur(px(blur_sigma));
     }
     text
 }
@@ -2020,7 +2020,7 @@ fn karaoke_word(
                 .inset_0()
                 .opacity(alpha)
                 .text_color(dark::white(1.0))
-                .blur(px(peak.glow_blur_px.clamp(2.0, 4.0)))
+                .filter_blur(px(peak.glow_blur_px.clamp(2.0, 4.0)))
                 .child(word.text.clone())
                 .into_any_element();
             if let Some((from, to, duration)) = segment {
