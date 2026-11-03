@@ -6164,13 +6164,19 @@ mod tests {
         let mut app = MusicApp::new(false);
         assert!(!app.stage_open);
         assert!(!app.stage_animating);
-        assert!(!stage_drawer_needs_surface(app.stage_progress, app.stage_animating));
+        assert!(!stage_drawer_needs_surface(
+            app.stage_progress,
+            app.stage_animating
+        ));
 
         // Completing the background prewarm must not paint a second screen
         // or intercept the first Home-page click.
         app.stage_prepared = true;
         app.stage_prewarm_after = None;
-        assert!(!stage_drawer_needs_surface(app.stage_progress, app.stage_animating));
+        assert!(!stage_drawer_needs_surface(
+            app.stage_progress,
+            app.stage_animating
+        ));
 
         assert!(stage_drawer_needs_surface(0.0, true));
         assert!(stage_drawer_needs_surface(0.2, false));
