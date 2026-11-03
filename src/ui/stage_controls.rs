@@ -768,8 +768,14 @@ impl StageTransportView {
                 }
             }
             AppUiEvent::ProgressChanged { ratio, .. } => {
-                if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                let preview_changed = option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015);
+                if preview_changed {
                     this.drag_progress_ratio = ratio;
+                }
+                // A non-preview progress event is a discrete audio seek, including clicks
+                // on a lyric or keyboard navigation. Refresh the elapsed clock immediately
+                // even if the scrub preview was already None.
+                if seek_event_requires_refresh(preview_changed, ratio) {
                     cx.notify();
                 }
             }
@@ -976,8 +982,20 @@ impl StageProgressView {
                 if this.local_dragging && ratio.is_some() {
                     return;
                 }
-                if option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015) {
+                // A committed seek from another surface cancels this local
+                // preview; releasing an old pointer must not overwrite it.
+                if ratio.is_none() {
+                    this.local_dragging = false;
+                }
+                let preview_changed = option_ratio_changed(this.drag_progress_ratio, ratio, 0.0015);
+                if preview_changed {
                     this.drag_progress_ratio = ratio;
+                }
+                // A seek from lyrics, keyboard or a foreign transport slider does not
+                // necessarily carry a drag preview. Rebase the compositor animation
+                // for EVERY committed position change instead of continuing the old
+                // progress-fill animation until a later playback-state transition.
+                if seek_event_requires_refresh(preview_changed, ratio) {
                     this.animation_epoch = this.animation_epoch.wrapping_add(1);
                     cx.notify();
                 }
@@ -1120,15 +1138,24 @@ impl StageProgressView {
             },
             move |ratio, cx| {
                 let ratio = ratio.clamp(0.0, 1.0);
-                let _ = this_commit.update(cx, |this, cx| {
-                    this.local_dragging = false;
-                    this.drag_progress_ratio = None;
-                    this.animation_epoch = this.animation_epoch.wrapping_add(1);
-                    cx.notify();
-                });
+                let should_commit = this_commit
+                    .update(cx, |this, cx| {
+                        // A track switch can cancel a drag before mouse-up. Never seek
+                        // the replacement track using coordinates from the old song.
+                        let valid = this.local_dragging;
+                        this.local_dragging = false;
+                        this.drag_progress_ratio = None;
+                        this.animation_epoch = this.animation_epoch.wrapping_add(1);
+                        cx.notify();
+                        valid
+                    })
+                    .unwrap_or(false);
+                if !should_commit {
+                    return;
+                }
                 let _ = commit_parent.update(cx, |app, app_cx| {
-                    // One final seek at release. The ProgressChanged(ratio=None) emitted by
-                    // seek_to_ratio closes the scrub lifecycle for lyrics and clocks.
+                    // A single click AND a full drag both reach this callback on release.
+                    // Clear seeking before the audio worker receives the committed seek.
                     app.seeking = false;
                     app.stage_last_user_activity = Instant::now();
                     app.seek_to_ratio(ratio, app_cx);
@@ -1136,6 +1163,12 @@ impl StageProgressView {
                 });
             },
         ));
+        // Without this flag a click only previews the thumb on mouse-down; the
+        // slider ignores mouse-up unless the pointer moved far enough to drag.
+        // That leaves MusicApp.seeking stuck and never sends PlayerCommand::Seek.
+        if let Some(slider) = self.slider.as_mut() {
+            slider.defer_commit_until_release();
+        }
     }
 }
 
@@ -1205,6 +1238,11 @@ fn option_ratio_changed(current: Option<f32>, next: Option<f32>, epsilon: f32) -
         (None, None) => false,
         _ => true,
     }
+}
+
+#[inline]
+fn seek_event_requires_refresh(preview_changed: bool, ratio: Option<f32>) -> bool {
+    preview_changed || ratio.is_none()
 }
 
 fn control_button(
@@ -1283,6 +1321,14 @@ fn stage_traffic_light_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_seek_rebases_progress_even_without_a_drag_preview() {
+        // Lyrics and keyboard seeks emit ratio=None without a preceding slider preview.
+        assert!(seek_event_requires_refresh(false, None));
+        assert!(seek_event_requires_refresh(true, Some(0.6)));
+        assert!(!seek_event_requires_refresh(false, Some(0.6)));
+    }
 
     #[test]
     fn option_ratio_change_uses_epsilon() {

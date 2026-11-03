@@ -1055,6 +1055,10 @@ mod tests {
         assert!(!slider.defer_commit_until_release);
         slider.defer_commit_until_release();
         assert!(slider.defer_commit_until_release);
+        // A tap (zero pointer movement) must still deliver the final seek.
+        assert!(commit_on_release(false, slider.defer_commit_until_release));
+        assert!(commit_on_release(true, slider.defer_commit_until_release));
+        assert!(!commit_on_release(false, false));
     }
 
     #[test]

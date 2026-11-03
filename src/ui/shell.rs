@@ -1299,6 +1299,18 @@ impl MusicApp {
     }
 
     pub(crate) fn close_stage(&mut self, cx: &mut Context<Self>) {
+        // Closing the stage during a pressed scrub cancels its preview rather
+        // than leaving seeking=true across the next stage/session.
+        if self.seeking {
+            self.seeking = false;
+            app_ui_events::emit_music(
+                cx,
+                app_ui_events::AppUiEvent::ProgressChanged {
+                    position_ms: self.snapshot.position_ms,
+                    ratio: None,
+                },
+            );
+        }
         self.begin_stage_transition(false, cx);
         self.stage_last_mouse_pos = None;
         self.stage_suppress_wake_until = None;
@@ -1736,8 +1748,10 @@ impl MusicApp {
         if self.drag_target == Some(DragTarget::Progress) {
             self.drag_target = None;
             self.drag_progress_ratio = None;
-            self.seeking = false;
         }
+        // StageProgressView owns its own pointer gesture, so drag_target is None
+        // while the fullscreen progress rail is pressed. Cancel both lifecycles.
+        self.seeking = false;
         self.snapshot.position_ms = 0;
         self.position_ms = 0;
         self.config.position_ms = 0;
@@ -4310,6 +4324,11 @@ impl MusicApp {
             (Some(previous), Some(current)) => !previous.ptr_eq(current),
             _ => true,
         };
+        // Engine-driven automatic Next can switch songs without going through
+        // reset_progress_for_track_switch. Cancel any stage seeking gesture.
+        if track_changed {
+            self.seeking = false;
+        }
         let playback_state_changed = previous_state != self.snapshot.state;
         let duration_changed = previous_duration_ms != self.snapshot.duration_ms;
         let volume_changed = (previous_volume - self.snapshot.volume).abs() > 0.0005;
@@ -4809,20 +4828,30 @@ impl MusicApp {
             self.snapshot.position_ms = clamped;
             self.position_ms = clamped;
             self.config.position_ms = clamped;
-            app_ui_events::emit_music(
-                cx,
-                app_ui_events::AppUiEvent::ProgressChanged {
-                    position_ms: clamped,
-                    ratio: None,
-                },
-            );
         }
+        // Even a rejected seek must close the preview phase in retained
+        // transport, lyric and clock views. A committed seek also rebases
+        // the compositor-driven progress animation immediately.
+        app_ui_events::emit_music(
+            cx,
+            app_ui_events::AppUiEvent::ProgressChanged {
+                position_ms: self.snapshot.position_ms,
+                ratio: None,
+            },
+        );
     }
 
     #[allow(dead_code)]
     pub(crate) fn seek_to_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
         let duration_ms = self.snapshot.duration_ms;
         if duration_ms == 0 {
+            app_ui_events::emit_music(
+                cx,
+                app_ui_events::AppUiEvent::ProgressChanged {
+                    position_ms: self.snapshot.position_ms,
+                    ratio: None,
+                },
+            );
             return;
         }
         let ratio = ratio.clamp(0.0, 1.0);
