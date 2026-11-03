@@ -1,9 +1,9 @@
 use std::f32::consts::PI;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use gpui::{
-    GpuMesh3d, GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader,
-    GpuMesh3dVertex, WgslShaderSource,
+use gpui_3d::{
+    AlphaMode, Camera, Material, Mesh, MeshPart, Node, Scene, SceneView, ShadingModel,
+    Vec2 as RenderVec2, Vec3 as RenderVec3, Vertex,
 };
 use yinqidao_audio_spatial::{
     DEFAULT_HEAD_RADIUS_M, MAX_DEBUG_SOURCES, SpatialDebugSnapshot, SpatialDebugSourceKind, Vec3,
@@ -23,7 +23,6 @@ mod humanoid_generated {
 }
 use humanoid_generated::{HUMANOID_ASSET_READY, HUMANOID_INDICES, HUMANOID_VERTICES};
 
-const SHADER_SOURCE: &str = include_str!("audio_spatial_debug_3d.wgsl");
 const MIN_SCENE_RADIUS: f32 = 1.8;
 const SOURCE_RADIUS: f32 = 0.075;
 const LISTENER_HEAD_HALF_WIDTH: f32 = DEFAULT_HEAD_RADIUS_M * 0.94;
@@ -81,7 +80,8 @@ impl SpatialDebug3dCamera {
 }
 
 pub(crate) struct SpatialDebug3dScene {
-    mesh: Option<Arc<GpuMesh3d>>,
+    mesh: Option<Arc<Mesh>>,
+    scene_view: Option<Arc<SceneView>>,
     sequence: u64,
     fit_radius: f32,
     error: Option<Arc<str>>,
@@ -91,6 +91,7 @@ impl Default for SpatialDebug3dScene {
     fn default() -> Self {
         Self {
             mesh: None,
+            scene_view: None,
             sequence: u64::MAX,
             fit_radius: MIN_SCENE_RADIUS,
             error: None,
@@ -101,6 +102,7 @@ impl Default for SpatialDebug3dScene {
 impl SpatialDebug3dScene {
     pub(crate) fn clear(&mut self) {
         self.mesh = None;
+        self.scene_view = None;
         self.sequence = u64::MAX;
         self.fit_radius = MIN_SCENE_RADIUS;
         self.error = None;
@@ -115,9 +117,38 @@ impl SpatialDebug3dScene {
             return;
         }
 
-        match build_scene_mesh(snapshot, self.mesh.as_ref()) {
-            Ok((mesh, fit_radius)) => {
+        match build_scene_mesh(snapshot, self.mesh.as_ref())
+            .and_then(|(mesh, fit_radius)| {
+                let mut scene = Scene::new();
+                let opaque = Arc::new(Material {
+                    shading_model: ShadingModel::Unlit,
+                    double_sided: true,
+                    ..Material::new()
+                });
+                let transparent = Arc::new(Material {
+                    alpha_mode: AlphaMode::Blend,
+                    shading_model: ShadingModel::Unlit,
+                    double_sided: true,
+                    ..Material::new()
+                });
+                scene.insert(
+                    None,
+                    Node::new()
+                        .with_mesh(mesh.clone())
+                        .with_materials([opaque, transparent]),
+                )
+                .map_err(|error| error.to_string())?;
+                let scene = Arc::new(scene);
+                let view = self.scene_view.as_ref().map_or_else(
+                    || SceneView::new(scene.clone(), Self::camera(SpatialDebug3dCamera::default())),
+                    |previous| previous.with_scene(scene),
+                );
+                Ok((mesh, fit_radius, view))
+            })
+        {
+            Ok((mesh, fit_radius, view)) => {
                 self.mesh = Some(mesh);
+                self.scene_view = Some(Arc::new(view));
                 self.sequence = snapshot.sequence;
                 self.fit_radius = fit_radius.max(MIN_SCENE_RADIUS);
                 self.error = None;
@@ -125,13 +156,16 @@ impl SpatialDebug3dScene {
             Err(error) => {
                 self.error = Some(Arc::<str>::from(error));
                 self.mesh = None;
+                self.scene_view = None;
                 self.sequence = snapshot.sequence;
             }
         }
     }
 
-    pub(crate) fn mesh(&self) -> Option<Arc<GpuMesh3d>> {
-        self.mesh.clone()
+    pub(crate) fn view(&self, camera: SpatialDebug3dCamera) -> Option<Arc<SceneView>> {
+        self.scene_view.as_ref().map(|scene| {
+            Arc::new(scene.with_camera(Self::camera(camera)))
+        })
     }
 
     pub(crate) fn error(&self) -> Option<Arc<str>> {
@@ -142,62 +176,28 @@ impl SpatialDebug3dScene {
         self.fit_radius.max(MIN_SCENE_RADIUS)
     }
 
-    pub(crate) fn draw_parameters(
-        &self,
-        aspect: f32,
-        camera: SpatialDebug3dCamera,
-    ) -> GpuMesh3dDrawParameters {
-        Self::draw_parameters_for(self.fit_radius(), aspect, camera)
-    }
-
-    pub(crate) fn draw_parameters_for(
-        fit_radius: f32,
-        aspect: f32,
-        camera: SpatialDebug3dCamera,
-    ) -> GpuMesh3dDrawParameters {
-        let aspect = aspect.max(0.1);
-        let radius = fit_radius.max(MIN_SCENE_RADIUS);
-        let model = mat4_scale([1.0 / radius, 1.0 / radius, 1.0 / radius]);
-
-        // Keep camera distance fixed and zoom by field-of-view. The spatial field is always centred
-        // on the listener; room reflections are secondary paths and never redefine the camera axis.
+    fn camera(camera: SpatialDebug3dCamera) -> Camera {
         let orbit_distance = 3.35;
         let horizontal = camera.pitch.cos();
-        let eye = [
-            camera.yaw.sin() * horizontal * orbit_distance,
-            -camera.pitch.sin() * orbit_distance,
-            camera.yaw.cos() * horizontal * orbit_distance,
-        ];
-        let view = mat4_look_at(eye, [0.0, -0.08, 0.0], [0.0, 1.0, 0.0]);
-        let vertical_fov = (52.0 / camera.zoom.max(0.1)).clamp(24.0, 78.0);
-        let projection = mat4_perspective(aspect, vertical_fov.to_radians(), 0.04, 64.0);
-        GpuMesh3dDrawParameters {
-            view_projection_model: mat4_mul(projection, mat4_mul(view, model)),
-        }
+        Camera::perspective(
+            RenderVec3::new(
+                camera.yaw.sin() * horizontal * orbit_distance,
+                -camera.pitch.sin() * orbit_distance,
+                camera.yaw.cos() * horizontal * orbit_distance,
+            ),
+            RenderVec3::new(0.0, -0.08, 0.0),
+            RenderVec3::new(0.0, 1.0, 0.0),
+            (52.0 / camera.zoom.max(0.1)).clamp(24.0, 78.0).to_radians(),
+            0.04,
+            64.0,
+        )
     }
-}
-
-fn spatial_debug_shader() -> Result<Arc<GpuMesh3dShader>, String> {
-    static SHADER: OnceLock<Result<Arc<GpuMesh3dShader>, String>> = OnceLock::new();
-    SHADER
-        .get_or_init(|| {
-            let source =
-                WgslShaderSource::from_source("src/ui/audio_spatial_debug_3d.wgsl", SHADER_SOURCE)
-                    .map_err(|error| error.to_string())?;
-            Ok(Arc::new(GpuMesh3dShader::new(
-                Arc::new(source),
-                "vs_spatial_debug",
-                "fs_spatial_debug",
-            )))
-        })
-        .clone()
 }
 
 fn build_scene_mesh(
     snapshot: SpatialDebugSnapshot,
-    previous: Option<&Arc<GpuMesh3d>>,
-) -> Result<(Arc<GpuMesh3d>, f32), String> {
-    let shader = spatial_debug_shader()?;
+    previous: Option<&Arc<Mesh>>,
+) -> Result<(Arc<Mesh>, f32), String> {
     let mut builder = MeshBuilder::with_capacity();
     let listener = snapshot.listener;
     let (right, up, forward) = listener.basis();
@@ -411,43 +411,32 @@ fn build_scene_mesh(
     }
 
     let total_count = builder.indices.len() as u32;
-    let ranges = GpuMesh3dDrawRanges {
-        opaque: GpuMesh3dRange {
-            start: 0,
-            count: opaque_count,
-        },
-        glass: GpuMesh3dRange {
-            start: opaque_count,
-            count: total_count.saturating_sub(opaque_count),
-        },
-        water: GpuMesh3dRange::default(),
-    };
-    let vertices: Arc<[GpuMesh3dVertex]> = Arc::from(builder.vertices);
-    let indices: Arc<[u32]> = Arc::from(builder.indices);
-
+    // Normalized scene coordinates preserve the previous viewer camera framing.
+    let scale = fit_radius.max(MIN_SCENE_RADIUS).recip();
+    for vertex in &mut builder.vertices {
+        vertex.position = vertex.position * scale;
+    }
+    // Two material slots preserve depth-writing solids and premultiplied
+    // translucent room/ear paths without custom shaders or a second renderer.
+    let mut parts = Vec::with_capacity(2);
+    if opaque_count > 0 {
+        parts.push(MeshPart::new(0, opaque_count, 0));
+    }
+    if total_count > opaque_count {
+        parts.push(MeshPart::new(opaque_count, total_count - opaque_count, 1));
+    }
+    let mesh = Mesh::with_parts_without_raycast(
+        builder.vertices.into_boxed_slice(),
+        builder.indices.into_boxed_slice(),
+        parts.into_boxed_slice(),
+    )
+    .map_err(|error| error.to_string())?;
     let mesh = if let Some(previous) = previous {
-        Arc::new(GpuMesh3d {
-            id: previous.id,
-            generation: previous.generation.wrapping_add(1),
-            vertices,
-            indices,
-            ranges,
-            center: [0.0, 0.0, 0.0],
-            fit_scale: 1.0 / fit_radius,
-            vertical_scale: 1.0,
-            shader,
-        })
+        mesh.with_identity(previous.id(), previous.generation().wrapping_add(1))
     } else {
-        Arc::new(GpuMesh3d::new(
-            vertices,
-            indices,
-            ranges,
-            [0.0, 0.0, 0.0],
-            1.0 / fit_radius,
-            1.0,
-            shader,
-        ))
+        mesh
     };
+    let mesh = Arc::new(mesh);
     Ok((mesh, fit_radius))
 }
 
@@ -532,7 +521,7 @@ fn wall_color(wall: yinqidao_audio_spatial::SpatialDebugReflectionWall, alpha: f
 
 #[derive(Default)]
 struct MeshBuilder {
-    vertices: Vec<GpuMesh3dVertex>,
+    vertices: Vec<Vertex>,
     indices: Vec<u32>,
 }
 
@@ -546,7 +535,12 @@ impl MeshBuilder {
 
     fn push_vertex(&mut self, position: [f32; 3], color: [f32; 4]) -> u32 {
         let index = self.vertices.len().min(u32::MAX as usize) as u32;
-        self.vertices.push(GpuMesh3dVertex { position, color });
+        self.vertices.push(Vertex {
+            position: RenderVec3::new(position[0], position[1], position[2]),
+            normal: RenderVec3::new(0.0, 1.0, 0.0),
+            uv: RenderVec2::ZERO,
+            color,
+        });
         index
     }
 
@@ -814,51 +808,6 @@ impl MeshBuilder {
             self.indices.extend(triangle.map(|index| base + index));
         }
     }
-}
-
-fn mat4_scale(scale: [f32; 3]) -> [[f32; 4]; 4] {
-    [
-        [scale[0], 0.0, 0.0, 0.0],
-        [0.0, scale[1], 0.0, 0.0],
-        [0.0, 0.0, scale[2], 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-fn mat4_perspective(aspect: f32, vertical_fov: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
-    let focal = 1.0 / (vertical_fov * 0.5).tan().max(0.0001);
-    let range = near - far;
-    [
-        [focal / aspect, 0.0, 0.0, 0.0],
-        [0.0, focal, 0.0, 0.0],
-        [0.0, 0.0, (far + near) / range, -1.0],
-        [0.0, 0.0, (2.0 * far * near) / range, 0.0],
-    ]
-}
-
-fn mat4_look_at(eye: [f32; 3], target: [f32; 3], world_up: [f32; 3]) -> [[f32; 4]; 4] {
-    let forward = normalize3(sub3(target, eye));
-    let right = normalize3(cross3(forward, world_up));
-    let up = cross3(right, forward);
-    [
-        [right[0], up[0], -forward[0], 0.0],
-        [right[1], up[1], -forward[1], 0.0],
-        [right[2], up[2], -forward[2], 0.0],
-        [-dot3(right, eye), -dot3(up, eye), dot3(forward, eye), 1.0],
-    ]
-}
-
-fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut result = [[0.0_f32; 4]; 4];
-    for column in 0..4 {
-        for row in 0..4 {
-            result[column][row] = a[0][row] * b[column][0]
-                + a[1][row] * b[column][1]
-                + a[2][row] * b[column][2]
-                + a[3][row] * b[column][3];
-        }
-    }
-    result
 }
 
 fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
