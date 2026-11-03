@@ -194,6 +194,14 @@ impl SnapshotCache {
 
     fn optimistic_position_ms(command: &PlayerCommand) -> Option<u64> {
         match command {
+            // An accepted track switch invalidates the previous track's
+            // position immediately. Clearing the old seek override instead
+            // exposed the previous decoder's live position until it loaded
+            // the next track, so the immersive progress bar replayed it.
+            PlayerCommand::PlayTrack(_)
+            | PlayerCommand::Next
+            | PlayerCommand::Previous
+            | PlayerCommand::Stop => Some(0),
             PlayerCommand::Seek(position) => Some(
                 position
                     .as_millis()
@@ -513,22 +521,20 @@ impl AudioEngine {
         if track.id >= 0 {
             return false;
         }
-        let previous_position_override = self.snapshot.clear_optimistic_position_ms();
+        let previous_position_override = self.snapshot.set_optimistic_position_ms(0);
         match self
             .request_tx
             .try_send(EngineRequest::PlayTransientTrack(track))
         {
             Ok(()) => {
-                // A new transient track invalidates every retained transport
-                // timeline even if the visible PlaybackState stays Playing.
+                // Reset both the displayed progress and the retained progress
+                // timeline before the remote decoder posts its first snapshot.
                 self.snapshot.bump_transport_generation();
                 true
             }
             Err(_) => {
-                self.snapshot.restore_optimistic_position_ms(
-                    NO_POSITION_OVERRIDE,
-                    previous_position_override,
-                );
+                self.snapshot
+                    .restore_optimistic_position_ms(0, previous_position_override);
                 false
             }
         }
@@ -1216,6 +1222,30 @@ mod tests {
         assert_eq!(engine.transport_generation(), 1);
         assert!(!engine.try_send(PlayerCommand::Seek(Duration::from_millis(2_000))));
         assert_eq!(engine.transport_generation(), 1);
+        drop(request_rx);
+    }
+
+    #[test]
+    fn accepted_next_switch_resets_visible_progress_without_waiting_for_decoder() {
+        let (request_tx, request_rx) = bounded::<EngineRequest>(1);
+        let snapshot = Arc::new(SnapshotCache::new(PlayerSnapshot::default()));
+        snapshot.store_progress(PlaybackState::Playing, 78_000, 180_000);
+        let engine = AudioEngine {
+            request_tx,
+            snapshot,
+            running: Arc::new(AtomicBool::new(true)),
+            ui_event_rx: Mutex::new(None),
+        };
+
+        assert_eq!(engine.progress().1, 78_000);
+        assert!(engine.try_send(PlayerCommand::Next));
+        assert_eq!(engine.progress().1, 0);
+        assert_eq!(engine.transport_generation(), 1);
+        // An old-position sample must not revive the previous song's bar.
+        engine
+            .snapshot
+            .store_progress(PlaybackState::Playing, 78_125, 180_000);
+        assert_eq!(engine.progress().1, 0);
         drop(request_rx);
     }
 
