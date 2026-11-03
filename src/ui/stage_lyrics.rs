@@ -321,7 +321,8 @@ impl StageKaraokeLineView {
                     self.line.words.get(index + 1).map(|next| next.timestamp_ms),
                 );
                 if let Some(delay) = sustained_transition_frame_delay(&visual, self.position_ms) {
-                    animated_delay = Some(animated_delay.map_or(delay, |current| current.min(delay)));
+                    animated_delay =
+                        Some(animated_delay.map_or(delay, |current| current.min(delay)));
                 }
             }
         }
