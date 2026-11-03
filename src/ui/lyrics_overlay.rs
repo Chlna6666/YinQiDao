@@ -104,9 +104,9 @@ impl DesktopLyricsView {
 
 impl gpui::Render for DesktopLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // This popup intentionally never activates on Windows. Opt in only this visible HUD-style
-        // window so GPUI can advance retained Paint/GPU animations without rebuilding the View.
-        window.set_inactive_animation_engine_enabled(true);
+        // This popup intentionally never activates on Windows. Its retained
+        // lyric transitions still need the visible inactive-window cadence.
+        super::enable_inactive_window_animations(window);
         self.attach_bounds_observer(window, cx);
         self.schedule_transport_deadline(window, cx);
 
