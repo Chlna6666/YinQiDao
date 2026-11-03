@@ -167,6 +167,8 @@ pub struct Allocation {
     name: Option<Box<str>>,
 }
 
+mod relocation;
+
 impl Allocation {
     /// Tries to borrow the CPU-mapped memory that backs this allocation as a [`presser::Slab`], which you can then
     /// use to safely copy data into the raw, potentially-uninitialized buffer.
@@ -476,11 +478,8 @@ impl MemoryType {
             .memory_properties
             .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
         let is_readback = desc.location == MemoryLocation::GpuToCpu;
-        let memblock_size = allocation_sizes.get_memblock_size(
-            is_host,
-            is_readback,
-            self.active_general_blocks,
-        );
+        let memblock_size =
+            allocation_sizes.get_memblock_size(is_host, is_readback, self.active_general_blocks);
 
         let size = desc.requirements.size;
         let alignment = desc.requirements.alignment;
@@ -972,6 +971,28 @@ impl Allocator {
             blocks,
             total_allocated_bytes,
             total_capacity_bytes,
+        }
+    }
+
+    /// Releases completely empty cached memory blocks, including the last general block.
+    ///
+    /// Live allocations, offsets, and block indices remain valid. This is an explicit memory
+    /// pressure operation: subsequent allocations may need new native memory blocks. It does
+    /// not wait for GPU work; callers must obey the normal allocation-free lifetime contract.
+    pub fn trim(&mut self) {
+        for memory_type in &mut self.memory_types {
+            for slot in &mut memory_type.memory_blocks {
+                if slot
+                    .as_ref()
+                    .is_some_and(|block| block.sub_allocator.is_empty())
+                {
+                    let block = slot.take().expect("the empty block is present");
+                    if block.sub_allocator.supports_general_allocations() {
+                        memory_type.active_general_blocks -= 1;
+                    }
+                    block.destroy(&self.device);
+                }
+            }
         }
     }
 
