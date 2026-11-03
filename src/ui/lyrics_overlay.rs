@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity, GpuMesh3d,
     GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex,
-    HorizontalRevealEdge, IntoElement, SharedString, Subscription, TransformOrigin, WeakEntity,
+    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity,
     WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
@@ -130,9 +130,7 @@ impl gpui::Render for DesktopLyricsView {
             self.line_transition_deadline = None;
         }
 
-        let next_key = display
-            .as_ref()
-            .map(|display| (display.track_id, display.line_index));
+        let next_key = desktop_lyrics_display_key(display.as_ref());
         if next_key != self.display_key {
             if self.display_key.is_some() && next_key.is_some() {
                 self.previous_display = self.last_display.clone();
@@ -181,69 +179,69 @@ impl gpui::Render for DesktopLyricsView {
                 .into_any_element()
         };
 
-        let lyrics = if let Some(previous) = self.previous_display.as_ref()
+        // Both animated and steady states share exactly the same full-size
+        // layout box. An intrinsic-height incoming wrapper previously
+        // re-centered the lyrics as soon as the 260ms animation finished,
+        // producing a visible vertical snap (most noticeable on short lines).
+        let mut lyric_viewport = div()
+            .relative()
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .overflow_hidden();
+        let incoming = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .child(lyrics);
+
+        if let Some(previous) = self.previous_display.as_ref()
             && line_transition_active
         {
-            // Keep the existing spring/smootherstep look, but let the GPUI animation engine advance
-            // the retained text/composite instead of sampling and rebuilding this View every VSync.
-            let travel = (config.font_size * 0.58).clamp(14.0, 34.0);
+            let travel = (config.font_size * 0.30).clamp(7.0, 17.0);
             let epoch = self.line_transition_epoch;
-            let incoming_translation = Animation::new(LYRIC_LINE_TRANSITION_DURATION)
-                .with_easing(desktop_spring_progress)
-                .with_property(AnimationProperty::translation(
-                    point(px(0.0), px(travel)),
-                    point(px(0.0), px(0.0)),
-                ));
-            let incoming_scale = Animation::new(LYRIC_LINE_TRANSITION_DURATION)
-                .with_easing(desktop_spring_progress)
-                .with_property(AnimationProperty::scale_opacity(
-                    0.90,
-                    1.0,
-                    0.82,
-                    1.0,
-                    TransformOrigin::new(0.5, 0.5),
-                ));
-            let incoming = div()
-                .w_full()
-                .min_w(px(0.0))
-                .child(lyrics)
+
+            // One retained translation+opacity animation, rather than
+            // nested translate + scale timelines that fight the active
+            // per-word karaoke highlight and change the text's raster bounds.
+            let incoming = incoming
                 .with_animation(
                     ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyrics-line-in-translate"),
+                        SharedString::new_static("desktop-lyrics-line-in"),
                         epoch,
                     ),
-                    incoming_translation,
-                    |element, _| element,
-                )
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::new_static("desktop-lyrics-line-in-scale"),
-                        epoch,
-                    ),
-                    incoming_scale,
+                    Animation::new(LYRIC_LINE_TRANSITION_DURATION)
+                        .with_easing(desktop_smootherstep)
+                        .with_property(AnimationProperty::translation_opacity(
+                            point(px(0.0), px(travel)),
+                            point(px(0.0), px(0.0)),
+                            0.74,
+                            1.0,
+                        )),
                     |element, _| element,
                 )
                 .into_any_element();
 
             let mut previous_complete = previous.clone();
             previous_complete.position_ms = u64::MAX;
-            let outgoing_duration =
-                Duration::from_secs_f32(LYRIC_LINE_TRANSITION_DURATION.as_secs_f32() * 0.46);
             let outgoing = div()
                 .absolute()
                 .inset_0()
                 .flex()
-                .child(desktop_current_group(&previous_complete, &config))
+                // Preserve the same current/next/translation geometry while
+                // fading the previous line. A current-only outgoing layer
+                // was vertically centered differently from a two-line stack.
+                .child(desktop_lyrics_stack(&previous_complete, &config))
                 .with_animation(
                     ElementId::NamedInteger(
                         SharedString::new_static("desktop-lyrics-line-out"),
                         epoch,
                     ),
-                    Animation::new(outgoing_duration)
+                    Animation::new(LYRIC_LINE_TRANSITION_DURATION)
                         .with_easing(desktop_smootherstep)
                         .with_property(AnimationProperty::translation_opacity(
                             point(px(0.0), px(0.0)),
-                            point(px(0.0), px(-travel * 1.10)),
+                            point(px(0.0), px(-travel)),
                             1.0,
                             0.0,
                         )),
@@ -251,17 +249,11 @@ impl gpui::Render for DesktopLyricsView {
                 )
                 .into_any_element();
 
-            div()
-                .relative()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(incoming)
-                .child(outgoing)
-                .into_any_element()
+            lyric_viewport = lyric_viewport.child(incoming).child(outgoing);
         } else {
-            lyrics
-        };
+            lyric_viewport = lyric_viewport.child(incoming);
+        }
+        let lyrics = lyric_viewport.into_any_element();
 
         let mut root = div()
             .id("desktop-lyrics-root")
@@ -374,6 +366,12 @@ impl gpui::Render for DesktopLyricsView {
 
         root.into_any_element()
     }
+}
+
+/// Word timing changes must not restart the whole line transition.
+#[inline]
+fn desktop_lyrics_display_key(display: Option<&LyricsDisplay>) -> Option<(TrackId, usize)> {
+    display.map(|display| (display.track_id, display.line_index))
 }
 
 fn desktop_lyrics_stack(
@@ -675,15 +673,6 @@ fn desktop_word_animation_id(
 }
 
 #[inline]
-fn desktop_spring_progress(progress: f32) -> f32 {
-    let t = progress.clamp(0.0, 1.0);
-    // Light under-damped spring: ~98% of the travel is complete around 40% of the timeline, with
-    // only a small overshoot/settle afterwards. This keeps lyric timing readable instead of hiding
-    // the current sentence behind a long decorative transition.
-    1.0 - (-7.5 * t).exp() * (9.5 * t).cos()
-}
-
-#[inline]
 fn desktop_smootherstep(progress: f32) -> f32 {
     let t = progress.clamp(0.0, 1.0);
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
@@ -978,6 +967,37 @@ mod tests {
             timestamp_ms,
             duration_ms,
             text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn desktop_line_transition_key_ignores_word_position() {
+        let mut line = LyricsDisplay {
+            track_id: 7,
+            line_index: 3,
+            position_ms: 1_000,
+            current: "line A".into(),
+            current_words: Arc::from(Vec::<LyricWord>::new()),
+            translation: Some("译文".into()),
+            next: Some("line B".into()),
+            next_translation: None,
+        };
+        let initial_key = desktop_lyrics_display_key(Some(&line));
+        line.position_ms = 2_500;
+        assert_eq!(desktop_lyrics_display_key(Some(&line)), initial_key);
+        line.line_index += 1;
+        assert_ne!(desktop_lyrics_display_key(Some(&line)), initial_key);
+        assert_eq!(desktop_lyrics_display_key(None), None);
+    }
+
+    #[test]
+    fn desktop_line_transition_easing_keeps_endpoints_and_no_overshoot() {
+        assert_eq!(desktop_smootherstep(0.0), 0.0);
+        assert_eq!(desktop_smootherstep(1.0), 1.0);
+        for step in 0..=100 {
+            let t = step as f32 / 100.0;
+            let opacity = desktop_smootherstep(t);
+            assert!((0.0..=1.0).contains(&opacity));
         }
     }
 
