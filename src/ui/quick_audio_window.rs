@@ -2,12 +2,13 @@
 //! No Windows system dialog or separate audio engine is created: all updates
 //! still reach the authoritative MusicApp and its shared audio processing state.
 
+use super::{settings, shell::MusicApp, theme};
 use anyhow::Result;
 use gpui::{
     AppContext, Bounds, Context, Entity, Global, IntoElement, Render, Subscription, WeakEntity,
-    Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions, div, prelude::*, px, size,
+    Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions, div, prelude::*, px,
+    size,
 };
-use super::{settings, shell::MusicApp, theme};
 
 #[derive(Default)]
 struct QuickAudioWindowState {
@@ -60,10 +61,9 @@ pub(super) fn open(parent: Entity<MusicApp>, cx: &mut Context<MusicApp>) -> Resu
         options.window_decorations = Some(gpui::WindowDecorations::Client);
         options.titlebar = None;
     }
-    let window = cx.open_window(
-        options,
-        move |_, cx| cx.new(|cx| QuickAudioView::new(parent, cx)),
-    )?;
+    let window = cx.open_window(options, move |_, cx| {
+        cx.new(|cx| QuickAudioView::new(parent, cx))
+    })?;
     cx.update_global(|state: &mut QuickAudioWindowState, _| {
         state.window = Some(window);
     });
