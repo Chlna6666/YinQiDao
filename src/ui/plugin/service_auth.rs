@@ -1247,7 +1247,7 @@ fn activate_form_input(
     };
     if let Some(input) = active_input(&key) {
         let focus = input.read(cx).focus_handle(cx);
-        window.focus(&focus);
+        window.focus(&focus, cx);
         return;
     }
 
@@ -1269,7 +1269,7 @@ fn activate_form_input(
         inputs.borrow_mut().insert(key, input.clone());
     });
     let focus = input.read(cx).focus_handle(cx);
-    window.focus(&focus);
+    window.focus(&focus, cx);
     window.request_animation_frame();
 }
 
