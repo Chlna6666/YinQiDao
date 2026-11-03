@@ -141,7 +141,7 @@ impl SpatialDebug3dScene {
             let scene = Arc::new(scene);
             let view = self.scene_view.as_ref().map_or_else(
                 || SceneView::new(scene.clone(), Self::camera(SpatialDebug3dCamera::default())),
-                |previous| previous.with_scene(scene),
+                |previous| previous.with_scene(scene.clone()),
             );
             Ok((mesh, fit_radius, view))
         }) {
