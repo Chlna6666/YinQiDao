@@ -252,6 +252,7 @@ fn apply_runtime_event(app: &mut MusicApp, event: &AppRuntimeEvent, cx: &mut Con
             app.handle_track_ended(cx);
         }
         AppRuntimeEvent::Audio(AudioUiEvent::Error(error)) => {
+            app.clear_pending_track_ack_on_error(cx);
             app.status.clone_from(error);
             cx.notify();
         }
