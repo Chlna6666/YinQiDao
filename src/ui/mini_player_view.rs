@@ -540,30 +540,26 @@ impl Render for MiniPlayerView {
     }
 }
 
-fn cached_playback_time(view: Entity<PlaybackTime>) -> AnyView {
-    AnyView::from(view)
-        .cached(
-            StyleRefinement::default()
-                .w(px(MINI_PLAYBACK_TIME_WIDTH))
-                .min_w(px(MINI_PLAYBACK_TIME_WIDTH))
-                .h(px(MINI_PLAYBACK_TIME_HEIGHT)),
-        )
-        .reuse_on_window_refresh()
+fn cached_playback_time(view: Entity<PlaybackTime>) -> AnyElement {
+    div()
+        .w(px(MINI_PLAYBACK_TIME_WIDTH))
+        .min_w(px(MINI_PLAYBACK_TIME_WIDTH))
+        .h(px(MINI_PLAYBACK_TIME_HEIGHT))
+        .child(AnyView::from(view))
+        .into_any_element()
 }
 
-fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyView {
-    AnyView::from(view)
-        .cached(
-            StyleRefinement::default()
-                .absolute()
-                .left(px(0.0))
-                .right(px(0.0))
-                .top(px(-MINI_PROGRESS_OUTWARD_REVEAL))
-                .h(px(
-                    MINI_PROGRESS_INTERACTION_HEIGHT + MINI_PROGRESS_OUTWARD_REVEAL
-                )),
-        )
-        .reuse_on_window_refresh()
+fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(0.0))
+        .right(px(0.0))
+        .top(px(-MINI_PROGRESS_OUTWARD_REVEAL))
+        .h(px(
+            MINI_PROGRESS_INTERACTION_HEIGHT + MINI_PROGRESS_OUTWARD_REVEAL
+        ))
+        .child(AnyView::from(view))
+        .into_any_element()
 }
 
 fn mini_volume_slider(
