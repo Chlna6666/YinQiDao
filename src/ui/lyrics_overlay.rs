@@ -353,12 +353,9 @@ impl gpui::Render for DesktopLyricsView {
             .relative()
             .overflow_hidden()
             .window_control_area(WindowControlArea::Client)
-            .when(!config.locked && cfg!(windows), |root| {
-                // Use GPUI's native Windows drag hit-test path for the widget surface. The backend
-                // arms a drag gesture and only calls start_window_move after the pointer crosses the
-                // platform drag threshold; frontmost Client controls automatically override it.
-                root.window_control_area(WindowControlArea::Drag)
-            })
+            // Do NOT tag the entire popup as native HTCAPTION/Drag on Windows.
+            // The non-activating tool window must route client mouse events to
+            // its close/settings/lock buttons before starting a move gesture.
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if this.hovered != *hovered {
                     this.hovered = *hovered;
@@ -366,9 +363,11 @@ impl gpui::Render for DesktopLyricsView {
                 }
             }));
 
-        if !config.locked && !cfg!(windows) {
-            // Linux/macOS currently do not consume WindowControlArea::Drag in the same native path,
-            // so keep explicit dragging there. Buttons/panels stop propagation themselves.
+        if !config.locked {
+            // All platforms use client-area hit testing. Child controls stop
+            // propagation; only a press on unused background starts window move.
+            // This is essential for NOACTIVATE Win32 popups: marking the entire
+            // surface as a caption swallows the toolbar click before GPUI sees it.
             root = root.on_mouse_down(
                 gpui::MouseButton::Left,
                 move |_: &gpui::MouseDownEvent, window, cx| {
@@ -378,7 +377,12 @@ impl gpui::Render for DesktopLyricsView {
             );
         }
 
-        if background_opacity > 0.001 {
+        if background_opacity > 0.001 && !cfg!(windows) {
+            // Transparent Windows tool windows can replay renderer-extension
+            // quads with stale DComp damage/clip state. Until the native path
+            // supplies a verified per-window scissor, prefer GPUI's clipped
+            // retained glass substrate. Avoid *all* custom extension draws in
+            // the NOACTIVATE HWND: they caused desktop-wide flashes.
             let logical_width = if cfg!(windows) {
                 config.width.clamp(420.0, 1_600.0)
             } else {
@@ -396,6 +400,24 @@ impl gpui::Render for DesktopLyricsView {
                 (logical_width, logical_height),
                 window.scale_factor(),
             ));
+        }
+
+        if background_opacity > 0.001 && cfg!(windows) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
+                    .overflow_hidden()
+                    .bg(hsla(0.62, 0.09, 0.24, background_opacity * 0.72))
+                    .border_1()
+                    .border_color(hsla(
+                        0.60,
+                        0.09,
+                        0.88,
+                        if interacting { 0.22 } else { 0.13 },
+                    )),
+            );
         }
 
         root = root.child(
@@ -460,9 +482,17 @@ impl gpui::Render for DesktopLyricsView {
                     move |_, _window, cx| {
                         // The owner serializes hide -> native close -> optional reopen. Do not call
                         // remove_window a second time here or clear the tracked handle prematurely.
-                        let _ = close_parent.update(cx, |app, app_cx| {
-                            app.desktop_lyrics_window_closed(app_cx);
-                        });
+                        let closed = close_parent
+                            .update(cx, |app, app_cx| {
+                                app.desktop_lyrics_window_closed(app_cx);
+                            })
+                            .is_ok();
+                        if !closed {
+                            // The owner was already destroyed (or is closing).
+                            // Do not leave an orphan topmost popup on the desktop.
+                            _window.hide_window();
+                            _window.remove_window();
+                        }
                     },
                 ));
             root = root.child(toolbar);

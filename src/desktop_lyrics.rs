@@ -265,10 +265,13 @@ impl MusicApp {
     }
 
     pub(crate) fn desktop_lyrics_window_closed(&mut self, cx: &mut Context<Self>) {
-        self.config.desktop_lyrics.visible = false;
-        self.save_config();
+        if self.config.desktop_lyrics.visible {
+            self.config.desktop_lyrics.visible = false;
+            self.save_config();
+        }
         ensure_window_state(cx);
-        // Hide first so the surface disappears immediately; GPUI owns the actual HWND destruction.
+        // The visibility toggle is authoritative. Any delayed close callback
+        // must not revive the native window or leave an orphaned topmost HWND.
         request_overlay_close(cx, false);
         cx.notify();
     }
@@ -566,21 +569,30 @@ pub(crate) fn initialize(main_window: WindowHandle<MusicApp>, cx: &mut App) {
         if !desktop_lyrics_windows(cx).is_empty() {
             return;
         }
-
-        let reopen = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+        let (was_ours, reopen) = cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
+            // on_window_closed fires for ALL GPUI windows, not just our popup.
+            // Ignore unrelated secondary window closures.
+            let was_ours = state.window.is_some() || state.closing;
+            let reopen = state.reopen_after_close;
             state.window = None;
             state.closing = false;
-            let reopen = state.reopen_after_close;
             state.reopen_after_close = false;
-            reopen
+            (was_ours, reopen)
         });
-        if reopen {
-            let _ = reopen_window.update(cx, |app, _window, app_cx| {
-                if app.config.desktop_lyrics.visible {
-                    app.sync_desktop_lyrics_window(app_cx);
-                }
-            });
+        if !was_ours {
+            return;
         }
+        let _ = reopen_window.update(cx, |app, _window, app_cx| {
+            if reopen && app.config.desktop_lyrics.visible {
+                app.sync_desktop_lyrics_window(app_cx);
+            } else if app.config.desktop_lyrics.visible {
+                // Native close, not the in-app close button: synchronize the
+                // persisted toggle with the actual HWND lifecycle.
+                app.config.desktop_lyrics.visible = false;
+                app.save_config();
+                app_cx.notify();
+            }
+        });
     })
     .detach();
 
