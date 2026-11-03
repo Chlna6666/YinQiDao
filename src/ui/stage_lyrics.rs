@@ -2204,34 +2204,34 @@ fn take_reading_wheel_steps(remainder: &mut f32, delta: f32) -> isize {
     signed
 }
 
-/// Conservative first-paint geometry for 28px semibold primary lyrics.
+/// Fast first-paint geometry for 28px semibold lyrics.
 ///
-/// Actual bounds observers may grow a row afterwards. This approximation
-/// gives a safe minimum for translated English wrap lines while avoiding a
-/// full shaping pass for every lyric on the render thread. Recompute only on
-/// a track change or actual lyrics viewport width change.
+/// This estimate feeds the primary container's min-height, so overestimating
+/// a single line as two lines inserts a visible 38px gap before translation.
+/// Keep the character advances close to actual glyph widths and let the
+/// bounds observer grow genuinely wrapped rows. No per-frame shaping needed.
 fn approximate_lyric_lines(text: &str, width_px: f32, font_px: f32) -> usize {
-    // Word-level karaoke uses flex-wrap: each token is indivisible, so a
-    // character-only estimate at the full width undercounts wrapped rows.
-    // Reserve slack for font shaping, word boundaries and focal scaling.
-    let max_width = (width_px * 0.80).max(font_px);
+    // The previous 80% width budget plus 0.76em ASCII advance incorrectly
+    // classified a one-line lyric as multiline at normal desktop widths.
+    // Retain only a small safety margin; actual GPUI layout is authoritative.
+    let max_width = (width_px * 0.97).max(font_px);
     let mut lines = 0usize;
     for paragraph in text.split('\n') {
         lines += 1;
         let mut width = 0.0f32;
         for ch in paragraph.chars() {
             let glyph_width = if ch.is_whitespace() {
-                font_px * 0.42
+                font_px * 0.36
             } else if ch.is_ascii() {
                 if matches!(ch, 'M' | 'W' | 'm' | 'w' | '@' | '%') {
-                    font_px * 0.98
+                    font_px * 0.80
                 } else if matches!(
                     ch,
                     'i' | 'l' | 'I' | '1' | '.' | ',' | '\'' | '!' | ':' | ';'
                 ) {
-                    font_px * 0.40
+                    font_px * 0.30
                 } else {
-                    font_px * 0.76
+                    font_px * 0.53
                 }
             } else {
                 font_px
@@ -2247,13 +2247,13 @@ fn approximate_lyric_lines(text: &str, width_px: f32, font_px: f32) -> usize {
 }
 
 fn estimated_primary_lyric_height(line: &StageLyricLine, width: f32) -> f32 {
-    approximate_lyric_lines(line.text.as_str(), width, 28.0) as f32 * 38.0 + 4.0
+    approximate_lyric_lines(line.text.as_str(), width, 28.0) as f32 * 38.0
 }
 
 fn estimated_lyric_row_height(line: &StageLyricLine, width: f32) -> f32 {
     let primary = estimated_primary_lyric_height(line, width);
     let translation = line.translation.as_ref().map_or(0.0, |text| {
-        approximate_lyric_lines(text.as_str(), width, 15.0) as f32 * 21.0 + 3.0
+        approximate_lyric_lines(text.as_str(), width, 15.0) as f32 * 21.0 + 4.0
     });
     // Keep measured/estimated rows in the same coordinate system. A
     // scaled karaoke leaf can be taller than its initial cached bounds.
@@ -2469,6 +2469,27 @@ mod tests {
     }
 
     #[test]
+    fn desktop_sunshine_lyrics_keep_translation_close_to_primary() {
+        // Regression: a 1115px stage gives the lyric text about 495px.
+        // These examples had been allocated 2/2/3 rows despite painting 1/1/2.
+        let width = 495.0;
+        let first = StageLyricLine::from_plain("Running through this strange life");
+        let second = StageLyricLine::from_plain("Chasing all them green lights");
+        let third = StageLyricLine::from_plain(
+            "Throwing off the shade for a little bit of sunshine",
+        );
+        assert_eq!(approximate_lyric_lines(first.text.as_str(), width, 28.0), 1);
+        assert_eq!(approximate_lyric_lines(second.text.as_str(), width, 28.0), 1);
+        assert_eq!(approximate_lyric_lines(third.text.as_str(), width, 28.0), 2);
+        assert_eq!(estimated_primary_lyric_height(&second, width), 38.0);
+
+        let mut translated = second;
+        translated.translation = Some(SharedString::from("畅想着通行无阻"));
+        let row = estimated_lyric_row_height(&translated, width);
+        assert!((row - (38.0 + 25.0 + 52.0)).abs() < 0.01);
+    }
+
+    #[test]
     fn multiline_english_and_chinese_translation_reserve_distinct_row_space() {
         let mut line = StageLyricLine::from_plain("We were both young when I first saw you");
         line.translation = Some(SharedString::from("第一次见到你的时候我们都还很年轻"));
@@ -2476,7 +2497,7 @@ mod tests {
         assert!(approximate_lyric_lines(line.text.as_str(), width, 28.0) >= 2);
         let primary = estimated_primary_lyric_height(&line, width);
         let row = estimated_lyric_row_height(&line, width);
-        assert!(primary >= 80.0);
+        assert!(primary >= 76.0);
         assert!(row >= primary + 25.0 + 40.0);
         let prefix = [0.0, row, row + 82.0];
         let current = playback_stack_row_top(0, 0, &prefix, 310.0);
@@ -2492,7 +2513,7 @@ mod tests {
         let primary = estimated_primary_lyric_height(&line, width);
         let row = estimated_lyric_row_height(&line, width);
         assert!(
-            primary >= 80.0,
+            primary >= 76.0,
             "English lyric must reserve at least two lines"
         );
         assert!(row >= primary + 25.0 + 52.0);
