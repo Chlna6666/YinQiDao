@@ -1,16 +1,13 @@
-use std::{
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity, GpuMesh3d,
-    GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex,
-    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity, WgslShaderSource,
-    Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
+    Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity,
+    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity,
+    Window, WindowControlArea, div, point, prelude::*, px, rgb,
 };
 
 use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
+use crate::gpu::{ShaderKind, ShaderParams16, next_shader_effect_id, shader_effect_canvas};
 use crate::{
     desktop_lyrics::LyricsDisplay, lyrics::LyricWord, model::TrackId,
     settings::DesktopLyricsAlignment,
@@ -24,7 +21,6 @@ use super::{
 const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
 const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(260);
-const LIQUID_GLASS_SHADER_SOURCE: &str = include_str!("lyrics_liquid_glass.wgsl");
 
 pub(crate) struct DesktopLyricsView {
     parent: WeakEntity<MusicApp>,
@@ -38,6 +34,7 @@ pub(crate) struct DesktopLyricsView {
     previous_display: Option<LyricsDisplay>,
     line_transition_epoch: u64,
     line_transition_deadline: Option<Instant>,
+    effect_id: u64,
 }
 
 impl DesktopLyricsView {
@@ -73,6 +70,7 @@ impl DesktopLyricsView {
             previous_display: None,
             line_transition_epoch: 0,
             line_transition_deadline: None,
+            effect_id: next_shader_effect_id(),
         }
     }
 
@@ -283,7 +281,11 @@ impl gpui::Render for DesktopLyricsView {
         }
 
         if background_opacity > 0.001 {
-            root = root.child(liquid_glass_surface(background_opacity, interacting));
+            root = root.child(liquid_glass_surface(
+                self.effect_id,
+                background_opacity,
+                interacting,
+            ));
         }
 
         root = root.child(
@@ -866,92 +868,19 @@ fn settings_row(
         )
 }
 
-fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
-    match lyrics_liquid_glass_mesh() {
-        Ok(mesh) => {
-            let mut metadata = [[0.0_f32; 4]; 4];
-            metadata[0][0] = opacity;
-            metadata[0][1] = if interacting { 1.0 } else { 0.0 };
-            metadata[0][2] = LIQUID_GLASS_CORNER_RADIUS;
-            metadata[3][3] = 1.0;
-            let parameters = GpuMesh3dDrawParameters {
-                view_projection_model: metadata,
-            };
-            canvas(
-                move |bounds, _window, _cx| bounds,
-                move |bounds, _prepaint, window, _cx| {
-                    window.paint_gpu_mesh_3d(bounds, mesh.clone(), parameters);
-                },
-            )
-            .absolute()
-            .inset_0()
-            .into_any_element()
-        }
-        Err(_error) => div()
-            .absolute()
-            .inset_0()
-            .rounded(px(LIQUID_GLASS_CORNER_RADIUS))
-            .bg(hsla(0.0, 0.0, 0.18, opacity))
-            .into_any_element(),
-    }
-}
-
-fn lyrics_liquid_glass_mesh() -> Result<Arc<GpuMesh3d>, String> {
-    static MESH: OnceLock<Result<Arc<GpuMesh3d>, String>> = OnceLock::new();
-    MESH.get_or_init(|| {
-        let result = build_lyrics_liquid_glass_mesh();
-        if let Err(error) = &result {
-            tracing::warn!(error = %error, "桌面歌词 Liquid Glass shader 不可用，回退透明灰背景");
-        }
-        result
-    })
-    .clone()
-}
-
-fn build_lyrics_liquid_glass_mesh() -> Result<Arc<GpuMesh3d>, String> {
-    let source = WgslShaderSource::from_source(
-        "src/ui/lyrics_liquid_glass.wgsl",
-        LIQUID_GLASS_SHADER_SOURCE,
+/// Native translucent shader, compiled at build time for Nova DX/Vulkan/Metal.
+fn liquid_glass_surface(id: u64, opacity: f32, interacting: bool) -> gpui::AnyElement {
+    let mut metadata = [[0.0_f32; 4]; 4];
+    metadata[0][0] = opacity;
+    metadata[0][1] = if interacting { 1.0 } else { 0.0 };
+    metadata[0][2] = LIQUID_GLASS_CORNER_RADIUS;
+    metadata[3][3] = 1.0;
+    shader_effect_canvas(
+        ShaderKind::LiquidGlass,
+        id,
+        ShaderParams16::from_columns(metadata),
+        false,
     )
-    .map_err(|error| error.to_string())?;
-    let shader = Arc::new(GpuMesh3dShader::new(
-        Arc::new(source),
-        "vs_lyrics_liquid_glass",
-        "fs_lyrics_liquid_glass",
-    ));
-    let vertices = vec![
-        GpuMesh3dVertex {
-            position: [-1.0, -1.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        },
-        GpuMesh3dVertex {
-            position: [1.0, -1.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        },
-        GpuMesh3dVertex {
-            position: [1.0, 1.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        },
-        GpuMesh3dVertex {
-            position: [-1.0, 1.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        },
-    ];
-    let indices = vec![0_u32, 1, 2, 0, 2, 3];
-    let mesh = GpuMesh3d::new(
-        Arc::from(vertices.into_boxed_slice()),
-        Arc::from(indices.into_boxed_slice()),
-        GpuMesh3dDrawRanges {
-            opaque: GpuMesh3dRange::default(),
-            glass: GpuMesh3dRange { start: 0, count: 6 },
-            water: GpuMesh3dRange::default(),
-        },
-        [0.0, 0.0, 0.0],
-        1.0,
-        1.0,
-        shader,
-    );
-    Ok(Arc::new(mesh))
 }
 
 #[cfg(test)]
