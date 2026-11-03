@@ -57,8 +57,6 @@ pub(crate) fn enable_inactive_window_animations(window: &mut gpui::Window) {
     let interval = window
         .inactive_frame_clock()
         .and_then(|clock| clock.fps())
-        .map(|fps| {
-            std::time::Duration::from_secs_f64(1.0 / f64::from(fps.get()))
-        });
+        .map(|fps| std::time::Duration::from_secs_f64(1.0 / f64::from(fps.get())));
     window.set_inactive_dirty_frame_retry_interval(interval);
 }
