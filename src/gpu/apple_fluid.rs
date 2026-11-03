@@ -116,7 +116,12 @@ impl AppleFluidView {
 
 impl Render for AppleFluidView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let now = window.animation_time();
+        // The retained GPU extension advances with RendererExtensionContext::frame_time
+        // (monotonic Instant), not GPUI's UI animation clock. That UI clock can
+        // be paused or sampled from an older committed layout after focus loss.
+        // Mixing the two made a live background appear frozen until another
+        // window event repainted the fluid snapshot.
+        let now = Instant::now();
         let running = self.stage_visible && self.playing && !window.is_minimized();
 
         if running {
@@ -182,6 +187,25 @@ mod tests {
             include_str!("apple_fluid.wgsl"),
         )
         .expect("Apple fluid WGSL should validate");
+    }
+
+    #[test]
+    fn fluid_clock_continues_across_focus_and_preserves_pause_phase() {
+        use std::time::Duration;
+
+        let mut fluid = AppleFluidView::new();
+        let started_at = Instant::now();
+        fluid.animation_seconds = 12.0;
+        fluid.running_since = Some(started_at);
+        let running = fluid.current_animation_seconds(started_at + Duration::from_secs(3));
+        assert!((running - 15.0).abs() < 0.001);
+
+        fluid.freeze_animation_clock(started_at + Duration::from_secs(3));
+        assert!((fluid.current_animation_seconds(started_at + Duration::from_secs(10)) - 15.0).abs() < 0.001);
+
+        fluid.running_since = Some(started_at + Duration::from_secs(10));
+        let resumed = fluid.current_animation_seconds(started_at + Duration::from_secs(11));
+        assert!((resumed - 16.0).abs() < 0.001);
     }
 
     #[test]
