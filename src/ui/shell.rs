@@ -328,6 +328,11 @@ fn stage_drawer_needs_surface(progress: f32, animating: bool) -> bool {
     animating || progress > 0.001
 }
 
+#[inline]
+fn stale_track_snapshot(pending: Option<TrackId>, observed: Option<TrackId>) -> bool {
+    pending.is_some_and(|expected| Some(expected) != observed)
+}
+
 fn stage_ease_in_out_cubic(progress: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
     if progress < 0.5 {
@@ -4264,9 +4269,10 @@ impl MusicApp {
             return;
         };
         let incoming = engine.snapshot();
-        if self.pending_track_ack_id.is_some_and(|expected| {
-            incoming.current_track.as_ref().map(|track| track.id) != Some(expected)
-        }) {
+        if stale_track_snapshot(
+            self.pending_track_ack_id,
+            incoming.current_track.as_ref().map(|track| track.id),
+        ) {
             // TrackEnded can enqueue a SnapshotChanged for the former track
             // immediately before the next-track command is consumed. Applying
             // that snapshot would roll the artwork, colors and progress back
@@ -6203,6 +6209,14 @@ fn library_scan_all(library: &Library, roots: &[PathBuf]) -> Result<Vec<ScanRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_audio_ack_cannot_overwrite_optimistic_next_track() {
+        assert!(stale_track_snapshot(Some(42), Some(41)));
+        assert!(stale_track_snapshot(Some(42), None));
+        assert!(!stale_track_snapshot(Some(42), Some(42)));
+        assert!(!stale_track_snapshot(None, Some(41)));
+    }
 
     #[test]
     fn page_render_keys_ignore_transport_only_updates() {
