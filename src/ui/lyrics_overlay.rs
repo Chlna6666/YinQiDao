@@ -1,7 +1,7 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::Arc;
 
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity,
