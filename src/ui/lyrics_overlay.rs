@@ -20,7 +20,6 @@ use super::{
     shell::MusicApp,
 };
 
-const INTERACTION_BACKGROUND_OPACITY: f32 = 0.36;
 const LIQUID_GLASS_CORNER_RADIUS: f32 = 18.0;
 const LYRIC_LINE_TRANSITION_DURATION: Duration = Duration::from_millis(260);
 
@@ -231,14 +230,10 @@ impl gpui::Render for DesktopLyricsView {
         }
 
         let interacting = self.hovered || self.settings_open;
-        let background_opacity = if interacting {
-            config
-                .background_opacity
-                .max(INTERACTION_BACKGROUND_OPACITY)
-        } else {
-            config.background_opacity
-        }
-        .clamp(0.0, 0.85);
+        // Entering or leaving the popup must not flash the entire window from
+        // 22% to 36% background opacity. Toolbar hover is independent from the
+        // user-selected substrate transparency.
+        let background_opacity = config.background_opacity.clamp(0.0, 0.85);
 
         let lyrics = if let Some(display) = &display {
             desktop_lyrics_stack(
@@ -1038,7 +1033,7 @@ fn settings_row(
 /// it. A GPUI-clipped rounded panel keeps the same dark material without leaking
 /// a huge gray quad onto the rest of the desktop during native frame transitions.
 fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
-    let alpha = (opacity + if interacting { 0.025 } else { 0.0 }).clamp(0.0, 0.88);
+    let alpha = opacity.clamp(0.0, 0.85);
     div()
         .absolute()
         .inset_0()
