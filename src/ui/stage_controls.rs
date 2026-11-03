@@ -559,6 +559,7 @@ impl Render for StageTitlebarView {
             .child(
                 div()
                     .id("stage-titlebar")
+                    .relative()
                     .w_full()
                     .h(px(38.0))
                     .flex_none()
@@ -569,6 +570,39 @@ impl Render for StageTitlebarView {
                     .items_center()
                     .justify_between()
                     .px_4()
+                    .child({
+                        let drag_region = div()
+                            .id("stage-drag-region")
+                            .absolute()
+                            .inset_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(dark::white(0.70))
+                                    .max_w(px(310.0))
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                |event: &gpui::MouseDownEvent, window, _| {
+                                    if event.click_count >= 2 {
+                                        window.titlebar_double_click();
+                                    }
+                                },
+                            );
+                        if visibility >= 0.1 {
+                            drag_region.window_control_area(gpui::WindowControlArea::Drag)
+                        } else {
+                            drag_region
+                        }
+                    })
                     .child(
                         div()
                             .occlude()
@@ -598,37 +632,6 @@ impl Render for StageTitlebarView {
                                 },
                             )),
                     )
-                    .child({
-                        let drag_region = div()
-                            .id("stage-drag-region")
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(dark::white(0.70))
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                |event: &gpui::MouseDownEvent, window, _| {
-                                    if event.click_count >= 2 {
-                                        window.titlebar_double_click();
-                                    }
-                                },
-                            );
-                        if visibility >= 0.1 {
-                            drag_region.window_control_area(gpui::WindowControlArea::Drag)
-                        } else {
-                            drag_region
-                        }
-                    })
                     .child(
                         div()
                             .flex()
