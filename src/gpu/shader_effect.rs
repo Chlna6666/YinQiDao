@@ -274,9 +274,12 @@ impl EffectRenderer {
         id: (ShaderKind, u64),
         device: &mut dyn ExtensionDevice,
     ) -> gpui::Result<&UniformSlot> {
-        if !self.slots.contains_key(&id) {
-            // Constant-buffer size is deliberately rounded to 256 bytes for D3D.
-            const BUFFER_BYTES: u64 = 256;
+        use std::collections::hash_map::Entry;
+        match self.slots.entry(id) {
+            Entry::Occupied(slot) => Ok(slot.into_mut()),
+            Entry::Vacant(slot) => {
+                // Constant-buffer size is deliberately rounded to 256 bytes for D3D.
+                const BUFFER_BYTES: u64 = 256;
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some("YinQiDao effect uniforms".into()),
                 size: BUFFER_BYTES,
@@ -302,9 +305,9 @@ impl EffectRenderer {
                     return Err(error.into());
                 }
             };
-            self.slots.insert(id, UniformSlot { buffer, group });
+                Ok(slot.insert(UniformSlot { buffer, group }))
+            }
         }
-        Ok(self.slots.get(&id).expect("created slot must exist"))
     }
 
     fn write_parameters(input: &EffectSnapshot, context: &RendererExtensionContext) -> [u8; 96] {
