@@ -219,6 +219,10 @@ pub struct MusicApp {
     // Track switches update retained surfaces immediately, but delay the expensive shell/titlebar
     // rebuild until the audio worker confirms the new track.
     track_root_notify_pending: bool,
+    /// Pending audio-worker ACK for the most recently accepted track switch.
+    /// Reject intermediate snapshots of the previous decoder, even if they
+    /// arrive after optimistic new-track metadata has already been painted.
+    pending_track_ack_id: Option<TrackId>,
     pub(crate) fluid_background: Option<Entity<crate::gpu::AppleFluidView>>,
     pub(crate) artwork_online_fallback_requested: HashSet<TrackId>,
     pub(crate) library_scroll_handle: gpui::UniformListScrollHandle,
@@ -896,6 +900,7 @@ impl MusicApp {
             stage_chrome_epoch: 0,
             transport_root_notify_pending: false,
             track_root_notify_pending: false,
+            pending_track_ack_id: None,
             fluid_background: None,
             artwork_online_fallback_requested: HashSet::new(),
             library_scroll_handle: gpui::UniformListScrollHandle::new(),
@@ -1691,6 +1696,7 @@ impl MusicApp {
 
     #[allow(dead_code)]
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
+        self.pending_track_ack_id = None;
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
         self.snapshot.state = PlaybackState::Stopped;
@@ -1965,6 +1971,7 @@ impl MusicApp {
         }
 
         if engine.try_send(PlayerCommand::PlayTrack(track_id)) {
+            self.pending_track_ack_id = Some(track_id);
             self.reset_progress_for_track_switch();
             self.config.current_track = Some(track_id);
             if let Some(track) = self
@@ -2619,6 +2626,7 @@ impl MusicApp {
         }
 
         self.online_track_cache.insert(track_id, track.clone());
+        self.pending_track_ack_id = Some(track_id);
         self.reset_progress_for_track_switch();
         // Keep persistence/UI identity coherent before the audio bridge posts its structural
         // SnapshotChanged event. This is metadata-only and performs no decoder/file/network work.
@@ -4242,10 +4250,30 @@ impl MusicApp {
         }
     }
 
+    pub(crate) fn clear_pending_track_ack_on_error(&mut self, cx: &mut Context<Self>) {
+        if self.pending_track_ack_id.take().is_some() {
+            // The decoder explicitly failed; do not leave stale optimistic
+            // metadata on screen indefinitely.
+            self.track_root_notify_pending = false;
+            self.sync_audio_snapshot_event(cx);
+        }
+    }
+
     pub(crate) fn sync_audio_snapshot_event(&mut self, cx: &mut Context<MusicApp>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
+        let incoming = engine.snapshot();
+        if self.pending_track_ack_id.is_some_and(|expected| {
+            incoming.current_track.as_ref().map(|track| track.id) != Some(expected)
+        }) {
+            // TrackEnded can enqueue a SnapshotChanged for the former track
+            // immediately before the next-track command is consumed. Applying
+            // that snapshot would roll the artwork, colors and progress back
+            // after the stage had already switched to the new track.
+            return;
+        }
+        self.pending_track_ack_id = None;
 
         // Transport commands already update the foreground snapshot optimistically. Preserve enough
         // structural identity to recognize a later bridge ACK and avoid repainting the whole root
@@ -4263,7 +4291,7 @@ impl MusicApp {
         let track_ack_pending = self.track_root_notify_pending;
         self.track_root_notify_pending = false;
 
-        self.snapshot = engine.snapshot();
+        self.snapshot = incoming;
         let track_changed = match (
             previous_track.as_ref(),
             self.snapshot.current_track.as_ref(),
