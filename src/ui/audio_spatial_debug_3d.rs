@@ -119,17 +119,16 @@ impl SpatialDebug3dScene {
 
         match build_scene_mesh(snapshot, self.mesh.as_ref()).and_then(|(mesh, fit_radius)| {
             let mut scene = Scene::new();
-            let opaque = Arc::new(Material {
-                shading_model: ShadingModel::Unlit,
-                double_sided: true,
-                ..Material::new()
-            });
-            let transparent = Arc::new(Material {
-                alpha_mode: AlphaMode::Blend,
-                shading_model: ShadingModel::Unlit,
-                double_sided: true,
-                ..Material::new()
-            });
+            let mut opaque = Material::new();
+            opaque.shading_model = ShadingModel::Unlit;
+            opaque.double_sided = true;
+            let opaque = Arc::new(opaque);
+
+            let mut transparent = Material::new();
+            transparent.alpha_mode = AlphaMode::Blend;
+            transparent.shading_model = ShadingModel::Unlit;
+            transparent.double_sided = true;
+            let transparent = Arc::new(transparent);
             scene
                 .insert(
                     None,
