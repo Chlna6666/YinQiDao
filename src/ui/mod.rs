@@ -47,3 +47,16 @@ mod shell;
 pub mod theme;
 
 pub use shell::MusicApp;
+
+const BACKGROUND_ANIMATION_FRAME_INTERVAL: std::time::Duration =
+    std::time::Duration::from_micros(16_667);
+
+/// Keep visible but unfocused music windows responsive to retained GPUI
+/// animations and audio-driven redraws. The renderer stays demand-driven:
+/// an idle or minimized window does not render at 60 FPS unnecessarily.
+/// Windows backend presentation pacing is pinned to 60 Hz in the GPUI fork.
+pub(crate) fn enable_inactive_window_animations(window: &mut gpui::Window) {
+    window.set_inactive_animation_engine_enabled(true);
+    window.set_inactive_dirty_redraw_enabled(true);
+    window.set_inactive_dirty_frame_retry_interval(Some(BACKGROUND_ANIMATION_FRAME_INTERVAL));
+}
