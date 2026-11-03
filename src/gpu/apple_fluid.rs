@@ -147,6 +147,7 @@ impl Render for AppleFluidView {
             | ((palette.dark_ambient_rgb[1] as u32) << 8)
             | palette.dark_ambient_rgb[2] as u32;
         div()
+            .relative()
             .size_full()
             .bg(rgb(dark))
             .child(effect)
