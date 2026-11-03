@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     App, AppContext, BorrowAppContext, Bounds, Context, Global, IntoElement, MouseButton, Render,
-    Subscription, Task, Timer, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
+    Subscription, Task, Timer, Window, WindowBounds, WindowHandle, WindowOptions, div,
     prelude::*, px, rgb, size,
 };
 use yinqidao_audio_spatial::{
@@ -221,9 +221,8 @@ impl Render for AudioDebugView {
         self.ensure_refresh_task(cx);
         let snapshot = self.snapshot.clone();
         let spatial = self.spatial_snapshot;
-        let mesh = self.gpu_scene.mesh();
+        let scene_view = self.gpu_scene.view(self.camera);
         let mesh_error = self.gpu_scene.error();
-        let draw_parameters = self.gpu_scene.draw_parameters(1.58, self.camera);
         let frozen = self.frozen;
         let head_tracking_demo = self.head_tracking_demo;
         let interaction_hint = if head_tracking_demo {
@@ -373,16 +372,12 @@ impl Render for AudioDebugView {
                                 .overflow_hidden()
                                 .rounded_lg()
                                 .bg(STAGE_BG_SUNKEN)
-                                .child(match mesh {
-                                    Some(mesh) => canvas(
-                                        move |bounds, _window, _cx| bounds,
-                                        move |bounds, _prepaint, window, _cx| {
-                                            window.paint_gpu_mesh_3d(bounds, mesh.clone(), draw_parameters);
-                                        },
-                                    )
-                                    .absolute()
-                                    .inset_0()
-                                    .into_any_element(),
+                                .child(match scene_view {
+                                    Some(scene) => div()
+                                        .absolute()
+                                        .inset_0()
+                                        .child(gpui_3d::scene_view(scene))
+                                        .into_any_element(),
                                     None => div()
                                         .absolute()
                                         .inset_0()
