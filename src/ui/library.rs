@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{
-    EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity,
+    Context, EncodedImageBytes, ImageFormat, IntoElement, ObjectFit, SharedString, WeakEntity,
     Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, uniform_list,
 };
 use lucide_gpui::icon;
@@ -19,6 +19,7 @@ mod plugin_context_menu;
 mod provider_playlists;
 
 use super::{
+    queue_cover,
     shell::{MusicApp, app_listener},
     theme::{dark, 
         self, ACCENT_RED, BORDER_CARD, BORDER_HAIRLINE, TEXT_PRIMARY, TEXT_SECONDARY,
@@ -798,7 +799,7 @@ fn songs_view<V: 'static>(
                     count,
                     move |range: Range<usize>, _window, cx| {
                         view_clone
-                            .update(cx, |this, _cx| {
+                            .update(cx, |this, cx| {
                                 let mut items = Vec::with_capacity(range.end - range.start);
                                 for idx in range {
                                     let track_index = matching_indices_for_rows
@@ -934,7 +935,7 @@ fn recent_view(
                     move |range: Range<usize>, _window, cx| {
                         let tracks = tracks_arc.clone();
                         view_clone
-                            .update(cx, |this, _cx| {
+                            .update(cx, |this, cx| {
                                 let mut items = Vec::with_capacity(range.end - range.start);
                                 for idx in range {
                                     if let Some(track) = tracks.get(idx) {
@@ -1633,6 +1634,7 @@ pub(super) fn queue_drawer_items(
                                                 this,
                                                 &view_for_rows,
                                                 queue_index,
+                                                cx,
                                             ))
                                             .into_any_element(),
                                     );
@@ -1834,6 +1836,7 @@ fn queue_item_row(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
     queue_index: usize,
+    cx: &mut Context<MusicApp>,
 ) -> impl IntoElement {
     let track_id = track.id;
     let is_current = app
@@ -1841,6 +1844,40 @@ fn queue_item_row(
         .current_track
         .as_ref()
         .is_some_and(|t| t.id == track_id);
+
+    let hovered = app.queue_drawer_hovered_cover == Some(queue_index);
+    let source_name = app.online_remote_tracks.get(&track_id)
+        .map(|(route, _)| {
+            crate::plugin::management::provider_display_labels()
+                .get(&route.provider_id)
+                .cloned()
+                .unwrap_or_else(|| route.provider_id.clone())
+        })
+        .unwrap_or_else(|| "本地音乐".to_owned());
+    let artwork = if let Some(bytes) = app.artworks.get(&track_id) {
+        img(EncodedImageBytes::new(ImageFormat::Png, bytes.clone()))
+            .size(px(42.0))
+            .rounded(px(9.0))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element()
+    } else if let Some((_, remote)) = app.online_remote_tracks.get(&track_id) {
+        image_cache::render_remote_cover(
+            remote.cover_url.as_deref(), 42.0, 42.0, 9.0, cx,
+        )
+    } else {
+        div()
+            .size(px(42.0))
+            .bg(theme::BG_CANVAS)
+            .rounded(px(9.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(themed_icon(icon!(music), 17.0, TEXT_SECONDARY.into()))
+            .into_any_element()
+    };
+    let cover = queue_cover::tile(
+        artwork, is_current, app.snapshot.state, false, hovered, queue_index as u64,
+    );
 
     div()
         .id(SharedString::from(format!(
@@ -1890,14 +1927,37 @@ fn queue_item_row(
                 .gap_3()
                 .flex_1()
                 .min_w(px(0.0))
-                .child({
-                    let dot_color = if is_current {
-                        gpui::Hsla::from(ACCENT_RED)
-                    } else {
-                        theme::TEXT_TERTIARY.into()
-                    };
-                    div().size(px(8.0)).rounded_full().bg(dot_color)
-                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!("queue-cover-{queue_index}-{track_id}")))
+                        .size(px(42.0))
+                        .flex_none()
+                        .cursor_pointer()
+                        .on_hover(app_listener(view, move |this, is_hovered: &bool, _, cx| {
+                            let next = if *is_hovered { Some(queue_index) } else { None };
+                            if (*is_hovered || this.queue_drawer_hovered_cover == Some(queue_index))
+                                && this.queue_drawer_hovered_cover != next
+                            {
+                                this.queue_drawer_hovered_cover = next;
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            app_listener(view, move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if is_current {
+                                    this.seek_to_ms(0, cx);
+                                    if this.snapshot.state != crate::model::PlaybackState::Playing {
+                                        this.toggle_play(cx);
+                                    }
+                                } else {
+                                    play_queued_track(this, track_id, cx);
+                                }
+                            }),
+                        )
+                        .child(cover),
+                )
                 .child(
                     div()
                         .flex()
@@ -1921,7 +1981,7 @@ fn queue_item_row(
                                 .text_xs()
                                 .text_color(TEXT_SECONDARY)
                                 .truncate()
-                                .child(format!("{} · {}", track.artist, track.album)),
+                                .child(format!("{} · {} · {}", track.artist, track.album, source_name)),
                         ),
                 ),
         )
@@ -1959,6 +2019,18 @@ fn queue_item_row(
                         })),
                 ),
         )
+}
+
+fn play_queued_track(app: &mut MusicApp, track_id: TrackId, cx: &mut Context<MusicApp>) {
+    if track_id < 0 {
+        if let Some((route, remote)) = app.online_remote_tracks.get(&track_id).cloned() {
+            app.play_online_remote_track(route, remote, cx);
+        } else if let Some(track) = app.online_track_cache.get(&track_id).cloned() {
+            app.play_prepared_remote_track(track, cx);
+        }
+    } else {
+        app.play_track(track_id, cx);
+    }
 }
 
 fn empty_filter_state() -> impl IntoElement {

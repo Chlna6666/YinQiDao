@@ -1,5 +1,7 @@
 use std::{ops::Range, sync::Arc};
 
+use crate::model::PlaybackState;
+
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, CompositeLayerExt as _,
     Context, Easing, ElementId, IntoElement, SharedString, WeakEntity, Window, div, point,
@@ -8,7 +10,7 @@ use gpui::{
 use lucide_gpui::icon;
 
 use super::{
-    library,
+    image_cache, library, queue_cover,
     shell::{MusicApp, OnlinePlaylistQueue, app_listener},
     theme::{
         self, ACCENT_RED, BORDER_CARD, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, format_time,
@@ -48,8 +50,13 @@ pub(super) fn render(
     let title = online_queue
         .map(|queue| queue.playlist_title.clone())
         .unwrap_or_else(|| "播放队列".to_owned());
+    let provider = online_queue.map(|queue| {
+        let labels = crate::plugin::management::provider_display_labels();
+        labels.get(&queue.route.provider_id).cloned()
+            .unwrap_or_else(|| queue.route.provider_id.clone())
+    });
     let rows = if let Some(queue) = online_queue {
-        online_queue_items(queue, &parent)
+        online_queue_items(app, queue, &parent)
     } else {
         library::queue_drawer_items(app, &parent)
     };
@@ -85,13 +92,13 @@ pub(super) fn render(
         .id("queue-drawer-sheet")
         .absolute()
         .right(px(0.0))
-        .top(px(0.0))
-        .bottom(px(0.0))
+        .top(px(TITLEBAR_HEIGHT))
+        .bottom(px(MINI_PLAYER_HEIGHT))
         .w(px(width))
         .flex()
         .flex_col()
         .occlude()
-        .rounded_2xl()
+        .rounded(px(16.0))
         .bg(theme::BG_CARD)
         .border_1()
         .border_color(BORDER_CARD)
@@ -108,6 +115,12 @@ pub(super) fn render(
                 .flex()
                 .items_center()
                 .justify_between()
+                .gap_3()
+                .children(online_queue.and_then(|queue| queue.tracks.first()).map(|track| {
+                    image_cache::render_remote_cover(
+                        track.cover_url.as_deref(), 44.0, 44.0, 10.0, cx,
+                    )
+                }))
                 .child(
                     div()
                         .flex_1()
@@ -127,7 +140,7 @@ pub(super) fn render(
                             div()
                                 .text_xs()
                                 .text_color(TEXT_SECONDARY)
-                                .child(format!("共 {count} 首 · 当前页面保持不变")),
+                                .child(format!("共 {count} 首 · {}", provider.as_deref().unwrap_or("本地曲库"))),
                         ),
                 )
                 .child(
@@ -217,17 +230,17 @@ pub(super) fn render(
     div()
         .id("queue-drawer-overlay")
         .absolute()
-        .top(px(TITLEBAR_HEIGHT))
-        .bottom(px(MINI_PLAYER_HEIGHT))
+        .top(px(0.0))
+        .bottom(px(0.0))
         .left(px(0.0))
         .right(px(0.0))
-        .overflow_hidden()
         .child(scrim)
         .child(sheet)
         .into_any_element()
 }
 
 fn online_queue_items(
+    app: &MusicApp,
     queue: &OnlinePlaylistQueue,
     parent: &WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
@@ -235,6 +248,16 @@ fn online_queue_items(
     let route = queue.route.clone();
     let playlist_title = queue.playlist_title.clone();
     let current_index = queue.current_index;
+    let current_source = app.snapshot.current_track.as_ref().and_then(|track| {
+        app.online_remote_tracks.get(&track.id).map(|(_, remote)| remote.source.clone())
+    });
+    let has_current_track = app.snapshot.current_track.is_some();
+    let playback_state = app.snapshot.state;
+    let hovered_cover = app.queue_drawer_hovered_cover;
+    let buffering_source = app.online_track_buffering.clone();
+    let labels = crate::plugin::management::provider_display_labels();
+    let provider = labels.get(&route.provider_id).cloned()
+        .unwrap_or_else(|| route.provider_id.clone());
     let parent = parent.clone();
 
     div()
@@ -244,16 +267,18 @@ fn online_queue_items(
             uniform_list(
                 "queue-drawer-online-vlist",
                 tracks.len(),
-                move |range: Range<usize>, _, _cx| {
+                move |range: Range<usize>, _, cx| {
                     let mut rows = Vec::with_capacity(range.len());
                     for index in range {
                         let Some(track) = tracks.get(index) else {
                             continue;
                         };
-                        let active = index == current_index;
-                        let route = route.clone();
-                        let source_tracks = tracks.clone();
-                        let playlist_title = playlist_title.clone();
+                        let active = current_source.as_ref().map_or(
+                            has_current_track && index == current_index && buffering_source.is_none(),
+                            |source| source == &track.source,
+                        );
+                        let buffering = buffering_source.as_deref() == Some(track.source.source_id.as_str());
+                        let hovered = hovered_cover == Some(index);
                         let title = track.title.clone();
                         let artist = if track.artists.is_empty() {
                             "未知艺术家".to_owned()
@@ -261,76 +286,93 @@ fn online_queue_items(
                             track.artists.join(" / ")
                         };
                         let duration = format_time(track.duration_ms.unwrap_or(0));
-                        rows.push(
-                            div()
-                                .id(SharedString::from(format!("drawer-online-row-{index}")))
-                                .h(px(62.0))
-                                .w_full()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .rounded_xl()
-                                .cursor_pointer()
-                                .bg(if active {
-                                    theme::accent_red_muted()
-                                } else {
-                                    theme::transparent()
-                                })
-                                .hover(|s| s.bg(theme::bg_hover()))
-                                .child(
-                                    div()
-                                        .w(px(24.0))
-                                        .text_xs()
-                                        .text_color(if active { ACCENT_RED } else { TEXT_TERTIARY })
-                                        .child(if active {
-                                            "▶".to_owned()
-                                        } else {
-                                            format!("{}", index + 1)
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(if active {
-                                                    ACCENT_RED
-                                                } else {
-                                                    TEXT_PRIMARY
-                                                })
-                                                .truncate()
-                                                .child(title),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(TEXT_SECONDARY)
-                                                .truncate()
-                                                .child(artist),
-                                        ),
-                                )
-                                .child(div().text_xs().text_color(TEXT_TERTIARY).child(duration))
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    app_listener(&parent, move |app, _, _, cx| {
+
+                        // Loading the cover is lazy: only visible virtual rows request images.
+                        let artwork = image_cache::render_remote_cover_with_sink(
+                            track.cover_url.as_deref(), 42.0, 42.0, 9.0, &parent, cx,
+                        );
+                        let cover = queue_cover::tile(
+                            artwork, active, playback_state, buffering, hovered, index as u64,
+                        );
+                        let hover_parent = parent.clone();
+                        let row_parent = parent.clone();
+                        let action_route = route.clone();
+                        let action_title = playlist_title.clone();
+                        let action_tracks = tracks.clone();
+                        let row = div()
+                            .id(SharedString::from(format!("drawer-online-row-{index}")))
+                            .h(px(64.0))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_3()
+                            .rounded(px(10.0))
+                            .cursor_pointer()
+                            .bg(if active { theme::accent_red_muted() } else { theme::transparent() })
+                            .hover(|s| s.bg(if active { theme::accent_red_active() } else { theme::bg_hover() }))
+                            .transition(theme::hover_transition())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("drawer-online-cover-{index}")))
+                                    .size(px(42.0))
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .on_hover(app_listener(&hover_parent, move |app, is_hovered: &bool, _, cx| {
+                                        let next = if *is_hovered { Some(index) } else { None };
+                                        if (*is_hovered || app.queue_drawer_hovered_cover == Some(index))
+                                            && app.queue_drawer_hovered_cover != next
+                                        {
+                                            app.queue_drawer_hovered_cover = next;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(cover),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.0))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(if active { gpui::FontWeight::SEMIBOLD } else { gpui::FontWeight::MEDIUM })
+                                            .text_color(if active { ACCENT_RED } else { TEXT_PRIMARY })
+                                            .truncate()
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(TEXT_SECONDARY)
+                                            .truncate()
+                                            .child(format!("{artist} · {provider}")),
+                                    ),
+                            )
+                            .child(div().flex_none().text_xs().text_color(TEXT_TERTIARY).child(duration))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                app_listener(&row_parent, move |app, _, _, cx| {
+                                    if active && !buffering {
+                                        app.seek_to_ms(0, cx);
+                                        if app.snapshot.state != PlaybackState::Playing {
+                                            app.toggle_play(cx);
+                                        }
+                                    } else {
                                         app.play_online_playlist_track_shared(
-                                            route.clone(),
-                                            playlist_title.clone(),
-                                            source_tracks.clone(),
+                                            action_route.clone(),
+                                            action_title.clone(),
+                                            action_tracks.clone(),
                                             index,
                                             cx,
                                         );
-                                    }),
-                                )
-                                .into_any_element(),
-                        );
+                                    }
+                                }),
+                            );
+                        rows.push(row.into_any_element());
                     }
                     rows
                 },

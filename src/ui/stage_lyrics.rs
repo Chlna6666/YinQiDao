@@ -1539,7 +1539,7 @@ fn lyric_text_layer(
         .min_w(px(0.0))
         .flex()
         .flex_col()
-        .gap_1()
+        .gap(px(3.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(
             div()
@@ -1563,7 +1563,9 @@ fn lyric_text_layer(
             div()
                 .w_full()
                 .min_w(px(0.0))
-                .text_size(px(17.0))
+                .text_size(px(15.0))
+                .line_height(px(21.0))
+                .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(dark::text_secondary())
                 .child(translation.clone()),
         );
@@ -2251,7 +2253,7 @@ fn estimated_primary_lyric_height(line: &StageLyricLine, width: f32) -> f32 {
 fn estimated_lyric_row_height(line: &StageLyricLine, width: f32) -> f32 {
     let primary = estimated_primary_lyric_height(line, width);
     let translation = line.translation.as_ref().map_or(0.0, |text| {
-        approximate_lyric_lines(text.as_str(), width, 17.0) as f32 * 25.0 + 4.0
+        approximate_lyric_lines(text.as_str(), width, 15.0) as f32 * 21.0 + 3.0
     });
     // Keep measured/estimated rows in the same coordinate system. A
     // scaled karaoke leaf can be taller than its initial cached bounds.

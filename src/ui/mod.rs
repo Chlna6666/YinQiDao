@@ -18,6 +18,7 @@ mod online_playlist;
 mod player_facade;
 #[allow(dead_code)]
 mod player_legacy;
+mod queue_cover;
 mod queue_drawer;
 mod quick_audio_window;
 #[rustfmt::skip]

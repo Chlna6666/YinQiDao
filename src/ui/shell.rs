@@ -191,6 +191,8 @@ pub struct MusicApp {
     pub(crate) queue_drawer_open: bool,
     pub(crate) queue_drawer_motion: theme::SampledMotion,
     pub(crate) queue_drawer_epoch: u64,
+    /// Hovered artwork index; only cover enter/leave changes it (no per-frame polling).
+    pub(crate) queue_drawer_hovered_cover: Option<usize>,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -884,6 +886,7 @@ impl MusicApp {
                 false,
             ),
             queue_drawer_epoch: 0,
+            queue_drawer_hovered_cover: None,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -1243,6 +1246,7 @@ impl MusicApp {
             return;
         }
         self.queue_drawer_open = open;
+        self.queue_drawer_hovered_cover = None;
         if self.queue_drawer_motion.set_target(open) {
             self.queue_drawer_epoch = self.queue_drawer_epoch.wrapping_add(1);
         }
