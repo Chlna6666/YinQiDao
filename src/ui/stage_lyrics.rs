@@ -1816,7 +1816,6 @@ fn sustained_time_envelope(word: &StageLyricWord, position_ms: u64) -> f32 {
 
 /// The next authored onset bounds the previous note's visible hold.
 /// Its smooth release continues after that onset rather than snapping.
-
 fn bounded_sustained_word(word: &StageLyricWord, next_start_ms: Option<u64>) -> StageLyricWord {
     let mut visual = word.clone();
     if let Some(next_start_ms) = next_start_ms
@@ -2732,12 +2731,14 @@ mod tests {
 
         let attack = sustained_time_envelope(&word, 1_180);
         let sustain = sustained_time_envelope(&word, 2_000);
-        let release = sustained_time_envelope(&word, 2_850);
+        let completed = sustained_time_envelope(&word, 3_000);
+        let release = sustained_time_envelope(&word, 3_200);
 
         assert!(attack > 0.0 && attack < 1.0);
         assert_eq!(sustain, 1.0);
+        assert_eq!(completed, 1.0);
         assert!(release > 0.0 && release < 1.0);
-        assert_eq!(sustained_time_envelope(&word, 3_000), 0.0);
+        assert_eq!(sustained_time_envelope(&word, 3_400), 0.0);
     }
 
     #[test]
@@ -2759,11 +2760,16 @@ mod tests {
             Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
         );
         assert_eq!(sustained_transition_frame_delay(&word, 2_000), None);
+        assert_eq!(sustained_transition_frame_delay(&word, 2_850), None);
         assert_eq!(
-            sustained_transition_frame_delay(&word, 2_850),
+            sustained_transition_frame_delay(&word, 3_000),
             Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
         );
-        assert_eq!(sustained_transition_frame_delay(&word, 3_000), None);
+        assert_eq!(
+            sustained_transition_frame_delay(&word, 3_200),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
+        assert_eq!(sustained_transition_frame_delay(&word, 3_400), None);
     }
 
     #[test]
@@ -2777,11 +2783,12 @@ mod tests {
         };
         let (attack, release) = sustained_attack_release_ms(&word).unwrap();
         let attack_end = word.timestamp_ms + attack;
-        let release_start = word.timestamp_ms + 2_000 - release;
+        let word_end = word.timestamp_ms + 2_000;
+        let release_end = word_end + release;
         let times = [
             (attack_end - 1, attack_end),
-            (release_start - 1, release_start),
-            (2_999, 3_000),
+            (word_end - 1, word_end),
+            (release_end - 1, release_end),
         ];
         for (before, after) in times {
             let previous = sustained_time_envelope(&word, before);
@@ -2804,14 +2811,23 @@ mod tests {
         };
         let visual = bounded_sustained_word(&original, Some(2_600));
         assert_eq!(visual.duration_ms, Some(1_600));
-        assert!(sustained_release_timestamp(&visual).unwrap() < 2_600);
-        assert!(sustained_time_envelope(&visual, 2_500) < 1.0);
-        assert_eq!(sustained_time_envelope(&visual, 2_600), 0.0);
+        let tail_end = sustained_release_timestamp(&visual).unwrap();
+        assert!(tail_end > 2_600);
+        assert_eq!(sustained_time_envelope(&visual, 2_500), 1.0);
+        assert_eq!(sustained_time_envelope(&visual, 2_600), 1.0);
+        assert!(sustained_tail_active(&original, &visual, 2_600));
+        let at_completion = sustained_visual_emphasis(&original, &visual, 2_600, false);
+        let settling = sustained_visual_emphasis(&original, &visual, (2_600 + tail_end) / 2, false);
+        assert!(at_completion.scale > settling.scale && settling.scale > 1.0);
+        assert!(at_completion.glow_alpha > settling.glow_alpha && settling.glow_alpha > 0.0);
+        assert!(!sustained_tail_active(&original, &visual, tail_end));
+        assert_eq!(sustained_time_envelope(&visual, tail_end), 0.0);
         // The original timed-word reveal still uses its source duration.
         assert!((word_reveal_progress(&original, 2_500) - 0.5).abs() < 0.001);
 
         let short = bounded_sustained_word(&original, Some(1_600));
         assert!(!should_emphasize_sustained_word(&short));
+        assert!(sustained_visual_emphasis(&original, &short, 1_600, false).scale > 1.0);
         assert_eq!(
             bounded_sustained_word(&original, None).duration_ms,
             Some(3_000)
@@ -2836,10 +2852,14 @@ mod tests {
         assert!(middle.scale < late.scale && late.scale < held.scale);
         assert!((held.scale - 1.035).abs() < 0.0001);
 
-        let tail_start = 5_000 - release;
-        let before_end = sustained_word_emphasis(&word, tail_start + release / 2, true, true);
-        assert!(1.0 < before_end.scale && before_end.scale < held.scale);
-        assert_eq!(sustained_word_emphasis(&word, 5_000, true, true).scale, 1.0);
+        let completed = sustained_word_emphasis(&word, 5_000, true, true);
+        let settling = sustained_word_emphasis(&word, 5_000 + release / 2, true, true);
+        assert!((completed.scale - held.scale).abs() < 0.0001);
+        assert!(1.0 < settling.scale && settling.scale < held.scale);
+        assert_eq!(
+            sustained_word_emphasis(&word, 5_000 + release, true, true).scale,
+            1.0
+        );
     }
 
     #[test]
@@ -2854,13 +2874,48 @@ mod tests {
 
         let middle = sustained_word_emphasis(&word, 6_500, true, false);
         let near_end = sustained_word_emphasis(&word, 7_900, true, false);
-        let ended = sustained_word_emphasis(&word, 8_000, true, false);
+        let completed = sustained_word_emphasis(&word, 8_000, true, false);
+        let (_, release) = sustained_attack_release_ms(&word).unwrap();
+        let settling = sustained_word_emphasis(&word, 8_000 + release / 2, true, false);
+        let ended = sustained_word_emphasis(&word, 8_000 + release, true, false);
 
         assert!(middle.glow_alpha > 0.0);
         assert!(middle.scale > 1.0);
-        assert!(near_end.glow_alpha < middle.glow_alpha);
+        assert_eq!(near_end.glow_alpha, middle.glow_alpha);
+        assert_eq!(completed.scale, middle.scale);
+        assert!(settling.glow_alpha > 0.0 && settling.glow_alpha < middle.glow_alpha);
+        assert!(settling.scale > 1.0 && settling.scale < middle.scale);
         assert_eq!(ended.glow_alpha, 0.0);
         assert_eq!(ended.scale, 1.0);
+    }
+
+    #[test]
+    fn sustained_completion_uses_zero_velocity_curve_and_does_not_snap() {
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("啊"),
+        };
+        let (attack_ms, release_ms) = sustained_attack_release_ms(&word).unwrap();
+        let attack_end = 1_000 + attack_ms;
+        let end_ms = 3_000;
+        let final_ms = end_ms + release_ms;
+
+        for (before, after) in [
+            (attack_end - 1, attack_end),
+            (end_ms - 1, end_ms),
+            (final_ms - 1, final_ms),
+        ] {
+            let first = sustained_word_emphasis(&word, before, true, true);
+            let second = sustained_word_emphasis(&word, after, true, true);
+            assert!((first.scale - second.scale).abs() < 0.0001);
+            assert!((first.glow_alpha - second.glow_alpha).abs() < 0.0001);
+        }
+        assert!((smootherstep01(0.5) - 0.5).abs() < 0.0001);
+        assert!(smootherstep01(0.1) < smoothstep01(0.1));
+        assert!(smootherstep01(0.9) > smoothstep01(0.9));
     }
 
     #[test]
