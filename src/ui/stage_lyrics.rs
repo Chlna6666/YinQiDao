@@ -320,11 +320,9 @@ impl StageKaraokeLineView {
                     word,
                     self.line.words.get(index + 1).map(|next| next.timestamp_ms),
                 );
-                if let Some(delay) = sustained_glyph_transition_frame_delay(
-                    word,
-                    &visual,
-                    self.position_ms,
-                ) {
+                if let Some(delay) =
+                    sustained_glyph_transition_frame_delay(word, &visual, self.position_ms)
+                {
                     animated_delay =
                         Some(animated_delay.map_or(delay, |current| current.min(delay)));
                 }
@@ -1908,19 +1906,14 @@ fn karaoke_sustained_glyphs(
         }
         let delay_ms = sustained_glyph_delay_ms(glyph_index);
         let local_time = position_ms.saturating_sub(delay_ms);
-        let emphasis = sustained_visual_emphasis(
-            word,
-            visual_word,
-            local_time,
-            is_last_word,
-        );
-        let letter_progress =
-            (progress * glyph_count as f32 - glyph_index as f32).clamp(0.0, 1.0);
-        let letter_start =
-            word.timestamp_ms.saturating_add(duration_ms * glyph_index as u64 / glyph_count as u64);
-        let letter_end = word.timestamp_ms.saturating_add(
-            duration_ms * (glyph_index as u64 + 1) / glyph_count as u64,
-        );
+        let emphasis = sustained_visual_emphasis(word, visual_word, local_time, is_last_word);
+        let letter_progress = (progress * glyph_count as f32 - glyph_index as f32).clamp(0.0, 1.0);
+        let letter_start = word
+            .timestamp_ms
+            .saturating_add(duration_ms * glyph_index as u64 / glyph_count as u64);
+        let letter_end = word
+            .timestamp_ms
+            .saturating_add(duration_ms * (glyph_index as u64 + 1) / glyph_count as u64);
         let letter = StageLyricWord {
             timestamp_ms: letter_start,
             duration_ms: Some(letter_end.saturating_sub(letter_start).max(1)),
@@ -1929,7 +1922,10 @@ fn karaoke_sustained_glyphs(
             text: SharedString::from(character.clone()),
         };
         let reveal = karaoke_reveal_word(
-            div().whitespace_nowrap().text_color(dark::white(1.0)).child(character.clone()),
+            div()
+                .whitespace_nowrap()
+                .text_color(dark::white(1.0))
+                .child(character.clone()),
             &letter,
             index.saturating_mul(16).saturating_add(glyph_index),
             letter_progress,
@@ -1939,8 +1935,9 @@ fn karaoke_sustained_glyphs(
         );
         // Letter layout remains fixed while its paint transform grows and settles.
         // This never changes the flex width or text baseline.
-        let scale = 1.0 + (peak_scale - 1.0)
-            * ((emphasis.scale - 1.0) / (base_scale - 1.0).max(0.0001)).clamp(0.0, 1.0);
+        let scale = 1.0
+            + (peak_scale - 1.0)
+                * ((emphasis.scale - 1.0) / (base_scale - 1.0).max(0.0001)).clamp(0.0, 1.0);
         let glyph = div()
             .relative()
             .flex_none()
@@ -2877,7 +2874,10 @@ mod tests {
             sustained_glyph_transition_frame_delay(&word, &word, 1_050),
             Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
         );
-        assert_eq!(sustained_glyph_transition_frame_delay(&word, &word, 2_000), None);
+        assert_eq!(
+            sustained_glyph_transition_frame_delay(&word, &word, 2_000),
+            None
+        );
         assert_eq!(
             sustained_glyph_transition_frame_delay(&word, &word, 3_100),
             Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
