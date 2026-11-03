@@ -11,7 +11,7 @@ use lucide_gpui::icon;
 
 use crate::{
     audio::{AudioEngine, PlayerCommand},
-    model::{PlaybackState, RepeatMode},
+    model::{PlaybackState, RepeatMode, TrackId},
 };
 
 use super::{
@@ -742,6 +742,8 @@ fn stage_title_fingerprint(app: &MusicApp) -> u64 {
 struct StageTransportView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
+    track_id: Option<TrackId>,
+    duration_ms: u64,
     stage_active: bool,
     controls_visible: bool,
     playback_state: PlaybackState,
@@ -775,6 +777,8 @@ impl StageTransportView {
         Self {
             parent,
             engine,
+            track_id: None,
+            duration_ms: 0,
             stage_active: false,
             controls_visible: true,
             playback_state: PlaybackState::Paused,
@@ -798,7 +802,11 @@ impl StageTransportView {
             _ => true,
         };
         let playback_state = app.snapshot.state;
+        let track_id = app.snapshot.current_track.as_ref().map(|track| track.id);
+        let duration_ms = app.snapshot.duration_ms;
+        let timeline_changed = self.track_id != track_id || self.duration_ms != duration_ms;
         let changed = engine_changed
+            || timeline_changed
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible
             || self.playback_state != playback_state;
@@ -806,6 +814,13 @@ impl StageTransportView {
         if engine_changed {
             self.engine = app.engine.clone();
         }
+        if timeline_changed {
+            // A next-track command can keep PlaybackState::Playing unchanged.
+            // Never replay the prior track's retained progress animation.
+            self.drag_progress_ratio = None;
+        }
+        self.track_id = track_id;
+        self.duration_ms = duration_ms;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
         self.playback_state = playback_state;
@@ -816,7 +831,15 @@ impl StageTransportView {
             let stage_active = self.stage_active;
             let controls_visible = self.controls_visible;
             progress.update(cx, |progress, cx| {
-                progress.sync(engine, playback_state, stage_active, controls_visible, cx)
+                progress.sync(
+                    engine,
+                    track_id,
+                    duration_ms,
+                    playback_state,
+                    stage_active,
+                    controls_visible,
+                    cx,
+                )
             });
         }
 
@@ -831,6 +854,8 @@ impl StageTransportView {
         }
         let parent = self.parent.clone();
         let engine = self.engine.clone();
+        let track_id = self.track_id;
+        let duration_ms = self.duration_ms;
         let playback_state = self.playback_state;
         let stage_active = self.stage_active;
         let controls_visible = self.controls_visible;
@@ -840,6 +865,8 @@ impl StageTransportView {
             StageProgressView::new(
                 parent,
                 engine,
+                track_id,
+                duration_ms,
                 playback_state,
                 stage_active,
                 controls_visible,
@@ -906,6 +933,8 @@ impl Render for StageTransportView {
 struct StageProgressView {
     parent: WeakEntity<MusicApp>,
     engine: Option<Arc<AudioEngine>>,
+    track_id: Option<TrackId>,
+    duration_ms: u64,
     playback_state: PlaybackState,
     stage_active: bool,
     controls_visible: bool,
@@ -923,6 +952,8 @@ impl StageProgressView {
     fn new(
         parent: WeakEntity<MusicApp>,
         engine: Option<Arc<AudioEngine>>,
+        track_id: Option<TrackId>,
+        duration_ms: u64,
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
@@ -955,6 +986,8 @@ impl StageProgressView {
         Self {
             parent,
             engine,
+            track_id,
+            duration_ms,
             playback_state,
             stage_active,
             controls_visible,
@@ -972,6 +1005,8 @@ impl StageProgressView {
     fn sync(
         &mut self,
         engine: Option<Arc<AudioEngine>>,
+        track_id: Option<TrackId>,
+        duration_ms: u64,
         playback_state: PlaybackState,
         stage_active: bool,
         controls_visible: bool,
@@ -989,11 +1024,19 @@ impl StageProgressView {
             .engine
             .as_ref()
             .map_or(0, |engine| engine.transport_generation());
+        let timeline_changed = self.track_id != track_id || self.duration_ms != duration_ms;
         let changed = engine_changed
+            || timeline_changed
             || self.transport_generation != transport_generation
             || self.playback_state != playback_state
             || self.stage_active != stage_active
             || self.controls_visible != controls_visible;
+        if timeline_changed {
+            self.drag_progress_ratio = None;
+            self.local_dragging = false;
+        }
+        self.track_id = track_id;
+        self.duration_ms = duration_ms;
         self.playback_state = playback_state;
         self.stage_active = stage_active;
         self.controls_visible = controls_visible;
