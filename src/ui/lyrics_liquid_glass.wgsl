@@ -5,26 +5,12 @@
 // custom-mesh binding, so this material provides the optical rim/specular/caustic response locally
 // while preserving the transparent swapchain. The base color is neutral gray and premultiplied.
 
-struct LyricsGlassDrawParameters {
-    bounds_origin: vec2<f32>,
-    bounds_size: vec2<f32>,
-    content_mask_origin: vec2<f32>,
-    content_mask_size: vec2<f32>,
-    view_proj_model: mat4x4<f32>,
+struct EffectUniforms {
+    params: mat4x4<f32>,
+    bounds: vec4<f32>,
+    viewport_time: vec4<f32>,
 };
-
-struct GlobalParams {
-    viewport_size: vec2<f32>,
-    premultiplied_alpha: u32,
-    pad: u32,
-};
-
-struct LyricsGlassVertex {
-    position_x: f32,
-    position_y: f32,
-    position_z: f32,
-    color_rgba8: u32,
-};
+@group(0) @binding(0) var<uniform> effect: EffectUniforms;
 
 struct LyricsGlassVarying {
     @builtin(position) position: vec4<f32>,
@@ -33,28 +19,26 @@ struct LyricsGlassVarying {
     @location(2) @interpolate(flat) material: vec3<f32>,
 };
 
-@group(0) @binding(0) var<uniform> globals: GlobalParams;
-@group(0) @binding(20) var<storage, read> lyrics_glass_draw_parameters: array<LyricsGlassDrawParameters>;
-@group(0) @binding(21) var<storage, read> lyrics_glass_vertices: array<LyricsGlassVertex>;
-
 @vertex
 fn vs_lyrics_liquid_glass(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
 ) -> LyricsGlassVarying {
-    let vertex = lyrics_glass_vertices[vertex_index];
-    let draw = lyrics_glass_draw_parameters[instance_index];
-    let uv = vec2<f32>(vertex.position_x, vertex.position_y) * 0.5 + vec2<f32>(0.5);
-    let pixel_position = draw.bounds_origin + uv * draw.bounds_size;
-    let viewport = max(globals.viewport_size, vec2<f32>(1.0));
+    let uv = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    )[vertex_index];
+    let pixel_position = effect.bounds.xy + uv * effect.bounds.zw;
+    let viewport = max(effect.viewport_time.xy, vec2<f32>(1.0));
     let device_position = pixel_position / viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: LyricsGlassVarying;
     out.position = vec4<f32>(device_position, 0.5, 1.0);
     out.uv = uv;
-    out.size = draw.bounds_size;
+    out.size = effect.bounds.zw;
     // The application packs material opacity, interaction intensity and radius into column 0.
-    out.material = draw.view_proj_model[0].xyz;
+    out.material = effect.params[0].xyz;
     return out;
 }
 
