@@ -110,6 +110,32 @@ impl DesktopLyricsView {
         self.bounds_subscription =
             Some(cx.observe_window_bounds(window, move |_view, window, cx| {
                 let bounds = window.bounds();
+                #[cfg(windows)]
+                if let Some(parent) = parent.upgrade() {
+                    // Windows desktop lyrics are not resizable. If a native move
+                    // accidentally enters a Snap/maximize geometry, restore the
+                    // persisted widget dimensions before saving bad fullscreen
+                    // bounds or painting an enlarged translucent surface.
+                    let expected = {
+                        let app = parent.read(cx);
+                        (
+                            app.config.desktop_lyrics.width.clamp(420.0, 1_600.0),
+                            app.config.desktop_lyrics.height.clamp(92.0, 520.0),
+                        )
+                    };
+                    if desktop_popup_size_mismatch(
+                        (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+                        expected,
+                    ) {
+                        let corrected = gpui::Bounds {
+                            origin: bounds.origin,
+                            size: gpui::size(px(expected.0), px(expected.1)),
+                        };
+                        if crate::window_platform::set_desktop_lyrics_bounds(window, corrected) {
+                            return;
+                        }
+                    }
+                }
                 let _ = parent.update(cx, |app, _cx| {
                     app.persist_desktop_lyrics_bounds(bounds);
                 });
@@ -430,6 +456,12 @@ impl gpui::Render for DesktopLyricsView {
 
         root.into_any_element()
     }
+}
+
+#[cfg(windows)]
+#[inline]
+fn desktop_popup_size_mismatch(actual: (f32, f32), expected: (f32, f32)) -> bool {
+    (actual.0 - expected.0).abs() > 8.0 || (actual.1 - expected.1).abs() > 8.0
 }
 
 /// Word timing changes must not restart the whole line transition.
@@ -1033,6 +1065,13 @@ mod tests {
             duration_ms,
             text: text.to_owned(),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_snap_geometry_cannot_be_persisted_as_lyric_popup_size() {
+        assert!(desktop_popup_size_mismatch((1114.0, 640.0), (760.0, 148.0)));
+        assert!(!desktop_popup_size_mismatch((763.0, 151.0), (760.0, 148.0)));
     }
 
     #[test]
