@@ -1966,7 +1966,7 @@ fn sustained_visual_emphasis(
     SustainedWordEmphasis {
         glow_alpha: peak.glow_alpha * envelope,
         glow_blur_px: peak.glow_blur_px,
-        scale: 1.0 + (peak.scale.clamp(1.0, 1.035) - 1.0) * envelope,
+        scale: 1.0 + (peak.scale.clamp(1.0, 1.09) - 1.0) * envelope,
         lift_px: peak.lift_px * envelope,
     }
 }
@@ -2222,8 +2222,8 @@ fn karaoke_word(
         .child(div().absolute().inset_0().child(highlighted));
     if emphasize {
         return root
-            .scale(emphasis.scale.clamp(1.0, 1.035))
-            .transform_origin(TransformOrigin::new(0.0, 1.0))
+            .scale(emphasis.scale.clamp(1.0, 1.09))
+            .transform_origin(TransformOrigin::new(0.5, 0.65))
             .into_any_element();
     }
     root.into_any_element()
