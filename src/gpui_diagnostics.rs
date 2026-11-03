@@ -131,7 +131,6 @@ fn emit_snapshot(previous: &PerformanceMetricsSnapshot, current: &PerformanceMet
         upload_bytes = current.upload_bytes,
         atlas_upload_bytes = current.atlas_upload_bytes,
         animation_bytes = current.animation_upload_bytes,
-        custom_mesh_parameter_bytes = current.custom_mesh_parameter_upload_bytes,
         "GPUI scene/upload diagnostics"
     );
 
