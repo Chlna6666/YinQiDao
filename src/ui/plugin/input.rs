@@ -111,7 +111,7 @@ pub fn activate(
 
     if let Some(input) = active(&key) {
         let focus_handle = input.read(cx).focus_handle(cx);
-        window.focus(&focus_handle);
+        window.focus(&focus_handle, cx);
         return;
     }
 
@@ -149,6 +149,6 @@ pub fn activate(
     });
 
     let focus_handle = input.read(cx).focus_handle(cx);
-    window.focus(&focus_handle);
+    window.focus(&focus_handle, cx);
     window.request_animation_frame();
 }
