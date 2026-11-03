@@ -13,7 +13,7 @@ use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, App, AppContext,
     Bounds, CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
     KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
-    WindowOptions, div, point, prelude::*, px, size,
+    WindowOptions, WindowVisibility, div, point, prelude::*, px, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
@@ -200,6 +200,9 @@ pub struct MusicApp {
     stage_transition_started_at: Option<std::time::Instant>,
     stage_transition_duration: Duration,
     stage_transition_start_armed: bool,
+    /// One-shot lifecycle callbacks, not per-frame background polling.
+    stage_activation_subscription: Option<Subscription>,
+    stage_visibility_subscription: Option<Subscription>,
     stage_prepared: bool,
     stage_prewarm_after: Option<std::time::Instant>,
     pub(crate) stage_last_user_activity: std::time::Instant,
@@ -881,6 +884,8 @@ impl MusicApp {
             stage_transition_started_at: None,
             stage_transition_duration: STAGE_TRANSITION_DURATION,
             stage_transition_start_armed: false,
+            stage_activation_subscription: None,
+            stage_visibility_subscription: None,
             stage_prepared: false,
             stage_prewarm_after: Some(std::time::Instant::now() + STAGE_BACKGROUND_PREWARM_DELAY),
             stage_last_user_activity: std::time::Instant::now(),
@@ -4136,6 +4141,44 @@ impl MusicApp {
         }
     }
 
+    fn sync_immersive_after_visibility(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let Some(fluid) = self.fluid_background.clone() else {
+            return;
+        };
+        if !visible {
+            // An occluded/minimized surface must not retain a live fullscreen
+            // time-dependent extension. Deactivation alone does not freeze it.
+            fluid.update(cx, |view, cx| view.set_playing(false, cx));
+            return;
+        }
+
+        // A retained compositor animation may have finished while the main
+        // entity was inactive. A focus/visibility edge is a safe one-shot point
+        // to reconcile its logical state before enabling the shader clock.
+        self.finish_stage_transition_if_due(std::time::Instant::now(), cx);
+        let track_id = self
+            .snapshot
+            .current_track
+            .as_ref()
+            .map_or(0, |track| track.id);
+        let palette = self.artwork_palettes.get(&track_id).cloned();
+        let stage_visible = self.stage_open && !self.stage_animating;
+        let playing = self.snapshot.state == PlaybackState::Playing;
+        fluid.update(cx, |view, cx| {
+            view.sync(
+                track_id,
+                palette,
+                self.config.dynamic_blur,
+                stage_visible,
+                cx,
+            );
+            view.set_playing(playing, cx);
+        });
+        if self.stage_open || self.stage_animating {
+            cx.notify();
+        }
+    }
+
     fn sync_track_visual_surfaces(&mut self, cx: &mut Context<MusicApp>) {
         self.sync_transport_surfaces(cx);
         player_stage::sync_if_created(self, cx);
@@ -4946,6 +4989,23 @@ impl Drop for MusicApp {
 impl Render for MusicApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         super::enable_inactive_window_animations(window);
+        if self.stage_activation_subscription.is_none() {
+            self.stage_activation_subscription =
+                Some(cx.observe_window_activation(window, |app, window, cx| {
+                    if window.is_window_active() {
+                        app.sync_immersive_after_visibility(true, cx);
+                    }
+                }));
+        }
+        if self.stage_visibility_subscription.is_none() {
+            self.stage_visibility_subscription =
+                Some(cx.observe_window_visibility(window, |app, visibility, _window, cx| {
+                    app.sync_immersive_after_visibility(
+                        visibility == WindowVisibility::Visible,
+                        cx,
+                    );
+                }));
+        }
         self.start_background_work(cx);
         self.start_runtime_events(cx);
         self.ensure_plugin_sessions_restored(cx);
