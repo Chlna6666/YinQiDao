@@ -4140,6 +4140,25 @@ impl MusicApp {
         self.sync_transport_surfaces(cx);
         player_stage::sync_if_created(self, cx);
         stage_lyrics::sync_if_created(self, cx);
+        if self.stage_prepared || self.stage_open || self.stage_animating {
+            let _ = stage_controls::titlebar_view(self, cx);
+        }
+        // A metadata-only track change may keep the audio playback state
+        // unchanged. Explicitly update the retained fullscreen shader, which
+        // otherwise could continue rendering the previous cover's palette
+        // until an unrelated root layout invalidation.
+        if let Some(fluid) = self.fluid_background.clone() {
+            let track_id = self
+                .snapshot
+                .current_track
+                .as_ref()
+                .map_or(0, |track| track.id);
+            let palette = self.artwork_palettes.get(&track_id).cloned();
+            let stage_visible = self.stage_open && !self.stage_animating;
+            fluid.update(cx, |view, cx| {
+                view.sync(track_id, palette, self.config.dynamic_blur, stage_visible, cx);
+            });
+        }
         self.notify_current_content_surface(cx);
     }
 
@@ -4266,6 +4285,14 @@ impl MusicApp {
         }
 
         self.update_system_media_async(cx);
+
+        // TrackEnded/Next can advance to another song without leaving Playing.
+        // A root notify alone does not invalidate retained child progress,
+        // artwork, lyric and fluid shader entities. Rebase them on structural
+        // track/duration changes, irrespective of PlaybackState transitions.
+        if track_changed || duration_changed {
+            self.sync_track_visual_surfaces(cx);
+        }
 
         if playback_state_changed || transport_ack_pending {
             app_ui_events::emit_music(
