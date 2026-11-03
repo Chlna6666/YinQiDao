@@ -70,6 +70,9 @@ const PLAYBACK_STACK_DEFAULT_ROW_HEIGHT_PX: f32 = 82.0;
 const READING_STACK_HISTORY_ROWS: usize = 5;
 const READING_STACK_FUTURE_ROWS: usize = 7;
 const TRANSPORT_MIN_SLEEP: u64 = 8;
+// The current karaoke leaf alone samples the short sustained attack/release
+// at 60 Hz; holds and ordinary words remain event/deadline-driven.
+const SUSTAINED_TRANSITION_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 // Limit malformed enhanced lyrics from expanding into an unbounded number of
 // per-word renderer trees on the main UI stack.
 const MAX_KARAOKE_WORDS_PER_LINE: usize = 96;
@@ -294,12 +297,28 @@ impl StageKaraokeLineView {
         if self.scrubbing || self.playback_state != PlaybackState::Playing {
             return None;
         }
-        let timestamp = next_karaoke_timestamp(&self.line, self.position_ms)?;
-        Some(Duration::from_millis(
-            timestamp
-                .saturating_sub(self.position_ms)
-                .max(TRANSPORT_MIN_SLEEP),
-        ))
+        let boundary_delay = next_karaoke_timestamp(&self.line, self.position_ms).map(|timestamp| {
+            Duration::from_millis(
+                timestamp
+                    .saturating_sub(self.position_ms)
+                    .max(TRANSPORT_MIN_SLEEP),
+            )
+        });
+        let animated_delay = active_enhanced_word_index(&self.line, self.position_ms)
+            .and_then(|index| {
+                let word = self.line.words.get(index)?;
+                let visual = bounded_sustained_word(
+                    word,
+                    self.line.words.get(index + 1).map(|next| next.timestamp_ms),
+                );
+                sustained_transition_frame_delay(&visual, self.position_ms)
+            });
+        match (boundary_delay, animated_delay) {
+            (Some(boundary), Some(frame)) => Some(boundary.min(frame)),
+            (Some(boundary), None) => Some(boundary),
+            (None, Some(frame)) => Some(frame),
+            (None, None) => None,
+        }
     }
 }
 
@@ -1676,7 +1695,11 @@ fn next_karaoke_timestamp(line: &StageLyricLine, position_ms: u64) -> Option<u64
             }
         }
 
-        if let Some(release_timestamp) = sustained_release_timestamp(word)
+        let visual_word = bounded_sustained_word(
+            word,
+            line.words.get(word_index + 1).map(|next| next.timestamp_ms),
+        );
+        if let Some(release_timestamp) = sustained_release_timestamp(&visual_word)
             && release_timestamp > position_ms
         {
             next_timestamp = Some(
@@ -1772,6 +1795,44 @@ fn sustained_time_envelope(word: &StageLyricWord, position_ms: u64) -> f32 {
     } else {
         1.0
     }
+}
+
+/// A provider may overlap syllable durations. The next authored syllable owns
+/// the handoff, so finish the old note's release before its successor starts.
+/// This only changes the emphasis envelope, never the original reveal timing.
+fn bounded_sustained_word(
+    word: &StageLyricWord,
+    next_start_ms: Option<u64>,
+) -> StageLyricWord {
+    let mut visual = word.clone();
+    if let Some(next_start_ms) = next_start_ms
+        && next_start_ms >= word.timestamp_ms
+    {
+        let available_ms = next_start_ms - word.timestamp_ms;
+        visual.duration_ms = visual.duration_ms.map(|ms| ms.min(available_ms));
+    }
+    visual
+}
+
+/// The note envelope is authored-time driven. Request short invalidations
+/// ONLY while the scalar envelope is changing; a steady sustained vowel
+/// costs zero scheduled layout frames and retains its GPU word reveal.
+fn sustained_transition_frame_delay(
+    word: &StageLyricWord,
+    position_ms: u64,
+) -> Option<Duration> {
+    if !should_emphasize_sustained_word(word) {
+        return None;
+    }
+    let duration_ms = word.duration_ms?;
+    let (attack_ms, release_ms) = sustained_attack_release_ms(word)?;
+    let elapsed_ms = position_ms.checked_sub(word.timestamp_ms)?;
+    if elapsed_ms >= duration_ms {
+        return None;
+    }
+    let remaining_ms = duration_ms - elapsed_ms;
+    (elapsed_ms < attack_ms || remaining_ms <= release_ms)
+        .then_some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
 }
 
 fn sustained_word_emphasis(
@@ -1920,35 +1981,6 @@ fn sustained_word_peak_emphasis(
     }
 }
 
-fn sustained_animation_segment(
-    word: &StageLyricWord,
-    position_ms: u64,
-) -> Option<(f32, f32, Duration)> {
-    let duration_ms = word.duration_ms.filter(|duration| *duration > 0)?;
-    let (attack_ms, release_ms) = sustained_attack_release_ms(word)?;
-    let start_ms = word.timestamp_ms;
-    let end_ms = start_ms.saturating_add(duration_ms);
-    if position_ms < start_ms || position_ms >= end_ms {
-        return None;
-    }
-
-    let elapsed_ms = position_ms - start_ms;
-    let remaining_ms = end_ms - position_ms;
-    let envelope = sustained_time_envelope(word, position_ms);
-
-    if elapsed_ms < attack_ms {
-        Some((
-            envelope,
-            1.0,
-            Duration::from_millis((attack_ms - elapsed_ms).max(1)),
-        ))
-    } else if remaining_ms <= release_ms {
-        Some((envelope, 0.0, Duration::from_millis(remaining_ms.max(1))))
-    } else {
-        None
-    }
-}
-
 /// A single stable flex item per authored syllable.
 ///
 /// Past/future words use ONE GPUI text element, not an invisible word, a
@@ -1957,6 +1989,7 @@ fn sustained_animation_segment(
 fn karaoke_word(
     word: &StageLyricWord,
     index: usize,
+    next_word_start_ms: Option<u64>,
     reveal_progress: f32,
     position_ms: u64,
     is_current_word: bool,
@@ -1998,81 +2031,36 @@ fn karaoke_word(
         animate,
         karaoke_epoch,
     );
-    // Only one current, sustained syllable may own a blurred glow layer.
-    // It is absolute and cannot alter text wrapping or lyric line spacing.
-    let emphasis = sustained_word_emphasis(word, position_ms, is_current_word, is_last_word);
+    // One time source owns BOTH glow and scale. Previously a base .scale()
+    // was compounded with a second scale_opacity animation, and the glow
+    // had its own independent easing. Rebuilding on the attack/hold/release
+    // boundaries therefore jumped, flashed or briefly overshot.
+    //
+    // Keep the overlay geometry stable and sample only the short transitions
+    // from the audio clock (scheduled on the active karaoke leaf).
+    let visual_word = bounded_sustained_word(word, next_word_start_ms);
+    let emphasize = is_current_word && should_emphasize_sustained_word(&visual_word);
+    let emphasis =
+        sustained_word_emphasis(&visual_word, position_ms, is_current_word, is_last_word);
     let mut root = div().relative().flex_none().whitespace_nowrap();
-    if is_current_word && should_emphasize_sustained_word(word) {
-        let peak = sustained_word_peak_emphasis(word, is_last_word);
-        if peak.glow_alpha > 0.001 {
-            let segment = if animate {
-                sustained_animation_segment(word, position_ms)
-            } else {
-                None
-            };
-            let alpha = if segment.is_some() {
-                peak.glow_alpha
-            } else {
-                emphasis.glow_alpha
-            };
-            let mut halo = div()
+    if emphasize {
+        let peak = sustained_word_peak_emphasis(&visual_word, is_last_word);
+        root = root.child(
+            div()
                 .absolute()
                 .inset_0()
-                .opacity(alpha)
+                .opacity(emphasis.glow_alpha)
                 .text_color(dark::white(1.0))
                 .filter_blur(px(peak.glow_blur_px.clamp(2.0, 4.0)))
-                .child(word.text.clone())
-                .into_any_element();
-            if let Some((from, to, duration)) = segment {
-                halo = halo
-                    .with_animation(
-                        ElementId::NamedInteger(
-                            SharedString::new_static("lyric-syllable-halo"),
-                            lyric_animation_instance_id(karaoke_epoch, index),
-                        ),
-                        Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
-                            .with_property(AnimationProperty::opacity(from, to)),
-                        |element, _| element,
-                    )
-                    .into_any_element();
-            }
-            root = root.child(halo);
-        }
+                .child(word.text.clone()),
+        );
     }
     let root = root
         .child(div().text_color(dark::white(0.58)).child(word.text.clone()))
         .child(div().absolute().inset_0().child(highlighted));
-    let scale = emphasis.scale.clamp(1.0, 1.035);
-    if animate
-        && let Some((from, to, duration)) = sustained_animation_segment(word, position_ms)
-        && scale > 1.0001
-    {
-        let peak = sustained_word_peak_emphasis(word, is_last_word);
-        let from_scale = (1.0 + (peak.scale - 1.0) * from).clamp(1.0, 1.035);
-        let to_scale = (1.0 + (peak.scale - 1.0) * to).clamp(1.0, 1.035);
+    if emphasize {
         return root
-            .scale(scale)
-            .transform_origin(TransformOrigin::new(0.0, 1.0))
-            .with_animation(
-                ElementId::NamedInteger(
-                    SharedString::new_static("lyric-word-emphasis"),
-                    lyric_animation_instance_id(karaoke_epoch, index),
-                ),
-                Animation::from_spec(AnimationSpec::new(duration).ease(Easing::InOutCubic))
-                    .with_property(AnimationProperty::scale_opacity(
-                        from_scale / scale,
-                        to_scale / scale,
-                        1.0,
-                        1.0,
-                        TransformOrigin::new(0.0, 1.0),
-                    )),
-                |element, _| element,
-            )
-            .into_any_element();
-    }
-    if scale > 1.0001 {
-        return root
-            .scale(scale)
+            .scale(emphasis.scale.clamp(1.0, 1.035))
             .transform_origin(TransformOrigin::new(0.0, 1.0))
             .into_any_element();
     }
@@ -2109,6 +2097,7 @@ fn karaoke_words_overlay(
         overlay = overlay.child(karaoke_word(
             word,
             index,
+            line.words.get(index + 1).map(|next| next.timestamp_ms),
             progress,
             position_ms,
             karaoke_state == KaraokeLineState::Active && current_word == Some(index),
@@ -2721,6 +2710,81 @@ mod tests {
         assert_eq!(sustain, 1.0);
         assert!(release > 0.0 && release < 1.0);
         assert_eq!(sustained_time_envelope(&word, 3_000), 0.0);
+    }
+
+    #[test]
+    fn sustained_animation_samples_only_the_attack_and_release() {
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("啊"),
+        };
+        assert_eq!(sustained_transition_frame_delay(&word, 999), None);
+        assert_eq!(
+            sustained_transition_frame_delay(&word, 1_000),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
+        assert_eq!(
+            sustained_transition_frame_delay(&word, 1_180),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
+        assert_eq!(sustained_transition_frame_delay(&word, 2_000), None);
+        assert_eq!(
+            sustained_transition_frame_delay(&word, 2_850),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
+        assert_eq!(sustained_transition_frame_delay(&word, 3_000), None);
+    }
+
+    #[test]
+    fn sustained_envelope_is_continuous_at_each_phase_boundary() {
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("啊"),
+        };
+        let (attack, release) = sustained_attack_release_ms(&word).unwrap();
+        let attack_end = word.timestamp_ms + attack;
+        let release_start = word.timestamp_ms + 2_000 - release;
+        let times = [
+            (attack_end - 1, attack_end),
+            (release_start - 1, release_start),
+            (2_999, 3_000),
+        ];
+        for (before, after) in times {
+            let previous = sustained_time_envelope(&word, before);
+            let current = sustained_time_envelope(&word, after);
+            assert!(
+                (current - previous).abs() < 0.002,
+                "envelope jumps between {before}ms and {after}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_syllables_release_before_next_word_without_moving_mask() {
+        let original = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(3_000),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("啊"),
+        };
+        let visual = bounded_sustained_word(&original, Some(2_600));
+        assert_eq!(visual.duration_ms, Some(1_600));
+        assert!(sustained_release_timestamp(&visual).unwrap() < 2_600);
+        assert!(sustained_time_envelope(&visual, 2_500) < 1.0);
+        assert_eq!(sustained_time_envelope(&visual, 2_600), 0.0);
+        // The original timed-word reveal still uses its source duration.
+        assert!((word_reveal_progress(&original, 2_500) - 0.5).abs() < 0.001);
+
+        let short = bounded_sustained_word(&original, Some(1_600));
+        assert!(!should_emphasize_sustained_word(&short));
+        assert_eq!(bounded_sustained_word(&original, None).duration_ms, Some(3_000));
     }
 
     #[test]
