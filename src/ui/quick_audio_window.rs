@@ -98,12 +98,8 @@ impl QuickAudioView {
 
 impl Render for QuickAudioView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The EQ popup can remain behind the main player while a preset switch
-        // animates. Permit retained animation and dirty redraw when visible
-        // but unfocused; minimized windows remain suspended by GPUI.
-        window.set_inactive_animation_engine_enabled(true);
-        window.set_inactive_dirty_redraw_enabled(true);
-        window.set_inactive_dirty_frame_retry_interval(Some(std::time::Duration::from_micros(16_667)));
+        // The EQ popup may be behind the player while a preset animates.
+        super::enable_inactive_window_animations(window);
 
         // Reuse exactly the same EQ and spatial control elements/listeners as
         // the Settings page. Only the native GPUI window shell is independent.
