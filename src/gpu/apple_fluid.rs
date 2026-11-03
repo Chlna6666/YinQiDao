@@ -1,34 +1,10 @@
-use std::{
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
+use std::time::Instant;
 
-use gpui::{
-    Animation, AnimationDriver, AnimationExt as _, AnimationProperty, AnimationSpec, Context,
-    IntoElement, Render, RepeatMode, Window, div, prelude::*, rgb,
-};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
 
 use crate::artwork::ArtworkPalette;
 
-use super::{ShaderEffectProgram, ShaderParams16, shader_effect_canvas};
-
-const APPLE_FLUID_SHADER: &str = include_str!("apple_fluid.wgsl");
-const FLUID_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
-
-pub(crate) fn apple_fluid_program() -> std::result::Result<Arc<ShaderEffectProgram>, String> {
-    static PROGRAM: OnceLock<std::result::Result<Arc<ShaderEffectProgram>, String>> =
-        OnceLock::new();
-    PROGRAM
-        .get_or_init(|| {
-            ShaderEffectProgram::from_source(
-                "src/gpu/apple_fluid.wgsl",
-                APPLE_FLUID_SHADER,
-                "vs_shader_effect",
-                "fs_apple_fluid_opaque",
-            )
-        })
-        .clone()
-}
+use super::{ShaderKind, ShaderParams16, next_shader_effect_id, shader_effect_canvas};
 
 pub(crate) fn apple_fluid_params(
     track_id: i64,
@@ -73,7 +49,7 @@ pub(crate) struct AppleFluidView {
     playing: bool,
     animation_seconds: f32,
     running_since: Option<Instant>,
-    shader_available: bool,
+    effect_id: u64,
 }
 
 impl AppleFluidView {
@@ -93,10 +69,6 @@ impl AppleFluidView {
     }
 
     pub(crate) fn new() -> Self {
-        // Parse/validate WGSL and build the shared mesh as soon as the retained entity is created.
-        // The offscreen Stage prewarm then paints the exact full-fluid visual that will later be
-        // replayed by the drawer instead of warming a cheaper but visibly different approximation.
-        let shader_available = apple_fluid_program().is_ok();
         Self {
             track_id: 0,
             palette: None,
@@ -104,7 +76,7 @@ impl AppleFluidView {
             playing: false,
             animation_seconds: 0.0,
             running_since: None,
-            shader_available,
+            effect_id: next_shader_effect_id(),
         }
     }
 
@@ -144,77 +116,37 @@ impl AppleFluidView {
 
 impl Render for AppleFluidView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        match apple_fluid_program() {
-            Ok(program) => {
-                self.shader_available = true;
-                let now = window.animation_time();
-                let animate = self.stage_visible && self.playing && !window.is_minimized();
+        let now = window.animation_time();
+        let running = self.stage_visible && self.playing && !window.is_minimized();
 
-                if animate {
-                    if self.running_since.is_none() {
-                        self.running_since = Some(now);
-                    }
-                } else {
-                    self.freeze_animation_clock(now);
-                }
-
-                let current_time = self.current_animation_seconds(now);
-                // Nova publishes a 60 Hz-quantized presentation tick in GlobalParams on every
-                // retained present. Store the inverse offset here so the first renderer-owned frame
-                // is phase-continuous, then let the shader advance without touching this View.
-                let renderer_time_60hz = (window.presentation_time_seconds() * 60.0).floor() / 60.0;
-                let time_base = if animate {
-                    current_time - renderer_time_60hz
-                } else {
-                    current_time
-                };
-
-                let effect = shader_effect_canvas(
-                    program,
-                    apple_fluid_params(
-                        self.track_id,
-                        self.palette.as_ref(),
-                        time_base,
-                        true,
-                        animate,
-                    ),
-                );
-
-                if animate {
-                    // Opacity 1 -> 1 deliberately has no visual effect. Its only job is to own one
-                    // renderer timeline so Nova gets presentation-only frames at 60 Hz. No View
-                    // notify, Taffy pass, or root traversal is required for ambient motion.
-                    return effect
-                        .with_animation(
-                            "apple-fluid-presentation-clock",
-                            Animation::from_spec(
-                                AnimationSpec::new(Duration::from_secs(1))
-                                    .repeat(RepeatMode::Forever)
-                                    .presentation_interval(FLUID_FRAME_INTERVAL)
-                                    .driver(AnimationDriver::Gpu),
-                            )
-                            .with_property(AnimationProperty::opacity(1.0, 1.0)),
-                            |element, _| element,
-                        )
-                        .into_any_element();
-                }
-
-                return effect;
+        if running {
+            if self.running_since.is_none() {
+                self.running_since = Some(now);
             }
-            Err(error) => {
-                self.shader_available = false;
-                static LOGGED_SHADER_ERROR: OnceLock<()> = OnceLock::new();
-                if LOGGED_SHADER_ERROR.set(()).is_ok() {
-                    tracing::error!(error = %error, "Apple fluid shader initialization failed");
-                }
-            }
+        } else {
+            self.freeze_animation_clock(now);
         }
+
+        // The native GPUI renderer extension samples the presentation clock and
+        // changes one 96-byte uniform block, without repainting the view tree.
+        let effect = shader_effect_canvas(
+            ShaderKind::Fluid,
+            self.effect_id,
+            apple_fluid_params(
+                self.track_id,
+                self.palette.as_ref(),
+                self.current_animation_seconds(now),
+                true,
+                running,
+            ),
+            running,
+        );
 
         let palette = self.palette.clone().unwrap_or_default();
         let dark = ((palette.dark_ambient_rgb[0] as u32) << 16)
             | ((palette.dark_ambient_rgb[1] as u32) << 8)
             | palette.dark_ambient_rgb[2] as u32;
-        div().size_full().bg(rgb(dark)).into_any_element()
+        div().size_full().bg(rgb(dark)).child(effect).into_any_element()
     }
 }
 
@@ -240,7 +172,11 @@ mod tests {
 
     #[test]
     fn apple_fluid_shader_validates() {
-        apple_fluid_program().expect("Apple fluid WGSL should validate");
+        gpui::WgslShaderSource::from_source(
+            "src/gpu/apple_fluid.wgsl",
+            include_str!("apple_fluid.wgsl"),
+        )
+        .expect("Apple fluid WGSL should validate");
     }
 
     #[test]
