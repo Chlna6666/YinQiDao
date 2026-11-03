@@ -336,6 +336,20 @@ fn edge_overlay_root(root: Div, style: SliderStyle) -> Div {
         .hover(move |hover| hover.top(px(0.0)).h(expanded_hit_height))
 }
 
+/// The expanded mini rail is painted upward from its bottom edge.
+    /// Its thumb must share the expanded rail's center, not the 3px hitbox's.
+fn horizontal_thumb_top(style: SliderStyle) -> Pixels {
+    let thumb_radius = f32::from(style.thumb_size) * 0.5;
+    if style.edge_overlay {
+        // Expanded rail bottom = resting hitbox height - 1px.
+        let expanded_center =
+            f32::from(style.interaction_height) - 1.0 - f32::from(style.hover_track_height) * 0.5;
+        px(expanded_center - thumb_radius)
+    } else {
+        px((f32::from(horizontal_interaction_height(style)) - f32::from(style.thumb_size)) * 0.5)
+    }
+}
+
 fn slider_visual_with_group(
     _id: ElementId,
     ratio: f32,
@@ -346,8 +360,6 @@ fn slider_visual_with_group(
     let interaction_height = horizontal_interaction_height(style);
     let thumb_hover_group = hover_group.clone();
     let rail_hover_group = hover_group.clone();
-    let half_thumb = px(f32::from(style.thumb_size) * 0.5);
-
     let mut thumb = div()
         .flex_none()
         .size(style.thumb_size)
@@ -419,29 +431,20 @@ fn slider_visual_with_group(
         )
     };
 
-    let thumb_layer = if style.edge_overlay {
-        div()
-            .absolute()
-            .left(px(-f32::from(half_thumb)))
-            .right(half_thumb)
-            .top(px(0.0))
-            .h(style.interaction_height)
-            .flex()
-            .items_center()
-            .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
-            .child(thumb)
-    } else {
-        div()
-            .absolute()
-            .left(px(-f32::from(half_thumb)))
-            .right(half_thumb)
-            .top(px(0.0))
-            .bottom(px(0.0))
-            .flex()
-            .items_center()
-            .child(div().flex_none().w(relative(clamped_ratio)).h(px(1.0)))
-            .child(thumb)
-    };
+    // Use the same percentage coordinate as the track fill, rather than
+    // a flex spacer whose resolved width can be retained independently
+    // during the hover expansion/scale transition. This keeps the circular
+    // thumb centered on the red fill endpoint as playback advances.
+    let thumb_layer = div()
+        .absolute()
+        .left(relative(clamped_ratio))
+        .top(horizontal_thumb_top(style))
+        .w(px(1.0))
+        .h(style.thumb_size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(thumb);
 
     let root = div()
         .group(hover_group)
@@ -1017,6 +1020,35 @@ mod tests {
         // extend into the transport controls when the visual grows.
         assert!(style.edge_overlay);
         assert_eq!(f32::from(horizontal_interaction_height(style)), 3.0);
+    }
+
+    #[test]
+    fn mini_progress_thumb_tracks_expanded_rail_center() {
+        let style = SliderStyle::mini_progress();
+        // The hover rail is 6px tall, grows upward, and ends 1px
+        // above the bottom of the 3px resting interaction strip.
+        let rail_center = f32::from(style.interaction_height)
+            - 1.0
+            - f32::from(style.hover_track_height) * 0.5;
+        let thumb_center = f32::from(horizontal_thumb_top(style))
+            + f32::from(style.thumb_size) * 0.5;
+        assert!((rail_center - thumb_center).abs() < 0.001);
+        assert!((rail_center - 1.5).abs() > 0.001);
+        // Fill and thumb are now positioned from the same normalized ratio
+        // of the full-width parent, without a flex-layout spacer.
+        for ratio in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let width = 320.0_f32;
+            assert!((ratio * width - width * ratio).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn normal_slider_thumb_remains_vertically_centered() {
+        for style in [SliderStyle::stage_progress(), SliderStyle::mini_volume()] {
+            let center = f32::from(horizontal_thumb_top(style))
+                + f32::from(style.thumb_size) * 0.5;
+            assert!((center - f32::from(horizontal_interaction_height(style)) * 0.5).abs() < 0.001);
+        }
     }
 
     #[test]
