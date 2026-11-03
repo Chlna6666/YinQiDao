@@ -4156,7 +4156,13 @@ impl MusicApp {
             let palette = self.artwork_palettes.get(&track_id).cloned();
             let stage_visible = self.stage_open && !self.stage_animating;
             fluid.update(cx, |view, cx| {
-                view.sync(track_id, palette, self.config.dynamic_blur, stage_visible, cx);
+                view.sync(
+                    track_id,
+                    palette,
+                    self.config.dynamic_blur,
+                    stage_visible,
+                    cx,
+                );
             });
         }
         self.notify_current_content_surface(cx);
