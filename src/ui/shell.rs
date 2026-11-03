@@ -4913,6 +4913,7 @@ impl Drop for MusicApp {
 
 impl Render for MusicApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::enable_inactive_window_animations(window);
         self.start_background_work(cx);
         self.start_runtime_events(cx);
         self.ensure_plugin_sessions_restored(cx);
