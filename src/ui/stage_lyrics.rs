@@ -1851,7 +1851,10 @@ fn sustained_word_emphasis(
     SustainedWordEmphasis {
         glow_alpha: peak.glow_alpha * envelope,
         glow_blur_px: peak.glow_blur_px,
-        scale: 1.0 + (peak.scale - 1.0) * envelope,
+        // Clamp the *target* before interpolation. Clamping the animated
+        // result flattened the middle of the attack/release and caused a
+        // visible kink whenever a strong/last syllable hit the 3.5% cap.
+        scale: 1.0 + (peak.scale.clamp(1.0, 1.035) - 1.0) * envelope,
         lift_px: peak.lift_px * envelope,
     }
 }
@@ -2783,6 +2786,30 @@ mod tests {
             bounded_sustained_word(&original, None).duration_ms,
             Some(3_000)
         );
+    }
+
+    #[test]
+    fn sustained_scale_uses_full_attack_release_without_early_clipping() {
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(4_000),
+            byte_start: 0,
+            byte_end: 3,
+            text: SharedString::from("啊"),
+        };
+        let (attack, release) = sustained_attack_release_ms(&word).unwrap();
+        let early = sustained_word_emphasis(&word, 1_000 + attack / 4, true, true);
+        let middle = sustained_word_emphasis(&word, 1_000 + attack / 2, true, true);
+        let late = sustained_word_emphasis(&word, 1_000 + attack * 3 / 4, true, true);
+        let held = sustained_word_emphasis(&word, 3_000, true, true);
+        assert!(1.0 < early.scale && early.scale < middle.scale);
+        assert!(middle.scale < late.scale && late.scale < held.scale);
+        assert!((held.scale - 1.035).abs() < 0.0001);
+
+        let tail_start = 5_000 - release;
+        let before_end = sustained_word_emphasis(&word, tail_start + release / 2, true, true);
+        assert!(1.0 < before_end.scale && before_end.scale < held.scale);
+        assert_eq!(sustained_word_emphasis(&word, 5_000, true, true).scale, 1.0);
     }
 
     #[test]
