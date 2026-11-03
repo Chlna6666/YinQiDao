@@ -6,6 +6,27 @@ use std::{
 };
 
 fn main() {
+    // Nova's native shader compiler runs once at build time. DX12 ships DXBC,
+    // Vulkan ships SPIR-V; the audio render thread never invokes a compiler.
+    use gfx_shader_build::{BackendSelection, Dx12ArtifactPolicy, Shader, ShaderSet, ShaderStage};
+    ShaderSet::new("yinqidao_effects")
+        .backend_selection(BackendSelection::Platform)
+        .dx12_artifact_policy(Dx12ArtifactPolicy::RequireBytecode)
+        .shader(
+            Shader::new("apple_fluid")
+                .wgsl_file("src/gpu/apple_fluid.wgsl")
+                .entry("vs_shader_effect", ShaderStage::Vertex)
+                .entry("fs_apple_fluid_opaque", ShaderStage::Fragment),
+        )
+        .shader(
+            Shader::new("lyrics_glass")
+                .wgsl_file("src/ui/lyrics_liquid_glass.wgsl")
+                .entry("vs_lyrics_liquid_glass", ShaderStage::Vertex)
+                .entry("fs_lyrics_liquid_glass", ShaderStage::Fragment),
+        )
+        .emit()
+        .unwrap_or_else(|error| panic!("failed to compile YinQiDao native shaders: {error}"));
+
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("Cargo must provide CARGO_MANIFEST_DIR"),
     );
