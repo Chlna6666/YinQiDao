@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    IntoElement, ObjectFit, Render, SharedString, StatefulInteractiveElement as _,
     Subscription, WeakEntity, Window, div, img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
@@ -540,7 +540,7 @@ impl Render for MiniPlayerView {
     }
 }
 
-fn cached_playback_time(view: Entity<PlaybackTime>) -> AnyElement {
+fn cached_playback_time(view: Entity<PlaybackTime>) -> gpui::AnyElement {
     div()
         .w(px(MINI_PLAYBACK_TIME_WIDTH))
         .min_w(px(MINI_PLAYBACK_TIME_WIDTH))
@@ -549,7 +549,7 @@ fn cached_playback_time(view: Entity<PlaybackTime>) -> AnyElement {
         .into_any_element()
 }
 
-fn cached_playback_progress(view: Entity<PlaybackProgress>) -> AnyElement {
+fn cached_playback_progress(view: Entity<PlaybackProgress>) -> gpui::AnyElement {
     div()
         .absolute()
         .left(px(0.0))
