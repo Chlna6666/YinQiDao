@@ -315,7 +315,6 @@ fn text_fingerprint(text: &str) -> u64 {
     hash
 }
 
-#[inline]
 /// Mount the immersive surface only for an explicit open/close transition.
 #[inline]
 fn stage_drawer_needs_surface(progress: f32, animating: bool) -> bool {
@@ -5078,7 +5077,7 @@ impl Render for MusicApp {
                         this.search_active = true;
                         if let Some(input) = &this.search_input {
                             let handle = input.read(cx).focus_handle(cx);
-                            window.focus(&handle);
+                            window.focus(&handle, cx);
                         }
                         cx.notify();
                     } else if this.typing_in_text_input(window, cx) {
@@ -5141,9 +5140,10 @@ impl Render for MusicApp {
                 stage_position(self.stage_transition_from),
                 stage_position(self.stage_transition_to),
             );
-            let stage_titlebar = AnyView::from(stage_controls::titlebar_view(self, cx))
-                .cached(StyleRefinement::default().w_full().h(px(38.0)))
-                .reuse_on_window_refresh();
+            let stage_titlebar = div()
+                .w_full()
+                .h(px(38.0))
+                .child(AnyView::from(stage_controls::titlebar_view(self, cx)));
 
             let stage_layer = div()
                 .id("stage-drawer-root")
@@ -5229,7 +5229,15 @@ impl Render for MusicApp {
                         .into_any_element()
                 } else {
                     stage_layer
-                        .with_sampled_animation(motion, 0.0)
+                        .with_stable_sampled_animation(
+                            ElementId::NamedInteger(
+                                SharedString::new_static("stage-drawer-sampled"),
+                                self.stage_transition_epoch,
+                            ),
+                            motion,
+                            0.0,
+                            false,
+                        )
                         .into_any_element()
                 }
             } else {
