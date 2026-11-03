@@ -799,7 +799,7 @@ fn songs_view<V: 'static>(
                     count,
                     move |range: Range<usize>, _window, cx| {
                         view_clone
-                            .update(cx, |this, cx| {
+                            .update(cx, |this, _cx| {
                                 let mut items = Vec::with_capacity(range.end - range.start);
                                 for idx in range {
                                     let track_index = matching_indices_for_rows
@@ -935,7 +935,7 @@ fn recent_view(
                     move |range: Range<usize>, _window, cx| {
                         let tracks = tracks_arc.clone();
                         view_clone
-                            .update(cx, |this, cx| {
+                            .update(cx, |this, _cx| {
                                 let mut items = Vec::with_capacity(range.end - range.start);
                                 for idx in range {
                                     if let Some(track) = tracks.get(idx) {
@@ -1608,7 +1608,7 @@ pub(super) fn queue_drawer_items(
                     queue_ids.len(),
                     move |range: Range<usize>, _window, cx| {
                         view_for_rows
-                            .update(cx, |this, _cx| {
+                            .update(cx, |this, cx| {
                                 let mut items = Vec::with_capacity(range.end - range.start);
                                 for queue_index in range {
                                     let Some(&track_id) = queue_ids_for_rows.get(queue_index) else {
