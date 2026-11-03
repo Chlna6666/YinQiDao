@@ -337,7 +337,7 @@ fn edge_overlay_root(root: Div, style: SliderStyle) -> Div {
 }
 
 /// The expanded mini rail is painted upward from its bottom edge.
-    /// Its thumb must share the expanded rail's center, not the 3px hitbox's.
+/// Its thumb must share the expanded rail's center, not the 3px hitbox's.
 fn horizontal_thumb_top(style: SliderStyle) -> Pixels {
     let thumb_radius = f32::from(style.thumb_size) * 0.5;
     if style.edge_overlay {
@@ -1027,11 +1027,10 @@ mod tests {
         let style = SliderStyle::mini_progress();
         // The hover rail is 6px tall, grows upward, and ends 1px
         // above the bottom of the 3px resting interaction strip.
-        let rail_center = f32::from(style.interaction_height)
-            - 1.0
-            - f32::from(style.hover_track_height) * 0.5;
-        let thumb_center = f32::from(horizontal_thumb_top(style))
-            + f32::from(style.thumb_size) * 0.5;
+        let rail_center =
+            f32::from(style.interaction_height) - 1.0 - f32::from(style.hover_track_height) * 0.5;
+        let thumb_center =
+            f32::from(horizontal_thumb_top(style)) + f32::from(style.thumb_size) * 0.5;
         assert!((rail_center - thumb_center).abs() < 0.001);
         assert!((rail_center - 1.5).abs() > 0.001);
         // Fill and thumb are now positioned from the same normalized ratio
@@ -1045,8 +1044,7 @@ mod tests {
     #[test]
     fn normal_slider_thumb_remains_vertically_centered() {
         for style in [SliderStyle::stage_progress(), SliderStyle::mini_volume()] {
-            let center = f32::from(horizontal_thumb_top(style))
-                + f32::from(style.thumb_size) * 0.5;
+            let center = f32::from(horizontal_thumb_top(style)) + f32::from(style.thumb_size) * 0.5;
             assert!((center - f32::from(horizontal_interaction_height(style)) * 0.5).abs() < 0.001);
         }
     }
