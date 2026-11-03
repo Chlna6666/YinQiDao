@@ -297,15 +297,16 @@ impl StageKaraokeLineView {
         if self.scrubbing || self.playback_state != PlaybackState::Playing {
             return None;
         }
-        let boundary_delay = next_karaoke_timestamp(&self.line, self.position_ms).map(|timestamp| {
-            Duration::from_millis(
-                timestamp
-                    .saturating_sub(self.position_ms)
-                    .max(TRANSPORT_MIN_SLEEP),
-            )
-        });
-        let animated_delay = active_enhanced_word_index(&self.line, self.position_ms)
-            .and_then(|index| {
+        let boundary_delay =
+            next_karaoke_timestamp(&self.line, self.position_ms).map(|timestamp| {
+                Duration::from_millis(
+                    timestamp
+                        .saturating_sub(self.position_ms)
+                        .max(TRANSPORT_MIN_SLEEP),
+                )
+            });
+        let animated_delay =
+            active_enhanced_word_index(&self.line, self.position_ms).and_then(|index| {
                 let word = self.line.words.get(index)?;
                 let visual = bounded_sustained_word(
                     word,
@@ -1800,10 +1801,7 @@ fn sustained_time_envelope(word: &StageLyricWord, position_ms: u64) -> f32 {
 /// A provider may overlap syllable durations. The next authored syllable owns
 /// the handoff, so finish the old note's release before its successor starts.
 /// This only changes the emphasis envelope, never the original reveal timing.
-fn bounded_sustained_word(
-    word: &StageLyricWord,
-    next_start_ms: Option<u64>,
-) -> StageLyricWord {
+fn bounded_sustained_word(word: &StageLyricWord, next_start_ms: Option<u64>) -> StageLyricWord {
     let mut visual = word.clone();
     if let Some(next_start_ms) = next_start_ms
         && next_start_ms >= word.timestamp_ms
@@ -1817,10 +1815,7 @@ fn bounded_sustained_word(
 /// The note envelope is authored-time driven. Request short invalidations
 /// ONLY while the scalar envelope is changing; a steady sustained vowel
 /// costs zero scheduled layout frames and retains its GPU word reveal.
-fn sustained_transition_frame_delay(
-    word: &StageLyricWord,
-    position_ms: u64,
-) -> Option<Duration> {
+fn sustained_transition_frame_delay(word: &StageLyricWord, position_ms: u64) -> Option<Duration> {
     if !should_emphasize_sustained_word(word) {
         return None;
     }
@@ -2784,7 +2779,10 @@ mod tests {
 
         let short = bounded_sustained_word(&original, Some(1_600));
         assert!(!should_emphasize_sustained_word(&short));
-        assert_eq!(bounded_sustained_word(&original, None).duration_ms, Some(3_000));
+        assert_eq!(
+            bounded_sustained_word(&original, None).duration_ms,
+            Some(3_000)
+        );
     }
 
     #[test]
