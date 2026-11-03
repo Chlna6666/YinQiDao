@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, Entity, Global, IntoElement,
-    Render, SharedString, StyleRefinement, Subscription, WeakEntity, Window, div, prelude::*, px,
+    Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use lucide_gpui::icon;
 
@@ -1138,7 +1138,7 @@ impl Render for StageProgressView {
     }
 }
 
-fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyElement {
+fn cached_stage_transport(view: Entity<StageTransportView>) -> gpui::AnyElement {
     div()
         .w_full()
         .flex_none()
@@ -1147,7 +1147,7 @@ fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyElement {
         .into_any_element()
 }
 
-fn cached_stage_progress(view: Entity<StageProgressView>) -> AnyElement {
+fn cached_stage_progress(view: Entity<StageProgressView>) -> gpui::AnyElement {
     div()
         .w_full()
         .flex_none()
