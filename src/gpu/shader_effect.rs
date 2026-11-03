@@ -384,7 +384,6 @@ impl RendererExtensionRenderer for EffectRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn uniform_packet_is_exactly_96_bytes() {
         assert_eq!(std::mem::size_of::<[[f32; 4]; 4]>(), 64);
