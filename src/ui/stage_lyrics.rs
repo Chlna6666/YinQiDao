@@ -2475,11 +2475,13 @@ mod tests {
         let width = 495.0;
         let first = StageLyricLine::from_plain("Running through this strange life");
         let second = StageLyricLine::from_plain("Chasing all them green lights");
-        let third = StageLyricLine::from_plain(
-            "Throwing off the shade for a little bit of sunshine",
-        );
+        let third =
+            StageLyricLine::from_plain("Throwing off the shade for a little bit of sunshine");
         assert_eq!(approximate_lyric_lines(first.text.as_str(), width, 28.0), 1);
-        assert_eq!(approximate_lyric_lines(second.text.as_str(), width, 28.0), 1);
+        assert_eq!(
+            approximate_lyric_lines(second.text.as_str(), width, 28.0),
+            1
+        );
         assert_eq!(approximate_lyric_lines(third.text.as_str(), width, 28.0), 2);
         assert_eq!(estimated_primary_lyric_height(&second, width), 38.0);
 
