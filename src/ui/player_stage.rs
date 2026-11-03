@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnimationExt as _, AnyView, BorrowAppContext as _, Context, EncodedImageBytes, Entity, Global, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, StyleRefinement, Subscription, Window, div,
+    IntoElement, ObjectFit, Render, SharedString, Subscription, Window, div,
     img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use lucide_gpui::icon;
