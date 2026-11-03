@@ -280,31 +280,31 @@ impl EffectRenderer {
             Entry::Vacant(slot) => {
                 // Constant-buffer size is deliberately rounded to 256 bytes for D3D.
                 const BUFFER_BYTES: u64 = 256;
-            let buffer = device.create_buffer(&BufferDescriptor {
-                label: Some("YinQiDao effect uniforms".into()),
-                size: BUFFER_BYTES,
-                usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-                memory_location: MemoryLocation::CpuToGpu,
-            })?;
-            let group = match device.create_bind_group(&BindGroupDescriptor {
-                label: Some("YinQiDao effect parameters".into()),
-                layout: self.layout,
-                entries: vec![BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer,
-                        offset: 0,
-                        size: BUFFER_BYTES,
-                        stride: None,
-                    }),
-                }],
-            }) {
-                Ok(group) => group,
-                Err(error) => {
-                    let _ = device.destroy_buffer(buffer);
-                    return Err(error.into());
-                }
-            };
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some("YinQiDao effect uniforms".into()),
+                    size: BUFFER_BYTES,
+                    usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+                    memory_location: MemoryLocation::CpuToGpu,
+                })?;
+                let group = match device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("YinQiDao effect parameters".into()),
+                    layout: self.layout,
+                    entries: vec![BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer(BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: BUFFER_BYTES,
+                            stride: None,
+                        }),
+                    }],
+                }) {
+                    Ok(group) => group,
+                    Err(error) => {
+                        let _ = device.destroy_buffer(buffer);
+                        return Err(error.into());
+                    }
+                };
                 Ok(slot.insert(UniformSlot { buffer, group }))
             }
         }
