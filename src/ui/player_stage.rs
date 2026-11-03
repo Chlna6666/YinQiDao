@@ -345,9 +345,7 @@ pub(super) fn render(
     // a lyric-only notify makes StagePlayerView a TraversalAncestor instead of rerendering cover,
     // metadata, controls, and the whole stage layout. Direct StagePlayer updates (track/chrome
     // layout/etc.) still invalidate this view and take the normal render path.
-    AnyView::from(stage)
-        .cached(StyleRefinement::default().size_full())
-        .into_any_element()
+    div().size_full().child(AnyView::from(stage)).into_any_element()
 }
 
 struct StagePlayerView {
@@ -378,28 +376,27 @@ impl Render for StagePlayerView {
 
         // The exact same golden split is passed to both renderer branches.
         // No independent window-width estimates are used in the lyric column.
-        let lyrics = AnyView::from(self.lyrics.clone())
-            .cached(if layout.horizontal {
-                StyleRefinement::default()
-                    .w(px(layout.lyrics_column_width))
-                    .h_full()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-            } else {
-                StyleRefinement::default()
-                    .w_full()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-            })
-            .reuse_on_window_refresh();
-        let controls = AnyView::from(self.controls.clone())
-            .cached(
-                StyleRefinement::default()
-                    .w(px(layout.controls_width))
-                    .h(px(STAGE_CONTROLS_SLOT_HEIGHT_PX)),
-            )
-            .reuse_on_window_refresh();
+        // Current GPUI retains AnyView subtrees automatically; a sized
+        // layout boundary replaces the removed AnyView::cached wrapper.
+        let lyrics = if layout.horizontal {
+            div()
+                .w(px(layout.lyrics_column_width))
+                .h_full()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .child(AnyView::from(self.lyrics.clone()))
+        } else {
+            div()
+                .w_full()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .child(AnyView::from(self.lyrics.clone()))
+        };
+        let controls = div()
+            .w(px(layout.controls_width))
+            .h(px(STAGE_CONTROLS_SLOT_HEIGHT_PX))
+            .child(AnyView::from(self.controls.clone()));
 
         let metadata = stage_metadata(
             &self.cover,
@@ -591,9 +588,7 @@ fn stage_metadata(
 }
 
 fn ambient_background(fluid_background: Entity<AppleFluidView>) -> gpui::AnyElement {
-    let fluid = AnyView::from(fluid_background)
-        .cached(StyleRefinement::default().size_full())
-        .reuse_on_window_refresh();
+    let fluid = div().size_full().child(AnyView::from(fluid_background));
     div()
         .absolute()
         .inset_0()
