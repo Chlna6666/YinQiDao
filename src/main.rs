@@ -124,6 +124,10 @@ fn main() -> Result<()> {
         let bounds = Bounds::centered(None, size(px(1120.0), px(720.0)), cx);
         options.window_bounds = Some(WindowBounds::Windowed(bounds));
         options.window_min_size = Some(size(px(800.0), px(560.0)));
+        // Only YinQiDao opts in. GPUI's default remains unchanged when
+        // inactive_frame_clock is not configured; child windows inherit this.
+        options.inactive_frame_clock =
+            Some(gpui::FrameClock::fixed_fps(60).expect("60 FPS is nonzero"));
         options.is_resizable = true;
         options.is_minimizable = true;
         options.is_movable = true;
