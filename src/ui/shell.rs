@@ -12,8 +12,8 @@ use anyhow::{Result, anyhow};
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, AnimationSpec, AnyView, App, AppContext,
     Bounds, CompositeLayerExt as _, Context, Easing, ElementId, Entity, Focusable, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    KeyDownEvent, Render, SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_tokio::Tokio;
 use lucide_gpui::icon;
