@@ -201,7 +201,10 @@ mod tests {
         assert!((running - 15.0).abs() < 0.001);
 
         fluid.freeze_animation_clock(started_at + Duration::from_secs(3));
-        assert!((fluid.current_animation_seconds(started_at + Duration::from_secs(10)) - 15.0).abs() < 0.001);
+        assert!(
+            (fluid.current_animation_seconds(started_at + Duration::from_secs(10)) - 15.0).abs()
+                < 0.001
+        );
 
         fluid.running_since = Some(started_at + Duration::from_secs(10));
         let resumed = fluid.current_animation_seconds(started_at + Duration::from_secs(11));
