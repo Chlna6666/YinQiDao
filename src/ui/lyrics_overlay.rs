@@ -179,7 +179,9 @@ impl gpui::Render for DesktopLyricsView {
         let next_key = desktop_lyrics_display_key(display.as_ref());
         if next_key != self.display_key {
             // Never crossfade unrelated tracks or stale lines during a scrub.
-            if playing && self.display_key.is_some() && next_key.is_some()
+            if playing
+                && self.display_key.is_some()
+                && next_key.is_some()
                 && self.display_key.map(|key| key.0) == next_key.map(|key| key.0)
             {
                 self.previous_display = self.last_display.clone();
@@ -213,7 +215,13 @@ impl gpui::Render for DesktopLyricsView {
         .clamp(0.0, 0.85);
 
         let lyrics = if let Some(display) = &display {
-            desktop_lyrics_stack(display, &config, playing, self.word_animation_epoch, lyric_width)
+            desktop_lyrics_stack(
+                display,
+                &config,
+                playing,
+                self.word_animation_epoch,
+                lyric_width,
+            )
         } else {
             div()
                 .w_full()
@@ -238,7 +246,12 @@ impl gpui::Render for DesktopLyricsView {
             .min_w(px(0.0))
             .h_full()
             .overflow_hidden();
-        let incoming = div().absolute().inset_0().flex().min_w(px(0.0)).child(lyrics);
+        let incoming = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .min_w(px(0.0))
+            .child(lyrics);
 
         if let Some(previous) = self.previous_display.as_ref()
             && line_transition_active
@@ -664,12 +677,7 @@ fn desktop_karaoke_word(
         let end_ms = duration_ms
             .map(|duration| word.timestamp_ms.saturating_add(duration))
             .unwrap_or(position_ms);
-        let active = desktop_word_reveal_running(
-            playing,
-            position_ms,
-            word.timestamp_ms,
-            end_ms,
-        );
+        let active = desktop_word_reveal_running(playing, position_ms, word.timestamp_ms, end_ms);
         // A paused/scrubbing lyric must not keep advancing a GPU reveal. Zero
         // duration paints exactly the requested fraction without a hidden timer.
         let remaining = if active {
@@ -784,7 +792,11 @@ fn fit_desktop_lyric_font(text: &str, preferred_px: f32, available_width: f32) -
             if ch.is_whitespace() {
                 0.32
             } else if ch.is_ascii() {
-                if "ilI1.,'!:;".contains(ch) { 0.30 } else { 0.57 }
+                if "ilI1.,'!:;".contains(ch) {
+                    0.30
+                } else {
+                    0.57
+                }
             } else {
                 1.0
             }
@@ -1002,7 +1014,12 @@ fn liquid_glass_surface(opacity: f32, interacting: bool) -> gpui::AnyElement {
         .overflow_hidden()
         .bg(hsla(0.64, 0.08, 0.19, alpha))
         .border_1()
-        .border_color(hsla(0.60, 0.07, 0.70, if interacting { 0.18 } else { 0.09 }))
+        .border_color(hsla(
+            0.60,
+            0.07,
+            0.70,
+            if interacting { 0.18 } else { 0.09 },
+        ))
         .into_any_element()
 }
 
@@ -1030,11 +1047,7 @@ mod tests {
     fn desktop_long_english_line_fits_without_window_resizing() {
         let base = 58.0;
         let width = 712.0;
-        let fitted = fit_desktop_lyric_font(
-            "I couldn't lie couldn't lie couldn't",
-            base,
-            width,
-        );
+        let fitted = fit_desktop_lyric_font("I couldn't lie couldn't lie couldn't", base, width);
         assert!(fitted < base);
         assert!(fitted >= 16.0);
         assert_eq!(fit_desktop_lyric_font("Hi", base, width), base);

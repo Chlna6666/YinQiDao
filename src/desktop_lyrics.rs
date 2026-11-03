@@ -89,7 +89,10 @@ impl MusicApp {
             // Already-visible NOACTIVATE popups must not be shown/configured on
             // every lyric/cache refresh: repeating ShowWindow + refresh can
             // expose an unfinished transparent DComp frame and flicker.
-            if window.update(cx, |_view, _window, view_cx| view_cx.notify()).is_ok() {
+            if window
+                .update(cx, |_view, _window, view_cx| view_cx.notify())
+                .is_ok()
+            {
                 return;
             }
             cx.update_global(|state: &mut DesktopLyricsWindowState, _cx| {
