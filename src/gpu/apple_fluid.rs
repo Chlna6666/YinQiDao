@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, rgb};
 
@@ -114,17 +114,31 @@ impl AppleFluidView {
     }
 }
 
+// The renderer extension is time-dependent, but that flag alone doesn't guarantee
+// a new present when the rest of the application is idle. Keep a bounded local
+// frame clock as long as audio actually plays and the Stage remains visible.
+const FLUID_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+
+#[inline]
+fn fluid_should_animate(stage_visible: bool, playing: bool, minimized: bool) -> bool {
+    stage_visible && playing && !minimized
+}
+
 impl Render for AppleFluidView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The retained GPU extension advances with RendererExtensionContext::frame_time
         // (monotonic Instant), not GPUI's UI animation clock. That UI clock can
         // be paused or sampled from an older committed layout after focus loss.
         // Mixing the two made a live background appear frozen until another
         // window event repainted the fluid snapshot.
         let now = Instant::now();
-        let running = self.stage_visible && self.playing && !window.is_minimized();
+        let running = fluid_should_animate(self.stage_visible, self.playing, window.is_minimized());
 
         if running {
+            // An active audio stream must animate the fluid even with no lyrics,
+            // pointer movement, or UI state transitions. Invalidate only this
+            // retained surface; never poll or rebuild MusicApp at 60 Hz.
+            window.request_invalidation_at(now + FLUID_FRAME_INTERVAL, cx);
             if self.running_since.is_none() {
                 self.running_since = Some(now);
             }
@@ -179,6 +193,14 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fluid_clock_is_driven_by_audio_not_lyrics() {
+        assert!(fluid_should_animate(true, true, false));
+        assert!(!fluid_should_animate(true, false, false));
+        assert!(!fluid_should_animate(false, true, false));
+        assert!(!fluid_should_animate(true, true, true));
+    }
 
     #[test]
     fn apple_fluid_shader_validates() {

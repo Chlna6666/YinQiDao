@@ -320,7 +320,11 @@ impl StageKaraokeLineView {
                     word,
                     self.line.words.get(index + 1).map(|next| next.timestamp_ms),
                 );
-                if let Some(delay) = sustained_transition_frame_delay(&visual, self.position_ms) {
+                if let Some(delay) = sustained_glyph_transition_frame_delay(
+                    word,
+                    &visual,
+                    self.position_ms,
+                ) {
                     animated_delay =
                         Some(animated_delay.map_or(delay, |current| current.min(delay)));
                 }
@@ -1844,6 +1848,113 @@ fn sustained_transition_frame_delay(word: &StageLyricWord, position_ms: u64) -> 
         .then_some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
 }
 
+/// A long note is a sequence of stationary glyphs, not a floating word.
+/// Keep the authored word as a single non-wrapping flex item and transform only
+/// its individual characters. Whitespace stays outside the visual envelope.
+#[inline]
+fn sustained_glyph_count(text: &str) -> usize {
+    text.chars().filter(|ch| !ch.is_whitespace()).count()
+}
+
+#[inline]
+fn sustained_glyph_delay_ms(index: usize) -> u64 {
+    // A short wave through the held syllable, never a moving baseline.
+    (index as u64 * 42).min(252)
+}
+
+fn sustained_glyph_transition_frame_delay(
+    original: &StageLyricWord,
+    visual: &StageLyricWord,
+    position_ms: u64,
+) -> Option<Duration> {
+    let count = sustained_glyph_count(original.text.as_str());
+    if !(2..=12).contains(&count) {
+        return sustained_transition_frame_delay(visual, position_ms);
+    }
+    (0..count)
+        .filter_map(|index| {
+            sustained_transition_frame_delay(
+                visual,
+                position_ms.saturating_sub(sustained_glyph_delay_ms(index)),
+            )
+        })
+        .min()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn karaoke_sustained_glyphs(
+    word: &StageLyricWord,
+    visual_word: &StageLyricWord,
+    index: usize,
+    progress: f32,
+    position_ms: u64,
+    is_current_word: bool,
+    is_last_word: bool,
+    karaoke_epoch: u64,
+    playback_animating: bool,
+) -> gpui::AnyElement {
+    let glyph_count = sustained_glyph_count(word.text.as_str());
+    let duration_ms = word.duration_ms.unwrap_or(1).max(1);
+    let base_scale = sustained_word_peak_emphasis(word, is_last_word).scale;
+    let peak_scale = (1.0 + (base_scale - 1.0) * 1.8).clamp(1.035, 1.09);
+    let mut line = div().flex().flex_none().items_end().whitespace_nowrap();
+    let mut glyph_index = 0usize;
+
+    for ch in word.text.chars() {
+        let character = ch.to_string();
+        if ch.is_whitespace() {
+            line = line.child(div().whitespace_nowrap().child(character));
+            continue;
+        }
+        let delay_ms = sustained_glyph_delay_ms(glyph_index);
+        let local_time = position_ms.saturating_sub(delay_ms);
+        let emphasis = sustained_visual_emphasis(
+            word,
+            visual_word,
+            local_time,
+            is_last_word,
+        );
+        let letter_progress =
+            (progress * glyph_count as f32 - glyph_index as f32).clamp(0.0, 1.0);
+        let letter_start =
+            word.timestamp_ms.saturating_add(duration_ms * glyph_index as u64 / glyph_count as u64);
+        let letter_end = word.timestamp_ms.saturating_add(
+            duration_ms * (glyph_index as u64 + 1) / glyph_count as u64,
+        );
+        let letter = StageLyricWord {
+            timestamp_ms: letter_start,
+            duration_ms: Some(letter_end.saturating_sub(letter_start).max(1)),
+            byte_start: 0,
+            byte_end: character.len(),
+            text: SharedString::from(character.clone()),
+        };
+        let reveal = karaoke_reveal_word(
+            div().whitespace_nowrap().text_color(dark::white(1.0)).child(character.clone()),
+            &letter,
+            index.saturating_mul(16).saturating_add(glyph_index),
+            letter_progress,
+            position_ms,
+            playback_animating && is_current_word,
+            karaoke_epoch,
+        );
+        // Letter layout remains fixed while its paint transform grows and settles.
+        // This never changes the flex width or text baseline.
+        let scale = 1.0 + (peak_scale - 1.0)
+            * ((emphasis.scale - 1.0) / (base_scale - 1.0).max(0.0001)).clamp(0.0, 1.0);
+        let glyph = div()
+            .relative()
+            .flex_none()
+            .whitespace_nowrap()
+            .child(div().text_color(dark::white(0.64)).child(character.clone()))
+            .child(div().absolute().inset_0().child(reveal))
+            .scale(scale)
+            .transform_origin(TransformOrigin::new(0.5, 0.65));
+        line = line.child(glyph);
+        glyph_index += 1;
+    }
+    line.into_any_element()
+}
+
 fn sustained_visual_emphasis(
     original: &StageLyricWord,
     visual: &StageLyricWord,
@@ -2038,6 +2149,21 @@ fn karaoke_word(
     let visual_word = bounded_sustained_word(word, next_word_start_ms);
     let emphasize = should_emphasize_sustained_word(word)
         && (is_current_word || sustained_tail_active(word, &visual_word, position_ms));
+    // Long Latin/CJK syllables are rendered as independent character zooms,
+    // while still wrapping as one authored word. Do not scale the word as a block.
+    if emphasize && (2..=12).contains(&sustained_glyph_count(word.text.as_str())) {
+        return karaoke_sustained_glyphs(
+            word,
+            &visual_word,
+            index,
+            progress,
+            position_ms,
+            is_current_word,
+            is_last_word,
+            karaoke_epoch,
+            playback_animating,
+        );
+    }
     // Never replace the animated glyph at precisely 100% reveal. Keep its
     // transform and glow until the post-completion settling tail finishes.
     if progress >= 1.0 && !animate && !emphasize {
@@ -2731,6 +2857,31 @@ mod tests {
         assert_eq!(first, 6);
         assert_eq!(last, 17);
         assert_eq!(last - first + 1, 12);
+    }
+
+    #[test]
+    fn long_note_character_wave_is_staggered_and_bounded() {
+        assert_eq!(sustained_glyph_count("hello "), 5);
+        assert_eq!(sustained_glyph_count("长音高亮"), 4);
+        assert_eq!(sustained_glyph_delay_ms(0), 0);
+        assert_eq!(sustained_glyph_delay_ms(1), 42);
+        assert_eq!(sustained_glyph_delay_ms(30), 252);
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 5,
+            text: SharedString::from("hello"),
+        };
+        assert_eq!(
+            sustained_glyph_transition_frame_delay(&word, &word, 1_050),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
+        assert_eq!(sustained_glyph_transition_frame_delay(&word, &word, 2_000), None);
+        assert_eq!(
+            sustained_glyph_transition_frame_delay(&word, &word, 3_100),
+            Some(SUSTAINED_TRANSITION_FRAME_INTERVAL)
+        );
     }
 
     #[test]
