@@ -518,7 +518,12 @@ impl AudioEngine {
             .request_tx
             .try_send(EngineRequest::PlayTransientTrack(track))
         {
-            Ok(()) => true,
+            Ok(()) => {
+                // A new transient track invalidates every retained transport
+                // timeline even if the visible PlaybackState stays Playing.
+                self.snapshot.bump_transport_generation();
+                true
+            }
             Err(_) => {
                 self.snapshot.restore_optimistic_position_ms(
                     NO_POSITION_OVERRIDE,
@@ -532,7 +537,14 @@ impl AudioEngine {
     pub fn try_send(&self, command: PlayerCommand) -> bool {
         let optimistic_state = SnapshotCache::optimistic_state(&command);
         let optimistic_position_ms = SnapshotCache::optimistic_position_ms(&command);
-        let advances_transport = optimistic_position_ms.is_some();
+        let advances_transport = optimistic_position_ms.is_some()
+            || matches!(
+                &command,
+                PlayerCommand::PlayTrack(_)
+                    | PlayerCommand::Next
+                    | PlayerCommand::Previous
+                    | PlayerCommand::Stop
+            );
         let position_override_update = optimistic_position_ms
             .map(|position_ms| {
                 (
