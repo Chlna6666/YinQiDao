@@ -6,8 +6,8 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnimationProperty, Context, ElementId, Entity, GpuMesh3d,
     GpuMesh3dDrawParameters, GpuMesh3dDrawRanges, GpuMesh3dRange, GpuMesh3dShader, GpuMesh3dVertex,
-    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity,
-    WgslShaderSource, Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
+    HorizontalRevealEdge, IntoElement, SharedString, Subscription, WeakEntity, WgslShaderSource,
+    Window, WindowControlArea, canvas, div, hsla, point, prelude::*, px, rgb,
 };
 
 use crate::ui::theme::{RADIUS_LG, RADIUS_MD, dark};
@@ -189,11 +189,7 @@ impl gpui::Render for DesktopLyricsView {
             .min_w(px(0.0))
             .h_full()
             .overflow_hidden();
-        let incoming = div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .child(lyrics);
+        let incoming = div().absolute().inset_0().flex().child(lyrics);
 
         if let Some(previous) = self.previous_display.as_ref()
             && line_transition_active
