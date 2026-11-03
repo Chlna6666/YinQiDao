@@ -331,7 +331,11 @@ impl EffectRenderer {
         } else {
             0.0
         };
-        values[22] = (elapsed * 60.0).floor() / 60.0;
+        // Use the actual GPU presentation time. Quantizing to 60 Hz made a
+        // 59.94/75/120 Hz display repeat or skip fluid samples, especially
+        // after DWM changed cadence on focus loss. The renderer already owns
+        // frame pacing, so a second time quantizer adds jitter but saves no GPU work.
+        values[22] = elapsed.rem_euclid(21_600.0);
         let mut bytes = [0_u8; 96];
         for (index, value) in values.into_iter().enumerate() {
             bytes[index * 4..][..4].copy_from_slice(&value.to_le_bytes());
