@@ -1,25 +1,10 @@
-struct ShaderEffectDrawParameters {
-    bounds_origin: vec2<f32>,
-    bounds_size: vec2<f32>,
-    content_mask_origin: vec2<f32>,
-    content_mask_size: vec2<f32>,
+// Nova build-time shader, with one per-draw uniform block and no deprecated mesh ABI.
+struct EffectUniforms {
     params: mat4x4<f32>,
+    bounds: vec4<f32>,
+    viewport_time: vec4<f32>,
 };
-
-struct GlobalParams {
-    viewport_size: vec2<f32>,
-    premultiplied_alpha: u32,
-    pad: u32,
-    presentation_time_seconds: f32,
-    presentation_tick_60hz: u32,
-};
-
-struct ShaderEffectVertex {
-    position_x: f32,
-    position_y: f32,
-    position_z: f32,
-    color_rgba8: u32,
-};
+@group(0) @binding(0) var<uniform> effect: EffectUniforms;
 
 struct ShaderEffectVarying {
     @builtin(position) position: vec4<f32>,
@@ -30,10 +15,6 @@ struct ShaderEffectVarying {
     @location(4) params3: vec4<f32>,
     @location(5) bounds_size: vec2<f32>,
 };
-
-@group(0) @binding(0) var<uniform> globals: GlobalParams;
-@group(0) @binding(20) var<storage, read> effect_draw_parameters: array<ShaderEffectDrawParameters>;
-@group(0) @binding(21) var<storage, read> effect_vertices: array<ShaderEffectVertex>;
 
 fn rotate2(value: vec2<f32>, angle: f32) -> vec2<f32> {
     let s = sin(angle);
@@ -88,21 +69,23 @@ fn vs_shader_effect(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
 ) -> ShaderEffectVarying {
-    let vertex = effect_vertices[vertex_index];
-    let draw = effect_draw_parameters[instance_index];
-    let local = vec2<f32>(vertex.position_x, vertex.position_y) * 0.5 + vec2<f32>(0.5);
-    let pixel_position = draw.bounds_origin + local * draw.bounds_size;
-    let viewport = max(globals.viewport_size, vec2<f32>(1.0));
+    let local = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    )[vertex_index];
+    let pixel_position = effect.bounds.xy + local * effect.bounds.zw;
+    let viewport = max(effect.viewport_time.xy, vec2<f32>(1.0));
     let device_position = pixel_position / viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: ShaderEffectVarying;
     out.position = vec4<f32>(device_position, 0.0, 1.0);
     out.uv = local;
-    out.params0 = draw.params[0];
-    out.params1 = draw.params[1];
-    out.params2 = draw.params[2];
-    out.params3 = draw.params[3];
-    out.bounds_size = draw.bounds_size;
+    out.params0 = effect.params[0];
+    out.params1 = effect.params[1];
+    out.params2 = effect.params[2];
+    out.params3 = effect.params[3];
+    out.bounds_size = effect.bounds.zw;
     return out;
 }
 
@@ -116,7 +99,7 @@ fn fs_apple_fluid_opaque(input: ShaderEffectVarying) -> @location(0) vec4<f32> {
     let packed_seed = input.params2.w;
     let renderer_clock_running = packed_seed >= 0.0;
     let seed = select(-packed_seed - 1.0, packed_seed, renderer_clock_running);
-    let renderer_time_60hz = f32(globals.presentation_tick_60hz) / 60.0;
+    let renderer_time_60hz = effect.viewport_time.z;
     let raw_time = input.params0.w + select(
         0.0,
         renderer_time_60hz,
