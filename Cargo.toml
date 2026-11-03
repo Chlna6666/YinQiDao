@@ -20,8 +20,8 @@ members = [
 ]
 
 [workspace.dependencies]
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf", default-features = false }
-gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf" }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c", default-features = false }
+gpui_tokio = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c" }
 
 [dependencies]
 anyhow = "1"
@@ -81,8 +81,8 @@ yinqidao-codec-avs3 = { path = "crates/audio-codec-avs3" }
 
 gpui_tokio = { workspace = true }
 # Native BMCBL renderer-extension and retained 3D scene interfaces.
-gpui-3d = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf" }
-gfx-core = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf" }
+gpui-3d = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c" }
+gfx-core = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c" }
 souvlaki = "0.8.3"
 gpui-router = "0.3.0"
 rayon = "1.10"
@@ -90,7 +90,7 @@ qrcode = { version = "0.14.1", default-features = false }
 
 [build-dependencies]
 # Compile YinQiDao WGSL to DXBC/SPIR-V/MSL/GLSL at build time.
-gfx-shader-build = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf" }
+gfx-shader-build = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c" }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
@@ -117,7 +117,7 @@ gpui = { workspace = true, features = [
 # Keep this local bridge until that patch is published by the upstream branch.
 [patch.crates-io]
 gpu-allocator = { path = "vendor/gpu-allocator" }
-gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "ae80a1104dfccebf3a0f48c9aec72e9e9939e9cf" }
+gpui = { git = "https://github.com/Chlna6666/Better-Minecraft-Bedrock-Launcher.git", rev = "a3a8fdd67a0d88f860f991b6a99bc5d66809088c" }
 
 [lints.rust]
 unsafe_code = "warn"
