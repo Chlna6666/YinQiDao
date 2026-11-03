@@ -1138,26 +1138,22 @@ impl Render for StageProgressView {
     }
 }
 
-fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyView {
-    AnyView::from(view)
-        .cached(
-            StyleRefinement::default()
-                .w_full()
-                .flex_none()
-                .h(px(STAGE_TRANSPORT_HEIGHT)),
-        )
-        .reuse_on_window_refresh()
+fn cached_stage_transport(view: Entity<StageTransportView>) -> AnyElement {
+    div()
+        .w_full()
+        .flex_none()
+        .h(px(STAGE_TRANSPORT_HEIGHT))
+        .child(AnyView::from(view))
+        .into_any_element()
 }
 
-fn cached_stage_progress(view: Entity<StageProgressView>) -> AnyView {
-    AnyView::from(view)
-        .cached(
-            StyleRefinement::default()
-                .w_full()
-                .flex_none()
-                .h(px(STAGE_PROGRESS_HEIGHT)),
-        )
-        .reuse_on_window_refresh()
+fn cached_stage_progress(view: Entity<StageProgressView>) -> AnyElement {
+    div()
+        .w_full()
+        .flex_none()
+        .h(px(STAGE_PROGRESS_HEIGHT))
+        .child(AnyView::from(view))
+        .into_any_element()
 }
 
 fn option_ratio_changed(current: Option<f32>, next: Option<f32>, epsilon: f32) -> bool {
