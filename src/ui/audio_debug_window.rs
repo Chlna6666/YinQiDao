@@ -216,7 +216,8 @@ impl AudioDebugView {
 }
 
 impl Render for AudioDebugView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::enable_inactive_window_animations(window);
         self.ensure_refresh_task(cx);
         let snapshot = self.snapshot.clone();
         let spatial = self.spatial_snapshot;
