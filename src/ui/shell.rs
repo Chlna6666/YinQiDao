@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         mpsc::{Receiver, Sender},
     },
     time::Duration,
@@ -37,6 +37,73 @@ use super::{
 };
 
 const MAX_LYRICS_MEMORY_ENTRIES: usize = 64;
+/// 封面位图（png + blur）驻留内存的条目上限。超出按 FIFO 驱逐，之后可从磁盘
+/// 缓存按需补载；没有它，整库封面会在启动后全部常驻（大曲库下 GB 级增长）。
+const MAX_ARTWORK_MEMORY_ENTRIES: usize = 256;
+/// 封面补载需求记录/队列的上限，防止极端滚动下无界增长。
+const MAX_ARTWORK_RELOAD_QUEUE: usize = 128;
+/// 单批补载/喂入的封面数量（沿用原批量喂入的 40 张节奏）。
+const ARTWORK_LOAD_BATCH: usize = 40;
+/// online_playlist_cache 的条目上限（每条持有完整歌单视图数据）。
+const MAX_ONLINE_PLAYLIST_CACHE: usize = 16;
+
+/// 渲染路径（可能只有 `&MusicApp`）发现的封面缺失记录；由
+/// `MusicApp::drain_artwork_wanted` 在下一轮渲染收口为补载任务。
+static ARTWORK_WANTED: OnceLock<Mutex<Vec<TrackId>>> = OnceLock::new();
+
+fn record_artwork_wanted(track_id: TrackId) {
+    let wanted = ARTWORK_WANTED.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut wanted) = wanted.lock() else {
+        return;
+    };
+    if wanted.len() < MAX_ARTWORK_RELOAD_QUEUE && !wanted.contains(&track_id) {
+        wanted.push(track_id);
+    }
+}
+
+/// FIFO 驱逐 `map`/`order` 直到 `order.len() <= cap`。供按条目计费的缓存
+/// （封面位图、在线歌单视图）复用；`order` 必须与 `map` 的键集同步维护。
+fn evict_fifo_map<K: Eq + std::hash::Hash, V>(
+    map: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    cap: usize,
+) {
+    while order.len() > cap {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
+
+/// 封面位图 FIFO 驱逐：同时清 png 与 blur 两张位图；`current`（正在播放的
+/// 曲目）受保护不被驱逐，保证舞台/侧栏封面不闪占位图。调色板刻意不参与
+/// 驱逐（每条仅数十字节，重 derive 渐变的 CPU 成本不值）。
+fn evict_artwork_maps<V>(
+    order: &mut VecDeque<TrackId>,
+    artworks: &mut HashMap<TrackId, V>,
+    blurred_artworks: &mut HashMap<TrackId, V>,
+    cap: usize,
+    current: Option<TrackId>,
+) {
+    let mut current_rotated = false;
+    while order.len() > cap {
+        let Some(candidate) = order.pop_front() else {
+            break;
+        };
+        if Some(candidate) == current {
+            if current_rotated {
+                break;
+            }
+            current_rotated = true;
+            order.push_back(candidate);
+            continue;
+        }
+        artworks.remove(&candidate);
+        blurred_artworks.remove(&candidate);
+    }
+}
+
 const ONLINE_ASSET_LOOKAHEAD: usize = 2;
 // Small navigation debounce without postponing preload until eight seconds.
 const ONLINE_AUDIO_PRELOAD_DELAY: Duration = Duration::from_millis(500);
@@ -133,7 +200,7 @@ pub struct MusicApp {
     pub(crate) engine: Option<Arc<AudioEngine>>,
     pub(crate) tracks: Vec<Track>,
     library_track_ids: Arc<Vec<TrackId>>,
-    track_index_by_id: HashMap<TrackId, usize>,
+    pub(crate) track_index_by_id: Arc<HashMap<TrackId, usize>>,
     pub(crate) output_devices: Vec<crate::audio::OutputDeviceInfo>,
     pub(crate) page: AppPage,
     pub(crate) library_tab: LibraryTab,
@@ -157,6 +224,15 @@ pub struct MusicApp {
     pub(crate) artworks: HashMap<TrackId, Arc<[u8]>>,
     pub(crate) blurred_artworks: HashMap<TrackId, Arc<[u8]>>,
     pub(crate) artwork_palettes: HashMap<TrackId, crate::artwork::ArtworkPalette>,
+    /// 封面位图驻留顺序（FIFO 驱逐依据），与 artworks/blurred_artworks 同步维护。
+    artwork_order: VecDeque<TrackId>,
+    /// 本会话已处理过（加载成功或确认缺失）的封面；终止整库批量喂入，
+    /// 使上限驱逐不会诱发无限重载。
+    artwork_ready: HashSet<TrackId>,
+    /// 可见界面请求补载的封面 id 队列，优先于整库喂入。
+    artwork_reload_queue: VecDeque<TrackId>,
+    /// 批量封面加载任务在途标志（同一时间至多一个）。
+    artwork_loader_active: bool,
     pub(crate) lyrics: HashMap<TrackId, LyricsDocument>,
     pub(crate) lyrics_order: VecDeque<TrackId>,
     watchers: Vec<notify::RecommendedWatcher>,
@@ -241,7 +317,7 @@ pub struct MusicApp {
     sessions_restored: bool,
     pub(crate) has_online_plugins: bool,
     pub(crate) online_authenticated: bool,
-    pub(crate) online_daily_tracks: Vec<crate::plugin::abi::RemoteTrack>,
+    pub(crate) online_daily_tracks: Arc<[crate::plugin::abi::RemoteTrack]>,
     pub(crate) online_playlists: Vec<crate::plugin::abi::CollectionRecommendationItem>,
     pub(crate) online_user_playlists: Vec<(
         crate::plugin::abi::PluginRoute,
@@ -272,6 +348,8 @@ pub struct MusicApp {
     /// Shared bounded memory index over the Host's persistent stream cache.
     online_audio_cache: Arc<super::online_audio_cache::OnlineAudioCache>,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
+    /// online_playlist_cache 的 FIFO 驱逐序，限制会话内的歌单视图缓存深度。
+    online_playlist_cache_order: VecDeque<String>,
     pub(crate) online_track_cache: HashMap<TrackId, Track>,
     pub(crate) online_remote_tracks: HashMap<
         TrackId,
@@ -661,11 +739,13 @@ impl MusicApp {
             .and_then(|library| library.tracks(None).ok())
             .unwrap_or_default();
         let library_track_ids = Arc::new(tracks.iter().map(|track| track.id).collect::<Vec<_>>());
-        let track_index_by_id = tracks
-            .iter()
-            .enumerate()
-            .map(|(index, track)| (track.id, index))
-            .collect::<HashMap<_, _>>();
+        let track_index_by_id = Arc::new(
+            tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| (track.id, index))
+                .collect::<HashMap<_, _>>(),
+        );
         // Render-key/state unit tests must not create native audio endpoints or
         // register OS media callbacks. On Windows CI these can outlive their
         // test owners and crash the process with STATUS_ACCESS_VIOLATION.
@@ -845,6 +925,10 @@ impl MusicApp {
             snapshot: initial_snapshot,
             playback_progress: None,
             playback_time: None,
+            artwork_order: initial_artworks.keys().copied().collect(),
+            artwork_ready: HashSet::new(),
+            artwork_reload_queue: VecDeque::new(),
+            artwork_loader_active: false,
             artworks: initial_artworks,
             blurred_artworks: initial_blurred_artworks,
             artwork_palettes: initial_artwork_palettes,
@@ -925,7 +1009,7 @@ impl MusicApp {
             sessions_restored: false,
             has_online_plugins: false,
             online_authenticated: false,
-            online_daily_tracks: Vec::new(),
+            online_daily_tracks: Vec::new().into(),
             online_playlists: Vec::new(),
             online_user_playlists: Vec::new(),
             online_new_tracks: Vec::new(),
@@ -945,6 +1029,7 @@ impl MusicApp {
             online_asset_preload_task: None,
             online_audio_cache: super::online_audio_cache::OnlineAudioCache::new(),
             online_playlist_cache: HashMap::new(),
+            online_playlist_cache_order: VecDeque::new(),
             online_track_cache: initial_online_cache,
             online_remote_tracks: initial_online_remote_tracks,
             home_page: None,
@@ -1005,7 +1090,7 @@ impl MusicApp {
             self.cancel_online_play_request();
             self.cancel_online_preload_tasks();
             self.online_audio_cache.clear();
-            self.online_daily_tracks.clear();
+            self.online_daily_tracks = Vec::new().into();
             self.online_playlists.clear();
             self.online_user_playlists.clear();
             self.online_new_tracks.clear();
@@ -1457,7 +1542,46 @@ impl MusicApp {
         if let Some(palette) = palette {
             self.artwork_palettes.insert(track_id, palette);
         }
+        // 记录「已处理」并按 FIFO 驱逐超限条目：被驱逐的封面不会让整库喂入
+        // 重启（artwork_ready 已覆盖），需要时经磁盘缓存按需补载。
+        self.artwork_ready.insert(track_id);
+        if !self.artwork_order.contains(&track_id) {
+            self.artwork_order.push_back(track_id);
+        }
+        let current_id = self.snapshot.current_track.as_ref().map(|track| track.id);
+        evict_artwork_maps(
+            &mut self.artwork_order,
+            &mut self.artworks,
+            &mut self.blurred_artworks,
+            MAX_ARTWORK_MEMORY_ENTRIES,
+            current_id,
+        );
         self.bump_ui_content_revision();
+    }
+
+    /// 渲染路径的封面读取：命中返回字节；未命中时记录补载需求（不改自身
+    /// 状态），由 `drain_artwork_wanted` 在下一轮渲染收口。永不阻塞渲染线程。
+    pub(crate) fn artwork_display_bytes(&self, track_id: TrackId) -> Option<Arc<[u8]>> {
+        if let Some(bytes) = self.artworks.get(&track_id) {
+            return Some(bytes.clone());
+        }
+        if !self.artwork_missing.contains(&track_id) && !self.artwork_loading.contains(&track_id) {
+            record_artwork_wanted(track_id);
+        }
+        None
+    }
+
+    /// 在线歌单视图缓存写入：FIFO 上限驱逐，防止会话内无界增长。
+    fn cache_online_playlist_view(&mut self, key: String, data: OnlinePlaylistViewData) {
+        if !self.online_playlist_cache.contains_key(&key) {
+            self.online_playlist_cache_order.push_back(key.clone());
+        }
+        self.online_playlist_cache.insert(key, data);
+        evict_fifo_map(
+            &mut self.online_playlist_cache,
+            &mut self.online_playlist_cache_order,
+            MAX_ONLINE_PLAYLIST_CACHE,
+        );
     }
 
     pub(crate) fn cache_lyrics(&mut self, track_id: TrackId, lyrics: LyricsDocument) {
@@ -2480,11 +2604,13 @@ impl MusicApp {
                     let tracks = library.tracks(None)?;
                     let library_track_ids =
                         Arc::new(tracks.iter().map(|track| track.id).collect::<Vec<_>>());
-                    let track_index_by_id = tracks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, track)| (track.id, index))
-                        .collect::<HashMap<_, _>>();
+                    let track_index_by_id = Arc::new(
+                        tracks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, track)| (track.id, index))
+                            .collect::<HashMap<_, _>>(),
+                    );
                     let engine_tracks = tracks.clone();
                     Ok::<_, anyhow::Error>((
                         tracks,
@@ -2516,7 +2642,7 @@ impl MusicApp {
                         if let Some(status) = status {
                             this.status = status;
                         }
-                        this.request_library_artworks(cx);
+                        this.kick_artwork_loader(cx);
                         this.request_current_artwork(cx);
                     }
                     Err(error) => this.status = format!("刷新歌库失败：{error:#}"),
@@ -3125,7 +3251,7 @@ impl MusicApp {
                         route,
                     };
                     Self::prefetch_online_playlist_images(&view_data, cx);
-                    app.online_playlist_cache.insert(c_key, view_data.clone());
+                    app.cache_online_playlist_view(c_key, view_data.clone());
                     if let Some(data) = &mut app.active_online_playlist {
                         if data.title == view_data.title {
                             *data = view_data;
@@ -3161,7 +3287,7 @@ impl MusicApp {
                 title: "每日歌曲推荐".into(),
                 subtitle: "根据你的音乐口味生成，每日 6:00 更新".into(),
                 cover_url,
-                tracks,
+                tracks: tracks.to_vec(),
                 loading,
                 route,
             },
@@ -3239,8 +3365,7 @@ impl MusicApp {
                         route,
                     };
                     Self::prefetch_online_playlist_images(&view_data, cx);
-                    app.online_playlist_cache
-                        .insert("user_favorite".to_string(), view_data.clone());
+                    app.cache_online_playlist_view("user_favorite".to_string(), view_data.clone());
                     if let Some(data) = &mut app.active_online_playlist {
                         if data.title == "我喜欢的音乐" || data.title == view_data.title {
                             *data = view_data;
@@ -3319,8 +3444,10 @@ impl MusicApp {
                         route,
                     };
                     Self::prefetch_online_playlist_images(&view_data, cx);
-                    app.online_playlist_cache
-                        .insert("netease_cloud_library".to_string(), view_data.clone());
+                    app.cache_online_playlist_view(
+                        "netease_cloud_library".to_string(),
+                        view_data.clone(),
+                    );
                     if let Some(data) = &mut app.active_online_playlist {
                         if data.title == "我的音乐网盘" {
                             *data = view_data;
@@ -3499,10 +3626,10 @@ impl MusicApp {
                         .online_route
                         .clone()
                         .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
-                    self.play_online_playlist_track(
+                    self.play_online_playlist_track_shared(
                         route,
                         "每日歌曲推荐".into(),
-                        self.online_daily_tracks.clone(),
+                        Arc::clone(&self.online_daily_tracks),
                         0,
                         cx,
                     );
@@ -3536,7 +3663,7 @@ impl MusicApp {
                     .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
                 let daily_tracks = self.online_daily_tracks.clone();
                 let mut added_ids = Vec::new();
-                for t in &daily_tracks {
+                for t in daily_tracks.iter() {
                     let prepared = self.ensure_track_for_remote(&route, t);
                     added_ids.push(prepared.id);
                 }
@@ -3552,7 +3679,7 @@ impl MusicApp {
                     .clone()
                     .unwrap_or_else(|| crate::ui::home::fallback_online_route(self));
                 let daily_tracks = self.online_daily_tracks.clone();
-                for t in &daily_tracks {
+                for t in daily_tracks.iter() {
                     let prepared = self.ensure_track_for_remote(&route, t);
                     self.add_to_queue(prepared.id, cx);
                 }
@@ -3742,7 +3869,7 @@ impl MusicApp {
 
     pub(crate) fn refresh_online_recommendations(&mut self, cx: &mut Context<Self>) {
         if !self.online_authenticated {
-            self.online_daily_tracks.clear();
+            self.online_daily_tracks = Vec::new().into();
             self.online_playlists.clear();
             self.online_user_playlists.clear();
             self.online_new_tracks.clear();
@@ -3867,7 +3994,7 @@ impl MusicApp {
                     if let Some(t) = new_tracks.first() {
                         push_cover(&t.cover_url, &mut urls);
                     }
-                    for t in &daily_tracks {
+                    for t in daily_tracks.iter() {
                         if let Some(u) = &t.cover_url {
                             urls.push(u.clone());
                         }
@@ -3890,14 +4017,14 @@ impl MusicApp {
                     crate::ui::image_cache::prefetch_urls(urls, cx);
 
                     app.online_route = Some(route);
-                    app.online_daily_tracks = daily_tracks;
+                    app.online_daily_tracks = daily_tracks.into();
                     app.online_playlists = playlists;
                     app.online_new_tracks = new_tracks;
                     app.online_user_playlists = user_playlists;
                     app.online_recommendations_loading = false;
                     if let Some(active_pl) = &mut app.active_online_playlist {
                         if active_pl.title == "每日歌曲推荐" {
-                            active_pl.tracks = app.online_daily_tracks.clone();
+                            active_pl.tracks = app.online_daily_tracks.to_vec();
                             active_pl.cover_url =
                                 active_pl.tracks.first().and_then(|t| t.cover_url.clone());
                             active_pl.loading = false;
@@ -4624,28 +4751,76 @@ impl MusicApp {
         .detach();
     }
 
-    fn request_library_artworks(&mut self, cx: &mut Context<Self>) {
+    /// 渲染期收集的封面缺失 → 补载队列，并按需启动批量加载。只在
+    /// `MusicApp::render` 顶部调用（此处才有 `&mut` + cx）。
+    fn drain_artwork_wanted(&mut self, cx: &mut Context<Self>) {
+        let Some(wanted) = ARTWORK_WANTED.get() else {
+            return;
+        };
+        let wanted = wanted
+            .lock()
+            .map(|mut wanted| std::mem::take(&mut *wanted))
+            .unwrap_or_default();
+        if wanted.is_empty() {
+            return;
+        }
+        for track_id in wanted {
+            if !self.artwork_reload_queue.contains(&track_id) {
+                self.artwork_reload_queue.push_back(track_id);
+            }
+        }
+        while self.artwork_reload_queue.len() > MAX_ARTWORK_RELOAD_QUEUE {
+            self.artwork_reload_queue.pop_front();
+        }
+        self.kick_artwork_loader(cx);
+    }
+
+    /// 启动一轮封面批量加载（同一时间至多一个任务）：优先补载可见需求，
+    /// 否则继续整库首次喂入。整库喂入以 artwork_ready 终止，被上限驱逐的
+    /// 封面不会诱发无限重载；空闲（无需求且整库已处理）时任务自然停止。
+    fn kick_artwork_loader(&mut self, cx: &mut Context<Self>) {
+        if self.artwork_loader_active {
+            return;
+        }
         let Some(cache) = self.artwork_cache.clone() else {
             return;
         };
-        let mut pending = Vec::new();
-        for track in &self.tracks {
-            if !self.artworks.contains_key(&track.id)
-                && !self.artwork_missing.contains(&track.id)
-                && self.artwork_loading.insert(track.id)
-            {
-                pending.push(track.clone());
-                if pending.len() >= 40 {
+        let mut batch: Vec<Track> = Vec::new();
+        while batch.len() < ARTWORK_LOAD_BATCH {
+            let Some(track_id) = self.artwork_reload_queue.pop_front() else {
+                break;
+            };
+            let Some(track) = self
+                .track_index_by_id
+                .get(&track_id)
+                .and_then(|&index| self.tracks.get(index))
+            else {
+                continue;
+            };
+            if self.artworks.contains_key(&track.id) || !self.artwork_loading.insert(track.id) {
+                continue;
+            }
+            batch.push(track.clone());
+        }
+        if batch.is_empty() {
+            for track in &self.tracks {
+                if batch.len() >= ARTWORK_LOAD_BATCH {
                     break;
                 }
+                if self.artwork_ready.contains(&track.id) || !self.artwork_loading.insert(track.id)
+                {
+                    continue;
+                }
+                batch.push(track.clone());
             }
         }
-        if pending.is_empty() {
+        if batch.is_empty() {
             return;
         }
+        self.artwork_loader_active = true;
         let task = Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
-                let results: Vec<_> = pending
+                let results: Vec<_> = batch
                     .into_iter()
                     .map(|track| {
                         let id = track.id;
@@ -4672,22 +4847,18 @@ impl MusicApp {
         cx.spawn(async move |this, cx| -> Result<()> {
             let (loaded, missing) = task.await?;
             this.update(cx, |this, cx| {
+                for id in &missing {
+                    this.artwork_loading.remove(id);
+                    this.artwork_missing.insert(*id);
+                    this.artwork_ready.insert(*id);
+                }
                 for (id, art) in loaded {
                     this.artwork_loading.remove(&id);
                     this.set_artwork_parts(id, art.png, Some(art.blurred_png), Some(art.palette));
                 }
-                for id in missing {
-                    this.artwork_loading.remove(&id);
-                    this.artwork_missing.insert(id);
-                }
-                let has_more = this.tracks.iter().any(|track| {
-                    !this.artworks.contains_key(&track.id)
-                        && !this.artwork_missing.contains(&track.id)
-                        && !this.artwork_loading.contains(&track.id)
-                });
-                if has_more {
-                    this.request_library_artworks(cx);
-                }
+                this.artwork_loader_active = false;
+                // 队列仍有需求就继续下一批；无需求且整库已处理则在此停住。
+                this.kick_artwork_loader(cx);
                 this.notify_current_content_surface(cx);
             })?;
             Ok(())
@@ -5062,6 +5233,8 @@ impl Drop for MusicApp {
 impl Render for MusicApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         super::enable_inactive_window_animations(window);
+        // 渲染期收集的封面缺失在下一帧收口补载（事件驱动，无轮询定时器）。
+        self.drain_artwork_wanted(cx);
         if self.stage_activation_subscription.is_none() {
             self.stage_activation_subscription =
                 Some(cx.observe_window_activation(window, |app, window, cx| {
@@ -6465,5 +6638,54 @@ mod tests {
         let key_authenticated = home_page_render_key(&app);
         assert_ne!(key_with_plugin, key_authenticated);
         assert!(key_authenticated.online_authenticated);
+    }
+}
+
+#[cfg(test)]
+mod artwork_memory_tests {
+    use super::*;
+    // 注意：`Arc` 一律用全路径 std::sync::Arc，避免任何作用域内名字遮蔽。
+
+    #[test]
+    fn artwork_map_eviction_respects_cap_and_protects_current() {
+        let mut order = VecDeque::new();
+        let mut artworks: HashMap<TrackId, u32> = HashMap::new();
+        let mut blurred: HashMap<TrackId, u32> = HashMap::new();
+        for id in 0..5 {
+            order.push_back(id);
+            artworks.insert(id, id as u32);
+            blurred.insert(id, id as u32);
+        }
+        evict_artwork_maps(&mut order, &mut artworks, &mut blurred, 3, None);
+        assert_eq!(order.len(), 3);
+        assert!(!artworks.contains_key(&0));
+        assert!(!blurred.contains_key(&0));
+        assert!(!artworks.contains_key(&1));
+        assert!(artworks.contains_key(&2));
+        assert!(blurred.contains_key(&4));
+
+        // 正在播放的曲目受保护：即使最旧也不被驱逐。
+        let mut order: VecDeque<TrackId> = [0, 1, 2].into_iter().collect();
+        let mut artworks: HashMap<TrackId, u32> = [(0, 1u32), (1, 1), (2, 1)].into_iter().collect();
+        let mut blurred = artworks.clone();
+        evict_artwork_maps(&mut order, &mut artworks, &mut blurred, 1, Some(0));
+        assert!(artworks.contains_key(&0), "正在播放的封面不应被驱逐");
+        assert_eq!(artworks.len(), 1);
+        assert!(order.contains(&0));
+    }
+
+    #[test]
+    fn fifo_map_eviction_caps_entries() {
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let mut order = VecDeque::new();
+        for i in 0..8 {
+            order.push_back(format!("k{i}"));
+            map.insert(format!("k{i}"), i);
+        }
+        evict_fifo_map(&mut map, &mut order, 4);
+        assert_eq!(map.len(), 4);
+        assert!(!map.contains_key("k0"));
+        assert!(map.contains_key("k7"));
+        assert_eq!(order.len(), 4);
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Cursor,
     path::PathBuf,
@@ -15,7 +15,37 @@ use lucide_gpui::icon;
 
 use super::theme::{self, ACCENT_RED, BORDER_HAIRLINE, TEXT_SECONDARY, themed_icon};
 
-static MEM_CACHE: OnceLock<RwLock<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
+/// 远端图片内存缓存条目上限（512px PNG 约 50–300KB/张）。FIFO 驱逐：渲染
+/// working set（首屏与当前歌单）远小于该上限，不会抖动；被驱逐的图片仍可
+/// 从磁盘缓存秒回（`load_disk_cached`）。
+const MEM_CACHE_MAX_ENTRIES: usize = 256;
+
+#[derive(Default)]
+struct MemCache {
+    map: HashMap<String, Arc<[u8]>>,
+    /// FIFO 驱逐序，与 map 的键集同步维护。
+    order: VecDeque<String>,
+}
+
+impl MemCache {
+    fn get(&self, url: &str) -> Option<Arc<[u8]>> {
+        self.map.get(url).cloned()
+    }
+
+    fn insert(&mut self, url: String, bytes: Arc<[u8]>) {
+        if self.map.insert(url.clone(), bytes).is_none() {
+            self.order.push_back(url);
+        }
+        while self.order.len() > MEM_CACHE_MAX_ENTRIES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.map.remove(&oldest);
+        }
+    }
+}
+
+static MEM_CACHE: OnceLock<RwLock<MemCache>> = OnceLock::new();
 static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DISK_DIR: OnceLock<PathBuf> = OnceLock::new();
 static REMOTE_IMAGE_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
@@ -23,8 +53,8 @@ static REMOTE_IMAGE_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 const PREFETCH_VISIBLE_LIMIT: usize = 8;
 const PREFETCH_BATCH_SIZE: usize = 4;
 
-fn mem_cache() -> &'static RwLock<HashMap<String, Arc<[u8]>>> {
-    MEM_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+fn mem_cache() -> &'static RwLock<MemCache> {
+    MEM_CACHE.get_or_init(|| RwLock::new(MemCache::default()))
 }
 
 fn in_flight() -> &'static Mutex<HashSet<String>> {
@@ -47,10 +77,7 @@ fn url_disk_filename(url: &str) -> String {
 
 /// Render-safe cache lookup. This function never touches the filesystem.
 pub fn get_cached(url: &str) -> Option<Arc<[u8]>> {
-    mem_cache()
-        .read()
-        .ok()
-        .and_then(|guard| guard.get(url).cloned())
+    mem_cache().read().ok().and_then(|cache| cache.get(url))
 }
 
 /// Blocking disk lookup for worker threads only. A hit is promoted into the in-memory cache.
@@ -67,8 +94,8 @@ pub fn load_disk_cached(url: &str) -> Option<Arc<[u8]>> {
     }
 
     let arc: Arc<[u8]> = bytes.into();
-    if let Ok(mut guard) = mem_cache().write() {
-        guard.insert(url.to_string(), arc.clone());
+    if let Ok(mut cache) = mem_cache().write() {
+        cache.insert(url.to_string(), arc.clone());
     }
     Some(arc)
 }
@@ -89,8 +116,8 @@ async fn load_or_fetch(url: String) -> Option<Arc<[u8]>> {
         let _ = tokio::task::spawn_blocking(move || fs::write(path, write_bytes.as_ref())).await;
     }
 
-    if let Ok(mut guard) = mem_cache().write() {
-        guard.insert(url, arc.clone());
+    if let Ok(mut cache) = mem_cache().write() {
+        cache.insert(url, arc.clone());
     }
     Some(arc)
 }
@@ -495,5 +522,37 @@ pub fn render_remote_cover_fill<V: 'static>(
     } else {
         request_remote_image(url, cx.weak_entity(), cx);
         placeholder(48.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mem_cache_evicts_oldest_beyond_cap() {
+        let mut cache = MemCache::default();
+        for i in 0..(MEM_CACHE_MAX_ENTRIES + 8) {
+            cache.insert(format!("u{i}"), Arc::from(&b"x"[..]));
+        }
+        assert_eq!(cache.map.len(), MEM_CACHE_MAX_ENTRIES);
+        assert!(!cache.map.contains_key("u0"));
+        assert!(
+            cache
+                .map
+                .contains_key(&format!("u{}", MEM_CACHE_MAX_ENTRIES + 7))
+        );
+
+        // 重复插入既有键不应在驱逐序中产生重复条目。
+        cache.insert("u1".into(), Arc::from(&b"y"[..]));
+        assert_eq!(
+            cache
+                .order
+                .iter()
+                .filter(|url| url.as_str() == "u1")
+                .count(),
+            1
+        );
+        assert_eq!(cache.order.len(), MEM_CACHE_MAX_ENTRIES);
     }
 }

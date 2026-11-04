@@ -599,7 +599,7 @@ fn discover_feature_cards<V: 'static>(
             cx,
             move |this, cx| {
                 if !card1_tracks.is_empty() {
-                    this.play_online_playlist_track(
+                    this.play_online_playlist_track_shared(
                         card1_route.clone(),
                         "每日歌曲推荐".into(),
                         card1_tracks.clone(),
@@ -1526,7 +1526,7 @@ fn featured_albums_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl 
 
 fn album_card(track: &Track, app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
     let track_id = track.id;
-    let artwork = app.artworks.get(&track_id).cloned();
+    let artwork = app.artwork_display_bytes(track_id);
 
     let cover = if let Some(bytes) = artwork {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))
@@ -1675,7 +1675,7 @@ pub(super) fn track_row(
         .as_ref()
         .is_some_and(|t| t.id == track_id);
     let is_playing = is_current && app.snapshot.state == crate::model::PlaybackState::Playing;
-    let artwork = app.artworks.get(&track_id).cloned();
+    let artwork = app.artwork_display_bytes(track_id);
 
     let cover = if let Some(bytes) = artwork {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes))

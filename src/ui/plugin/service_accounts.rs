@@ -125,7 +125,7 @@ fn refresh_services(cx: &mut Context<MusicApp>) {
             let is_auth = this.check_online_authenticated();
             this.online_authenticated = is_auth;
             if !is_auth {
-                this.online_daily_tracks.clear();
+                this.online_daily_tracks = Vec::new().into();
                 this.online_playlists.clear();
                 this.online_new_tracks.clear();
                 this.online_route = None;

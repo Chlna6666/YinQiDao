@@ -669,7 +669,7 @@ fn songs_view<V: 'static>(
                         .current_track
                         .as_ref()
                         .is_some_and(|t| t.id == track_id);
-                    let artwork = app.artworks.get(&track_id).cloned();
+                    let artwork = app.artwork_display_bytes(track_id);
                     local_list = local_list.child(song_table_row(
                         idx + 1,
                         track,
@@ -812,7 +812,7 @@ fn songs_view<V: 'static>(
                                             .current_track
                                             .as_ref()
                                             .is_some_and(|t| t.id == track_id);
-                                        let artwork = this.artworks.get(&track_id).cloned();
+                                        let artwork = this.artwork_display_bytes(track_id);
                                         items.push(song_table_row(
                                             idx + 1,
                                             track,
@@ -945,7 +945,7 @@ fn recent_view(
                                             .current_track
                                             .as_ref()
                                             .is_some_and(|t| t.id == track_id);
-                                        let artwork = this.artworks.get(&track_id).cloned();
+                                        let artwork = this.artwork_display_bytes(track_id);
                                         items.push(song_table_row(
                                             idx + 1,
                                             track,
@@ -1207,7 +1207,7 @@ fn albums_view(
                                     else {
                                         break;
                                     };
-                                    let artwork = this.artworks.get(track_id).cloned();
+                                    let artwork = this.artwork_display_bytes(*track_id);
                                     row_cards = row_cards.child(album_poster_card(
                                         name.clone(),
                                         artist.clone(),
@@ -1555,13 +1555,7 @@ pub(super) fn queue_drawer_items(
 ) -> gpui::AnyElement {
     let queue_ids = &app.config.queue;
     let queue_ids_for_rows = queue_ids.clone();
-    let track_indices_for_rows = Arc::new(
-        app.tracks
-            .iter()
-            .enumerate()
-            .map(|(index, track)| (track.id, index))
-            .collect::<HashMap<TrackId, usize>>(),
-    );
+    let track_indices_for_rows = Arc::clone(&app.track_index_by_id);
     let view_for_rows = view.clone();
 
     if queue_ids.is_empty() {
@@ -1854,7 +1848,7 @@ fn queue_item_row(
                 .unwrap_or_else(|| route.provider_id.clone())
         })
         .unwrap_or_else(|| "本地音乐".to_owned());
-    let artwork = if let Some(bytes) = app.artworks.get(&track_id) {
+    let artwork = if let Some(bytes) = app.artwork_display_bytes(track_id) {
         img(EncodedImageBytes::new(ImageFormat::Png, bytes.clone()))
             .size(px(42.0))
             .rounded(px(9.0))
