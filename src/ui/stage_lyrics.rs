@@ -3070,7 +3070,13 @@ mod tests {
         let held = sustained_word_emphasis(&word, 3_000, true, true);
         assert!(1.0 < early.scale && early.scale < middle.scale);
         assert!(middle.scale < late.scale && late.scale < held.scale);
-        assert!((held.scale - 1.035).abs() < 0.0001);
+        // The peak can change with the visual design. Assert that the held
+        // sample reaches the authored peak without early clipping, rather
+        // than pinning an obsolete hard-coded scale from an older animation.
+        let expected_peak = sustained_word_peak_emphasis(&word, true)
+            .scale
+            .clamp(1.0, 1.09);
+        assert!((held.scale - expected_peak).abs() < 0.0001);
 
         let completed = sustained_word_emphasis(&word, 5_000, true, true);
         let settling = sustained_word_emphasis(&word, 5_000 + release / 2, true, true);

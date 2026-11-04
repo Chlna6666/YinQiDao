@@ -5420,6 +5420,7 @@ impl Render for MusicApp {
             };
 
             div()
+                .id("music-app-base-shell")
                 .size_full()
                 .relative()
                 .flex()
@@ -5612,6 +5613,7 @@ impl Render for MusicApp {
         let global_modal = super::components::modal::render(self, cx);
 
         div()
+            .id("music-app-root")
             .size_full()
             .relative()
             .overflow_hidden()
@@ -5879,6 +5881,7 @@ fn sidebar(
     };
 
     div()
+        .id("music-app-sidebar")
         .w(px(236.0))
         .h_full()
         .flex_none()
