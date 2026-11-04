@@ -582,16 +582,21 @@ pub(crate) fn initialize(main_window: WindowHandle<MusicApp>, cx: &mut App) {
         if !was_ours {
             return;
         }
-        let _ = reopen_window.update(cx, |app, _window, app_cx| {
-            if reopen && app.config.desktop_lyrics.visible {
-                app.sync_desktop_lyrics_window(app_cx);
-            } else if app.config.desktop_lyrics.visible {
-                // Native close, not the in-app close button: synchronize the
-                // persisted toggle with the actual HWND lifecycle.
-                app.config.desktop_lyrics.visible = false;
-                app.save_config();
-                app_cx.notify();
-            }
+        // remove_window may synchronously emit this global callback while
+        // MusicApp is still inside desktop_lyrics_window_closed(). Never
+        // reenter MusicApp from a nested platform window-close notification.
+        let reopen_window = reopen_window.clone();
+        cx.defer(move |cx| {
+            let _ = reopen_window.update(cx, |app, _window, app_cx| {
+                if reopen && app.config.desktop_lyrics.visible {
+                    app.sync_desktop_lyrics_window(app_cx);
+                } else if app.config.desktop_lyrics.visible {
+                    // Native close, not the in-app close button.
+                    app.config.desktop_lyrics.visible = false;
+                    app.save_config();
+                    app_cx.notify();
+                }
+            });
         });
     })
     .detach();

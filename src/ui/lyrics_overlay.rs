@@ -117,18 +117,14 @@ impl DesktopLyricsView {
             Some(cx.observe_window_bounds(window, move |_view, window, cx| {
                 let bounds = window.bounds();
                 #[cfg(windows)]
-                if let Some(parent) = parent.upgrade() {
-                    // Windows desktop lyrics are not resizable. If a native move
-                    // accidentally enters a Snap/maximize geometry, restore the
-                    // persisted widget dimensions before saving bad fullscreen
-                    // bounds or painting an enlarged translucent surface.
-                    let expected = {
-                        let app = parent.read(cx);
-                        (
-                            app.config.desktop_lyrics.width.clamp(420.0, 1_600.0),
-                            app.config.desktop_lyrics.height.clamp(92.0, 520.0),
-                        )
-                    };
+                if let Some(config) = _view.observed_config.as_ref() {
+                    // Consult the latest rendered popup snapshot, not MusicApp.
+                    // Reading or updating MusicApp inside this nested window
+                    // callback can run while MusicApp is already being updated.
+                    let expected = (
+                        config.width.clamp(420.0, 1_600.0),
+                        config.height.clamp(92.0, 520.0),
+                    );
                     if desktop_popup_size_mismatch(
                         (f32::from(bounds.size.width), f32::from(bounds.size.height)),
                         expected,
@@ -142,8 +138,17 @@ impl DesktopLyricsView {
                         }
                     }
                 }
-                let _ = parent.update(cx, |app, _cx| {
-                    app.persist_desktop_lyrics_bounds(bounds);
+                // The bounds callback may be dispatched synchronously inside
+                // MusicApp::sync_desktop_lyrics_window/reset_desktop_lyrics_bounds.
+                // EntityMap forbids reentrant MusicApp::update, so persist only
+                // after the whole GPUI effect cycle has unwound.
+                let parent = parent.clone();
+                cx.defer(move |cx| {
+                    let _ = parent.update(cx, |app, _cx| {
+                        if app.config.desktop_lyrics.visible {
+                            app.persist_desktop_lyrics_bounds(bounds);
+                        }
+                    });
                 });
             }));
     }
