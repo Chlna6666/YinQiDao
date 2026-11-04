@@ -4,6 +4,7 @@
 //! producer gets an MMCSS task lease here; never boost the UI, network,
 //! background preload or whole process, and never use REALTIME_PRIORITY_CLASS.
 #[cfg(windows)]
+#[allow(unsafe_code)] // SAFETY: only the documented avrt MMCSS FFI surface below.
 mod platform {
     use core::ffi::c_void;
 
@@ -16,12 +17,12 @@ mod platform {
         fn AvRevertMmThreadCharacteristics(handle: *mut c_void) -> i32;
     }
 
-    pub(super) struct AudioDecodePriority {
+    pub(crate) struct AudioDecodePriority {
         task_handle: *mut c_void,
     }
 
     impl AudioDecodePriority {
-        pub(super) fn enter() -> Self {
+        pub(crate) fn enter() -> Self {
             const AUDIO_TASK: [u16; 6] = [
                 b'A' as u16,
                 b'u' as u16,
@@ -55,7 +56,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub(super) use platform::AudioDecodePriority;
+pub(crate) use platform::AudioDecodePriority;
 
 #[cfg(not(windows))]
 pub(super) struct AudioDecodePriority;
