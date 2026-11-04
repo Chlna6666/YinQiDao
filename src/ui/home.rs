@@ -27,10 +27,47 @@ use super::{
     },
 };
 
+/// Local-library statistics and featured albums, built only when the catalog changes.
+///
+/// GPUI can render HomePage for unrelated root invalidations. Cache catalog
+/// aggregation instead of repeating two O(N) HashSet scans and an album search.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct HomeLibrarySummary {
+    track_count: usize,
+    album_count: usize,
+    artist_count: usize,
+    featured_indices: [Option<usize>; 8],
+}
+
+impl HomeLibrarySummary {
+    pub(super) fn from_tracks(tracks: &[Track]) -> Self {
+        Self::from_catalog(tracks.iter().map(|track| (track.album.as_str(), track.artist.as_str())))
+    }
+
+    fn from_catalog<'a>(catalog: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut albums = HashSet::new();
+        let mut artists = HashSet::new();
+        let mut summary = Self::default();
+        let mut featured_count = 0;
+        for (index, (album, artist)) in catalog.into_iter().enumerate() {
+            summary.track_count += 1;
+            if albums.insert(album) && featured_count < summary.featured_indices.len() {
+                summary.featured_indices[featured_count] = Some(index);
+                featured_count += 1;
+            }
+            artists.insert(artist);
+        }
+        summary.album_count = albums.len();
+        summary.artist_count = artists.len();
+        summary
+    }
+}
+
 pub(super) fn render<V: 'static>(
     app: &MusicApp,
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
+    catalog: &HomeLibrarySummary,
 ) -> gpui::AnyElement {
     let has_online_plugin = app.has_online_plugins;
     let is_authenticated = app.online_authenticated;
@@ -62,8 +99,8 @@ pub(super) fn render<V: 'static>(
                     .flex()
                     .flex_col()
                     .gap_8()
-                    .child(stats_overview(app))
-                    .child(featured_albums_section(app, view))
+                    .child(stats_overview(catalog))
+                    .child(featured_albums_section(app, view, catalog))
                     .child(recent_tracks_section(app, view)),
             );
         } else if !has_online_content && !app.online_recommendations_loading {
@@ -79,8 +116,8 @@ pub(super) fn render<V: 'static>(
                     .flex()
                     .flex_col()
                     .gap_8()
-                    .child(stats_overview(app))
-                    .child(featured_albums_section(app, view))
+                    .child(stats_overview(catalog))
+                    .child(featured_albums_section(app, view, catalog))
                     .child(recent_tracks_section(app, view)),
             );
         } else {
@@ -94,8 +131,8 @@ pub(super) fn render<V: 'static>(
                     .flex()
                     .flex_col()
                     .gap_8()
-                    .child(stats_overview(app))
-                    .child(featured_albums_section(app, view))
+                    .child(stats_overview(catalog))
+                    .child(featured_albums_section(app, view, catalog))
                     .child(recent_tracks_section(app, view)),
             );
         } else {
@@ -1403,20 +1440,10 @@ fn daily_recommended_tracks_section<V: 'static>(
     )
 }
 
-fn stats_overview(app: &MusicApp) -> impl IntoElement {
-    let track_count = app.tracks.len();
-    let album_count = app
-        .tracks
-        .iter()
-        .map(|t| t.album.as_str())
-        .collect::<HashSet<_>>()
-        .len();
-    let artist_count = app
-        .tracks
-        .iter()
-        .map(|t| t.artist.as_str())
-        .collect::<HashSet<_>>()
-        .len();
+fn stats_overview(catalog: &HomeLibrarySummary) -> impl IntoElement {
+    let track_count = catalog.track_count;
+    let album_count = catalog.album_count;
+    let artist_count = catalog.artist_count;
 
     div()
         .flex()
@@ -1475,27 +1502,16 @@ fn stat_badge(label: &'static str, val: String, icon: &'static str) -> impl Into
         )
 }
 
-fn featured_albums_section(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
-    let mut albums: [Option<&Track>; 8] = [None; 8];
-    let mut album_count = 0_usize;
-    for track in &app.tracks {
-        let duplicate = albums[..album_count]
-            .iter()
-            .flatten()
-            .any(|existing| existing.album.as_str() == track.album.as_str());
-        if duplicate {
-            continue;
-        }
-        albums[album_count] = Some(track);
-        album_count += 1;
-        if album_count == albums.len() {
-            break;
-        }
-    }
-
+fn featured_albums_section(
+    app: &MusicApp,
+    view: &WeakEntity<MusicApp>,
+    catalog: &HomeLibrarySummary,
+) -> impl IntoElement {
     let mut grid = div().flex().flex_wrap().gap_5();
-    for track in albums[..album_count].iter().flatten().copied() {
-        grid = grid.child(album_card(track, app, view));
+    for track_index in catalog.featured_indices.into_iter().flatten() {
+        if let Some(track) = app.tracks.get(track_index) {
+            grid = grid.child(album_card(track, app, view));
+        }
     }
 
     div()
@@ -1882,5 +1898,24 @@ fn current_time_greeting() -> &'static str {
         "下午好，来一段惬意音乐时光"
     } else {
         "晚上好，让音乐为你卸下疲惫"
+    }
+}
+
+#[cfg(test)]
+mod catalog_cache_tests {
+    use super::HomeLibrarySummary;
+
+    #[test]
+    fn catalog_summary_deduplicates_album_and_artist_in_one_pass() {
+        let stats = HomeLibrarySummary::from_catalog([
+            ("Album A", "Artist 1"),
+            ("Album A", "Artist 2"),
+            ("Album B", "Artist 1"),
+            ("Album C", "Artist 1"),
+        ]);
+        assert_eq!(stats.track_count, 4);
+        assert_eq!(stats.album_count, 3);
+        assert_eq!(stats.artist_count, 2);
+        assert_eq!(stats.featured_indices[0..4], [Some(0), Some(2), Some(3), None]);
     }
 }

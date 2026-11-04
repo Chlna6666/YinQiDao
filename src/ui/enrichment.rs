@@ -243,6 +243,7 @@ impl MusicApp {
                 this.enrichment_done.insert(track_id);
                 let mut artwork_changed = false;
                 let mut metadata_changed = false;
+                let mut catalog_metadata_changed = false;
                 match outcome {
                     Ok(outcome) => {
                         artwork_changed = outcome.artwork.is_some();
@@ -288,6 +289,14 @@ impl MusicApp {
                             updated_track = Some(track.clone());
                         }
 
+                        if metadata_changed && updated_track.is_some() {
+                            // HomePage caches album/artist aggregates by this revision.
+                            // Updating one track's metadata invalidates that cache once,
+                            // instead of rescanning the catalog on every GPUI frame.
+                            this.bump_ui_content_revision();
+                            catalog_metadata_changed = true;
+                        }
+
                         if let Some(track) = updated_track {
                             if let Some(current) = this
                                 .snapshot
@@ -329,7 +338,8 @@ impl MusicApp {
                     .as_ref()
                     .is_some_and(|track| track.id == track_id);
                 let root_visible_change = this.page == AppPage::Library
-                    || (current_track && (artwork_changed || metadata_changed));
+                    || (current_track && (artwork_changed || metadata_changed))
+                    || (this.page == AppPage::Home && catalog_metadata_changed);
                 if root_visible_change {
                     cx.notify();
                 }

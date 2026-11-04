@@ -453,6 +453,9 @@ struct HomePage {
     refresh_pending: bool,
     plugin_home_loading: HashMap<String, u64>,
     plugin_home_failed: HashMap<String, u64>,
+    /// Rebuild catalog aggregates only after a library content revision.
+    /// GPUI layout invalidation of other widgets must not rescan all tracks.
+    catalog_cache: Option<((u64, usize), home::HomeLibrarySummary)>,
     _subscription: Subscription,
     _ui_subscription: Subscription,
 }
@@ -496,6 +499,7 @@ impl HomePage {
             refresh_pending: false,
             plugin_home_loading: HashMap::new(),
             plugin_home_failed: HashMap::new(),
+            catalog_cache: None,
             _subscription: subscription,
             _ui_subscription: ui_subscription,
         }
@@ -571,7 +575,23 @@ impl Render for HomePage {
             return div().into_any_element();
         };
         let app = parent.read(cx);
-        home::render(app, &self.parent, cx)
+        let catalog_revision = (app.ui_content_revision, app.tracks.len());
+        if self
+            .catalog_cache
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != catalog_revision)
+        {
+            self.catalog_cache = Some((
+                catalog_revision,
+                home::HomeLibrarySummary::from_tracks(&app.tracks),
+            ));
+        }
+        let catalog = &self
+            .catalog_cache
+            .as_ref()
+            .expect("HomePage catalog cache must be populated")
+            .1;
+        home::render(app, &self.parent, cx, catalog)
     }
 }
 
@@ -5647,9 +5667,9 @@ fn sidebar(
         let mut collected_playlists = Vec::new();
         for (route, pl) in &app.online_user_playlists {
             if pl.editable {
-                created_playlists.push((route.clone(), pl.clone()));
+                created_playlists.push((route, pl));
             } else {
-                collected_playlists.push((route.clone(), pl.clone()));
+                collected_playlists.push((route, pl));
             }
         }
 
@@ -5679,9 +5699,9 @@ fn sidebar(
                             .active_online_playlist
                             .as_ref()
                             .is_some_and(|p| p.title == pl.name);
-                    let source = source_label(&route);
+                    let source = source_label(route);
                     group = group.child(render_playlist_sidebar_item(
-                        route, pl, is_active, source, cx,
+                        route.clone(), pl.clone(), is_active, source, cx,
                     ));
                 }
             }
@@ -5714,9 +5734,9 @@ fn sidebar(
                             .active_online_playlist
                             .as_ref()
                             .is_some_and(|p| p.title == pl.name);
-                    let source = source_label(&route);
+                    let source = source_label(route);
                     group = group.child(render_playlist_sidebar_item(
-                        route, pl, is_active, source, cx,
+                        route.clone(), pl.clone(), is_active, source, cx,
                     ));
                 }
             }
