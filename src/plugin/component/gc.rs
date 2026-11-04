@@ -46,13 +46,16 @@ pub struct PluginGcPolicy {
 
 impl Default for PluginGcPolicy {
     fn default() -> Self {
+        // 桌面播放器规模（个位数插件/账号）下按实际工作集收紧默认保留：
+        // warm Store/Instance 线性内存与 async 栈是主要滞留成本，60s 空闲即可
+        // 归还；编译 Component 留 5 分钟热缓存。全局上限按 4 route × 2 兜底。
         Self {
             sweep_interval: Duration::from_secs(30),
-            warm_instance_idle_ttl: Duration::from_secs(2 * 60),
-            compiled_component_idle_ttl: Duration::from_secs(10 * 60),
+            warm_instance_idle_ttl: Duration::from_secs(60),
+            compiled_component_idle_ttl: Duration::from_secs(5 * 60),
             max_warm_instances_per_route: 2,
-            max_warm_instances_total: 32,
-            max_compiled_components: 16,
+            max_warm_instances_total: 8,
+            max_compiled_components: 8,
             max_disk_cache_bytes: 512 * MIB,
             disk_cache_max_age: Duration::from_secs(30 * 24 * 60 * 60),
         }
