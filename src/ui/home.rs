@@ -41,7 +41,11 @@ pub(super) struct HomeLibrarySummary {
 
 impl HomeLibrarySummary {
     pub(super) fn from_tracks(tracks: &[Track]) -> Self {
-        Self::from_catalog(tracks.iter().map(|track| (track.album.as_str(), track.artist.as_str())))
+        Self::from_catalog(
+            tracks
+                .iter()
+                .map(|track| (track.album.as_str(), track.artist.as_str())),
+        )
     }
 
     fn from_catalog<'a>(catalog: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
@@ -1916,6 +1920,9 @@ mod catalog_cache_tests {
         assert_eq!(stats.track_count, 4);
         assert_eq!(stats.album_count, 3);
         assert_eq!(stats.artist_count, 2);
-        assert_eq!(stats.featured_indices[0..4], [Some(0), Some(2), Some(3), None]);
+        assert_eq!(
+            stats.featured_indices[0..4],
+            [Some(0), Some(2), Some(3), None]
+        );
     }
 }

@@ -5701,7 +5701,11 @@ fn sidebar(
                             .is_some_and(|p| p.title == pl.name);
                     let source = source_label(route);
                     group = group.child(render_playlist_sidebar_item(
-                        route.clone(), pl.clone(), is_active, source, cx,
+                        route.clone(),
+                        pl.clone(),
+                        is_active,
+                        source,
+                        cx,
                     ));
                 }
             }
@@ -5736,7 +5740,11 @@ fn sidebar(
                             .is_some_and(|p| p.title == pl.name);
                     let source = source_label(route);
                     group = group.child(render_playlist_sidebar_item(
-                        route.clone(), pl.clone(), is_active, source, cx,
+                        route.clone(),
+                        pl.clone(),
+                        is_active,
+                        source,
+                        cx,
                     ));
                 }
             }
