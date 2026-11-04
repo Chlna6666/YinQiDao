@@ -163,7 +163,10 @@ pub(super) fn render(
                                 .current_online_source_for_route(&queue.route)
                                 .map(|source| source.source_id.as_str());
                             let index = focus_source_index(
-                                queue.tracks.iter().map(|track| track.source.source_id.as_str()),
+                                queue
+                                    .tracks
+                                    .iter()
+                                    .map(|track| track.source.source_id.as_str()),
                                 playing_source,
                                 None,
                                 queue.current_index,

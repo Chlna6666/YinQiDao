@@ -1461,7 +1461,9 @@ impl MusicApp {
         let preferred_index = selected_queue.map_or(0, |queue| queue.current_index);
         let buffering = selected_queue.and_then(|_| self.online_track_buffering.as_deref());
         if let Some(index) = queue_drawer::focus_source_index(
-            data.tracks.iter().map(|track| track.source.source_id.as_str()),
+            data.tracks
+                .iter()
+                .map(|track| track.source.source_id.as_str()),
             source,
             buffering,
             preferred_index,
@@ -2983,7 +2985,10 @@ impl MusicApp {
         if index == queue.current_index {
             return;
         }
-        let queue = self.online_playlist_queue.as_mut().expect("queue checked above");
+        let queue = self
+            .online_playlist_queue
+            .as_mut()
+            .expect("queue checked above");
         queue.current_index = index;
         self.config.online_playlist_queue = Some(crate::settings::SavedOnlinePlaylistQueue {
             route: queue.route.clone(),

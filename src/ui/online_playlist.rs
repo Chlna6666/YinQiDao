@@ -308,19 +308,20 @@ fn render_songs_table(
             && queue.tracks.len() == data.tracks.len()
     });
     let preferred_index = selected_queue.map_or(0, |queue| queue.current_index);
-    let current_index = app.current_online_source_for_route(route).and_then(|source| {
-        tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, track)| track.source == *source)
-            .min_by_key(|(index, _)| index.abs_diff(preferred_index))
-            .map(|(index, _)| index)
-    });
+    let current_index = app
+        .current_online_source_for_route(route)
+        .and_then(|source| {
+            tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| track.source == *source)
+                .min_by_key(|(index, _)| index.abs_diff(preferred_index))
+                .map(|(index, _)| index)
+        });
     let buffering_index = selected_queue.and_then(|queue| {
         queue.tracks.get(queue.current_index).and_then(|selected| {
-            (app.online_track_buffering.as_deref()
-                == Some(selected.source.source_id.as_str()))
-            .then_some(queue.current_index)
+            (app.online_track_buffering.as_deref() == Some(selected.source.source_id.as_str()))
+                .then_some(queue.current_index)
         })
     });
 
