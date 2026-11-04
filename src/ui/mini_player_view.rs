@@ -162,9 +162,14 @@ pub(super) fn view(
     };
 
     view.update(cx, |view, cx| {
+        let metadata_changed = track.is_some_and(|track| {
+            view.track.title.as_ref() != track.title.as_str()
+                || view.track.artist.as_ref() != track.artist.as_str()
+        });
         let track_changed = view.key.track_id != key.track_id
             || view.key.artwork_ptr != key.artwork_ptr
-            || view.key.artwork_len != key.artwork_len;
+            || view.key.artwork_len != key.artwork_len
+            || metadata_changed;
         if track_changed {
             view.track = if let Some(track) = track {
                 MiniTrackRenderData {
@@ -180,7 +185,7 @@ pub(super) fn view(
                 }
             };
         }
-        if view.key != key {
+        if view.key != key || metadata_changed {
             view.key = key;
             view.slider_volume = slider_volume;
             view.icon_volume = icon_volume;

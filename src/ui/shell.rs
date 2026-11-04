@@ -269,6 +269,10 @@ pub struct MusicApp {
     pub(crate) queue_drawer_epoch: u64,
     /// Hovered artwork index; only cover enter/leave changes it (no per-frame polling).
     pub(crate) queue_drawer_hovered_cover: Option<usize>,
+    /// Dedicated persistent scroll positions for each queue source. The drawer
+    /// never resets these in Render; opening it applies a one-shot focus.
+    pub(crate) queue_drawer_online_scroll: gpui::UniformListScrollHandle,
+    pub(crate) queue_drawer_local_scroll: gpui::UniformListScrollHandle,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -340,6 +344,10 @@ pub struct MusicApp {
         ),
     >,
     pub(crate) online_track_buffering: Option<String>,
+    /// URL provenance for decoded remote artwork; TrackId alone is not enough
+    /// when a provider enriches/replaces metadata while a request is in flight.
+    online_artwork_loaded_urls: HashMap<TrackId, String>,
+    online_artwork_requests: HashMap<TrackId, String>,
     online_play_request_generation: u64,
     online_play_task: Option<gpui::Task<()>>,
     online_preload_generation: u64,
@@ -812,6 +820,7 @@ impl MusicApp {
         let mut initial_artworks = HashMap::new();
         let mut initial_blurred_artworks = HashMap::new();
         let mut initial_artwork_palettes = HashMap::new();
+        let mut initial_online_artwork_urls = HashMap::new();
 
         if let Some(track) = &initial_track
             && track.id < 0
@@ -850,6 +859,7 @@ impl MusicApp {
                     && let Ok(Some(artwork)) = cache.load_key(&url)
                 {
                     initial_artworks.insert(track.id, artwork.png.into());
+                    initial_online_artwork_urls.insert(track.id, url.clone());
                     initial_blurred_artworks.insert(track.id, artwork.blurred_png.into());
                     initial_artwork_palettes.insert(track.id, artwork.palette);
                 }
@@ -991,6 +1001,8 @@ impl MusicApp {
             ),
             queue_drawer_epoch: 0,
             queue_drawer_hovered_cover: None,
+            queue_drawer_online_scroll: gpui::UniformListScrollHandle::new(),
+            queue_drawer_local_scroll: gpui::UniformListScrollHandle::new(),
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -1042,6 +1054,8 @@ impl MusicApp {
             recent_plays: Vec::new(),
             online_playback_meta: initial_online_playback_meta,
             online_track_buffering: None,
+            online_artwork_loaded_urls: initial_online_artwork_urls,
+            online_artwork_requests: HashMap::new(),
             online_play_request_generation: 0,
             online_play_task: None,
             online_preload_generation: 0,
@@ -1352,10 +1366,48 @@ impl MusicApp {
         }
         self.queue_drawer_open = open;
         self.queue_drawer_hovered_cover = None;
+        if open {
+            self.focus_queue_drawer_on_current();
+        }
         if self.queue_drawer_motion.set_target(open) {
             self.queue_drawer_epoch = self.queue_drawer_epoch.wrapping_add(1);
         }
         cx.notify();
+    }
+
+    /// Focus the actual playing source when the drawer opens. The current
+    /// online index may already point at the next *pending* source while the
+    /// previous song is still audible, so resolve from the AudioEngine
+    /// snapshot first. Neither this method nor Render polls/forces scrolling.
+    fn focus_queue_drawer_on_current(&self) {
+        if let Some(queue) = self.online_playlist_queue.as_ref().filter(|q| !q.tracks.is_empty()) {
+            let source = self.snapshot.current_track.as_ref().and_then(|track| {
+                self.online_remote_tracks.get(&track.id)
+                    .filter(|(route, _)| route.provider_id == queue.route.provider_id)
+                    .map(|(_, remote)| remote.source.source_id.as_str())
+                    .or_else(|| {
+                        self.online_playback_meta.get(&track.id)
+                            .filter(|(route, _, _)| route.provider_id == queue.route.provider_id)
+                            .map(|(_, source, _)| source.source_id.as_str())
+                    })
+            });
+            if let Some(selected) = queue_drawer::focus_source_index(
+                queue.tracks.iter().map(|track| track.source.source_id.as_str()),
+                source,
+                self.online_track_buffering.as_deref(),
+                queue.current_index,
+            ) {
+                self.queue_drawer_online_scroll
+                    .scroll_to_item_strict(selected, gpui::ScrollStrategy::Center);
+            }
+        } else if let Some(current_id) = self
+            .snapshot.current_track.as_ref().map(|track| track.id)
+            .or(self.config.current_track)
+            && let Some(index) = self.config.queue.iter().position(|id| *id == current_id)
+        {
+            self.queue_drawer_local_scroll
+                .scroll_to_item_strict(index, gpui::ScrollStrategy::Center);
+        }
     }
 
     pub(crate) fn toggle_queue_drawer(&mut self, cx: &mut Context<Self>) {
@@ -2157,6 +2209,12 @@ impl MusicApp {
                     app_ui_events::AppUiEvent::PlaybackStateChanged(PlaybackState::Loading),
                 );
                 self.record_recent_play(&track);
+                if self.queue_drawer_open {
+                    if let Some(index) = self.config.queue.iter().position(|id| *id == track_id) {
+                        self.queue_drawer_local_scroll
+                            .scroll_to_item_strict(index, gpui::ScrollStrategy::Center);
+                    }
+                }
             } else {
                 self.recent_plays.retain(|id| *id != track_id);
                 self.recent_plays.insert(0, track_id);
@@ -2846,6 +2904,16 @@ impl MusicApp {
             self.config.online_playlist_queue = None;
         }
         self.save_config();
+        if self.queue_drawer_open {
+            if let Some(queue) = self.online_playlist_queue.as_ref() {
+                // The user deliberately switched tracks. Follow the target
+                // once; subsequent render frames must not reset manual scroll.
+                self.queue_drawer_online_scroll.scroll_to_item_strict(
+                    queue.current_index,
+                    gpui::ScrollStrategy::Center,
+                );
+            }
+        }
         // Replay previously materialized music immediately, even when it was
         // cached several tracks earlier or was reached via Previous.
         let preloaded = self.online_audio_cache.ready(&route, &source);
@@ -2987,8 +3055,26 @@ impl MusicApp {
         url: String,
         cx: &mut Context<Self>,
     ) {
-        if self.artworks.contains_key(&track_id) {
+        if self.artworks.contains_key(&track_id)
+            && self.online_artwork_loaded_urls.get(&track_id) == Some(&url)
+        {
             return;
+        }
+        if self.online_artwork_requests.get(&track_id) == Some(&url) {
+            // One in-flight URL per track, not one task per render.
+            return;
+        }
+        self.online_artwork_requests.insert(track_id, url.clone());
+        if self.artworks.remove(&track_id).is_some() {
+            // Never display a previous cover for this ID while a replacement
+            // URL is loading. The UI should show its neutral artwork fallback.
+            self.blurred_artworks.remove(&track_id);
+            self.artwork_palettes.remove(&track_id);
+            self.artwork_ready.remove(&track_id);
+            self.online_artwork_loaded_urls.remove(&track_id);
+            if self.snapshot.current_track.as_ref().is_some_and(|track| track.id == track_id) {
+                self.sync_track_visual_surfaces(cx);
+            }
         }
         let artwork_cache = self.artwork_cache.clone();
         let target_url = url.clone();
@@ -3076,12 +3162,38 @@ impl MusicApp {
         });
 
         cx.spawn(async move |this, cx| -> Result<()> {
-            if let Ok((png, blurred, pal)) = task.await {
-                let _ = this.update(cx, |app, cx| {
-                    app.set_artwork_parts(track_id, png, Some(blurred), Some(pal));
-                    cx.notify();
-                });
-            }
+            let result = task.await;
+            let _ = this.update(cx, |app, cx| {
+                // A rapid Next/Previous or provider metadata refresh can
+                // finish an older HTTP request after the new song is selected.
+                // An immutable TrackId must NEVER authorize stale URL bytes.
+                if app.online_artwork_requests.get(&track_id) != Some(&url) {
+                    return;
+                }
+                app.online_artwork_requests.remove(&track_id);
+                let expected = app.online_playback_meta
+                    .get(&track_id)
+                    .and_then(|(_, _, cover)| cover.as_deref())
+                    .or_else(|| app.online_remote_tracks.get(&track_id)
+                        .and_then(|(_, remote)| remote.cover_url.as_deref()));
+                if expected != Some(url.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok((png, blurred, pal)) => {
+                        app.set_artwork_parts(track_id, png, Some(blurred), Some(pal));
+                        app.online_artwork_loaded_urls.insert(track_id, url.clone());
+                        if app.snapshot.current_track.as_ref().is_some_and(|track| track.id == track_id) {
+                            app.sync_track_visual_surfaces(cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(track_id, %error, "Remote artwork fetch failed");
+                    }
+                }
+            });
             Ok(())
         })
         .detach();
@@ -4475,6 +4587,9 @@ impl MusicApp {
         // reset_progress_for_track_switch. Cancel any stage seeking gesture.
         if track_changed {
             self.seeking = false;
+            if self.queue_drawer_open {
+                self.focus_queue_drawer_on_current();
+            }
         }
         let playback_state_changed = previous_state != self.snapshot.state;
         let duration_changed = previous_duration_ms != self.snapshot.duration_ms;

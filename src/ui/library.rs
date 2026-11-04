@@ -1638,6 +1638,7 @@ pub(super) fn queue_drawer_items(
                             .unwrap_or_default()
                     },
                 )
+                .track_scroll(app.queue_drawer_local_scroll.clone())
                 .size_full(),
             )
             .into_any_element()

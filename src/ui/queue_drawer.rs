@@ -29,6 +29,32 @@ fn drawer_width(viewport_width: f32) -> f32 {
         .max(1.0)
 }
 
+/// Resolve the initial drawer position from actual transport identity first,
+/// then the selected source being prepared, and finally persisted list position.
+/// Only called for opening/explicit transport changes, never on each render.
+pub(super) fn focus_source_index<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    playing_source: Option<&str>,
+    buffering_source: Option<&str>,
+    fallback_index: usize,
+) -> Option<usize> {
+    let mut count = 0;
+    let mut playing_index = None;
+    let mut buffering_index = None;
+    for (index, id) in ids.into_iter().enumerate() {
+        count += 1;
+        if playing_source == Some(id) {
+            playing_index = Some(index);
+        }
+        if buffering_source == Some(id) {
+            buffering_index = Some(index);
+        }
+    }
+    playing_index
+        .or(buffering_index)
+        .or_else(|| (count > 0).then_some(fallback_index.min(count.saturating_sub(1))))
+}
+
 /// An absolute right-hand sheet, not an AppPage. Geometry stays fixed while
 /// the compositor translates the panel and fades its scrim with one epoch.
 pub(super) fn render(
@@ -120,7 +146,9 @@ pub(super) fn render(
                 .gap_3()
                 .children(
                     online_queue
-                        .and_then(|queue| queue.tracks.first())
+                        // The former header always used the FIRST song's cover.
+                        // An arbitrary first track is not a playlist cover.
+                        .and_then(|queue| queue.tracks.get(queue.current_index))
                         .map(|track| {
                             image_cache::render_remote_cover(
                                 track.cover_url.as_deref(),
@@ -430,6 +458,7 @@ fn online_queue_items(
                     rows
                 },
             )
+            .track_scroll(app.queue_drawer_online_scroll.clone())
             .size_full(),
         )
         .into_any_element()
@@ -438,6 +467,23 @@ fn online_queue_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawer_focus_prioritizes_playing_source_and_clamps_restored_position() {
+        assert_eq!(
+            focus_source_index(["first", "second", "third"], Some("second"), Some("third"), 0),
+            Some(1)
+        );
+        assert_eq!(
+            focus_source_index(["first", "second", "third"], None, Some("third"), 0),
+            Some(2)
+        );
+        assert_eq!(
+            focus_source_index(["first", "second", "third"], Some("gone"), None, 99),
+            Some(2)
+        );
+        assert_eq!(focus_source_index([], None, None, 0), None);
+    }
 
     #[test]
     fn drawer_stays_within_small_and_large_windows() {
