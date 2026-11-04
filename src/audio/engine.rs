@@ -1590,7 +1590,9 @@ impl AudioWorker {
             // block. The previous sample-by-sample try_push path synchronized
             // thousands of times and was vulnerable to OS scheduler stalls.
             let end = (offset + PCM_PRODUCER_BATCH_SAMPLES).min(self.processed_samples.len());
-            let written = self.producer.push_slice(&self.processed_samples[offset..end]);
+            let written = self
+                .producer
+                .push_slice(&self.processed_samples[offset..end]);
             if written > 0 {
                 offset += written;
             } else {
@@ -2195,19 +2197,23 @@ fn fill_f32(
         (samples / 2) as u64
     } else {
         data.fill(0.0);
-        consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
-            let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
-            for (index, sample) in frame.iter_mut().enumerate() {
-                let value = if channels == 1 {
-                    (left + right) * 0.5
-                } else if index % 2 == 0 {
-                    left
-                } else {
-                    right
-                };
-                *sample = value * gain;
-            }
-        })
+        consume_pcm_frames(
+            consumer,
+            data.len() / channels,
+            |frame_index, left, right| {
+                let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
+                for (index, sample) in frame.iter_mut().enumerate() {
+                    let value = if channels == 1 {
+                        (left + right) * 0.5
+                    } else if index % 2 == 0 {
+                        left
+                    } else {
+                        right
+                    };
+                    *sample = value * gain;
+                }
+            },
+        )
     };
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
@@ -2233,24 +2239,30 @@ fn fill_i16(
 
     let channels = channels.max(1);
     data.fill(0);
-    let consumed_frames = consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
-        let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
-        for (index, sample) in frame.iter_mut().enumerate() {
-            let value = if channels == 1 {
-                (left + right) * 0.5
-            } else if index % 2 == 0 {
-                left
-            } else {
-                right
-            };
-            let quantized = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            *sample = if gain == 1.0 {
-                quantized
-            } else {
-                ((quantized as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32)) as i16
-            };
-        }
-    });
+    let consumed_frames = consume_pcm_frames(
+        consumer,
+        data.len() / channels,
+        |frame_index, left, right| {
+            let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
+            for (index, sample) in frame.iter_mut().enumerate() {
+                let value = if channels == 1 {
+                    (left + right) * 0.5
+                } else if index % 2 == 0 {
+                    left
+                } else {
+                    right
+                };
+                let quantized = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                *sample = if gain == 1.0 {
+                    quantized
+                } else {
+                    ((quantized as f32 * gain)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32)) as i16
+                };
+            }
+        },
+    );
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
@@ -2276,25 +2288,31 @@ fn fill_u16(
     const CENTER: f32 = 32768.0;
     let channels = channels.max(1);
     data.fill(32768);
-    let consumed_frames = consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
-        let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
-        for (index, sample) in frame.iter_mut().enumerate() {
-            let value = if channels == 1 {
-                (left + right) * 0.5
-            } else if index % 2 == 0 {
-                left
-            } else {
-                right
-            };
-            let quantized = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
-            *sample = if gain == 1.0 {
-                quantized
-            } else {
-                let centered = quantized as f32 - CENTER;
-                (CENTER + centered * gain).round().clamp(0.0, u16::MAX as f32) as u16
-            };
-        }
-    });
+    let consumed_frames = consume_pcm_frames(
+        consumer,
+        data.len() / channels,
+        |frame_index, left, right| {
+            let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
+            for (index, sample) in frame.iter_mut().enumerate() {
+                let value = if channels == 1 {
+                    (left + right) * 0.5
+                } else if index % 2 == 0 {
+                    left
+                } else {
+                    right
+                };
+                let quantized = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+                *sample = if gain == 1.0 {
+                    quantized
+                } else {
+                    let centered = quantized as f32 - CENTER;
+                    (CENTER + centered * gain)
+                        .round()
+                        .clamp(0.0, u16::MAX as f32) as u16
+                };
+            }
+        },
+    );
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }

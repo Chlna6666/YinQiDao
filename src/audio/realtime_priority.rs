@@ -9,8 +9,10 @@ mod platform {
 
     #[link(name = "avrt")]
     unsafe extern "system" {
-        fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32)
-            -> *mut c_void;
+        fn AvSetMmThreadCharacteristicsW(
+            task_name: *const u16,
+            task_index: *mut u32,
+        ) -> *mut c_void;
         fn AvRevertMmThreadCharacteristics(handle: *mut c_void) -> i32;
     }
 
@@ -20,15 +22,20 @@ mod platform {
 
     impl AudioDecodePriority {
         pub(super) fn enter() -> Self {
-            const AUDIO_TASK: [u16; 6] = [b'A' as u16, b'u' as u16, b'd' as u16,
-                b'i' as u16, b'o' as u16, 0];
+            const AUDIO_TASK: [u16; 6] = [
+                b'A' as u16,
+                b'u' as u16,
+                b'd' as u16,
+                b'i' as u16,
+                b'o' as u16,
+                0,
+            ];
             let mut task_index = 0;
             // SAFETY: a valid, NUL-terminated UTF-16 string and a writable
             // DWORD are passed. The returned task handle is released on this
             // same worker thread, even if playback exits through an error.
-            let task_handle = unsafe {
-                AvSetMmThreadCharacteristicsW(AUDIO_TASK.as_ptr(), &mut task_index)
-            };
+            let task_handle =
+                unsafe { AvSetMmThreadCharacteristicsW(AUDIO_TASK.as_ptr(), &mut task_index) };
             if task_handle.is_null() {
                 tracing::debug!("Audio MMCSS task unavailable; using normal thread priority");
             }
