@@ -2916,7 +2916,10 @@ mod tests {
             sustained_glyph_transition_frame_delay(&word, &word, 3_100),
             Some(SUSTAINED_TRANSITION_FRAME_INTERVAL),
         );
-        assert_eq!(sustained_glyph_transition_frame_delay(&word, &word, 3_500), None);
+        assert_eq!(
+            sustained_glyph_transition_frame_delay(&word, &word, 3_500),
+            None
+        );
     }
 
     #[test]
