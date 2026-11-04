@@ -1,5 +1,54 @@
 use gpui::{App, PerformanceMetricsSnapshot, Timer, performance_metrics_snapshot};
-use std::time::Duration;
+use std::{
+    sync::{
+        LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+#[derive(Default)]
+struct AppCacheSample {
+    remote_tracks: AtomicUsize,
+    remote_playback_meta: AtomicUsize,
+    remote_sources: AtomicUsize,
+    artwork_bytes_entries: AtomicUsize,
+    lyrics_entries: AtomicUsize,
+    artwork_ready_ids: AtomicUsize,
+    lyric_checked_ids: AtomicUsize,
+}
+
+static APP_CACHE_SAMPLE: LazyLock<AppCacheSample> = LazyLock::new(AppCacheSample::default);
+
+pub(crate) fn record_app_cache_sample(
+    remote_tracks: usize,
+    remote_playback_meta: usize,
+    remote_sources: usize,
+    artwork_bytes_entries: usize,
+    lyrics_entries: usize,
+    artwork_ready_ids: usize,
+    lyric_checked_ids: usize,
+) {
+    if !enabled() {
+        return;
+    }
+    let sample = &*APP_CACHE_SAMPLE;
+    sample.remote_tracks.store(remote_tracks, Ordering::Relaxed);
+    sample
+        .remote_playback_meta
+        .store(remote_playback_meta, Ordering::Relaxed);
+    sample.remote_sources.store(remote_sources, Ordering::Relaxed);
+    sample
+        .artwork_bytes_entries
+        .store(artwork_bytes_entries, Ordering::Relaxed);
+    sample.lyrics_entries.store(lyrics_entries, Ordering::Relaxed);
+    sample
+        .artwork_ready_ids
+        .store(artwork_ready_ids, Ordering::Relaxed);
+    sample
+        .lyric_checked_ids
+        .store(lyric_checked_ids, Ordering::Relaxed);
+}
 
 const LOG_INTERVAL: Duration = Duration::from_secs(5);
 const ENV_NAME: &str = "YINQIDAO_GPUI_DIAGNOSTICS";
@@ -55,7 +104,7 @@ fn duration_micros(duration: Option<Duration>) -> u128 {
     duration.map_or(0, |duration| duration.as_micros())
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     std::env::var(ENV_NAME).ok().is_some_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -132,6 +181,19 @@ fn emit_snapshot(previous: &PerformanceMetricsSnapshot, current: &PerformanceMet
         atlas_upload_bytes = current.atlas_upload_bytes,
         animation_bytes = current.animation_upload_bytes,
         "GPUI scene/upload diagnostics"
+    );
+
+    let caches = &*APP_CACHE_SAMPLE;
+    tracing::info!(
+        target: "yinqidao::gpui_perf",
+        remote_track_metadata = caches.remote_tracks.load(Ordering::Relaxed),
+        remote_playback_provenance = caches.remote_playback_meta.load(Ordering::Relaxed),
+        remote_source_records = caches.remote_sources.load(Ordering::Relaxed),
+        artwork_memory_entries = caches.artwork_bytes_entries.load(Ordering::Relaxed),
+        lyrics_memory_entries = caches.lyrics_entries.load(Ordering::Relaxed),
+        artwork_processed_ids = caches.artwork_ready_ids.load(Ordering::Relaxed),
+        lyric_checked_ids = caches.lyric_checked_ids.load(Ordering::Relaxed),
+        "YinQiDao long-session cache telemetry"
     );
 
     tracing::info!(

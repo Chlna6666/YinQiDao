@@ -38,7 +38,7 @@ pub(super) fn focus_source_index<'a>(
     buffering_source: Option<&str>,
     fallback_index: usize,
 ) -> Option<usize> {
-    let mut count = 0;
+    let mut count: usize = 0;
     let mut playing_index = None;
     let mut buffering_index = None;
     for (index, id) in ids.into_iter().enumerate() {

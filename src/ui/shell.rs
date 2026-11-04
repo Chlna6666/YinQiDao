@@ -46,6 +46,11 @@ const MAX_ARTWORK_RELOAD_QUEUE: usize = 128;
 const ARTWORK_LOAD_BATCH: usize = 40;
 /// online_playlist_cache 的条目上限（每条持有完整歌单视图数据）。
 const MAX_ONLINE_PLAYLIST_CACHE: usize = 16;
+// Remote playback creates a fresh negative TrackId for each activation. Without
+// eviction the metadata, artwork and lyric tracking sets grow for the whole
+// process lifetime despite the bounded stream and image byte caches.
+const MAX_ONLINE_TRACK_METADATA: usize = 192;
+const ONLINE_TRACK_METADATA_TRIM_TARGET: usize = 128;
 
 /// 渲染路径（可能只有 `&MusicApp`）发现的封面缺失记录；由
 /// `MusicApp::drain_artwork_wanted` 在下一轮渲染收口为补载任务。
@@ -2344,6 +2349,90 @@ impl MusicApp {
         self.notify_current_content_surface(cx);
     }
 
+    /// Evict metadata from old, unreferenced remote activations. Preserve the
+    /// audible/pending song, user queue and recent-play history; their negative
+    /// IDs are still referenced by interaction/transport surfaces.
+    fn prune_online_track_metadata(&mut self) {
+        let count = self
+            .online_track_cache
+            .len()
+            .max(self.online_playback_meta.len())
+            .max(self.online_remote_tracks.len());
+        if count <= MAX_ONLINE_TRACK_METADATA {
+            return;
+        }
+
+        let mut keep: HashSet<TrackId> = self
+            .config
+            .queue
+            .iter()
+            .copied()
+            .filter(|id| *id < 0)
+            .collect();
+        keep.extend(self.recent_plays.iter().copied().filter(|id| *id < 0));
+        keep.extend(
+            self.snapshot
+                .current_track
+                .as_ref()
+                .map(|track| track.id)
+                .filter(|id| *id < 0),
+        );
+        keep.extend(self.pending_track_ack_id.filter(|id| *id < 0));
+        keep.extend(self.last_polled_track_id.filter(|id| *id < 0));
+
+        // Allocator hands out descending negative IDs; process oldest first.
+        let mut candidates: Vec<TrackId> = self
+            .online_track_cache
+            .keys()
+            .chain(self.online_playback_meta.keys())
+            .chain(self.online_remote_tracks.keys())
+            .copied()
+            .filter(|id| *id < 0)
+            .collect();
+        candidates.sort_unstable_by(|a, b| b.cmp(a));
+        candidates.dedup();
+
+        let mut excess = candidates.len().saturating_sub(ONLINE_TRACK_METADATA_TRIM_TARGET);
+        let mut removed = 0;
+        for id in candidates {
+            if excess == 0 {
+                break;
+            }
+            if keep.contains(&id) {
+                continue;
+            }
+            self.online_track_cache.remove(&id);
+            self.online_playback_meta.remove(&id);
+            self.online_remote_tracks.remove(&id);
+            self.online_artwork_loaded_urls.remove(&id);
+            // In-flight requests retain their own URL/provenance; a late reply
+            // cannot resurrect an evicted song's artwork.
+            self.online_artwork_requests.remove(&id);
+            self.artworks.remove(&id);
+            self.blurred_artworks.remove(&id);
+            self.artwork_palettes.remove(&id);
+            self.artwork_ready.remove(&id);
+            self.artwork_missing.remove(&id);
+            self.artwork_loading.remove(&id);
+            self.enrichment_done.remove(&id);
+            self.enrichment_loading.remove(&id);
+            self.artwork_online_fallback_requested.remove(&id);
+            self.lyrics.remove(&id);
+            self.lyrics_checked.remove(&id);
+            self.artwork_order.retain(|candidate| *candidate != id);
+            self.lyrics_order.retain(|candidate| *candidate != id);
+            excess -= 1;
+            removed += 1;
+        }
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                metadata_entries = self.online_playback_meta.len(),
+                "已驱逐不再引用的旧在线播放元数据"
+            );
+        }
+    }
+
     pub(crate) fn ensure_track_for_remote(
         &mut self,
         route: &crate::plugin::abi::PluginRoute,
@@ -2397,6 +2486,7 @@ impl MusicApp {
         self.online_track_cache.insert(track_id, track.clone());
         self.online_remote_tracks
             .insert(track_id, (route.clone(), remote.clone()));
+        self.prune_online_track_metadata();
 
         if let Some(url) = &remote.cover_url {
             crate::ui::image_cache::fetch_detached(url);
@@ -3110,6 +3200,7 @@ impl MusicApp {
                     .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
                 self.online_remote_tracks
                     .insert(track_id, (route.clone(), remote.clone()));
+                self.prune_online_track_metadata();
                 self.status = format!("正在播放在线音频：{title} · {artist}");
                 if let Some(url) = cover_url {
                     self.fetch_online_artwork_for_track(track_id, url, cx);
@@ -3166,6 +3257,7 @@ impl MusicApp {
                             .insert(track_id, (route.clone(), source.clone(), cover_url.clone()));
                         app.online_remote_tracks
                             .insert(track_id, (route.clone(), remote_for_cache.clone()));
+                        app.prune_online_track_metadata();
                         app.status = format!("正在播放在线音频：{title} · {artist}");
 
                         if let Some(url) = cover_url.clone() {
@@ -4926,6 +5018,18 @@ impl MusicApp {
         self.flush_config_save_if_due();
         self.update_system_media_async(cx);
         self.ensure_system_media_async(cx);
+
+        // O(1) counters collected on the existing 2s maintenance turn. The
+        // diagnostic logger samples atomics every 5s and never borrows MusicApp.
+        crate::gpui_diagnostics::record_app_cache_sample(
+            self.online_track_cache.len(),
+            self.online_playback_meta.len(),
+            self.online_remote_tracks.len(),
+            self.artworks.len(),
+            self.lyrics.len(),
+            self.artwork_ready.len(),
+            self.lyrics_checked.len(),
+        );
     }
 
     fn ensure_system_media_async(&mut self, cx: &mut Context<MusicApp>) {
@@ -7054,6 +7158,74 @@ mod artwork_memory_tests {
         assert!(artworks.contains_key(&0), "正在播放的封面不应被驱逐");
         assert_eq!(artworks.len(), 1);
         assert!(order.contains(&0));
+    }
+
+    #[test]
+    fn remote_history_pruning_releases_old_ids_without_touching_playback() {
+        let mut app = MusicApp::new(false);
+        let route = crate::plugin::abi::PluginRoute {
+            plugin_id: "provider-plugin".into(),
+            provider_id: "provider".into(),
+            account_id: "account".into(),
+            priority: 0,
+            is_default: true,
+        };
+
+        for sequence in 1..=(MAX_ONLINE_TRACK_METADATA + 30) {
+            let track_id = -(sequence as TrackId);
+            let source = crate::plugin::abi::SourceTrackRef {
+                provider_id: route.provider_id.clone(),
+                source_id: sequence.to_string(),
+            };
+            let remote = crate::plugin::abi::RemoteTrack {
+                source: source.clone(),
+                title: format!("Track {sequence}"),
+                ..Default::default()
+            };
+            let track = Track::new(crate::model::TrackData {
+                id: track_id,
+                path: PathBuf::from(format!("remote://{sequence}")),
+                title: remote.title.clone(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                year: None,
+                genre: None,
+                duration_ms: 60_000,
+                codec: "remote".into(),
+                sample_rate: 44_100,
+                channels: 2,
+                artwork_key: None,
+            });
+            app.online_track_cache.insert(track_id, track);
+            app.online_playback_meta
+                .insert(track_id, (route.clone(), source, None));
+            app.online_remote_tracks
+                .insert(track_id, (route.clone(), remote));
+            app.lyrics_checked.insert(track_id);
+            app.artwork_ready.insert(track_id);
+        }
+
+        app.snapshot.current_track = app.online_track_cache.get(&-1).cloned();
+        app.config.queue = Arc::new(vec![-2]);
+        app.pending_track_ack_id = Some(-3);
+        app.recent_plays = vec![-4];
+        app.last_polled_track_id = Some(-5);
+        app.prune_online_track_metadata();
+
+        for id in [-1, -2, -3, -4, -5] {
+            assert!(app.online_track_cache.contains_key(&id));
+            assert!(app.online_playback_meta.contains_key(&id));
+            assert!(app.online_remote_tracks.contains_key(&id));
+        }
+        assert!(app.online_track_cache.len() <= ONLINE_TRACK_METADATA_TRIM_TARGET + 5);
+        assert!(!app.online_track_cache.contains_key(&-6));
+        assert!(!app.lyrics_checked.contains(&-6));
+        assert!(!app.artwork_ready.contains(&-6));
+
+        // Further pruning of a bounded working set is a no-op.
+        let remaining = app.online_playback_meta.len();
+        app.prune_online_track_metadata();
+        assert_eq!(app.online_playback_meta.len(), remaining);
     }
 
     #[test]

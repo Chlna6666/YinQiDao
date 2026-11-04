@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gfx_core::{
@@ -116,9 +116,26 @@ struct Program {
     pipeline: RenderPipelineId,
 }
 
+// Keep a stable slot for each mounted effect while allowing removed popup/views
+// to return their GPU allocations without waiting for the entire window to close.
 struct UniformSlot {
     buffer: BufferId,
     group: BindGroupId,
+    last_used: Instant,
+}
+
+const MAX_EFFECT_UNIFORM_SLOTS: usize = 16;
+const EFFECT_SLOT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+const EFFECT_SLOT_IDLE_TTL: Duration = Duration::from_secs(30);
+const EFFECT_SLOT_OVERFLOW_IDLE: Duration = Duration::from_secs(2);
+
+fn should_evict_effect_slot(
+    last_used: Instant,
+    now: Instant,
+    over_budget: bool,
+) -> bool {
+    let idle = now.saturating_duration_since(last_used);
+    idle >= EFFECT_SLOT_IDLE_TTL || (over_budget && idle >= EFFECT_SLOT_OVERFLOW_IDLE)
 }
 
 struct EffectRenderer {
@@ -129,6 +146,7 @@ struct EffectRenderer {
     viewport: gfx_core::Extent2d,
     programs: HashMap<ShaderKind, Program>,
     slots: HashMap<(ShaderKind, u64), UniformSlot>,
+    last_slot_sweep: Option<Instant>,
 }
 
 fn embedded_shader(
@@ -186,6 +204,7 @@ impl EffectRenderer {
             viewport: context.viewport(),
             programs: HashMap::new(),
             slots: HashMap::new(),
+            last_slot_sweep: None,
         })
     }
 
@@ -269,14 +288,53 @@ impl EffectRenderer {
         Ok(pipeline)
     }
 
+    /// Sweep only at coarse intervals, at the start of rendering an effect.
+    /// The 2-second overflow grace prevents destroying bindings still used by
+    /// the current/in-flight GPU frame.
+    fn sweep_uniform_slots(
+        &mut self,
+        now: Instant,
+        device: &mut dyn ExtensionDevice,
+    ) -> gpui::Result<()> {
+        if self.last_slot_sweep.is_some_and(|last| {
+            now.saturating_duration_since(last) < EFFECT_SLOT_SWEEP_INTERVAL
+        }) {
+            return Ok(());
+        }
+        self.last_slot_sweep = Some(now);
+
+        let mut candidates: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(key, slot)| (*key, slot.last_used))
+            .collect();
+        candidates.sort_unstable_by_key(|(_, last_used)| *last_used);
+        let over_budget = candidates.len().saturating_sub(MAX_EFFECT_UNIFORM_SLOTS);
+        for (position, (key, last_used)) in candidates.into_iter().enumerate() {
+            if !should_evict_effect_slot(last_used, now, position < over_budget) {
+                continue;
+            }
+            if let Some(slot) = self.slots.remove(&key) {
+                device.destroy_bind_group(slot.group)?;
+                device.destroy_buffer(slot.buffer)?;
+            }
+        }
+        Ok(())
+    }
+
     fn uniform_slot(
         &mut self,
         id: (ShaderKind, u64),
+        now: Instant,
         device: &mut dyn ExtensionDevice,
     ) -> gpui::Result<&UniformSlot> {
         use std::collections::hash_map::Entry;
         match self.slots.entry(id) {
-            Entry::Occupied(slot) => Ok(slot.into_mut()),
+            Entry::Occupied(slot) => {
+                let slot = slot.into_mut();
+                slot.last_used = now;
+                Ok(slot)
+            }
             Entry::Vacant(slot) => {
                 // Constant-buffer size is deliberately rounded to 256 bytes for D3D.
                 const BUFFER_BYTES: u64 = 256;
@@ -305,7 +363,7 @@ impl EffectRenderer {
                         return Err(error.into());
                     }
                 };
-                Ok(slot.insert(UniformSlot { buffer, group }))
+                Ok(slot.insert(UniformSlot { buffer, group, last_used: now }))
             }
         }
     }
@@ -356,7 +414,9 @@ impl RendererExtensionRenderer for EffectRenderer {
             .downcast_ref::<EffectSnapshot>()
             .ok_or_else(|| anyhow::anyhow!("unexpected native shader effect type"))?;
         let pipeline = self.ensure_pipeline(input.kind, device, &context)?;
-        let slot = self.uniform_slot((input.kind, input.id), device)?;
+        let now = context.frame_time();
+        self.sweep_uniform_slots(now, device)?;
+        let slot = self.uniform_slot((input.kind, input.id), now, device)?;
         device.write_buffer(slot.buffer, 0, &Self::write_parameters(input, &context))?;
         steps.push(RenderCommand::Draw(DrawCommand {
             pipeline,
@@ -388,6 +448,33 @@ impl RendererExtensionRenderer for EffectRenderer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn shader_uniform_slots_expire_without_eviction_of_live_effects() {
+        let now = Instant::now();
+        assert!(!should_evict_effect_slot(
+            now - Duration::from_secs(1),
+            now,
+            true
+        ));
+        assert!(should_evict_effect_slot(
+            now - Duration::from_secs(3),
+            now,
+            true
+        ));
+        assert!(!should_evict_effect_slot(
+            now - Duration::from_secs(3),
+            now,
+            false
+        ));
+        assert!(should_evict_effect_slot(
+            now - Duration::from_secs(31),
+            now,
+            false
+        ));
+    }
+
     #[test]
     fn uniform_packet_is_exactly_96_bytes() {
         assert_eq!(std::mem::size_of::<[[f32; 4]; 4]>(), 64);
