@@ -78,6 +78,51 @@ fn pcm_wav() -> Vec<u8> {
 }
 
 #[test]
+fn pcm_ring_capacity_has_bounded_cpu_stall_headroom() {
+    // PCM ring grows from the previous 125ms to 240ms while remaining tiny in
+    // memory (46_080 samples = ~180KiB at 96kHz). This is decoded PCM, not an
+    // artificial delay introduced into the system audio output stream.
+    assert_eq!(pcm_ring_capacity(48_000), 23_040);
+    assert_eq!(pcm_ring_capacity(8_000), 4_096);
+    assert_eq!(pcm_ring_capacity(96_000), 46_080);
+}
+
+#[test]
+fn output_underrun_telemetry_is_lock_free_and_not_counted_while_paused() {
+    let ring = HeapRb::<f32>::new(16);
+    let (mut prod, cons) = ring.split();
+    prod.push_slice(&[0.1, -0.1, 0.2, -0.2]);
+    let flush = AtomicBool::new(false);
+    let paused = AtomicBool::new(false);
+    let audible = AtomicU64::new(2);
+    let underruns = AtomicU64::new(0);
+    observe_output_underrun(12, 2, &cons, &flush, &paused, &audible, &underruns);
+    assert_eq!(underruns.load(Ordering::Relaxed), 4);
+    paused.store(true, Ordering::Release);
+    observe_output_underrun(12, 2, &cons, &flush, &paused, &audible, &underruns);
+    assert_eq!(underruns.load(Ordering::Relaxed), 4);
+    paused.store(false, Ordering::Release);
+    flush.store(true, Ordering::Release);
+    observe_output_underrun(12, 2, &cons, &flush, &paused, &audible, &underruns);
+    assert_eq!(underruns.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn bulk_pcm_read_keeps_channels_aligned_and_leaves_remainder_silent() {
+    let ring = HeapRb::<f32>::new(16);
+    let (mut prod, mut cons) = ring.split();
+    assert_eq!(prod.push_slice(&[0.1, -0.1, 0.2, -0.2]), 4);
+    let flush = AtomicBool::new(false);
+    let paused = AtomicBool::new(false);
+    let audible = AtomicU64::new(0);
+    let mut output = [9.0f32; 8];
+    fill_f32(&mut output, 2, &mut cons, &flush, &paused, &audible, 1.0);
+    assert_eq!(&output[..4], &[0.1, -0.1, 0.2, -0.2]);
+    assert_eq!(&output[4..], &[0.0; 4]);
+    assert_eq!(audible.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn output_converters_fill_silence_without_allocating() {
     let ring = HeapRb::<f32>::new(16);
     let (_, mut consumer) = ring.split();

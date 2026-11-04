@@ -11,6 +11,7 @@ mod fingerprint;
 mod head_tracking;
 mod head_tracking_opentrack;
 pub(crate) mod progressive;
+mod realtime_priority;
 mod smart_profile;
 mod spatial_activity;
 mod spatial_debug;

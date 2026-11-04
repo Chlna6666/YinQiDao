@@ -631,6 +631,8 @@ fn run_bridge(
     initial_volume: f32,
 ) {
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
+    let mut last_underrun_report = Instant::now();
+    let mut last_underrun_frames = engine.output_underrun_frames();
     let mut last_transient_sweep = Instant::now();
     let mut transport_fade = TransportFade::new(initial_volume);
     // Online enrichment updates the registry without touching decoder transport. The blocking
@@ -702,6 +704,23 @@ fn run_bridge(
                 }
                 _ => refresh_snapshot = true,
             }
+        }
+
+        // Underflow is measured by CPAL using atomics and reported outside
+        // the realtime callback. This distinguishes CPU scheduling starvation
+        // from decoder/network buffering and leaves GUI animation untouched.
+        if last_underrun_report.elapsed() >= Duration::from_secs(5) {
+            let total = engine.output_underrun_frames();
+            let missed = total.saturating_sub(last_underrun_frames);
+            if missed > 0 {
+                tracing::warn!(
+                    missed_pcm_frames = missed,
+                    total_missed_pcm_frames = total,
+                    "Audio output underrun: decoder scheduling/PCM supply fell behind CPAL"
+                );
+            }
+            last_underrun_frames = total;
+            last_underrun_report = Instant::now();
         }
 
         if last_progress.elapsed() >= PROGRESS_INTERVAL {

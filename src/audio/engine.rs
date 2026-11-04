@@ -40,6 +40,19 @@ use super::{
 pub type DeviceId = String;
 
 const PRELOAD_DEBOUNCE: Duration = Duration::from_millis(40);
+/// Decode-ahead budget for scheduling stalls; this is not a CPAL device buffer
+/// and does not add an entire buffer period to user-initiated seeks.
+const PCM_RING_BUFFER_MS: usize = 240;
+/// Poll transport commands after a bounded batch of 512 stereo frames.
+const PCM_PRODUCER_BATCH_SAMPLES: usize = 1024;
+/// A fixed-size callback-local scratch, never heap allocate on the audio thread.
+const PCM_CALLBACK_BLOCK_FRAMES: usize = 256;
+
+#[inline]
+fn pcm_ring_capacity(output_rate: u32) -> usize {
+    // Store interleaved stereo PCM. Both producer and consumer commit in pairs.
+    ((output_rate as usize * PCM_RING_BUFFER_MS / 1_000) * 2).max(4096)
+}
 const MIN_TRANSITION_MS: u64 = 250;
 const MAX_TRANSITION_MS: u64 = 12_000;
 
@@ -566,6 +579,8 @@ pub struct AudioEngine {
     flush: Arc<AtomicBool>,
     output_gain: Arc<AtomicU32>,
     audible_frames: Arc<AtomicU64>,
+    /// Zero-alloc underflow telemetry, sampled only on the non-realtime bridge.
+    output_underrun_frames: Arc<AtomicU64>,
     output_rate: u32,
     preloader: Arc<PreloadCoordinator>,
     preload_worker: Option<thread::JoinHandle<()>>,
@@ -605,13 +620,14 @@ impl AudioEngine {
             volume: volume.clamp(0.0, 1.0),
             ..PlayerSnapshot::default()
         }));
-        let ring_capacity = ((output_rate as usize / 8) * 2).max(4096);
+        let ring_capacity = pcm_ring_capacity(output_rate);
         let ring = HeapRb::<f32>::new(ring_capacity);
         let (producer, consumer) = ring.split();
         let flush = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let output_gain = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
         let audible_frames = Arc::new(AtomicU64::new(0));
+        let output_underrun_frames = Arc::new(AtomicU64::new(0));
         let preloader = Arc::new(PreloadCoordinator::new());
         let stream = build_output_stream(
             &device,
@@ -621,6 +637,7 @@ impl AudioEngine {
             paused.clone(),
             output_gain.clone(),
             audible_frames.clone(),
+            output_underrun_frames.clone(),
             event_tx.clone(),
         )?;
         stream.play().context("启动音频输出流失败")?;
@@ -635,6 +652,9 @@ impl AudioEngine {
         let worker = thread::Builder::new()
             .name("yinqidao-audio-worker".into())
             .spawn(move || {
+                // MMCSS is scoped to this thread, not the entire GUI process.
+                // CPAL owns the separate WASAPI callback scheduling.
+                let _audio_priority = super::realtime_priority::AudioDecodePriority::enter();
                 let mut worker = AudioWorker::new_with_preloader(
                     worker_command_queue,
                     event_tx,
@@ -672,6 +692,7 @@ impl AudioEngine {
             flush,
             output_gain,
             audible_frames,
+            output_underrun_frames,
             output_rate,
             preloader,
             preload_worker: Some(preload_worker),
@@ -778,6 +799,12 @@ impl AudioEngine {
             .map_or_else(|_| PlayerSnapshot::default(), |snapshot| snapshot.clone());
         snapshot.position_ms = self.audible_position_ms(snapshot.duration_ms);
         snapshot
+    }
+
+    /// Number of output PCM frames replaced with silence after the first
+    /// audible frame; never reads a lock or runs inside the audio callback.
+    pub fn output_underrun_frames(&self) -> u64 {
+        self.output_underrun_frames.load(Ordering::Relaxed)
     }
 
     pub fn progress(&self) -> (PlaybackState, u64, u64) {
@@ -1546,33 +1573,31 @@ impl AudioWorker {
 
     fn push_processed_samples(&mut self, position: Duration) -> Result<bool, DecodeError> {
         let decode_generation = self.decode_generation;
-        for index in 0..self.processed_samples.len() {
-            let sample = self.processed_samples[index];
-            if index > 0 && index % 1024 == 0 {
-                if !self.handle_commands() {
-                    return Ok(false);
-                }
-                if self.decode_generation != decode_generation
-                    || self.state != PlaybackState::Playing
-                    || self.decoder.is_none()
-                {
-                    return Ok(true);
-                }
+        let mut offset = 0;
+        while offset < self.processed_samples.len() {
+            // Keep Pause/Seek/Next responsive while producing ahead.
+            if !self.handle_commands() {
+                return Ok(false);
             }
-            loop {
-                if self.producer.try_push(sample).is_ok() {
-                    break;
-                }
-                if !self.handle_commands() {
-                    return Ok(false);
-                }
-                if self.decode_generation != decode_generation
-                    || self.state != PlaybackState::Playing
-                    || self.decoder.is_none()
-                {
-                    return Ok(true);
-                }
-                thread::sleep(Duration::from_millis(2));
+            if self.decode_generation != decode_generation
+                || self.state != PlaybackState::Playing
+                || self.decoder.is_none()
+            {
+                return Ok(true);
+            }
+
+            // Every push_slice publishes one producer index for an entire PCM
+            // block. The previous sample-by-sample try_push path synchronized
+            // thousands of times and was vulnerable to OS scheduler stalls.
+            let end = (offset + PCM_PRODUCER_BATCH_SAMPLES).min(self.processed_samples.len());
+            let written = self.producer.push_slice(&self.processed_samples[offset..end]);
+            if written > 0 {
+                offset += written;
+            } else {
+                // Backpressure: the callback is draining the ring. Sleeping here
+                // never blocks the realtime output thread, and commands still
+                // get checked at the next iteration.
+                thread::sleep(Duration::from_millis(1));
             }
         }
         if self.last_position_event.elapsed() >= Duration::from_millis(100) {
@@ -1981,17 +2006,30 @@ fn build_output_stream(
     paused: Arc<AtomicBool>,
     output_gain: Arc<AtomicU32>,
     audible_frames: Arc<AtomicU64>,
+    output_underrun_frames: Arc<AtomicU64>,
     event_tx: Sender<PlayerEvent>,
 ) -> Result<Stream> {
     let config: StreamConfig = supported.clone().into();
     let channels = config.channels as usize;
     let f32_events = event_tx.clone();
     let i16_events = event_tx.clone();
+    let f32_underruns = output_underrun_frames.clone();
+    let i16_underruns = output_underrun_frames.clone();
+    let u16_underruns = output_underrun_frames;
     let u16_events = event_tx;
     let stream = match supported.sample_format() {
         SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
+                observe_output_underrun(
+                    data.len(),
+                    channels,
+                    &consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                    &f32_underruns,
+                );
                 fill_f32(
                     data,
                     channels,
@@ -2011,6 +2049,15 @@ fn build_output_stream(
         SampleFormat::I16 => device.build_output_stream(
             &config,
             move |data: &mut [i16], _| {
+                observe_output_underrun(
+                    data.len(),
+                    channels,
+                    &consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                    &i16_underruns,
+                );
                 fill_i16(
                     data,
                     channels,
@@ -2030,6 +2077,15 @@ fn build_output_stream(
         SampleFormat::U16 => device.build_output_stream(
             &config,
             move |data: &mut [u16], _| {
+                observe_output_underrun(
+                    data.len(),
+                    channels,
+                    &consumer,
+                    &flush,
+                    &paused,
+                    &audible_frames,
+                    &u16_underruns,
+                );
                 fill_u16(
                     data,
                     channels,
@@ -2057,6 +2113,57 @@ fn current_output_gain(output_gain: &AtomicU32) -> f32 {
     perceptual_volume_gain(f32::from_bits(output_gain.load(Ordering::Acquire)))
 }
 
+/// The callback records only the shortage, never logging or taking locks.
+/// Zero means enough predecoded PCM was available for this device period.
+#[inline]
+fn observe_output_underrun(
+    output_samples: usize,
+    channels: usize,
+    consumer: &ringbuf::HeapCons<f32>,
+    flush: &AtomicBool,
+    paused: &AtomicBool,
+    audible_frames: &AtomicU64,
+    underrun_frames: &AtomicU64,
+) {
+    if paused.load(Ordering::Relaxed)
+        || flush.load(Ordering::Relaxed)
+        || audible_frames.load(Ordering::Relaxed) == 0
+    {
+        return;
+    }
+    let requested = output_samples / channels.max(1);
+    let available = consumer.occupied_len() / 2;
+    if requested > available {
+        underrun_frames.fetch_add((requested - available) as u64, Ordering::Relaxed);
+    }
+}
+
+/// Transfers stereo PCM in contiguous blocks. One ring-index publication per
+/// block rather than two atomics for every audio frame. No heap allocation,
+/// lock, conversion or trace call is performed on the realtime callback thread.
+#[inline]
+fn consume_pcm_frames(
+    consumer: &mut ringbuf::HeapCons<f32>,
+    requested_frames: usize,
+    mut write: impl FnMut(usize, f32, f32),
+) -> u64 {
+    let mut scratch = [0.0f32; PCM_CALLBACK_BLOCK_FRAMES * 2];
+    let mut consumed = 0;
+    while consumed < requested_frames {
+        let requested = (requested_frames - consumed).min(PCM_CALLBACK_BLOCK_FRAMES);
+        let samples = consumer.pop_slice(&mut scratch[..requested * 2]);
+        let frames = samples / 2;
+        for i in 0..frames {
+            write(consumed + i, scratch[i * 2], scratch[i * 2 + 1]);
+        }
+        consumed += frames;
+        if frames != requested {
+            break;
+        }
+    }
+    consumed as u64
+}
+
 fn fill_f32(
     data: &mut [f32],
     channels: usize,
@@ -2075,33 +2182,33 @@ fn fill_f32(
     }
 
     let channels = channels.max(1);
-    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
-    let mut consumed_frames = 0_u64;
-    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
-        if frame_index >= readable_frames {
-            frame.fill(0.0);
-            continue;
+    let consumed_frames = if channels == 2 {
+        // The most common device format can be copied directly from the SPSC
+        // ring into CPAL's output slice, with no temporary PCM allocation.
+        let samples = consumer.pop_slice(data);
+        data[samples..].fill(0.0);
+        if gain != 1.0 {
+            for sample in &mut data[..samples] {
+                *sample *= gain;
+            }
         }
-        let Some(left) = consumer.try_pop() else {
-            frame.fill(0.0);
-            continue;
-        };
-        let Some(right) = consumer.try_pop() else {
-            frame.fill(0.0);
-            continue;
-        };
-        for (index, sample) in frame.iter_mut().enumerate() {
-            let value = if channels == 1 {
-                (left + right) * 0.5
-            } else if index % 2 == 0 {
-                left
-            } else {
-                right
-            };
-            *sample = value * gain;
-        }
-        consumed_frames += 1;
-    }
+        (samples / 2) as u64
+    } else {
+        data.fill(0.0);
+        consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
+            let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
+            for (index, sample) in frame.iter_mut().enumerate() {
+                let value = if channels == 1 {
+                    (left + right) * 0.5
+                } else if index % 2 == 0 {
+                    left
+                } else {
+                    right
+                };
+                *sample = value * gain;
+            }
+        })
+    };
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
@@ -2125,21 +2232,9 @@ fn fill_i16(
     }
 
     let channels = channels.max(1);
-    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
-    let mut consumed_frames = 0_u64;
-    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
-        if frame_index >= readable_frames {
-            frame.fill(0);
-            continue;
-        }
-        let Some(left) = consumer.try_pop() else {
-            frame.fill(0);
-            continue;
-        };
-        let Some(right) = consumer.try_pop() else {
-            frame.fill(0);
-            continue;
-        };
+    data.fill(0);
+    let consumed_frames = consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
+        let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
         for (index, sample) in frame.iter_mut().enumerate() {
             let value = if channels == 1 {
                 (left + right) * 0.5
@@ -2152,13 +2247,10 @@ fn fill_i16(
             *sample = if gain == 1.0 {
                 quantized
             } else {
-                ((quantized as f32 * gain)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32)) as i16
+                ((quantized as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32)) as i16
             };
         }
-        consumed_frames += 1;
-    }
+    });
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
@@ -2183,21 +2275,9 @@ fn fill_u16(
 
     const CENTER: f32 = 32768.0;
     let channels = channels.max(1);
-    let readable_frames = (consumer.occupied_len() / 2).min(data.len() / channels);
-    let mut consumed_frames = 0_u64;
-    for (frame_index, frame) in data.chunks_exact_mut(channels).enumerate() {
-        if frame_index >= readable_frames {
-            frame.fill(32768);
-            continue;
-        }
-        let Some(left) = consumer.try_pop() else {
-            frame.fill(32768);
-            continue;
-        };
-        let Some(right) = consumer.try_pop() else {
-            frame.fill(32768);
-            continue;
-        };
+    data.fill(32768);
+    let consumed_frames = consume_pcm_frames(consumer, data.len() / channels, |frame_index, left, right| {
+        let frame = &mut data[frame_index * channels..(frame_index + 1) * channels];
         for (index, sample) in frame.iter_mut().enumerate() {
             let value = if channels == 1 {
                 (left + right) * 0.5
@@ -2211,13 +2291,10 @@ fn fill_u16(
                 quantized
             } else {
                 let centered = quantized as f32 - CENTER;
-                (CENTER + centered * gain)
-                    .round()
-                    .clamp(0.0, u16::MAX as f32) as u16
+                (CENTER + centered * gain).round().clamp(0.0, u16::MAX as f32) as u16
             };
         }
-        consumed_frames += 1;
-    }
+    });
     if consumed_frames != 0 {
         audible_frames.fetch_add(consumed_frames, Ordering::Relaxed);
     }
