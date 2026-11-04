@@ -16,6 +16,7 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod allocator;
 mod artwork;
 mod audio;
 mod audio_policy;
@@ -71,6 +72,8 @@ use settings::ConfigStore;
 use ui::MusicApp;
 
 fn main() -> Result<()> {
+    // 在任何大块分配发生前收紧 mimalloc 的空闲页归还节奏。
+    allocator::tune_mimalloc_reclamation();
     let app_runtime = runtime::initialize_app_runtime()?;
     let io_handle = app_runtime.io_handle().clone();
 
@@ -111,6 +114,11 @@ fn main() -> Result<()> {
     // the global idle image budget still caps unused decoded assets.
     let mut image_pipeline = gpui::ImagePipelineConfig::default();
     image_pipeline.trim_memory_on_hidden = false;
+    // 播放器可见工作集（可见行/舞台/首页卡片）的解码图约 30–60 张，48MB
+    // 足够热路径零重复解码；空闲滞留从 fork 默认 128MB 收紧，miss 直接由
+    // 内存中的编码缓存/磁盘缓存重新解码。位图复用池同理 64MB→16MB。
+    image_pipeline.idle_image_bytes = 48 * 1024 * 1024;
+    image_pipeline.bitmap_pool_bytes = 16 * 1024 * 1024;
     let app = Application::new()
         .with_image_pipeline_config(image_pipeline)
         .with_assets(lucide_gpui::Assets)
