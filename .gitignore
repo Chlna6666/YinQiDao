@@ -35,3 +35,4 @@ target/
 **/.cargo_vcs_info.json
 .DS_Store
 Thumbs.db
+/.zcode
