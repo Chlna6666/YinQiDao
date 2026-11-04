@@ -1380,19 +1380,28 @@ impl MusicApp {
     /// previous song is still audible, so resolve from the AudioEngine
     /// snapshot first. Neither this method nor Render polls/forces scrolling.
     fn focus_queue_drawer_on_current(&self) {
-        if let Some(queue) = self.online_playlist_queue.as_ref().filter(|q| !q.tracks.is_empty()) {
+        if let Some(queue) = self
+            .online_playlist_queue
+            .as_ref()
+            .filter(|q| !q.tracks.is_empty())
+        {
             let source = self.snapshot.current_track.as_ref().and_then(|track| {
-                self.online_remote_tracks.get(&track.id)
+                self.online_remote_tracks
+                    .get(&track.id)
                     .filter(|(route, _)| route.provider_id == queue.route.provider_id)
                     .map(|(_, remote)| remote.source.source_id.as_str())
                     .or_else(|| {
-                        self.online_playback_meta.get(&track.id)
+                        self.online_playback_meta
+                            .get(&track.id)
                             .filter(|(route, _, _)| route.provider_id == queue.route.provider_id)
                             .map(|(_, source, _)| source.source_id.as_str())
                     })
             });
             if let Some(selected) = queue_drawer::focus_source_index(
-                queue.tracks.iter().map(|track| track.source.source_id.as_str()),
+                queue
+                    .tracks
+                    .iter()
+                    .map(|track| track.source.source_id.as_str()),
                 source,
                 self.online_track_buffering.as_deref(),
                 queue.current_index,
@@ -1401,7 +1410,10 @@ impl MusicApp {
                     .scroll_to_item_strict(selected, gpui::ScrollStrategy::Center);
             }
         } else if let Some(current_id) = self
-            .snapshot.current_track.as_ref().map(|track| track.id)
+            .snapshot
+            .current_track
+            .as_ref()
+            .map(|track| track.id)
             .or(self.config.current_track)
             && let Some(index) = self.config.queue.iter().position(|id| *id == current_id)
         {
@@ -2908,10 +2920,8 @@ impl MusicApp {
             if let Some(queue) = self.online_playlist_queue.as_ref() {
                 // The user deliberately switched tracks. Follow the target
                 // once; subsequent render frames must not reset manual scroll.
-                self.queue_drawer_online_scroll.scroll_to_item_strict(
-                    queue.current_index,
-                    gpui::ScrollStrategy::Center,
-                );
+                self.queue_drawer_online_scroll
+                    .scroll_to_item_strict(queue.current_index, gpui::ScrollStrategy::Center);
             }
         }
         // Replay previously materialized music immediately, even when it was
@@ -3072,7 +3082,12 @@ impl MusicApp {
             self.artwork_palettes.remove(&track_id);
             self.artwork_ready.remove(&track_id);
             self.online_artwork_loaded_urls.remove(&track_id);
-            if self.snapshot.current_track.as_ref().is_some_and(|track| track.id == track_id) {
+            if self
+                .snapshot
+                .current_track
+                .as_ref()
+                .is_some_and(|track| track.id == track_id)
+            {
                 self.sync_track_visual_surfaces(cx);
             }
         }
@@ -3171,11 +3186,15 @@ impl MusicApp {
                     return;
                 }
                 app.online_artwork_requests.remove(&track_id);
-                let expected = app.online_playback_meta
+                let expected = app
+                    .online_playback_meta
                     .get(&track_id)
                     .and_then(|(_, _, cover)| cover.as_deref())
-                    .or_else(|| app.online_remote_tracks.get(&track_id)
-                        .and_then(|(_, remote)| remote.cover_url.as_deref()));
+                    .or_else(|| {
+                        app.online_remote_tracks
+                            .get(&track_id)
+                            .and_then(|(_, remote)| remote.cover_url.as_deref())
+                    });
                 if expected != Some(url.as_str()) {
                     return;
                 }
@@ -3183,7 +3202,12 @@ impl MusicApp {
                     Ok((png, blurred, pal)) => {
                         app.set_artwork_parts(track_id, png, Some(blurred), Some(pal));
                         app.online_artwork_loaded_urls.insert(track_id, url.clone());
-                        if app.snapshot.current_track.as_ref().is_some_and(|track| track.id == track_id) {
+                        if app
+                            .snapshot
+                            .current_track
+                            .as_ref()
+                            .is_some_and(|track| track.id == track_id)
+                        {
                             app.sync_track_visual_surfaces(cx);
                         } else {
                             cx.notify();

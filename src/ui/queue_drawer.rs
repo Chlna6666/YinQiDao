@@ -471,7 +471,12 @@ mod tests {
     #[test]
     fn drawer_focus_prioritizes_playing_source_and_clamps_restored_position() {
         assert_eq!(
-            focus_source_index(["first", "second", "third"], Some("second"), Some("third"), 0),
+            focus_source_index(
+                ["first", "second", "third"],
+                Some("second"),
+                Some("third"),
+                0
+            ),
             Some(1)
         );
         assert_eq!(
