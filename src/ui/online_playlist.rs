@@ -300,8 +300,29 @@ fn render_songs_table(
     let track_route = route.clone();
     let playlist_title = data.title.clone();
     let view_clone = view.clone();
-    let buffering_source_id = app.online_track_buffering.clone();
-    let current_track_title = app.snapshot.current_track.as_ref().map(|t| t.title.clone());
+    let selected_queue = app.online_playlist_queue.as_ref().filter(|queue| {
+        queue.route.plugin_id == route.plugin_id
+            && queue.route.provider_id == route.provider_id
+            && queue.route.account_id == route.account_id
+            && queue.playlist_title == data.title
+            && queue.tracks.len() == data.tracks.len()
+    });
+    let preferred_index = selected_queue.map_or(0, |queue| queue.current_index);
+    let current_index = app.current_online_source_for_route(route).and_then(|source| {
+        tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track.source == *source)
+            .min_by_key(|(index, _)| index.abs_diff(preferred_index))
+            .map(|(index, _)| index)
+    });
+    let buffering_index = selected_queue.and_then(|queue| {
+        queue.tracks.get(queue.current_index).and_then(|selected| {
+            (app.online_track_buffering.as_deref()
+                == Some(selected.source.source_id.as_str()))
+            .then_some(queue.current_index)
+        })
+    });
 
     div()
         .size_full()
@@ -347,10 +368,8 @@ fn render_songs_table(
                         let mut items = Vec::with_capacity(range.end - range.start);
                         for idx in range {
                             if let Some(track) = tracks.get(idx) {
-                                let is_buffering =
-                                    buffering_source_id.as_deref() == Some(&track.source.source_id);
-                                let is_current =
-                                    current_track_title.as_deref() == Some(&track.title);
+                                let is_buffering = buffering_index == Some(idx);
+                                let is_current = current_index == Some(idx);
 
                                 items.push(render_online_song_row(
                                     idx + 1,
@@ -369,6 +388,7 @@ fn render_songs_table(
                         items
                     },
                 )
+                .track_scroll(app.online_playlist_scroll.clone())
                 .size_full(),
             ),
         )

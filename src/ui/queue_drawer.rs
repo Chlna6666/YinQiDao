@@ -43,10 +43,20 @@ pub(super) fn focus_source_index<'a>(
     let mut buffering_index = None;
     for (index, id) in ids.into_iter().enumerate() {
         count += 1;
-        if playing_source == Some(id) {
+        // Repeated songs are distinct queue rows. Choose the occurrence
+        // closest to the transport's selected position, not the last match.
+        if playing_source == Some(id)
+            && playing_index.is_none_or(|best: usize| {
+                index.abs_diff(fallback_index) < best.abs_diff(fallback_index)
+            })
+        {
             playing_index = Some(index);
         }
-        if buffering_source == Some(id) {
+        if buffering_source == Some(id)
+            && buffering_index.is_none_or(|best: usize| {
+                index.abs_diff(fallback_index) < best.abs_diff(fallback_index)
+            })
+        {
             buffering_index = Some(index);
         }
     }
@@ -148,7 +158,18 @@ pub(super) fn render(
                     online_queue
                         // The former header always used the FIRST song's cover.
                         // An arbitrary first track is not a playlist cover.
-                        .and_then(|queue| queue.tracks.get(queue.current_index))
+                        .and_then(|queue| {
+                            let playing_source = app
+                                .current_online_source_for_route(&queue.route)
+                                .map(|source| source.source_id.as_str());
+                            let index = focus_source_index(
+                                queue.tracks.iter().map(|track| track.source.source_id.as_str()),
+                                playing_source,
+                                None,
+                                queue.current_index,
+                            )?;
+                            queue.tracks.get(index)
+                        })
                         .map(|track| {
                             image_cache::render_remote_cover(
                                 track.cover_url.as_deref(),
@@ -284,12 +305,15 @@ fn online_queue_items(
     let route = queue.route.clone();
     let playlist_title = queue.playlist_title.clone();
     let current_index = queue.current_index;
-    let current_source = app.snapshot.current_track.as_ref().and_then(|track| {
-        app.online_remote_tracks
-            .get(&track.id)
-            .map(|(_, remote)| remote.source.clone())
+    let current_source = app.current_online_source_for_route(&route);
+    let playing_index = current_source.and_then(|source| {
+        tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track.source == *source)
+            .min_by_key(|(index, _)| index.abs_diff(current_index))
+            .map(|(index, _)| index)
     });
-    let has_current_track = app.snapshot.current_track.is_some();
     let playback_state = app.snapshot.state;
     let hovered_cover = app.queue_drawer_hovered_cover;
     let buffering_source = app.online_track_buffering.clone();
@@ -313,14 +337,9 @@ fn online_queue_items(
                         let Some(track) = tracks.get(index) else {
                             continue;
                         };
-                        let active = current_source.as_ref().map_or(
-                            has_current_track
-                                && index == current_index
-                                && buffering_source.is_none(),
-                            |source| source == &track.source,
-                        );
-                        let buffering =
-                            buffering_source.as_deref() == Some(track.source.source_id.as_str());
+                        let active = playing_index == Some(index);
+                        let buffering = index == current_index
+                            && buffering_source.as_deref() == Some(track.source.source_id.as_str());
                         let hovered = hovered_cover == Some(index);
                         let title = track.title.clone();
                         let artist = if track.artists.is_empty() {
@@ -488,6 +507,14 @@ mod tests {
             Some(2)
         );
         assert_eq!(focus_source_index([], None, None, 0), None);
+        assert_eq!(
+            focus_source_index(["song", "other", "song"], Some("song"), None, 2),
+            Some(2)
+        );
+        assert_eq!(
+            focus_source_index(["song", "other", "song"], Some("song"), None, 0),
+            Some(0)
+        );
     }
 
     #[test]

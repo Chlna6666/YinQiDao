@@ -273,6 +273,8 @@ pub struct MusicApp {
     /// never resets these in Render; opening it applies a one-shot focus.
     pub(crate) queue_drawer_online_scroll: gpui::UniformListScrollHandle,
     pub(crate) queue_drawer_local_scroll: gpui::UniformListScrollHandle,
+    pub(crate) online_playlist_scroll: gpui::UniformListScrollHandle,
+    online_playlist_view_revision: u64,
     pub(crate) stage_open: bool,
     pub(crate) stage_progress: f32,
     pub(crate) stage_animating: bool,
@@ -356,6 +358,7 @@ pub struct MusicApp {
     /// Shared bounded memory index over the Host's persistent stream cache.
     online_audio_cache: Arc<super::online_audio_cache::OnlineAudioCache>,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
+    online_playlist_request_generation: u64,
     /// online_playlist_cache 的 FIFO 驱逐序，限制会话内的歌单视图缓存深度。
     online_playlist_cache_order: VecDeque<String>,
     pub(crate) online_track_cache: HashMap<TrackId, Track>,
@@ -419,6 +422,15 @@ fn stage_drawer_needs_surface(progress: f32, animating: bool) -> bool {
 #[inline]
 fn stale_track_snapshot(pending: Option<TrackId>, observed: Option<TrackId>) -> bool {
     pending.is_some_and(|expected| Some(expected) != observed)
+}
+
+fn same_online_route(
+    left: &crate::plugin::abi::PluginRoute,
+    right: &crate::plugin::abi::PluginRoute,
+) -> bool {
+    left.plugin_id == right.plugin_id
+        && left.provider_id == right.provider_id
+        && left.account_id == right.account_id
 }
 
 fn stage_ease_in_out_cubic(progress: f32) -> f32 {
@@ -661,6 +673,7 @@ struct OnlinePlaylistRenderKey {
     playlist_title: Option<String>,
     tracks_count: usize,
     loading: bool,
+    view_revision: u64,
     buffering_track: Option<String>,
     current_track: Option<TrackId>,
 }
@@ -677,6 +690,7 @@ fn online_playlist_render_key(app: &MusicApp) -> OnlinePlaylistRenderKey {
             .active_online_playlist
             .as_ref()
             .is_some_and(|p| p.loading),
+        view_revision: app.online_playlist_view_revision,
         buffering_track: app.online_track_buffering.clone(),
         current_track: app.snapshot.current_track.as_ref().map(|track| track.id),
     }
@@ -1003,6 +1017,8 @@ impl MusicApp {
             queue_drawer_hovered_cover: None,
             queue_drawer_online_scroll: gpui::UniformListScrollHandle::new(),
             queue_drawer_local_scroll: gpui::UniformListScrollHandle::new(),
+            online_playlist_scroll: gpui::UniformListScrollHandle::new(),
+            online_playlist_view_revision: 0,
             stage_open: false,
             stage_progress: 0.0,
             stage_animating: false,
@@ -1063,6 +1079,7 @@ impl MusicApp {
             online_asset_preload_task: None,
             online_audio_cache: super::online_audio_cache::OnlineAudioCache::new(),
             online_playlist_cache: HashMap::new(),
+            online_playlist_request_generation: 0,
             online_playlist_cache_order: VecDeque::new(),
             online_track_cache: initial_online_cache,
             online_remote_tracks: initial_online_remote_tracks,
@@ -1379,24 +1396,32 @@ impl MusicApp {
     /// online index may already point at the next *pending* source while the
     /// previous song is still audible, so resolve from the AudioEngine
     /// snapshot first. Neither this method nor Render polls/forces scrolling.
+    pub(crate) fn current_online_source_for_route(
+        &self,
+        route: &crate::plugin::abi::PluginRoute,
+    ) -> Option<&crate::plugin::abi::SourceTrackRef> {
+        let track_id = self.snapshot.current_track.as_ref()?.id;
+        self.online_playback_meta
+            .get(&track_id)
+            .filter(|(active_route, _, _)| same_online_route(active_route, route))
+            .map(|(_, source, _)| source)
+            .or_else(|| {
+                self.online_remote_tracks
+                    .get(&track_id)
+                    .filter(|(active_route, _)| same_online_route(active_route, route))
+                    .map(|(_, remote)| &remote.source)
+            })
+    }
+
     fn focus_queue_drawer_on_current(&self) {
         if let Some(queue) = self
             .online_playlist_queue
             .as_ref()
             .filter(|q| !q.tracks.is_empty())
         {
-            let source = self.snapshot.current_track.as_ref().and_then(|track| {
-                self.online_remote_tracks
-                    .get(&track.id)
-                    .filter(|(route, _)| route.provider_id == queue.route.provider_id)
-                    .map(|(_, remote)| remote.source.source_id.as_str())
-                    .or_else(|| {
-                        self.online_playback_meta
-                            .get(&track.id)
-                            .filter(|(route, _, _)| route.provider_id == queue.route.provider_id)
-                            .map(|(_, source, _)| source.source_id.as_str())
-                    })
-            });
+            let source = self
+                .current_online_source_for_route(&queue.route)
+                .map(|source| source.source_id.as_str());
             if let Some(selected) = queue_drawer::focus_source_index(
                 queue
                     .tracks
@@ -1419,6 +1444,33 @@ impl MusicApp {
         {
             self.queue_drawer_local_scroll
                 .scroll_to_item_strict(index, gpui::ScrollStrategy::Center);
+        }
+    }
+
+    /// Focus the list once at navigation time, not on every render. GPUI
+    /// applies this deferred target during the virtual list's first prepaint.
+    fn focus_online_playlist_on_current(&self, data: &OnlinePlaylistViewData) {
+        let source = self
+            .current_online_source_for_route(&data.route)
+            .map(|source| source.source_id.as_str());
+        let selected_queue = self.online_playlist_queue.as_ref().filter(|queue| {
+            same_online_route(&queue.route, &data.route)
+                && queue.playlist_title == data.title
+                && queue.tracks.len() == data.tracks.len()
+        });
+        let preferred_index = selected_queue.map_or(0, |queue| queue.current_index);
+        let buffering = selected_queue.and_then(|_| self.online_track_buffering.as_deref());
+        if let Some(index) = queue_drawer::focus_source_index(
+            data.tracks.iter().map(|track| track.source.source_id.as_str()),
+            source,
+            buffering,
+            preferred_index,
+        ) {
+            self.online_playlist_scroll
+                .scroll_to_item_strict(index, gpui::ScrollStrategy::Center);
+        } else {
+            self.online_playlist_scroll
+                .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
         }
     }
 
@@ -1851,8 +1903,19 @@ impl MusicApp {
         // Pause/resume is an O(1) UI command path. A transport click also supersedes any unresolved
         // online switch immediately instead of waiting for its network/materialization task.
         let cancelled_pending_online = self.online_track_buffering.is_some();
+        let cancelled_source = self.online_playlist_queue.as_ref().and_then(|queue| {
+            let buffering = self.online_track_buffering.as_deref()?;
+            queue
+                .tracks
+                .get(queue.current_index)
+                .filter(|track| track.source.source_id == buffering)
+                .map(|track| (queue.route.clone(), track.source.clone()))
+        });
         if cancelled_pending_online {
             self.cancel_online_play_request();
+            if let Some((route, source)) = cancelled_source {
+                self.restore_online_playlist_after_failed_play(&route, &source);
+            }
             if self.snapshot.current_track.is_none() {
                 self.cancel_online_preload_tasks();
                 self.snapshot.state = PlaybackState::Stopped;
@@ -2285,7 +2348,7 @@ impl MusicApp {
         remote: &crate::plugin::abi::RemoteTrack,
     ) -> Track {
         for (id, (r, s, _)) in &self.online_playback_meta {
-            if r.provider_id == route.provider_id && s.source_id == remote.source.source_id {
+            if same_online_route(r, route) && s == &remote.source {
                 if let Some(track) = self.online_track_cache.get(id).cloned() {
                     self.online_remote_tracks
                         .insert(*id, (route.clone(), remote.clone()));
@@ -2886,6 +2949,51 @@ impl MusicApp {
         true
     }
 
+    /// A failed network/decoder preparation must not leave Next pointing past
+    /// the song still audible in the engine.
+    fn restore_online_playlist_after_failed_play(
+        &mut self,
+        route: &crate::plugin::abi::PluginRoute,
+        failed_source: &crate::plugin::abi::SourceTrackRef,
+    ) {
+        let Some(queue) = self.online_playlist_queue.as_ref() else {
+            return;
+        };
+        if !same_online_route(&queue.route, route)
+            || !queue
+                .tracks
+                .get(queue.current_index)
+                .is_some_and(|track| &track.source == failed_source)
+        {
+            return;
+        }
+        let Some(audible_source) = self.current_online_source_for_route(route) else {
+            return;
+        };
+        let Some(index) = queue
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| &track.source == audible_source)
+            .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        if index == queue.current_index {
+            return;
+        }
+        let queue = self.online_playlist_queue.as_mut().expect("queue checked above");
+        queue.current_index = index;
+        self.config.online_playlist_queue = Some(crate::settings::SavedOnlinePlaylistQueue {
+            route: queue.route.clone(),
+            playlist_title: queue.playlist_title.clone(),
+            tracks: queue.tracks.clone(),
+            current_index: index,
+        });
+        self.save_config();
+    }
+
     pub(crate) fn play_online_remote_track(
         &mut self,
         route: crate::plugin::abi::PluginRoute,
@@ -2899,7 +3007,14 @@ impl MusicApp {
         // Remember the actual playlist + current index, not only temporary
         // audio-engine IDs, which cannot identify online songs after restart.
         if let Some(queue) = self.online_playlist_queue.as_mut() {
-            if let Some(index) = queue.tracks.iter().position(|entry| entry.source == source) {
+            if let Some(index) = queue
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.source == source)
+                .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
+                .map(|(index, _)| index)
+            {
                 queue.current_index = index;
                 self.config.online_playlist_queue =
                     Some(crate::settings::SavedOnlinePlaylistQueue {
@@ -2916,6 +3031,29 @@ impl MusicApp {
             self.config.online_playlist_queue = None;
         }
         self.save_config();
+        if self.page == AppPage::OnlinePlaylist
+            && let Some(data) = self.active_online_playlist.as_ref()
+            && same_online_route(&data.route, &route)
+        {
+            let preferred_index = self
+                .online_playlist_queue
+                .as_ref()
+                .filter(|queue| {
+                    same_online_route(&queue.route, &data.route)
+                        && queue.playlist_title == data.title
+                })
+                .map_or(0, |queue| queue.current_index);
+            if let Some((index, _)) = data
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| track.source == source)
+                .min_by_key(|(index, _)| index.abs_diff(preferred_index))
+            {
+                self.online_playlist_scroll
+                    .scroll_to_item_strict(index, gpui::ScrollStrategy::Center);
+            }
+        }
         if self.queue_drawer_open {
             if let Some(queue) = self.online_playlist_queue.as_ref() {
                 // The user deliberately switched tracks. Follow the target
@@ -2931,6 +3069,14 @@ impl MusicApp {
         self.cancel_online_preload_tasks();
         self.online_play_request_generation = self.online_play_request_generation.wrapping_add(1);
         let generation = self.online_play_request_generation;
+        tracing::debug!(
+            plugin = %route.plugin_id,
+            provider = %route.provider_id,
+            source = %source.source_id,
+            generation,
+            cache_hit = preloaded.is_some(),
+            "在线音频切换已调度"
+        );
 
         self.online_track_buffering = Some(source.source_id.clone());
         self.status = format!("正在切换在线音频：{title} · {artist}");
@@ -2965,6 +3111,8 @@ impl MusicApp {
                 }
                 self.fetch_online_lyrics_for_track(track_id, route, source, cx);
                 self.schedule_online_playlist_prefetch(cx);
+            } else {
+                self.restore_online_playlist_after_failed_play(&route, &source);
             }
             return;
         }
@@ -2998,6 +3146,7 @@ impl MusicApp {
                         let track_id = track.id;
                         let track_for_cache = track.clone();
                         if !app.play_prepared_remote_track(track, cx) {
+                            app.restore_online_playlist_after_failed_play(&route, &source);
                             return None;
                         }
 
@@ -3028,6 +3177,15 @@ impl MusicApp {
                             return;
                         }
                         app.online_track_buffering = None;
+                        app.restore_online_playlist_after_failed_play(&route, &source);
+                        tracing::warn!(
+                            plugin = %route.plugin_id,
+                            provider = %route.provider_id,
+                            source = %source.source_id,
+                            generation,
+                            %error,
+                            "在线音频准备失败：检查插件源解析、网络与缓存"
+                        );
                         app.status = format!("播放失败：{error:#}");
                         cx.notify();
                     });
@@ -3350,7 +3508,11 @@ impl MusicApp {
         cx: &mut Context<Self>,
     ) {
         Self::prefetch_online_playlist_images(&data, cx);
+        self.focus_online_playlist_on_current(&data);
         self.active_online_playlist = Some(data);
+        self.online_playlist_request_generation =
+            self.online_playlist_request_generation.wrapping_add(1);
+        self.online_playlist_view_revision = self.online_playlist_view_revision.wrapping_add(1);
         self.page = AppPage::OnlinePlaylist;
         cx.notify();
     }
@@ -3364,7 +3526,15 @@ impl MusicApp {
         cover_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let cache_key = collection.source_id.clone();
+        // Collection IDs can collide across plugins, accounts and collection kinds.
+        let cache_key = format!(
+            "collection:{}:{}:{}:{:?}:{}",
+            route.plugin_id,
+            route.provider_id,
+            route.account_id,
+            collection.kind,
+            collection.source_id
+        );
         if let Some(cached) = self.online_playlist_cache.get(&cache_key).cloned() {
             self.show_online_playlist_detail(cached, cx);
             return;
@@ -3382,6 +3552,7 @@ impl MusicApp {
             cx,
         );
 
+        let request_generation = self.online_playlist_request_generation;
         let c_key = cache_key.clone();
         let c_title = title.clone();
         let c_subtitle = subtitle.clone();
@@ -3408,16 +3579,25 @@ impl MusicApp {
                     };
                     Self::prefetch_online_playlist_images(&view_data, cx);
                     app.cache_online_playlist_view(c_key, view_data.clone());
-                    if let Some(data) = &mut app.active_online_playlist {
-                        if data.title == view_data.title {
-                            *data = view_data;
-                        }
+                    if app.online_playlist_request_generation == request_generation
+                        && app.active_online_playlist.as_ref().is_some_and(|active| {
+                            active.title == view_data.title
+                                && same_online_route(&active.route, &view_data.route)
+                        })
+                    {
+                        app.focus_online_playlist_on_current(&view_data);
+                        app.active_online_playlist = Some(view_data);
+                        app.online_playlist_view_revision =
+                            app.online_playlist_view_revision.wrapping_add(1);
                     }
                     app.notify_online_playlist_surface(cx);
                 });
             }
             Err(err) => {
                 let _ = this.update(cx, |app, cx| {
+                    if app.online_playlist_request_generation != request_generation {
+                        return;
+                    }
                     if let Some(data) = &mut app.active_online_playlist {
                         data.loading = false;
                     }
@@ -3522,10 +3702,14 @@ impl MusicApp {
                     };
                     Self::prefetch_online_playlist_images(&view_data, cx);
                     app.cache_online_playlist_view("user_favorite".to_string(), view_data.clone());
-                    if let Some(data) = &mut app.active_online_playlist {
-                        if data.title == "我喜欢的音乐" || data.title == view_data.title {
-                            *data = view_data;
-                        }
+                    if app.active_online_playlist.as_ref().is_some_and(|active| {
+                        (active.title == "我喜欢的音乐" || active.title == view_data.title)
+                            && same_online_route(&active.route, &view_data.route)
+                    }) {
+                        app.focus_online_playlist_on_current(&view_data);
+                        app.active_online_playlist = Some(view_data);
+                        app.online_playlist_view_revision =
+                            app.online_playlist_view_revision.wrapping_add(1);
                     }
                     cx.notify();
                 });
@@ -4184,6 +4368,8 @@ impl MusicApp {
                             active_pl.cover_url =
                                 active_pl.tracks.first().and_then(|t| t.cover_url.clone());
                             active_pl.loading = false;
+                            app.online_playlist_view_revision =
+                                app.online_playlist_view_revision.wrapping_add(1);
                         }
                     }
                     app.bump_ui_content_revision();
@@ -6592,6 +6778,27 @@ mod tests {
         assert!(stale_track_snapshot(Some(42), None));
         assert!(!stale_track_snapshot(Some(42), Some(42)));
         assert!(!stale_track_snapshot(None, Some(41)));
+    }
+
+    #[test]
+    fn remote_route_identity_includes_plugin_provider_and_account() {
+        let route = crate::plugin::abi::PluginRoute {
+            plugin_id: "plugin".into(),
+            provider_id: "provider".into(),
+            account_id: "user-a".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let mut other = route.clone();
+        assert!(same_online_route(&route, &other));
+        other.account_id = "user-b".into();
+        assert!(!same_online_route(&route, &other));
+        other = route.clone();
+        other.plugin_id = "plugin-b".into();
+        assert!(!same_online_route(&route, &other));
+        other = route.clone();
+        other.provider_id = "provider-b".into();
+        assert!(!same_online_route(&route, &other));
     }
 
     #[test]

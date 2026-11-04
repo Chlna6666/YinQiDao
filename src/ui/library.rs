@@ -1618,6 +1618,9 @@ pub(super) fn queue_drawer_items(
                                         .cloned()
                                         .or_else(|| this.online_track_cache.get(&track_id).cloned());
                                     let Some(track) = track else {
+                                        // The virtual list must return one uniform-height row per
+                                        // requested index, including unresolved restored tracks.
+                                        items.push(div().h(px(64.0)).into_any_element());
                                         continue;
                                     };
                                     items.push(
