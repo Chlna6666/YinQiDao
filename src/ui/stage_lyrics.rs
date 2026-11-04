@@ -1900,10 +1900,8 @@ fn karaoke_sustained_glyphs(
     index: usize,
     progress: f32,
     position_ms: u64,
-    is_current_word: bool,
     is_last_word: bool,
     karaoke_epoch: u64,
-    playback_animating: bool,
 ) -> gpui::AnyElement {
     let glyph_count = sustained_glyph_count(word.text.as_str());
     let duration_ms = word.duration_ms.unwrap_or(1).max(1);
@@ -1942,9 +1940,7 @@ fn karaoke_sustained_glyphs(
                 .text_color(dark::white(1.0))
                 .child(character.clone())
                 .into_any_element()
-        } else if letter_progress <= 0.0
-            && (!playback_animating || !is_current_word || position_ms < letter_start)
-        {
+        } else if letter_progress <= 0.0 {
             div()
                 .text_color(dark::white(0.64))
                 .child(character.clone())
@@ -1959,7 +1955,9 @@ fn karaoke_sustained_glyphs(
                 index.saturating_mul(16).saturating_add(glyph_index),
                 letter_progress,
                 position_ms,
-                playback_animating && is_current_word,
+                // The active leaf already redraws at audio-time cadence.
+                // Never start a second GPUI compositor clock per character.
+                false,
                 karaoke_epoch,
             );
             div()
@@ -2185,10 +2183,8 @@ fn karaoke_word(
             index,
             progress,
             position_ms,
-            is_current_word,
             is_last_word,
             karaoke_epoch,
-            playback_animating,
         );
     }
     // Never replace the animated glyph at precisely 100% reveal. Keep its
