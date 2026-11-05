@@ -547,13 +547,28 @@ pub fn playlist_tracks(
         )],
         false,
     )?;
+    let response_code = object
+        .pointer("/diss/code")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if response_code != 0 {
+        return Err(format!("QQ音乐歌单接口返回异常 code={response_code}"));
+    }
     let songs = object
         .pointer("/diss/data/songlist")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .and_then(Value::as_array);
+    // A missing result list with zero total is a valid empty playlist; a
+    // missing result list otherwise is a failed read, never an unlike event.
+    if songs.is_none()
+        && object
+            .pointer("/diss/data/dirinfo/song_cnt")
+            .and_then(Value::as_u64) != Some(0)
+    {
+        return Err("QQ音乐歌单响应缺少 songlist，拒绝解释为空收藏".into());
+    }
     songs
-        .iter()
+        .into_iter()
+        .flatten()
         .take(usize::from(limit))
         .map(parse_remote_track)
         .collect()

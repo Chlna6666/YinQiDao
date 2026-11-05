@@ -442,16 +442,23 @@ pub fn playlist_tracks(
     let playlist_id = numeric_source_id(playlist_id)?;
     let path = format!("/api/v6/playlist/detail?id={playlist_id}&n=100000&s=8");
     let json = request_json(Some(account_id), "GET", &path, None)?;
-    let track_ids = json
+    if !api_code_success(&json) {
+        return Err(format!(
+            "网易云歌单详情读取失败 (code={})",
+            json.get("code").and_then(Value::as_i64).unwrap_or(-1)
+        ));
+    }
+    // A malformed/expired response must never look like an empty liked list:
+    // that would erase verified online hearts during account reconciliation.
+    let raw_ids = json
         .pointer("/playlist/trackIds")
         .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value_u64(value, &["id"]))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| "网易云歌单详情缺少 trackIds，拒绝解释为空收藏".to_string())?;
+    let track_ids: Vec<u64> = raw_ids
+        .iter()
+        .map(|value| value_u64(value, &["id"])
+            .ok_or_else(|| "网易云歌单返回无效歌曲 ID".to_string()))
+        .collect::<ApiResult<_>>()?;
     let start = usize::try_from(offset)
         .unwrap_or(usize::MAX)
         .min(track_ids.len());
@@ -461,10 +468,14 @@ pub fn playlist_tracks(
     if start == end {
         return Ok(Vec::new());
     }
-    song_detail(Some(account_id), &track_ids[start..end])?
+    let tracks: Vec<_> = song_detail(Some(account_id), &track_ids[start..end])?
         .iter()
         .map(parse_remote_track)
-        .collect()
+        .collect::<ApiResult<_>>()?;
+    if tracks.len() != end - start {
+        return Err("网易云歌曲详情数量与收藏 ID 不一致，未更新本地缓存".into());
+    }
+    Ok(tracks)
 }
 
 pub fn playlist_create(

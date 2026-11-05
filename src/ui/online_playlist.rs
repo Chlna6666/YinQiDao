@@ -574,7 +574,7 @@ fn render_online_song_row(
         )
         .child(
             div()
-                .id(SharedString::from(format!("online-playlist-liked-{index}")))
+                .id(gpui::SharedString::from(format!("online-playlist-liked-{index}")))
                 .w(px(34.0))
                 .flex()
                 .items_center()
