@@ -311,7 +311,8 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         }
         let mut quality_ids = HashSet::new();
         for profile in &provider.quality_profiles {
-            if !valid_identifier(&profile.id) || profile.id.len() > 64
+            if !valid_identifier(&profile.id)
+                || profile.id.len() > 64
                 || profile.label.trim().is_empty()
                 || profile.label.len() > 80
                 || profile.label.contains('\0')

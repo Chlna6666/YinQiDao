@@ -184,9 +184,12 @@ pub(super) fn view(
         let quality_route_changed = view.quality_route != route_key;
         let quality_changed = view.selected_quality != quality_selected;
         if quality_route_changed {
-            view.quality_profiles = route_key.as_ref().map_or_else(Vec::new, |(plugin, provider)| {
-                crate::plugin::management::quality_profiles_for(plugin, provider)
-            });
+            view.quality_profiles =
+                route_key
+                    .as_ref()
+                    .map_or_else(Vec::new, |(plugin, provider)| {
+                        crate::plugin::management::quality_profiles_for(plugin, provider)
+                    });
             view.quality_route = route_key;
             view.quality_menu_open = false;
         }
@@ -251,11 +254,18 @@ impl Render for MiniPlayerView {
         let parent = self.parent.clone();
         let slider_volume = self.slider_volume;
         let icon_volume = self.icon_volume;
-        let quality_label = self.selected_quality.as_deref().and_then(|selected| {
-            self.quality_profiles
-                .iter()
-                .find(|profile| profile.id == selected)
-        }).map_or("自动音质", |profile| profile.label.split('·').next().unwrap_or("音质").trim()).to_owned();
+        let quality_label = self
+            .selected_quality
+            .as_deref()
+            .and_then(|selected| {
+                self.quality_profiles
+                    .iter()
+                    .find(|profile| profile.id == selected)
+            })
+            .map_or("自动音质", |profile| {
+                profile.label.split('·').next().unwrap_or("音质").trim()
+            })
+            .to_owned();
         let show_quality = !self.quality_profiles.is_empty();
         let quality_menu_open = self.quality_menu_open;
         let quality_profiles = self.quality_profiles.clone();
@@ -691,9 +701,10 @@ impl Render for MiniPlayerView {
                             .text_sm()
                             .text_color(if selected { ACCENT_RED } else { TEXT_PRIMARY })
                             .child(label)
-                            .children(selected.then(|| {
-                                themed_icon(icon!(check), 14.0, ACCENT_RED.into())
-                            }))
+                            .children(
+                                selected
+                                    .then(|| themed_icon(icon!(check), 14.0, ACCENT_RED.into())),
+                            )
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
                                 cx.listener(move |view, _, _, cx| {

@@ -175,11 +175,13 @@ pub fn quality_profiles_for(
     provider_id: &str,
 ) -> Vec<super::abi::StreamQualityProfile> {
     super::host::catalog::global()
-        .and_then(|host| host.read().ok().and_then(|host| {
-            host.catalog()
-                .provider(plugin_id, provider_id)
-                .map(|provider| provider.quality_profiles.clone())
-        }))
+        .and_then(|host| {
+            host.read().ok().and_then(|host| {
+                host.catalog()
+                    .provider(plugin_id, provider_id)
+                    .map(|provider| provider.quality_profiles.clone())
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -188,7 +190,11 @@ pub fn supports_like_sync(plugin_id: &str, provider_id: &str) -> bool {
         host.read().is_ok_and(|host| {
             host.catalog()
                 .provider(plugin_id, provider_id)
-                .is_some_and(|provider| provider.capabilities.contains(&super::abi::PluginCapability::LikeSync))
+                .is_some_and(|provider| {
+                    provider
+                        .capabilities
+                        .contains(&super::abi::PluginCapability::LikeSync)
+                })
         })
     })
 }

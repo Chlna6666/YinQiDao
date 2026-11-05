@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashSet, fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
@@ -584,12 +579,14 @@ mod tests {
         let mut config = AppConfig::default();
         let local_path = PathBuf::from("C:/Music/test-album/song.flac");
         config.local_liked_paths.insert(local_path.clone());
-        config.online_quality_preferences.push(SavedOnlineQualityPreference {
-            plugin_id: "plugin.qq".into(),
-            provider_id: "qqmusic".into(),
-            account_id: "account".into(),
-            quality: "lossless".into(),
-        });
+        config
+            .online_quality_preferences
+            .push(SavedOnlineQualityPreference {
+                plugin_id: "plugin.qq".into(),
+                provider_id: "qqmusic".into(),
+                account_id: "account".into(),
+                quality: "lossless".into(),
+            });
         let route = crate::plugin::abi::PluginRoute {
             plugin_id: "plugin.qq".into(),
             provider_id: "qqmusic".into(),
@@ -623,10 +620,7 @@ mod tests {
         assert_eq!(restored.online_liked_sources.len(), 1);
         assert_eq!(restored.online_liked_tracks.len(), 1);
         assert_eq!(restored.online_liked_tracks[0].track.title, "远程歌曲");
-        assert_eq!(
-            restored.online_quality_preferences[0].quality,
-            "lossless"
-        );
+        assert_eq!(restored.online_quality_preferences[0].quality, "lossless");
         fs::remove_file(path).expect("cleanup");
     }
 

@@ -1438,10 +1438,8 @@ impl MusicApp {
             cx.notify();
             return;
         };
-        let supported = crate::plugin::management::quality_profiles_for(
-            &route.plugin_id,
-            &route.provider_id,
-        );
+        let supported =
+            crate::plugin::management::quality_profiles_for(&route.plugin_id, &route.provider_id);
         if let Some(selected) = quality.as_deref()
             && !supported.iter().any(|profile| profile.id == selected)
         {
@@ -1517,17 +1515,16 @@ impl MusicApp {
             .and_then(|track| self.track_liked_state(track))
     }
 
-    pub(crate) fn toggle_local_track_liked(
-        &mut self,
-        track_id: TrackId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_local_track_liked(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         let path = self
             .track_index_by_id
             .get(&track_id)
             .and_then(|index| self.tracks.get(*index))
             .or_else(|| {
-                self.snapshot.current_track.as_ref().filter(|track| track.id == track_id)
+                self.snapshot
+                    .current_track
+                    .as_ref()
+                    .filter(|track| track.id == track_id)
             })
             .map(|track| track.path.clone());
         let Some(path) = path.filter(|_| track_id >= 0) else {
@@ -1581,8 +1578,7 @@ impl MusicApp {
             // Update metadata rather than retaining multiple snapshots for
             // one account/source (including after plugin reauthentication).
             self.config.online_liked_tracks.retain(|entry| {
-                !same_online_route(&entry.route, &route)
-                    || entry.track.source != source
+                !same_online_route(&entry.route, &route) || entry.track.source != source
             });
             self.config
                 .online_liked_tracks
@@ -1593,8 +1589,7 @@ impl MusicApp {
         } else {
             self.config.online_liked_sources.remove(&key);
             self.config.online_liked_tracks.retain(|entry| {
-                !same_online_route(&entry.route, &route)
-                    || entry.track.source != source
+                !same_online_route(&entry.route, &route) || entry.track.source != source
             });
         }
         self.bump_ui_content_revision();
@@ -1636,16 +1631,10 @@ impl MusicApp {
         cx.notify();
     }
 
-    pub(crate) fn toggle_track_liked_by_id(
-        &mut self,
-        track_id: TrackId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_track_liked_by_id(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
         if let Some((route, remote)) = self.online_remote_tracks.get(&track_id).cloned() {
             self.toggle_online_track_liked(route, remote, cx);
-        } else if let Some((route, source, _)) =
-            self.online_playback_meta.get(&track_id).cloned()
-        {
+        } else if let Some((route, source, _)) = self.online_playback_meta.get(&track_id).cloned() {
             if let Some(track) = self
                 .snapshot
                 .current_track
@@ -3452,7 +3441,9 @@ impl MusicApp {
         // Replay previously materialized music immediately, even when it was
         // cached several tracks earlier or was reached via Previous.
         let quality = self.online_quality_for_route(&route).map(str::to_owned);
-        let preloaded = self.online_audio_cache.ready(&route, &source, quality.as_deref());
+        let preloaded = self
+            .online_audio_cache
+            .ready(&route, &source, quality.as_deref());
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
         let next_generation = self.online_play_request_generation.wrapping_add(1);
@@ -3518,7 +3509,9 @@ impl MusicApp {
         let remote_for_cache = remote.clone();
         let audio_cache = Arc::clone(&self.online_audio_cache);
         let audio_task = Tokio::spawn_result(cx, async move {
-            audio_cache.prepare(route_for_prep, remote_for_prep, quality).await
+            audio_cache
+                .prepare(route_for_prep, remote_for_prep, quality)
+                .await
         });
 
         // Lyrics are independent of stream materialization. Start them at the same time instead of
