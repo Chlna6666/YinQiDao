@@ -412,6 +412,7 @@ mod tests {
                     vec![PluginCapability::Search]
                 },
                 auth_methods: Vec::new(),
+                quality_profiles: Vec::new(),
             }],
             network_domains: domains.iter().map(|domain| (*domain).into()).collect(),
         }

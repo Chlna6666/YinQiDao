@@ -128,9 +128,12 @@ pub fn stream(
     // 播放文件名 = 前缀 + songmid + mediaMid + 后缀；mediaMid 缺省时以 songmid 兜底。
     let media_mid = song_media_mid(&session, &mid)?.unwrap_or_else(|| mid.clone());
     let candidates = quality_candidates(request.quality.as_deref());
+    // The CDN filename uses mediaMid only, not songmid+mediaMid.
+    // Some metadata returns a distinct mediaMid, and the prior concatenation
+    // made every candidate invalid (even for playable songs).
     let filenames: Vec<String> = candidates
         .iter()
-        .map(|(prefix, extension)| format!("{prefix}{mid}{media_mid}.{extension}"))
+        .map(|(prefix, extension)| vkey_filename(prefix, &media_mid, extension))
         .collect();
 
     let mut param = Map::new();
@@ -141,9 +144,12 @@ pub fn stream(
     param.insert("guid".into(), Value::from(session.guid.clone()));
     param.insert(
         "songmid".into(),
-        Value::Array(vec![Value::from(mid.clone())]),
+        Value::Array((0..filenames.len()).map(|_| Value::from(mid.clone())).collect()),
     );
-    param.insert("songtype".into(), Value::Array(vec![Value::from(0)]));
+    param.insert(
+        "songtype".into(),
+        Value::Array((0..filenames.len()).map(|_| Value::from(0)).collect()),
+    );
     param.insert("uin".into(), Value::from(session.uin.clone()));
     param.insert("loginflag".into(), Value::from(1));
     param.insert("platform".into(), Value::from("20"));
@@ -165,10 +171,17 @@ pub fn stream(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let midurlinfo = object
+    let candidates_returned = object
         .pointer("/vkey/data/midurlinfo")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .and_then(Value::as_array);
+    let chosen = candidates_returned
+        .and_then(|items| {
+            items.iter().find(|item| {
+                value_string(item, &["purl"]).is_some_and(|purl| !purl.is_empty())
+            })
+        });
+    let midurlinfo = chosen
+        .or_else(|| candidates_returned.and_then(|items| items.first()))
         .cloned()
         .unwrap_or(Value::Null);
     let purl = value_string(&midurlinfo, &["purl"]).unwrap_or_default();
@@ -225,6 +238,10 @@ pub fn stream(
     })
 }
 
+fn vkey_filename(prefix: &str, media_mid: &str, extension: &str) -> String {
+    format!("{prefix}{media_mid}.{extension}")
+}
+
 fn song_media_mid(session: &Session, mid: &str) -> ApiResult<Option<String>> {
     let mut param = Map::new();
     param.insert("song_mid".into(), Value::from(mid));
@@ -241,7 +258,10 @@ fn song_media_mid(session: &Session, mid: &str) -> ApiResult<Option<String>> {
     )?;
     Ok(object
         .pointer("/detail/data/track_info/file/mediaMid")
+        .or_else(|| object.pointer("/detail/data/track_info/file/media_mid"))
+        .or_else(|| object.pointer("/detail/data/track_info/file/strMediaMid"))
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_owned))
 }
 
@@ -483,6 +503,18 @@ mod tests {
         assert_eq!(lines[0].translation.as_deref(), Some("你好"));
         assert_eq!(lines[1].text, "world");
         assert!(lines[1].translation.is_none());
+    }
+
+    #[test]
+    fn vkey_uses_only_media_mid() {
+        assert_eq!(
+            vkey_filename("M800", "002MediaMid", "mp3"),
+            "M800002MediaMid.mp3"
+        );
+        assert_ne!(
+            vkey_filename("M800", "002MediaMid", "mp3"),
+            "M800001SongMid002MediaMid.mp3"
+        );
     }
 
     #[test]

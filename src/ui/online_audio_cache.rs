@@ -29,16 +29,18 @@ struct AudioKey {
     provider: String,
     account: String,
     source: String,
+    quality: Option<String>,
     package_generation: u64,
 }
 
 impl AudioKey {
-    fn new(route: &PluginRoute, source: &SourceTrackRef) -> Self {
+    fn new(route: &PluginRoute, source: &SourceTrackRef, quality: Option<&str>) -> Self {
         Self {
             plugin: route.plugin_id.clone(),
             provider: route.provider_id.clone(),
             account: route.account_id.clone(),
             source: source.source_id.clone(),
+            quality: quality.map(str::to_owned),
             package_generation: crate::plugin::runtime_ports::package_mutation_generation(),
         }
     }
@@ -116,11 +118,16 @@ impl OnlineAudioCache {
         Arc::new(Self::default())
     }
 
-    pub(super) fn ready(&self, route: &PluginRoute, source: &SourceTrackRef) -> Option<Track> {
+    pub(super) fn ready(
+        &self,
+        route: &PluginRoute,
+        source: &SourceTrackRef,
+        quality: Option<&str>,
+    ) -> Option<Track> {
         if !valid_route_source(route, source) {
             return None;
         }
-        let key = AudioKey::new(route, source);
+        let key = AudioKey::new(route, source, quality);
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let track = state.usable(&key);
         // Every new playback receives a fresh transient ID: reusing the ID
@@ -130,9 +137,14 @@ impl OnlineAudioCache {
 
     /// A low-priority speculative fetch; limited to two concurrent tracks.
     /// Duplicate keys do not create duplicate provider requests.
-    pub(super) fn prefetch(self: &Arc<Self>, route: PluginRoute, remote: RemoteTrack) {
+    pub(super) fn prefetch(
+        self: &Arc<Self>,
+        route: PluginRoute,
+        remote: RemoteTrack,
+        quality: Option<String>,
+    ) {
         if valid_route_source(&route, &remote.source) {
-            let _ = self.start(route, remote, true);
+            let _ = self.start(route, remote, quality, true);
         }
     }
 
@@ -142,15 +154,16 @@ impl OnlineAudioCache {
         self: &Arc<Self>,
         route: PluginRoute,
         remote: RemoteTrack,
+        quality: Option<String>,
     ) -> Result<Track> {
         if !valid_route_source(&route, &remote.source) {
             return Err(anyhow!("在线音频插件路由与歌曲来源不一致"));
         }
-        if let Some(track) = self.ready(&route, &remote.source) {
+        if let Some(track) = self.ready(&route, &remote.source, quality.as_deref()) {
             return Ok(track);
         }
         let mut rx = self
-            .start(route, remote, false)
+            .start(route, remote, quality, false)
             .ok_or_else(|| anyhow!("无法启动在线音频准备任务"))?;
         loop {
             let outcome = (*rx.borrow_and_update()).clone();
@@ -169,9 +182,10 @@ impl OnlineAudioCache {
         self: &Arc<Self>,
         route: PluginRoute,
         remote: RemoteTrack,
+        quality: Option<String>,
         background: bool,
     ) -> Option<watch::Receiver<Option<PreparedResult>>> {
-        let key = AudioKey::new(&route, &remote.source);
+        let key = AudioKey::new(&route, &remote.source, quality.as_deref());
         let handle = crate::runtime::io_handle().ok()?;
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if let Some(track) = state.usable(&key) {
@@ -226,7 +240,7 @@ impl OnlineAudioCache {
                 let frontend = crate::plugin::frontend::global()
                     .ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
                 let response = frontend
-                    .prepare_remote_track_for_route(&route, &remote, None)
+                    .prepare_remote_track_for_route(&route, &remote, quality.as_deref())
                     .await?;
                 let crate::plugin::frontend::PluginSingleResult {
                     value,
@@ -357,13 +371,33 @@ mod tests {
             provider_id: "netease".into(),
             source_id: "track-1".into(),
         };
-        let key = AudioKey::new(&route, &source);
+        let key = AudioKey::new(&route, &source, None);
         let mut other = route.clone();
         other.account_id = "bob".into();
-        assert_ne!(key, AudioKey::new(&other, &source));
+        assert_ne!(key, AudioKey::new(&other, &source, None));
         other = route.clone();
         other.provider_id = "qqmusic".into();
-        assert_ne!(key, AudioKey::new(&other, &source));
+        assert_ne!(key, AudioKey::new(&other, &source, None));
+    }
+
+    #[test]
+    fn prepared_cache_never_reuses_the_wrong_quality() {
+        let route = PluginRoute {
+            plugin_id: "music".into(),
+            provider_id: "netease".into(),
+            account_id: "alice".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let source = SourceTrackRef {
+            provider_id: "netease".into(),
+            source_id: "1234".into(),
+        };
+        let standard = AudioKey::new(&route, &source, Some("standard"));
+        let lossless = AudioKey::new(&route, &source, Some("lossless"));
+        let automatic = AudioKey::new(&route, &source, None);
+        assert_ne!(standard, lossless);
+        assert_ne!(automatic, lossless);
     }
 
     #[test]
@@ -408,6 +442,7 @@ mod tests {
                 provider_id: "netease".into(),
                 source_id: "0".into(),
             },
+            None,
         );
         for index in 0..(MAX_READY_TRACKS + 3) {
             let key = AudioKey::new(
@@ -416,6 +451,7 @@ mod tests {
                     provider_id: "netease".into(),
                     source_id: index.to_string(),
                 },
+                None,
             );
             // This test exercises only ordering and eviction; the track value
             // is irrelevant, so use a regular local TrackData fixture.

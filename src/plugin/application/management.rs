@@ -167,6 +167,32 @@ pub fn provider_display_labels() -> std::collections::BTreeMap<String, String> {
     labels
 }
 
+/// Stream quality options are declared by the installed provider package,
+/// not inferred from hardcoded names in UI or guessed from the current codec.
+/// This uses the already-loaded Host catalog; no filesystem access on UI frames.
+pub fn quality_profiles_for(
+    plugin_id: &str,
+    provider_id: &str,
+) -> Vec<super::abi::StreamQualityProfile> {
+    super::host::catalog::global()
+        .and_then(|host| host.read().ok().and_then(|host| {
+            host.catalog()
+                .provider(plugin_id, provider_id)
+                .map(|provider| provider.quality_profiles.clone())
+        }))
+        .unwrap_or_default()
+}
+
+pub fn supports_like_sync(plugin_id: &str, provider_id: &str) -> bool {
+    super::host::catalog::global().is_some_and(|host| {
+        host.read().is_ok_and(|host| {
+            host.catalog()
+                .provider(plugin_id, provider_id)
+                .is_some_and(|provider| provider.capabilities.contains(&super::abi::PluginCapability::LikeSync))
+        })
+    })
+}
+
 /// 多来源 UI：provider_id → 来源显示名（来自已安装插件目录）。
 /// 未安装/未知的 provider_id 由调用方回退为原始 id 显示。
 pub fn provider_display_names() -> Result<std::collections::BTreeMap<String, String>> {

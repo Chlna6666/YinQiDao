@@ -301,6 +301,27 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 );
             }
         }
+        if provider.quality_profiles.len() > 16 {
+            bail!("provider {} 超过 16 个音质选项", provider.id);
+        }
+        if !provider.quality_profiles.is_empty()
+            && !provider.capabilities.contains(&PluginCapability::Streaming)
+        {
+            bail!("provider {} 音质选项需要 streaming capability", provider.id);
+        }
+        let mut quality_ids = HashSet::new();
+        for profile in &provider.quality_profiles {
+            if !valid_identifier(&profile.id) || profile.id.len() > 64
+                || profile.label.trim().is_empty()
+                || profile.label.len() > 80
+                || profile.label.contains('\0')
+            {
+                bail!("provider {} 音质档位 id/label 非法", provider.id);
+            }
+            if !quality_ids.insert(&profile.id) {
+                bail!("provider {} 重复音质档位 {}", provider.id, profile.id);
+            }
+        }
         let mut auth_methods = HashSet::new();
         for method in &provider.auth_methods {
             let key = auth_method_key(*method);
@@ -850,6 +871,7 @@ auth_methods = ["qr_code"]
                 display_name: "Test".into(),
                 capabilities: vec![PluginCapability::Search],
                 auth_methods: Vec::new(),
+                quality_profiles: Vec::new(),
             }],
             network_domains: vec!["api.example.com".into()],
         }
@@ -914,6 +936,7 @@ auth_methods = ["qr_code"]
                 display_name: format!("Provider {index}"),
                 capabilities: vec![PluginCapability::Search],
                 auth_methods: Vec::new(),
+                quality_profiles: Vec::new(),
             })
             .collect();
         assert!(validate_manifest(&too_many_providers).is_err());

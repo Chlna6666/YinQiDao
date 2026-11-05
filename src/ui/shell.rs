@@ -362,6 +362,8 @@ pub struct MusicApp {
     online_asset_preload_task: Option<gpui::Task<()>>,
     /// Shared bounded memory index over the Host's persistent stream cache.
     online_audio_cache: Arc<super::online_audio_cache::OnlineAudioCache>,
+    pending_quality_resume: Option<(u64, u64)>,
+    liked_sync_pending: HashSet<crate::settings::SavedLikedSource>,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
     online_playlist_request_generation: u64,
     /// online_playlist_cache 的 FIFO 驱逐序，限制会话内的歌单视图缓存深度。
@@ -1087,6 +1089,8 @@ impl MusicApp {
             online_audio_preload_task: None,
             online_asset_preload_task: None,
             online_audio_cache: super::online_audio_cache::OnlineAudioCache::new(),
+            pending_quality_resume: None,
+            liked_sync_pending: HashSet::new(),
             online_playlist_cache: HashMap::new(),
             online_playlist_request_generation: 0,
             online_playlist_cache_order: VecDeque::new(),
@@ -1406,6 +1410,168 @@ impl MusicApp {
     /// online index may already point at the next *pending* source while the
     /// previous song is still audible, so resolve from the AudioEngine
     /// snapshot first. Neither this method nor Render polls/forces scrolling.
+    pub(crate) fn online_quality_for_route(
+        &self,
+        route: &crate::plugin::abi::PluginRoute,
+    ) -> Option<&str> {
+        self.config
+            .online_quality_preferences
+            .iter()
+            .find(|pref| {
+                pref.plugin_id == route.plugin_id
+                    && pref.provider_id == route.provider_id
+                    && pref.account_id == route.account_id
+            })
+            .map(|pref| pref.quality.as_str())
+    }
+
+    pub(crate) fn set_current_online_quality(
+        &mut self,
+        quality: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) else {
+            return;
+        };
+        let Some((route, remote)) = self.online_remote_tracks.get(&track_id).cloned() else {
+            self.status = "当前曲目不是可切换音质的在线歌曲".into();
+            cx.notify();
+            return;
+        };
+        let supported = crate::plugin::management::quality_profiles_for(
+            &route.plugin_id,
+            &route.provider_id,
+        );
+        if let Some(selected) = quality.as_deref()
+            && !supported.iter().any(|profile| profile.id == selected)
+        {
+            self.status = "当前来源未声明该音质档位".into();
+            cx.notify();
+            return;
+        }
+        if self.online_quality_for_route(&route) == quality.as_deref() {
+            return;
+        }
+
+        self.config.online_quality_preferences.retain(|preference| {
+            !(preference.plugin_id == route.plugin_id
+                && preference.provider_id == route.provider_id
+                && preference.account_id == route.account_id)
+        });
+        if let Some(quality) = quality.clone() {
+            self.config.online_quality_preferences.push(
+                crate::settings::SavedOnlineQualityPreference {
+                    plugin_id: route.plugin_id.clone(),
+                    provider_id: route.provider_id.clone(),
+                    account_id: route.account_id.clone(),
+                    quality,
+                },
+            );
+        }
+        self.save_config();
+        let position_ms = self.snapshot.position_ms;
+        self.pending_quality_resume = Some((
+            self.online_play_request_generation.wrapping_add(1),
+            position_ms,
+        ));
+        self.play_online_remote_track(route, remote, cx);
+        self.status = "正在切换音质，并恢复原播放位置".into();
+        cx.notify();
+    }
+
+    pub(crate) fn current_liked_state(&self) -> Option<bool> {
+        let id = self.snapshot.current_track.as_ref()?.id;
+        if let Some((route, source, _)) = self.online_playback_meta.get(&id) {
+            return Some(self.config.online_liked_sources.contains(&
+                crate::settings::SavedLikedSource {
+                    plugin_id: route.plugin_id.clone(),
+                    provider_id: route.provider_id.clone(),
+                    account_id: route.account_id.clone(),
+                    source_id: source.source_id.clone(),
+                },
+            ));
+        }
+        Some(self.config.local_liked_tracks.contains(&id))
+    }
+
+    pub(crate) fn toggle_current_liked(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.snapshot.current_track.as_ref().map(|track| track.id) else {
+            return;
+        };
+        if let Some((route, source, _)) = self.online_playback_meta.get(&id).cloned() {
+            let key = crate::settings::SavedLikedSource {
+                plugin_id: route.plugin_id.clone(),
+                provider_id: route.provider_id.clone(),
+                account_id: route.account_id.clone(),
+                source_id: source.source_id.clone(),
+            };
+            if self.liked_sync_pending.contains(&key) {
+                return;
+            }
+            let was_liked = self.config.online_liked_sources.contains(&key);
+            let liked = !was_liked;
+            if liked {
+                self.config.online_liked_sources.insert(key.clone());
+            } else {
+                self.config.online_liked_sources.remove(&key);
+            }
+            self.save_config();
+            if crate::plugin::management::supports_like_sync(
+                &route.plugin_id,
+                &route.provider_id,
+            ) {
+                self.liked_sync_pending.insert(key.clone());
+                self.status = "正在同步喜欢状态到音乐平台".into();
+                let task = Tokio::spawn_result(cx, async move {
+                    let frontend = crate::plugin::frontend::global()
+                        .ok_or_else(|| anyhow::anyhow!("插件前端未初始化"))?;
+                    frontend.set_liked_for_route(&route, &source, liked).await
+                });
+                cx.spawn(async move |this, cx| {
+                    let outcome = task.await;
+                    let _ = this.update(cx, |app, cx| {
+                        app.liked_sync_pending.remove(&key);
+                        if !matches!(outcome, Ok(true)) {
+                            if liked {
+                                app.config.online_liked_sources.remove(&key);
+                            } else {
+                                app.config.online_liked_sources.insert(key);
+                            }
+                            app.save_config();
+                            app.status = match outcome {
+                                Ok(false) => "音乐平台拒绝了喜欢状态写入，已恢复原状态".into(),
+                                Err(error) => format!("喜欢同步失败：{error:#}"),
+                                Ok(true) => unreachable!(),
+                            };
+                        } else {
+                            app.status = if liked {
+                                "已同步喜欢到音乐平台".into()
+                            } else {
+                                "已同步取消喜欢到音乐平台".into()
+                            };
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            } else {
+                self.status = if liked {
+                    "已加入本地喜欢；该平台尚不支持账号红心同步".into()
+                } else {
+                    "已从本地喜欢移除；该平台尚不支持账号红心同步".into()
+                };
+            }
+        } else if !self.config.local_liked_tracks.insert(id) {
+            self.config.local_liked_tracks.remove(&id);
+            self.status = "已从本地喜欢移除".into();
+            self.save_config();
+        } else {
+            self.status = "已加入本地喜欢".into();
+            self.save_config();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn current_online_source_for_route(
         &self,
         route: &crate::plugin::abi::PluginRoute,
@@ -1844,6 +2010,7 @@ impl MusicApp {
             }
         }
         let generation = self.online_preload_generation;
+        let quality = self.online_quality_for_route(&route).map(str::to_owned);
 
         // Artwork is tiny after image_cache normalization and already deduplicated by URL. Warm at
         // most two covers so the next rows/stage never wait for network.
@@ -1906,7 +2073,7 @@ impl MusicApp {
                 return;
             }
             for remote in candidates {
-                audio_cache.prefetch(route.clone(), remote);
+                audio_cache.prefetch(route.clone(), remote, quality.clone());
             }
         }));
     }
@@ -3027,6 +3194,14 @@ impl MusicApp {
         }
 
         self.online_track_cache.insert(track_id, track.clone());
+        if let Some((generation, position_ms)) = self.pending_quality_resume.take()
+            && generation == self.online_play_request_generation
+        {
+            // Both commands go through the ordered audio bridge: the transient
+            // Play is queued before Seek, preserving the audible position on
+            // an on-the-fly quality change.
+            let _ = self.send(PlayerCommand::Seek(Duration::from_millis(position_ms)));
+        }
         self.online_playlist_rollback = None;
         self.pending_track_ack_id = Some(track_id);
         self.reset_progress_for_track_switch();
@@ -3172,10 +3347,18 @@ impl MusicApp {
         }
         // Replay previously materialized music immediately, even when it was
         // cached several tracks earlier or was reached via Previous.
-        let preloaded = self.online_audio_cache.ready(&route, &source);
+        let quality = self.online_quality_for_route(&route).map(str::to_owned);
+        let preloaded = self.online_audio_cache.ready(&route, &source, quality.as_deref());
         self.cancel_online_play_request();
         self.cancel_online_preload_tasks();
-        self.online_play_request_generation = self.online_play_request_generation.wrapping_add(1);
+        let next_generation = self.online_play_request_generation.wrapping_add(1);
+        if !self
+            .pending_quality_resume
+            .is_some_and(|(generation, _)| generation == next_generation)
+        {
+            self.pending_quality_resume = None;
+        }
+        self.online_play_request_generation = next_generation;
         let generation = self.online_play_request_generation;
         tracing::debug!(
             plugin = %route.plugin_id,
@@ -3231,7 +3414,7 @@ impl MusicApp {
         let remote_for_cache = remote.clone();
         let audio_cache = Arc::clone(&self.online_audio_cache);
         let audio_task = Tokio::spawn_result(cx, async move {
-            audio_cache.prepare(route_for_prep, remote_for_prep).await
+            audio_cache.prepare(route_for_prep, remote_for_prep, quality).await
         });
 
         // Lyrics are independent of stream materialization. Start them at the same time instead of

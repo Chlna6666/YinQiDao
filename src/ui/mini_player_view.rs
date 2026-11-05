@@ -13,6 +13,7 @@ use lucide_gpui::icon;
 use crate::{
     audio::PlayerCommand,
     model::{PlaybackState, RepeatMode, TrackId},
+    plugin::abi::StreamQualityProfile,
 };
 
 use super::{
@@ -51,6 +52,7 @@ struct MiniPlayerRenderKey {
     repeat: RepeatMode,
     desktop_lyrics_visible: bool,
     queue_active: bool,
+    liked: bool,
     slider_volume_bits: u32,
     icon_volume_bits: u32,
 }
@@ -116,6 +118,7 @@ pub(super) fn view(
                     repeat: RepeatMode::Off,
                     desktop_lyrics_visible: false,
                     queue_active: false,
+                    liked: false,
                     slider_volume_bits: 1.0_f32.to_bits(),
                     icon_volume_bits: 1.0_f32.to_bits(),
                 },
@@ -123,6 +126,10 @@ pub(super) fn view(
                 icon_volume: 1.0,
                 last_volume_command_at: Instant::now() - VOLUME_COMMAND_INTERVAL,
                 last_volume_command: 1.0,
+                quality_route: None,
+                selected_quality: None,
+                quality_profiles: Vec::new(),
+                quality_menu_open: false,
                 _ui_subscription: ui_subscription,
             }
         });
@@ -157,11 +164,35 @@ pub(super) fn view(
         repeat: app.snapshot.repeat,
         desktop_lyrics_visible: app.config.desktop_lyrics.visible,
         queue_active: app.queue_drawer_open,
+        liked: app.current_liked_state().unwrap_or(false),
         slider_volume_bits: slider_volume.to_bits(),
         icon_volume_bits: icon_volume.to_bits(),
     };
 
+    let quality_route = track_id.and_then(|id| {
+        app.online_playback_meta
+            .get(&id)
+            .map(|(route, _, _)| route)
+            .or_else(|| app.online_remote_tracks.get(&id).map(|(route, _)| route))
+    });
+    let route_key = quality_route.map(|route| (route.plugin_id.clone(), route.provider_id.clone()));
+    let quality_selected = quality_route
+        .and_then(|route| app.online_quality_for_route(route))
+        .map(str::to_owned);
+
     view.update(cx, |view, cx| {
+        let quality_route_changed = view.quality_route != route_key;
+        let quality_changed = view.selected_quality != quality_selected;
+        if quality_route_changed {
+            view.quality_profiles = route_key.as_ref().map_or_else(Vec::new, |(plugin, provider)| {
+                crate::plugin::management::quality_profiles_for(plugin, provider)
+            });
+            view.quality_route = route_key;
+            view.quality_menu_open = false;
+        }
+        if quality_changed {
+            view.selected_quality = quality_selected;
+        }
         let metadata_changed = track.is_some_and(|track| {
             view.track.title.as_ref() != track.title.as_str()
                 || view.track.artist.as_ref() != track.artist.as_str()
@@ -185,7 +216,7 @@ pub(super) fn view(
                 }
             };
         }
-        if view.key != key || metadata_changed {
+        if view.key != key || metadata_changed || quality_route_changed || quality_changed {
             view.key = key;
             view.slider_volume = slider_volume;
             view.icon_volume = icon_volume;
@@ -207,6 +238,10 @@ pub(super) struct MiniPlayerView {
     icon_volume: f32,
     last_volume_command_at: Instant,
     last_volume_command: f32,
+    quality_route: Option<(String, String)>,
+    selected_quality: Option<String>,
+    quality_profiles: Vec<StreamQualityProfile>,
+    quality_menu_open: bool,
     _ui_subscription: Subscription,
 }
 
@@ -216,6 +251,15 @@ impl Render for MiniPlayerView {
         let parent = self.parent.clone();
         let slider_volume = self.slider_volume;
         let icon_volume = self.icon_volume;
+        let quality_label = self.selected_quality.as_deref().and_then(|selected| {
+            self.quality_profiles
+                .iter()
+                .find(|profile| profile.id == selected)
+        }).map_or("自动音质", |profile| profile.label.split('·').next().unwrap_or("音质").trim()).to_owned();
+        let show_quality = !self.quality_profiles.is_empty();
+        let quality_menu_open = self.quality_menu_open;
+        let quality_profiles = self.quality_profiles.clone();
+        let selected_quality = self.selected_quality.clone();
 
         div()
             .id("mini-player-container")
@@ -299,14 +343,32 @@ impl Render for MiniPlayerView {
                                     .justify_center()
                                     .rounded_full()
                                     .cursor_pointer()
+                                    .bg(if self.key.liked {
+                                        theme::accent_red_muted()
+                                    } else {
+                                        theme::transparent()
+                                    })
                                     .hover(|style| style.bg(theme::bg_hover()))
                                     .transition(press_transition())
                                     .active(|style| style.scale(0.92))
                                     .child(themed_icon(
                                         icon!(heart),
                                         15.0,
-                                        theme::TEXT_TERTIARY.into(),
-                                    )),
+                                        if self.key.liked {
+                                            ACCENT_RED.into()
+                                        } else {
+                                            theme::TEXT_TERTIARY.into()
+                                        },
+                                    ))
+                                    .on_mouse_down(gpui::MouseButton::Left, {
+                                        let parent = parent.clone();
+                                        move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = parent.update(cx, |app, app_cx| {
+                                                app.toggle_current_liked(app_cx);
+                                            });
+                                        }
+                                    }),
                             ),
                     )
                     .child(
@@ -417,6 +479,37 @@ impl Render for MiniPlayerView {
                             .items_center()
                             .justify_end()
                             .gap_3()
+                            .children(show_quality.then(|| {
+                                div()
+                                    .id("mini-quality-btn")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(if quality_menu_open {
+                                        ACCENT_RED
+                                    } else {
+                                        TEXT_SECONDARY
+                                    })
+                                    .bg(if quality_menu_open {
+                                        theme::accent_red_muted()
+                                    } else {
+                                        theme::transparent()
+                                    })
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme::bg_hover()))
+                                    .transition(press_transition())
+                                    .child(quality_label)
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|view, _, _, cx| {
+                                            cx.stop_propagation();
+                                            view.quality_menu_open = !view.quality_menu_open;
+                                            cx.notify();
+                                        }),
+                                    )
+                            }))
                             .child(
                                 div()
                                     .id("mini-desktop-lyrics-btn")
@@ -542,6 +635,80 @@ impl Render for MiniPlayerView {
                     ),
             )
             .child(cached_playback_progress(self.playback_progress.clone()))
+            .children((show_quality && quality_menu_open).then(|| {
+                let mut menu = div()
+                    .id("mini-quality-popup")
+                    .absolute()
+                    .right(px(125.0))
+                    .bottom(px(76.0))
+                    .w(px(216.0))
+                    .max_h(px(380.0))
+                    .overflow_y_scroll()
+                    .rounded_xl()
+                    .bg(theme::BG_CARD)
+                    .border_1()
+                    .border_color(theme::BORDER_CARD)
+                    .shadow_lg()
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(TEXT_SECONDARY)
+                            .child("音质 · 当前音乐来源"),
+                    );
+
+                let mut choices: Vec<(Option<String>, String)> =
+                    Vec::with_capacity(quality_profiles.len() + 1);
+                choices.push((None, "自动音质".into()));
+                for profile in quality_profiles {
+                    choices.push((Some(profile.id), profile.label));
+                }
+                for (index, (quality, label)) in choices.into_iter().enumerate() {
+                    let selected = quality == selected_quality;
+                    let parent = parent.clone();
+                    menu = menu.child(
+                        div()
+                            .id(SharedString::from(format!("mini-quality-option-{index}")))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(if selected {
+                                theme::accent_red_muted()
+                            } else {
+                                theme::transparent()
+                            })
+                            .hover(|style| style.bg(theme::bg_hover()))
+                            .text_sm()
+                            .text_color(if selected { ACCENT_RED } else { TEXT_PRIMARY })
+                            .child(label)
+                            .children(selected.then(|| {
+                                themed_icon(icon!(check), 14.0, ACCENT_RED.into())
+                            }))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.quality_menu_open = false;
+                                    let _ = parent.update(cx, |app, app_cx| {
+                                        app.set_current_online_quality(quality.clone(), app_cx);
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    );
+                }
+                menu
+            }))
     }
 }
 

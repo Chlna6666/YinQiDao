@@ -500,6 +500,8 @@ fn quality_level(quality: Option<&str>) -> &'static str {
         "lossless" => "lossless",
         "hires" => "hires",
         "jyeffect" => "jyeffect",
+        "jymaster" => "jymaster",
+        "vivid" => "vivid",
         "sky" => "sky",
         "dolby" => "dolby",
         _ => "exhigh",
@@ -618,5 +620,7 @@ mod tests {
         assert_eq!(quality_level(Some("320k")), "exhigh");
         assert_eq!(quality_level(Some("lossless")), "lossless");
         assert_eq!(quality_level(Some("sky")), "sky");
+        assert_eq!(quality_level(Some("jymaster")), "jymaster");
+        assert_eq!(quality_level(Some("vivid")), "vivid");
     }
 }

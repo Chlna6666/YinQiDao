@@ -1390,6 +1390,7 @@ impl From<wit_types::ProviderDescriptor> for ProviderDescriptor {
             display_name: d.display_name,
             capabilities: d.capabilities.into_iter().map(Into::into).collect(),
             auth_methods: d.auth_methods.into_iter().map(Into::into).collect(),
+            quality_profiles: Vec::new(),
         }
     }
 }

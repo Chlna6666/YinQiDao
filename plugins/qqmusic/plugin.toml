@@ -40,3 +40,8 @@ capabilities = [
   "user_profile",
 ]
 auth_methods = ["qr_code", "cookie_import"]
+quality_profiles = [
+  { id = "standard", label = "标准 · 128 kbps" },
+  { id = "exhigh", label = "高品质 · 320 kbps" },
+  { id = "lossless", label = "无损 · FLAC" },
+]

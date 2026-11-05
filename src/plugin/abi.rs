@@ -37,6 +37,13 @@ pub enum AuthMethod {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StreamQualityProfile {
+    /// Opaque identifier passed through StreamRequest.quality unchanged.
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderDescriptor {
     pub id: String,
     pub display_name: String,
@@ -44,6 +51,10 @@ pub struct ProviderDescriptor {
     pub capabilities: Vec<PluginCapability>,
     #[serde(default)]
     pub auth_methods: Vec<AuthMethod>,
+    /// Declarative quality choices from the installed provider package.
+    /// ABI v1 already carries StreamRequest.quality, so no WIT break is required.
+    #[serde(default)]
+    pub quality_profiles: Vec<StreamQualityProfile>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

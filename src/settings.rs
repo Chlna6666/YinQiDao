@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
@@ -141,6 +146,22 @@ pub struct SavedOnlinePlaylistQueue {
     pub current_index: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct SavedLikedSource {
+    pub plugin_id: String,
+    pub provider_id: String,
+    pub account_id: String,
+    pub source_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SavedOnlineQualityPreference {
+    pub plugin_id: String,
+    pub provider_id: String,
+    pub account_id: String,
+    pub quality: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "current_schema_version")]
@@ -171,6 +192,12 @@ pub struct AppConfig {
     pub queue: Arc<Vec<TrackId>>,
     #[serde(default)]
     pub online_playlist_queue: Option<SavedOnlinePlaylistQueue>,
+    #[serde(default)]
+    pub online_quality_preferences: Vec<SavedOnlineQualityPreference>,
+    #[serde(default)]
+    pub online_liked_sources: HashSet<SavedLikedSource>,
+    #[serde(default)]
+    pub local_liked_tracks: HashSet<TrackId>,
     #[serde(default)]
     pub current_track: Option<TrackId>,
     #[serde(default)]
@@ -284,6 +311,9 @@ impl AppConfigV1 {
             shuffle: self.shuffle,
             queue: self.queue,
             online_playlist_queue: None,
+            online_quality_preferences: Vec::new(),
+            online_liked_sources: HashSet::new(),
+            local_liked_tracks: HashSet::new(),
             current_track: self.current_track,
             last_played_track: None,
             position_ms: self.position_ms,
@@ -352,6 +382,9 @@ impl Default for AppConfig {
             shuffle: false,
             queue: Arc::new(Vec::new()),
             online_playlist_queue: None,
+            online_quality_preferences: Vec::new(),
+            online_liked_sources: HashSet::new(),
+            local_liked_tracks: HashSet::new(),
             current_track: None,
             last_played_track: None,
             position_ms: 0,
