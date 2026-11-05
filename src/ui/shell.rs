@@ -1565,10 +1565,7 @@ impl MusicApp {
         .detach();
     }
 
-    pub(crate) fn platform_likes_ready(
-        &self,
-        route: &crate::plugin::abi::PluginRoute,
-    ) -> bool {
+    pub(crate) fn platform_likes_ready(&self, route: &crate::plugin::abi::PluginRoute) -> bool {
         self.online_like_loaded_accounts
             .contains(&super::favorite_sync::scope(route))
     }
