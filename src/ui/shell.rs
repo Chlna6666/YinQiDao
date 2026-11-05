@@ -3067,16 +3067,17 @@ impl MusicApp {
         {
             return;
         }
-        let current_index = self
-            .current_online_source_for_route(route)
-            .and_then(|audible_source| {
-                queue.tracks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, track)| &track.source == audible_source)
-                    .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
-                    .map(|(index, _)| index)
-            });
+        let current_index =
+            self.current_online_source_for_route(route)
+                .and_then(|audible_source| {
+                    queue
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, track)| &track.source == audible_source)
+                        .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
+                        .map(|(index, _)| index)
+                });
         if let Some(index) = current_index {
             let queue = self
                 .online_playlist_queue
@@ -3939,10 +3940,13 @@ impl MusicApp {
     ) {
         if let Some(track) = tracks.get(index).cloned() {
             if self.online_track_buffering.is_none() {
-                self.online_playlist_rollback = self.online_playlist_queue.clone().filter(|queue| {
-                    self.current_online_source_for_route(&queue.route)
-                        .is_some_and(|source| queue.tracks.iter().any(|track| &track.source == source))
-                });
+                self.online_playlist_rollback =
+                    self.online_playlist_queue.clone().filter(|queue| {
+                        self.current_online_source_for_route(&queue.route)
+                            .is_some_and(|source| {
+                                queue.tracks.iter().any(|track| &track.source == source)
+                            })
+                    });
             }
             self.online_playlist_queue = Some(OnlinePlaylistQueue {
                 route: route.clone(),
@@ -7168,12 +7172,17 @@ mod tests {
         app.restore_online_playlist_after_failed_play(&route, &unavailable.source);
 
         assert_eq!(
-            app.online_playlist_queue.as_ref().map(|q| q.playlist_title.as_str()),
+            app.online_playlist_queue
+                .as_ref()
+                .map(|q| q.playlist_title.as_str()),
             Some("Audible list")
         );
         assert!(app.online_playlist_rollback.is_none());
         assert_eq!(
-            app.config.online_playlist_queue.as_ref().map(|q| q.current_index),
+            app.config
+                .online_playlist_queue
+                .as_ref()
+                .map(|q| q.current_index),
             Some(0)
         );
     }
@@ -7223,7 +7232,11 @@ mod tests {
         app.restore_online_playlist_after_failed_play(&route, &unavailable.source);
         assert_eq!(app.online_playlist_queue.as_ref().unwrap().current_index, 0);
         assert_eq!(
-            app.config.online_playlist_queue.as_ref().unwrap().current_index,
+            app.config
+                .online_playlist_queue
+                .as_ref()
+                .unwrap()
+                .current_index,
             0
         );
     }

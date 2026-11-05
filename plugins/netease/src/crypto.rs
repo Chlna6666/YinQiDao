@@ -160,7 +160,7 @@ fn aes_expand_key(key: &[u8; AES_BLOCK]) -> [u8; 176] {
             expanded[generated - 2],
             expanded[generated - 1],
         ];
-        if generated % AES_BLOCK == 0 {
+        if generated.is_multiple_of(AES_BLOCK) {
             temp.rotate_left(1);
             for byte in &mut temp {
                 *byte = AES_SBOX[*byte as usize];
@@ -358,9 +358,9 @@ impl U1024 {
 fn add_mod(left: U1024, right: U1024, modulus: U1024) -> U1024 {
     let mut sum = [0u64; 17];
     let mut carry = 0u128;
-    for index in 0..16 {
+    for (index, limb) in sum[..16].iter_mut().enumerate() {
         let value = u128::from(left.0[index]) + u128::from(right.0[index]) + carry;
-        sum[index] = value as u64;
+        *limb = value as u64;
         carry = value >> 64;
     }
     sum[16] = carry as u64;
@@ -371,10 +371,10 @@ fn add_mod(left: U1024, right: U1024, modulus: U1024) -> U1024 {
     };
     if should_subtract {
         let mut borrow = false;
-        for index in 0..16 {
-            let (value, borrow_a) = sum[index].overflowing_sub(modulus.0[index]);
+        for (index, limb) in sum[..16].iter_mut().enumerate() {
+            let (value, borrow_a) = limb.overflowing_sub(modulus.0[index]);
             let (value, borrow_b) = value.overflowing_sub(u64::from(borrow));
-            sum[index] = value;
+            *limb = value;
             borrow = borrow_a || borrow_b;
         }
         let (top, top_borrow) = sum[16].overflowing_sub(u64::from(borrow));

@@ -320,10 +320,10 @@ pub fn parse_remote_track(value: &Value) -> Result<types::RemoteTrack, String> {
                 if !name.is_empty() {
                     artists.push(name.to_string());
                 }
-            } else if let Some(name) = a.as_str() {
-                if !name.is_empty() {
-                    artists.push(name.to_string());
-                }
+            } else if let Some(name) = a.as_str()
+                && !name.is_empty()
+            {
+                artists.push(name.to_string());
             }
         }
     }
