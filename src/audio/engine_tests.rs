@@ -79,12 +79,12 @@ fn pcm_wav() -> Vec<u8> {
 
 #[test]
 fn pcm_ring_capacity_has_bounded_cpu_stall_headroom() {
-    // PCM ring grows from the previous 125ms to 240ms while remaining tiny in
-    // memory (46_080 samples = ~180KiB at 96kHz). This is decoded PCM, not an
-    // artificial delay introduced into the system audio output stream.
-    assert_eq!(pcm_ring_capacity(48_000), 23_040);
-    assert_eq!(pcm_ring_capacity(8_000), 4_096);
-    assert_eq!(pcm_ring_capacity(96_000), 46_080);
+    // 500ms decoded PCM absorbs short scheduler stalls without changing the
+    // WASAPI output period or retaining stale audio across Seek/Next.
+    // 96kHz stereo requires 96_000 f32 samples, ~375KiB.
+    assert_eq!(pcm_ring_capacity(48_000), 48_000);
+    assert_eq!(pcm_ring_capacity(8_000), 8_000);
+    assert_eq!(pcm_ring_capacity(96_000), 96_000);
 }
 
 #[test]

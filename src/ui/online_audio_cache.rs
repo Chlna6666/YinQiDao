@@ -13,7 +13,10 @@ use tokio::sync::watch;
 
 use crate::{
     model::Track,
-    plugin::abi::{PluginRoute, RemoteTrack, SourceTrackRef},
+    plugin::{
+        abi::{PluginRoute, RemoteTrack, SourceTrackRef},
+        frontend::PluginCallFailure,
+    },
 };
 
 const MAX_READY_TRACKS: usize = 6;
@@ -225,10 +228,16 @@ impl OnlineAudioCache {
                 let response = frontend
                     .prepare_remote_track_for_route(&route, &remote, None)
                     .await?;
-                response
-                    .value
-                    .map(|prepared| prepared.into_track())
-                    .ok_or_else(|| anyhow!("在线音频源不可用"))
+                let crate::plugin::frontend::PluginSingleResult {
+                    value,
+                    failures,
+                    client_ready,
+                    ..
+                } = response;
+                match value {
+                    Some(prepared) => Ok(prepared.into_track()),
+                    None => Err(anyhow!(unavailable_stream_reason(&failures, client_ready))),
+                }
             }
             .await
             .map_err(|err| format!("{err:#}"));
@@ -274,6 +283,33 @@ impl OnlineAudioCache {
     }
 }
 
+/// Do not collapse Host/plugin failures into the same generic "source unavailable".
+/// A playlist row can be clickable even when a provider denies the stream.
+fn unavailable_stream_reason(failures: &[PluginCallFailure], client_ready: bool) -> String {
+    if let Some(failure) = failures.last() {
+        let message = failure.error.lines().next().unwrap_or("").trim();
+        let lowercase = message.to_ascii_lowercase();
+        // Never display potentially signed stream URLs, cookies or token values
+        // returned by an untrusted third-party plug-in.
+        if lowercase.contains("://")
+            || lowercase.contains("cookie")
+            || lowercase.contains("token")
+            || lowercase.contains("authorization")
+        {
+            return "在线音源解析失败，请检查该平台账号、版权和网络状态".into();
+        }
+        if !message.is_empty() {
+            let reason: String = message.chars().take(180).collect();
+            return format!("在线音源解析失败：{reason}");
+        }
+    }
+    if !client_ready {
+        "在线音源插件尚未就绪，请检查插件安装与账号登录状态".into()
+    } else {
+        "当前账号未提供可播放的在线音源（可能受版权、会员或地区限制）".into()
+    }
+}
+
 /// Clone the Host-backed Track metadata without copying the downloaded
 /// audio; each transport activation gets a distinct negative process-local ID.
 fn fresh_playback_track(mut track: Track) -> Result<Track> {
@@ -284,6 +320,29 @@ fn fresh_playback_track(mut track: Track) -> Result<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_source_surfaces_actual_plugin_reason_without_credentials() {
+        let route = PluginRoute {
+            plugin_id: "netease".into(),
+            provider_id: "netease".into(),
+            account_id: "session".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let failures = [PluginCallFailure {
+            route,
+            error: "歌曲无版权或会员限制".into(),
+        }];
+        assert!(unavailable_stream_reason(&failures, true).contains("会员限制"));
+        assert!(unavailable_stream_reason(&[], false).contains("尚未就绪"));
+        assert!(unavailable_stream_reason(&[], true).contains("地区限制"));
+        let secret = [PluginCallFailure {
+            route: failures[0].route.clone(),
+            error: "https://example.org/audio?token=secret".into(),
+        }];
+        assert!(!unavailable_stream_reason(&secret, true).contains("secret"));
+    }
 
     #[test]
     fn cache_keys_never_mix_accounts_or_providers() {

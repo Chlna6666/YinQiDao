@@ -380,6 +380,10 @@ pub struct MusicApp {
     pub(crate) active_modal: Option<super::components::modal::GlobalModal>,
     pub(crate) active_online_playlist: Option<OnlinePlaylistViewData>,
     pub(crate) online_playlist_queue: Option<OnlinePlaylistQueue>,
+    // The pending selection is not yet audible. Preserve the last confirmed
+    // queue so a failed cross-playlist request cannot make Next/Previous jump
+    // through a song that never started.
+    online_playlist_rollback: Option<OnlinePlaylistQueue>,
     pub(crate) sidebar_created_playlists_collapsed: bool,
     pub(crate) sidebar_collected_playlists_collapsed: bool,
     pub(crate) search_input: Option<Entity<crate::ui::components::input::HostTextInput>>,
@@ -1094,6 +1098,7 @@ impl MusicApp {
             active_modal: None,
             active_online_playlist: None,
             online_playlist_queue: restored_online_playlist_queue,
+            online_playlist_rollback: None,
             sidebar_created_playlists_collapsed: false,
             sidebar_collected_playlists_collapsed: false,
             search_input: None,
@@ -1464,7 +1469,7 @@ impl MusicApp {
                 && queue.tracks.len() == data.tracks.len()
         });
         let preferred_index = selected_queue.map_or(0, |queue| queue.current_index);
-        let buffering = selected_queue.and_then(|_| self.online_track_buffering.as_deref());
+        let buffering = selected_queue.and(self.online_track_buffering.as_deref());
         if let Some(index) = queue_drawer::focus_source_index(
             data.tracks
                 .iter()
@@ -3022,6 +3027,7 @@ impl MusicApp {
         }
 
         self.online_track_cache.insert(track_id, track.clone());
+        self.online_playlist_rollback = None;
         self.pending_track_ack_id = Some(track_id);
         self.reset_progress_for_track_switch();
         // Keep persistence/UI identity coherent before the audio bridge posts its structural
@@ -3061,32 +3067,36 @@ impl MusicApp {
         {
             return;
         }
-        let Some(audible_source) = self.current_online_source_for_route(route) else {
-            return;
-        };
-        let Some(index) = queue
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, track)| &track.source == audible_source)
-            .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
-            .map(|(index, _)| index)
-        else {
-            return;
-        };
-        if index == queue.current_index {
-            return;
+        let current_index = self
+            .current_online_source_for_route(route)
+            .and_then(|audible_source| {
+                queue.tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| &track.source == audible_source)
+                    .min_by_key(|(index, _)| index.abs_diff(queue.current_index))
+                    .map(|(index, _)| index)
+            });
+        if let Some(index) = current_index {
+            let queue = self
+                .online_playlist_queue
+                .as_mut()
+                .expect("queue checked above");
+            queue.current_index = index;
+        } else {
+            // The previous audible song may belong to a different playlist.
+            // Restore its queue rather than persisting an unplayable selection
+            // and desynchronizing Next/Previous and queue drawer artwork.
+            self.online_playlist_queue = self.online_playlist_rollback.take();
         }
-        let queue = self
-            .online_playlist_queue
-            .as_mut()
-            .expect("queue checked above");
-        queue.current_index = index;
-        self.config.online_playlist_queue = Some(crate::settings::SavedOnlinePlaylistQueue {
-            route: queue.route.clone(),
-            playlist_title: queue.playlist_title.clone(),
-            tracks: queue.tracks.clone(),
-            current_index: index,
+        self.online_playlist_rollback = None;
+        self.config.online_playlist_queue = self.online_playlist_queue.as_ref().map(|queue| {
+            crate::settings::SavedOnlinePlaylistQueue {
+                route: queue.route.clone(),
+                playlist_title: queue.playlist_title.clone(),
+                tracks: queue.tracks.clone(),
+                current_index: queue.current_index,
+            }
         });
         self.save_config();
     }
@@ -3928,6 +3938,12 @@ impl MusicApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(track) = tracks.get(index).cloned() {
+            if self.online_track_buffering.is_none() {
+                self.online_playlist_rollback = self.online_playlist_queue.clone().filter(|queue| {
+                    self.current_online_source_for_route(&queue.route)
+                        .is_some_and(|source| queue.tracks.iter().any(|track| &track.source == source))
+                });
+            }
             self.online_playlist_queue = Some(OnlinePlaylistQueue {
                 route: route.clone(),
                 playlist_title,
@@ -7096,6 +7112,120 @@ mod tests {
         app.record_recent_play(&track1_replayed);
         assert_eq!(app.recent_plays, vec![-3, -2]);
         assert_eq!(app.recent_plays.len(), 2);
+    }
+
+    #[test]
+    fn unavailable_song_restores_previous_audible_playlist() {
+        let mut app = MusicApp::new(false);
+        let route = crate::plugin::abi::PluginRoute {
+            plugin_id: "plugin".into(),
+            provider_id: "provider".into(),
+            account_id: "account".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let song = |source_id: &str| crate::plugin::abi::RemoteTrack {
+            source: crate::plugin::abi::SourceTrackRef {
+                provider_id: "provider".into(),
+                source_id: source_id.into(),
+            },
+            title: source_id.into(),
+            ..Default::default()
+        };
+        let original = song("audible");
+        let unavailable = song("unavailable");
+        let playing = Track::new(crate::model::TrackData {
+            id: -901,
+            path: PathBuf::from("remote://audible"),
+            title: "audible".into(),
+            artist: "artist".into(),
+            album: "album".into(),
+            year: None,
+            genre: None,
+            duration_ms: 120_000,
+            codec: "remote".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: None,
+        });
+        app.snapshot.current_track = Some(playing);
+        app.online_playback_meta
+            .insert(-901, (route.clone(), original.source.clone(), None));
+
+        let previous = OnlinePlaylistQueue {
+            route: route.clone(),
+            playlist_title: "Audible list".into(),
+            tracks: Arc::from([original]),
+            current_index: 0,
+        };
+        app.online_playlist_rollback = Some(previous);
+        app.online_playlist_queue = Some(OnlinePlaylistQueue {
+            route: route.clone(),
+            playlist_title: "Unavailable list".into(),
+            tracks: Arc::from([unavailable.clone()]),
+            current_index: 0,
+        });
+        app.restore_online_playlist_after_failed_play(&route, &unavailable.source);
+
+        assert_eq!(
+            app.online_playlist_queue.as_ref().map(|q| q.playlist_title.as_str()),
+            Some("Audible list")
+        );
+        assert!(app.online_playlist_rollback.is_none());
+        assert_eq!(
+            app.config.online_playlist_queue.as_ref().map(|q| q.current_index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn failed_selection_reanchors_to_audible_song_in_same_playlist() {
+        let mut app = MusicApp::new(false);
+        let route = crate::plugin::abi::PluginRoute {
+            plugin_id: "plugin".into(),
+            provider_id: "provider".into(),
+            account_id: "account".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let song = |source_id: &str| crate::plugin::abi::RemoteTrack {
+            source: crate::plugin::abi::SourceTrackRef {
+                provider_id: "provider".into(),
+                source_id: source_id.into(),
+            },
+            title: source_id.into(),
+            ..Default::default()
+        };
+        let audible = song("audible");
+        let unavailable = song("unavailable");
+        app.snapshot.current_track = Some(Track::new(crate::model::TrackData {
+            id: -902,
+            path: PathBuf::from("remote://audible"),
+            title: "audible".into(),
+            artist: String::new(),
+            album: String::new(),
+            year: None,
+            genre: None,
+            duration_ms: 30_000,
+            codec: "remote".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            artwork_key: None,
+        }));
+        app.online_playback_meta
+            .insert(-902, (route.clone(), audible.source.clone(), None));
+        app.online_playlist_queue = Some(OnlinePlaylistQueue {
+            route: route.clone(),
+            playlist_title: "Current".into(),
+            tracks: Arc::from([audible, unavailable.clone()]),
+            current_index: 1,
+        });
+        app.restore_online_playlist_after_failed_play(&route, &unavailable.source);
+        assert_eq!(app.online_playlist_queue.as_ref().unwrap().current_index, 0);
+        assert_eq!(
+            app.config.online_playlist_queue.as_ref().unwrap().current_index,
+            0
+        );
     }
 
     #[test]

@@ -185,40 +185,73 @@ pub fn stream(
     ensure_source(provider_id, &request.track)?;
     validate_account_id(account_id)?;
     let id = numeric_source_id(&request.track.source_id)?;
-    let level = quality_level(request.quality.as_deref());
-    let mut data = json!({
-        "ids": format!("[{id}]"),
-        "level": level,
-        "encodeType": "flac",
-    });
-    if level == "sky" {
-        data["immerseType"] = Value::String("c51".into());
-    }
-    // 优先尝试网易云官方接口获取音频流
-    if let Ok(response) = protocol::eapi(account_id, "/api/song/enhance/player/url/v1", data) {
-        let item = response
-            .get("data")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first());
-        if let Some(item) = item {
-            let url = value_string(item, &["url"]).filter(|url| !url.is_empty());
-            if let Some(url) = url {
-                return Ok(types::StreamDescriptor {
-                    url: force_https(url),
-                    headers: vec![types::KeyValue {
-                        key: "Referer".into(),
-                        value: "https://music.163.com/".into(),
-                    }],
-                    codec: value_string(item, &["type"])
-                        .map(|value| value.to_ascii_lowercase())
-                        .filter(|value| !value.is_empty()),
-                    bitrate: value_u64(item, &["br"]).and_then(|value| u32::try_from(value).ok()),
-                    sample_rate: value_u64(item, &["sr"]).and_then(|value| u32::try_from(value).ok()),
-                    channels: value_u64(item, &["channels"])
-                        .or_else(|| value_u64(item, &["channel"]))
-                        .and_then(|value| u16::try_from(value).ok()),
-                    expires_at_ms: None,
-                });
+    let preferred = quality_level(request.quality.as_deref());
+    // A default "exhigh" request may return a null URL even when the same
+    // authenticated account is allowed to play the standard-quality stream.
+    // Retry only through the official account API; do not silently downgrade
+    // explicitly requested lossless/spatial profiles.
+    let mut official_failure = "网易云官方接口未返回播放地址".to_string();
+    for level in stream_quality_candidates(preferred) {
+        let mut data = json!({
+            "ids": format!("[{id}]"),
+            "level": level,
+            "encodeType": "flac",
+        });
+        if level == "sky" {
+            data["immerseType"] = Value::String("c51".into());
+        }
+        match protocol::eapi(account_id, "/api/song/enhance/player/url/v1", data) {
+            Ok(response) => {
+                let item = response
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first());
+                if let Some(item) = item {
+                    let url = value_string(item, &["url"]).filter(|url| !url.is_empty());
+                    if let Some(url) = url {
+                    return Ok(types::StreamDescriptor {
+                        url: force_https(url),
+                        headers: vec![types::KeyValue {
+                            key: "Referer".into(),
+                            value: "https://music.163.com/".into(),
+                        }],
+                        codec: value_string(item, &["type"])
+                            .map(|value| value.to_ascii_lowercase())
+                            .filter(|value| !value.is_empty()),
+                        bitrate: value_u64(item, &["br"]).and_then(|value| u32::try_from(value).ok()),
+                        sample_rate: value_u64(item, &["sr"]).and_then(|value| u32::try_from(value).ok()),
+                        channels: value_u64(item, &["channels"])
+                            .or_else(|| value_u64(item, &["channel"]))
+                            .and_then(|value| u16::try_from(value).ok()),
+                        expires_at_ms: None,
+                    });
+                    }
+                }
+                // Preserve numeric upstream status for diagnostics, without
+                // including a signed URL, account token or full response.
+                let response_code = item
+                    .and_then(|entry| value_u64(entry, &["code"]))
+                    .or_else(|| value_u64(&response, &["code"]));
+                official_failure = response_code.map_or_else(
+                    || format!("网易云官方 {level} 音质未返回播放地址"),
+                    |code| format!("网易云官方 {level} 音质无播放地址 (code={code})"),
+                );
+            }
+            Err(error) => {
+                official_failure = if error.contains("Cookie") || error.contains("登录") {
+                    "网易云账号登录凭证不可用，请检查插件登录态".into()
+                } else {
+                    // Repeating a failed protocol/HTTP request for all quality
+                    // levels only adds timeouts and triggers provider rate limits.
+                    let lower = error.to_ascii_lowercase();
+                    if lower.contains("://") || lower.contains("token") {
+                        "网易云官方音频接口请求失败（网络或协议层）".into()
+                    } else {
+                        let detail: String = error.chars().take(120).collect();
+                        format!("网易云官方音频接口请求失败：{detail}")
+                    }
+                };
+                break;
             }
         }
     }
@@ -242,6 +275,7 @@ pub fn stream(
     };
 
     crate::unblock::resolve_stream(id, &title, &artists, duration_ms)
+        .map_err(|fallback| format!("{official_failure}；备用音源未匹配：{fallback}"))
 }
 
 fn request_eapi(account_id: Option<&str>, path: &str, data: Value) -> Result<Value, String> {
@@ -450,6 +484,14 @@ fn parse_lrc_timestamp(value: &str) -> Option<u64> {
         .checked_add(millis)
 }
 
+fn stream_quality_candidates(preferred: &'static str) -> Vec<&'static str> {
+    match preferred {
+        "exhigh" => vec!["exhigh", "higher", "standard"],
+        "higher" => vec!["higher", "standard"],
+        _ => vec![preferred],
+    }
+}
+
 fn quality_level(quality: Option<&str>) -> &'static str {
     match quality.unwrap_or("").trim().to_ascii_lowercase().as_str() {
         "low" | "standard" | "128k" => "standard",
@@ -549,6 +591,26 @@ mod tests {
         assert_eq!(words.len(), 3);
         assert_eq!(words[0].timestamp_ms, 1000);
         assert_eq!(words[2].duration_ms, Some(400));
+    }
+
+    #[test]
+    fn official_stream_quality_fallback_keeps_explicit_lossless() {
+        assert_eq!(
+            stream_quality_candidates(quality_level(None)),
+            vec!["exhigh", "higher", "standard"]
+        );
+        assert_eq!(
+            stream_quality_candidates(quality_level(Some("192k"))),
+            vec!["higher", "standard"]
+        );
+        assert_eq!(
+            stream_quality_candidates(quality_level(Some("lossless"))),
+            vec!["lossless"]
+        );
+        assert_eq!(
+            stream_quality_candidates(quality_level(Some("sky"))),
+            vec!["sky"]
+        );
     }
 
     #[test]

@@ -40,9 +40,11 @@ use super::{
 pub type DeviceId = String;
 
 const PRELOAD_DEBOUNCE: Duration = Duration::from_millis(40);
-/// Decode-ahead budget for scheduling stalls; this is not a CPAL device buffer
-/// and does not add an entire buffer period to user-initiated seeks.
-const PCM_RING_BUFFER_MS: usize = 240;
+/// Decode-ahead budget for OS scheduling stalls. Playback/seek still flushes the
+/// SPSC ring immediately; this is not an added WASAPI device output delay.
+/// Keep roughly half a second of decoded PCM so short all-core CPU bursts do not
+/// empty the callback's supply while the single ordered decoder is descheduled.
+const PCM_RING_BUFFER_MS: usize = 500;
 /// Poll transport commands after a bounded batch of 512 stereo frames.
 const PCM_PRODUCER_BATCH_SAMPLES: usize = 1024;
 /// A fixed-size callback-local scratch, never heap allocate on the audio thread.

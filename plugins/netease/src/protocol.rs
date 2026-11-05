@@ -100,7 +100,13 @@ fn eapi_with(
     validate_api_path(path)?;
     let now_ms = host::now_ms();
     let header = eapi_header(identity, cookie, now_ms);
+    // Keep the full authenticated cookie jar from the original login.
+    // eapi_cookie() synthesizes only a small subset of device fields and
+    // MUSIC_U/MUSIC_A; using it alone drops NMTID and other session cookies
+    // that may be required for the official song URL endpoint. Preserve the
+    // original raw token bytes rather than percent-encoding them twice.
     let header_cookie = eapi_cookie(&header);
+    let request_cookie = merge_cookie_strings(&header_cookie, cookie);
 
     let object = data
         .as_object_mut()
@@ -114,7 +120,7 @@ fn eapi_with(
         account_id,
         "POST",
         &endpoint,
-        &header_cookie,
+        &request_cookie,
         EAPI_USER_AGENT,
         encrypted.body,
         accepted_codes,
@@ -484,6 +490,18 @@ mod tests {
             Some("csrf-value")
         );
         assert_eq!(header.get("os").and_then(Value::as_str), Some("pc"));
+    }
+
+    #[test]
+    fn eapi_request_cookie_preserves_all_login_session_fields() {
+        let full = "MUSIC_U=token%2Bwith%3Dpadding; __csrf=original; NMTID=device-abc; __remember_me=true";
+        let header = eapi_header("123", full, 1_700_000_000_123);
+        let request_cookie = merge_cookie_strings(&eapi_cookie(&header), full);
+        assert!(request_cookie.contains("MUSIC_U=token%2Bwith%3Dpadding"));
+        assert!(request_cookie.contains("__csrf=original"));
+        assert!(request_cookie.contains("NMTID=device-abc"));
+        assert!(request_cookie.contains("__remember_me=true"));
+        assert!(request_cookie.contains("os=pc"));
     }
 
     #[test]
