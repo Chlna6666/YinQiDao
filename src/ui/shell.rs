@@ -2392,7 +2392,9 @@ impl MusicApp {
         candidates.sort_unstable_by(|a, b| b.cmp(a));
         candidates.dedup();
 
-        let mut excess = candidates.len().saturating_sub(ONLINE_TRACK_METADATA_TRIM_TARGET);
+        let mut excess = candidates
+            .len()
+            .saturating_sub(ONLINE_TRACK_METADATA_TRIM_TARGET);
         let mut removed = 0;
         for id in candidates {
             if excess == 0 {

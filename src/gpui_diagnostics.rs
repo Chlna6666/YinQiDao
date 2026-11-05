@@ -37,11 +37,15 @@ pub(crate) fn record_app_cache_sample(
     sample
         .remote_playback_meta
         .store(remote_playback_meta, Ordering::Relaxed);
-    sample.remote_sources.store(remote_sources, Ordering::Relaxed);
+    sample
+        .remote_sources
+        .store(remote_sources, Ordering::Relaxed);
     sample
         .artwork_bytes_entries
         .store(artwork_bytes_entries, Ordering::Relaxed);
-    sample.lyrics_entries.store(lyrics_entries, Ordering::Relaxed);
+    sample
+        .lyrics_entries
+        .store(lyrics_entries, Ordering::Relaxed);
     sample
         .artwork_ready_ids
         .store(artwork_ready_ids, Ordering::Relaxed);

@@ -129,11 +129,7 @@ const EFFECT_SLOT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const EFFECT_SLOT_IDLE_TTL: Duration = Duration::from_secs(30);
 const EFFECT_SLOT_OVERFLOW_IDLE: Duration = Duration::from_secs(2);
 
-fn should_evict_effect_slot(
-    last_used: Instant,
-    now: Instant,
-    over_budget: bool,
-) -> bool {
+fn should_evict_effect_slot(last_used: Instant, now: Instant, over_budget: bool) -> bool {
     let idle = now.saturating_duration_since(last_used);
     idle >= EFFECT_SLOT_IDLE_TTL || (over_budget && idle >= EFFECT_SLOT_OVERFLOW_IDLE)
 }
@@ -296,9 +292,10 @@ impl EffectRenderer {
         now: Instant,
         device: &mut dyn ExtensionDevice,
     ) -> gpui::Result<()> {
-        if self.last_slot_sweep.is_some_and(|last| {
-            now.saturating_duration_since(last) < EFFECT_SLOT_SWEEP_INTERVAL
-        }) {
+        if self
+            .last_slot_sweep
+            .is_some_and(|last| now.saturating_duration_since(last) < EFFECT_SLOT_SWEEP_INTERVAL)
+        {
             return Ok(());
         }
         self.last_slot_sweep = Some(now);
@@ -363,7 +360,11 @@ impl EffectRenderer {
                         return Err(error.into());
                     }
                 };
-                Ok(slot.insert(UniformSlot { buffer, group, last_used: now }))
+                Ok(slot.insert(UniformSlot {
+                    buffer,
+                    group,
+                    last_used: now,
+                }))
             }
         }
     }

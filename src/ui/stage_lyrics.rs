@@ -1872,8 +1872,7 @@ fn sustained_glyph_focus(progress: f32, index: usize, count: usize) -> f32 {
     let arrival = smootherstep01((progress - start) / (segment * 0.75));
     // The travelling peak decays over multiple glyphs rather than snapping
     // back as soon as the next glyph begins.
-    let rolloff = 1.0
-        - smootherstep01((progress - start - segment * 0.55) / (segment * 2.2));
+    let rolloff = 1.0 - smootherstep01((progress - start - segment * 0.55) / (segment * 2.2));
     // Keep a restrained shared sustain until the *word* release envelope
     // settles every glyph together, including the final letter.
     arrival * (0.28 + 0.72 * rolloff)
@@ -2136,13 +2135,7 @@ fn karaoke_word(
     // Long Latin/CJK syllables are rendered as independent character zooms,
     // while still wrapping as one authored word. Do not scale the word as a block.
     if emphasize && (2..=12).contains(&sustained_glyph_count(word.text.as_str())) {
-        return karaoke_sustained_glyphs(
-            word,
-            &visual_word,
-            progress,
-            position_ms,
-            is_last_word,
-        );
+        return karaoke_sustained_glyphs(word, &visual_word, progress, position_ms, is_last_word);
     }
     // Never replace the animated glyph at precisely 100% reveal. Keep its
     // transform and glow until the post-completion settling tail finishes.
@@ -2885,7 +2878,10 @@ mod tests {
             for tick in 1..=1_000 {
                 let progress = tick as f32 / 1_000.0;
                 let sample = sustained_glyph_focus(progress, glyph, count);
-                assert!((sample - previous).abs() < 0.025, "glyph {glyph} jumped at {progress}");
+                assert!(
+                    (sample - previous).abs() < 0.025,
+                    "glyph {glyph} jumped at {progress}"
+                );
                 assert!((0.0..=1.0).contains(&sample));
                 previous = sample;
             }
