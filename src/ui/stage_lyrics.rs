@@ -1854,10 +1854,11 @@ fn sustained_glyph_count(text: &str) -> usize {
     text.chars().filter(|ch| !ch.is_whitespace()).count()
 }
 
-/// A held syllable follows its authored progress; fabricated per-letter delays
-/// make English long notes look like bouncing characters rather than singing.
-/// Previous glyphs settle as the next glyph lights up; the last holds its
-/// emphasis until the real word release.
+/// Apple Music-style long-note motion: a gentle highlight travels across the
+/// authored glyphs, while already-sung glyphs retain a small shared lift.
+/// The previous implementation dropped each character to scale 1 in less
+/// than half a glyph interval, making longer English syllables appear to bounce
+/// and leaving only the last letter enlarged at completion.
 #[inline]
 fn sustained_glyph_focus(progress: f32, index: usize, count: usize) -> f32 {
     if count == 0 || index >= count {
@@ -1866,13 +1867,16 @@ fn sustained_glyph_focus(progress: f32, index: usize, count: usize) -> f32 {
     let segment = 1.0 / count as f32;
     let start = index as f32 * segment;
     let progress = progress.clamp(0.0, 1.0);
-    let attack = smootherstep01((progress - start) / (segment * 0.40));
-    if index + 1 == count {
-        return attack;
-    }
-    let release_start = start + segment * 0.62;
-    let release = 1.0 - smootherstep01((progress - release_start) / (segment * 0.38));
-    attack * release
+
+    // A soft, overlapping attack replaces the sharp per-character pop.
+    let arrival = smootherstep01((progress - start) / (segment * 0.75));
+    // The travelling peak decays over multiple glyphs rather than snapping
+    // back as soon as the next glyph begins.
+    let rolloff = 1.0
+        - smootherstep01((progress - start - segment * 0.55) / (segment * 2.2));
+    // Keep a restrained shared sustain until the *word* release envelope
+    // settles every glyph together, including the final letter.
+    arrival * (0.28 + 0.72 * rolloff)
 }
 
 fn sustained_glyph_transition_frame_delay(
@@ -1897,17 +1901,14 @@ fn sustained_glyph_transition_frame_delay(
 fn karaoke_sustained_glyphs(
     word: &StageLyricWord,
     visual_word: &StageLyricWord,
-    index: usize,
     progress: f32,
     position_ms: u64,
     is_last_word: bool,
-    karaoke_epoch: u64,
 ) -> gpui::AnyElement {
     let glyph_count = sustained_glyph_count(word.text.as_str());
-    let duration_ms = word.duration_ms.unwrap_or(1).max(1);
-    // Static word geometry, with no lifting/translation and no whole-word zoom.
-    // Slightly more emphasis on the last voiced character, but never a jump.
-    let peak_scale = if is_last_word { 1.062 } else { 1.052 };
+    // Text geometry stays fixed: only compositor paint transforms change.
+    // Unlike a pronounced bounce, the iPad reference uses a subtle swell.
+    let peak_scale = if is_last_word { 1.045 } else { 1.035 };
     let release = sustained_time_envelope(visual_word, position_ms);
     let mut line = div().flex().flex_none().items_end().whitespace_nowrap();
     let mut glyph_index = 0usize;
@@ -1918,60 +1919,18 @@ fn karaoke_sustained_glyphs(
             line = line.child(div().whitespace_nowrap().child(character));
             continue;
         }
+
         let focus = sustained_glyph_focus(progress, glyph_index, glyph_count) * release;
         let letter_progress = (progress * glyph_count as f32 - glyph_index as f32).clamp(0.0, 1.0);
-        let letter_start = word
-            .timestamp_ms
-            .saturating_add(duration_ms * glyph_index as u64 / glyph_count as u64);
-        let letter_end = word
-            .timestamp_ms
-            .saturating_add(duration_ms * (glyph_index as u64 + 1) / glyph_count as u64);
-        let letter = StageLyricWord {
-            timestamp_ms: letter_start,
-            duration_ms: Some(letter_end.saturating_sub(letter_start).max(1)),
-            byte_start: 0,
-            byte_end: character.len(),
-            text: SharedString::from(character.clone()),
-        };
-        // Avoid drawing two fully opaque copies of a completed glyph.
-        // Only an actively revealing character needs the clipped overlay.
-        let face = if letter_progress >= 1.0 {
-            div()
-                .text_color(dark::white(1.0))
-                .child(character.clone())
-                .into_any_element()
-        } else if letter_progress <= 0.0 {
-            div()
-                .text_color(dark::white(0.64))
-                .child(character.clone())
-                .into_any_element()
-        } else {
-            let reveal = karaoke_reveal_word(
-                div()
-                    .whitespace_nowrap()
-                    .text_color(dark::white(1.0))
-                    .child(character.clone()),
-                &letter,
-                index.saturating_mul(16).saturating_add(glyph_index),
-                letter_progress,
-                position_ms,
-                // The active leaf already redraws at audio-time cadence.
-                // Never start a second GPUI compositor clock per character.
-                false,
-                karaoke_epoch,
-            );
-            div()
-                .relative()
-                .child(div().text_color(dark::white(0.64)).child(character.clone()))
-                .child(div().absolute().inset_0().child(reveal))
-                .into_any_element()
-        };
-        // A center-anchored paint transform does not modify baseline or width.
-        // The focus curve is zero at both ends of every intermediate letter.
+        // Long notes use a continuous per-glyph luminance sweep instead of
+        // constructing two text elements, a mask and an AnimationSpec for
+        // every letter at 60 Hz. Ordinary karaoke keeps its precise reveal.
+        let brightness = 0.64 + 0.36 * smootherstep01(letter_progress);
         let glyph = div()
             .flex_none()
             .whitespace_nowrap()
-            .child(face)
+            .text_color(dark::white(brightness))
+            .child(character)
             .scale(1.0 + (peak_scale - 1.0) * focus)
             .transform_origin(TransformOrigin::new(0.5, 0.65));
         line = line.child(glyph);
@@ -2180,11 +2139,9 @@ fn karaoke_word(
         return karaoke_sustained_glyphs(
             word,
             &visual_word,
-            index,
             progress,
             position_ms,
             is_last_word,
-            karaoke_epoch,
         );
     }
     // Never replace the animated glyph at precisely 100% reveal. Keep its
@@ -2888,11 +2845,13 @@ mod tests {
         assert_eq!(sustained_glyph_count("长音高亮"), 4);
         assert_eq!(sustained_glyph_focus(0.0, 0, 4), 0.0);
         assert_eq!(sustained_glyph_focus(0.0, 3, 4), 0.0);
-        assert!(sustained_glyph_focus(0.12, 0, 4) > 0.9);
-        assert!(sustained_glyph_focus(0.37, 1, 4) > 0.9);
-        assert_eq!(sustained_glyph_focus(0.5, 0, 4), 0.0);
-        assert_eq!(sustained_glyph_focus(1.0, 0, 4), 0.0);
-        assert_eq!(sustained_glyph_focus(1.0, 3, 4), 1.0);
+        assert!(sustained_glyph_focus(0.12, 0, 4) > 0.5);
+        assert!(sustained_glyph_focus(0.37, 1, 4) > 0.5);
+        // Earlier glyphs now hold a subtle lift instead of snapping flat
+        // whenever the next letter begins.
+        assert!(sustained_glyph_focus(0.5, 0, 4) > 0.28);
+        assert!(sustained_glyph_focus(1.0, 0, 4) >= 0.28);
+        assert!(sustained_glyph_focus(1.0, 3, 4) > 0.8);
         assert_eq!(sustained_glyph_focus(0.5, 7, 4), 0.0);
 
         let word = StageLyricWord {
@@ -2916,6 +2875,38 @@ mod tests {
             sustained_glyph_transition_frame_delay(&word, &word, 3_500),
             None
         );
+    }
+
+    #[test]
+    fn sustained_glyph_wave_is_continuous_and_settles_as_a_group() {
+        let count = 7;
+        for glyph in 0..count {
+            let mut previous = sustained_glyph_focus(0.0, glyph, count);
+            for tick in 1..=1_000 {
+                let progress = tick as f32 / 1_000.0;
+                let sample = sustained_glyph_focus(progress, glyph, count);
+                assert!((sample - previous).abs() < 0.025, "glyph {glyph} jumped at {progress}");
+                assert!((0.0..=1.0).contains(&sample));
+                previous = sample;
+            }
+        }
+        let first = sustained_glyph_focus(1.0, 0, count);
+        let last = sustained_glyph_focus(1.0, count - 1, count);
+        assert!(first >= 0.28);
+        assert!(last > first);
+        // End-of-word scale stays continuous: all characters use the same
+        // smooth release envelope, not a special last-letter snap.
+        let word = StageLyricWord {
+            timestamp_ms: 1_000,
+            duration_ms: Some(2_000),
+            byte_start: 0,
+            byte_end: 7,
+            text: SharedString::from("whoa-oh"),
+        };
+        let held = sustained_time_envelope(&word, 3_000);
+        let settling = sustained_time_envelope(&word, 3_150);
+        assert_eq!(held, 1.0);
+        assert!(settling > 0.0 && settling < held);
     }
 
     #[test]
