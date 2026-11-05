@@ -301,6 +301,16 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 );
             }
         }
+        if provider.liked_tracks_readable
+            && !provider.capabilities.iter().any(|capability| {
+                matches!(
+                    capability,
+                    PluginCapability::LikeSync | PluginCapability::MediaCollections
+                )
+            })
+        {
+            bail!("provider {} 的只读红心声明缺少 LikeSync/MediaCollections 能力", provider.id);
+        }
         if provider.quality_profiles.len() > 16 {
             bail!("provider {} 超过 16 个音质选项", provider.id);
         }
@@ -873,6 +883,7 @@ auth_methods = ["qr_code"]
                 capabilities: vec![PluginCapability::Search],
                 auth_methods: Vec::new(),
                 quality_profiles: Vec::new(),
+                liked_tracks_readable: false,
             }],
             network_domains: vec!["api.example.com".into()],
         }
@@ -938,6 +949,7 @@ auth_methods = ["qr_code"]
                 capabilities: vec![PluginCapability::Search],
                 auth_methods: Vec::new(),
                 quality_profiles: Vec::new(),
+                liked_tracks_readable: false,
             })
             .collect();
         assert!(validate_manifest(&too_many_providers).is_err());

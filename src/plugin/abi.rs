@@ -55,6 +55,9 @@ pub struct ProviderDescriptor {
     /// ABI v1 already carries StreamRequest.quality, so no WIT break is required.
     #[serde(default)]
     pub quality_profiles: Vec<StreamQualityProfile>,
+    /// Read-only platform likes; separate from LikeSync mutation.
+    #[serde(default)]
+    pub liked_tracks_readable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

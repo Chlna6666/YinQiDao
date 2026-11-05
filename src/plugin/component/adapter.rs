@@ -1391,6 +1391,7 @@ impl From<wit_types::ProviderDescriptor> for ProviderDescriptor {
             capabilities: d.capabilities.into_iter().map(Into::into).collect(),
             auth_methods: d.auth_methods.into_iter().map(Into::into).collect(),
             quality_profiles: Vec::new(),
+            liked_tracks_readable: false,
         }
     }
 }

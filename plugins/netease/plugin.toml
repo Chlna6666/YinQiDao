@@ -23,6 +23,7 @@ network_domains = [
 [[providers]]
 id = "netease"
 display_name = "网易云音乐"
+liked_tracks_readable = true
 capabilities = [
   "authentication",
   "search",

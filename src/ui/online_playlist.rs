@@ -588,11 +588,7 @@ fn render_online_song_row(
                 .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                     cx.stop_propagation();
                     let _ = heart_view.update(cx, |app, cx| {
-                        app.toggle_online_track_liked(
-                            heart_route.clone(),
-                            heart_track.clone(),
-                            cx,
-                        );
+                        app.toggle_online_track_liked(heart_route.clone(), heart_track.clone(), cx);
                     });
                 }),
         )

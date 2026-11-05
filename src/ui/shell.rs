@@ -364,6 +364,9 @@ pub struct MusicApp {
     online_audio_cache: Arc<super::online_audio_cache::OnlineAudioCache>,
     pending_quality_resume: Option<(u64, u64)>,
     liked_sync_pending: HashSet<crate::settings::SavedLikedSource>,
+    online_like_loaded_accounts: HashSet<super::favorite_sync::LikeScope>,
+    online_like_loading_accounts: HashSet<super::favorite_sync::LikeScope>,
+    online_like_session_generation: u64,
     pub(crate) online_playlist_cache: HashMap<String, OnlinePlaylistViewData>,
     online_playlist_request_generation: u64,
     /// online_playlist_cache 的 FIFO 驱逐序，限制会话内的歌单视图缓存深度。
@@ -1091,6 +1094,9 @@ impl MusicApp {
             online_audio_cache: super::online_audio_cache::OnlineAudioCache::new(),
             pending_quality_resume: None,
             liked_sync_pending: HashSet::new(),
+            online_like_loaded_accounts: HashSet::new(),
+            online_like_loading_accounts: HashSet::new(),
+            online_like_session_generation: 0,
             online_playlist_cache: HashMap::new(),
             online_playlist_request_generation: 0,
             online_playlist_cache_order: VecDeque::new(),
@@ -1142,6 +1148,9 @@ impl MusicApp {
             false
         };
         let was_authenticated = self.online_authenticated;
+        self.online_like_session_generation = self.online_like_session_generation.wrapping_add(1);
+        self.online_like_loaded_accounts.clear();
+        self.online_like_loading_accounts.clear();
         self.has_online_plugins = has_plugins;
         self.online_authenticated = is_auth;
         // Previously authenticated media must not stay in the in-memory
@@ -1483,11 +1492,91 @@ impl MusicApp {
             || self.config.local_liked_tracks.contains(&track.id)
     }
 
+    fn accept_verified_online_likes(
+        &mut self,
+        route: &crate::plugin::abi::PluginRoute,
+        tracks: Vec<crate::plugin::abi::RemoteTrack>,
+        cx: &mut Context<Self>,
+    ) {
+        let (added, removed) =
+            super::favorite_sync::replace_verified(&mut self.config, route, tracks.clone());
+        self.online_like_loaded_accounts
+            .insert(super::favorite_sync::scope(route));
+        if let Some(playlist) = self.active_online_playlist.as_mut()
+            && same_online_route(&playlist.route, route)
+        {
+            if playlist.title == "我喜欢的音乐" {
+                playlist.tracks = tracks;
+                playlist.subtitle = format!("平台当前收藏 {} 首歌曲", playlist.tracks.len());
+                playlist.loading = false;
+            }
+            // Invalidate the retained playlist surface even when its track
+            // count is unchanged: red hearts must update after Host reads.
+            self.online_playlist_view_revision =
+                self.online_playlist_view_revision.wrapping_add(1);
+        }
+        tracing::debug!(
+            plugin = %route.plugin_id,
+            provider = %route.provider_id,
+            imported = added,
+            removed,
+            "远端收藏快照已验证并替换缓存"
+        );
+        self.bump_ui_content_revision();
+        self.save_config();
+        self.notify_online_playlist_surface(cx);
+    }
+
+    fn refresh_online_likes_for_route(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = super::favorite_sync::scope(&route);
+        if !force && self.online_like_loaded_accounts.contains(&scope) {
+            return;
+        }
+        if !self.online_like_loading_accounts.insert(scope.clone()) {
+            return;
+        }
+        let epoch = self.online_like_session_generation;
+        let task = Tokio::spawn_result(cx, async move {
+            let tracks = super::favorite_sync::read_complete(&route).await?;
+            Ok((route, tracks))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |app, cx| {
+                app.online_like_loading_accounts.remove(&scope);
+                if epoch != app.online_like_session_generation {
+                    return;
+                }
+                match result {
+                    Ok((route, tracks)) => {
+                        app.accept_verified_online_likes(&route, tracks, cx);
+                    }
+                    Err(error) => {
+                        app.status = format!("读取平台喜欢状态失败：{error:#}");
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn is_online_track_liked(
         &self,
         route: &crate::plugin::abi::PluginRoute,
         source: &crate::plugin::abi::SourceTrackRef,
     ) -> bool {
+        if !self
+            .online_like_loaded_accounts
+            .contains(&super::favorite_sync::scope(route))
+        {
+            return false;
+        }
         self.config
             .online_liked_sources
             .contains(&crate::settings::SavedLikedSource {
@@ -1509,10 +1598,20 @@ impl MusicApp {
     }
 
     pub(crate) fn current_liked_state(&self) -> Option<bool> {
-        self.snapshot
-            .current_track
-            .as_ref()
-            .and_then(|track| self.track_liked_state(track))
+        let track = self.snapshot.current_track.as_ref()?;
+        let route = self
+            .online_playback_meta
+            .get(&track.id)
+            .map(|(route, _, _)| route)
+            .or_else(|| self.online_remote_tracks.get(&track.id).map(|(route, _)| route));
+        if let Some(route) = route
+            && !self
+                .online_like_loaded_accounts
+                .contains(&super::favorite_sync::scope(route))
+        {
+            return None;
+        }
+        self.track_liked_state(track)
     }
 
     pub(crate) fn toggle_local_track_liked(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
@@ -1546,9 +1645,8 @@ impl MusicApp {
         cx.notify();
     }
 
-    /// A single write path for the current song, online playlist rows, and
-    /// saved favorites. The local favorite is authoritative; remote LikeSync
-    /// is an optional account capability, never a prerequisite to saving.
+    /// Online hearts only write to the song's own provider account. The
+    /// player's local-file favorites are never changed by this code path.
     pub(crate) fn toggle_online_track_liked(
         &mut self,
         route: crate::plugin::abi::PluginRoute,
@@ -1556,74 +1654,87 @@ impl MusicApp {
         cx: &mut Context<Self>,
     ) {
         if route.provider_id != remote.source.provider_id {
-            self.status = "收藏失败：歌曲来源与音乐插件不一致".into();
+            self.status = "收藏失败：歌曲与音乐平台来源不一致".into();
+            cx.notify();
+            return;
+        }
+        if !crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id) {
+            self.status = format!(
+                "{} 暂未实现账号红心写入，未修改任何本地或平台收藏",
+                route.provider_id
+            );
+            cx.notify();
+            return;
+        }
+        let scope = super::favorite_sync::scope(&route);
+        if !self.online_like_loaded_accounts.contains(&scope) {
+            self.status = "正在从平台读取真实红心状态，请完成读取后再点击".into();
+            self.refresh_online_likes_for_route(route, false, cx);
+            cx.notify();
+            return;
+        }
+        if self.online_like_loading_accounts.contains(&scope) {
+            self.status = "平台红心状态正在刷新，请稍后再操作".into();
             cx.notify();
             return;
         }
         let source = remote.source.clone();
-        let key = crate::settings::SavedLikedSource {
-            plugin_id: route.plugin_id.clone(),
-            provider_id: route.provider_id.clone(),
-            account_id: route.account_id.clone(),
-            source_id: source.source_id.clone(),
-        };
-        if self.liked_sync_pending.contains(&key) {
-            self.status = "该曲目的平台收藏同步尚未完成".into();
+        let key = super::favorite_sync::key(&route, &source.source_id);
+        if !self.liked_sync_pending.insert(key.clone()) {
+            self.status = "这首歌的红心写入尚未完成".into();
             cx.notify();
             return;
         }
-        let liked = !self.config.online_liked_sources.contains(&key);
-        if liked {
-            self.config.online_liked_sources.insert(key.clone());
-            // Update metadata rather than retaining multiple snapshots for
-            // one account/source (including after plugin reauthentication).
-            self.config.online_liked_tracks.retain(|entry| {
-                !same_online_route(&entry.route, &route) || entry.track.source != source
-            });
-            self.config
-                .online_liked_tracks
-                .push(crate::settings::SavedOnlineLikedTrack {
-                    route: route.clone(),
-                    track: remote,
-                });
-        } else {
-            self.config.online_liked_sources.remove(&key);
-            self.config.online_liked_tracks.retain(|entry| {
-                !same_online_route(&entry.route, &route) || entry.track.source != source
-            });
-        }
-        self.bump_ui_content_revision();
-        self.save_config();
-
-        if !crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id) {
-            self.status = if liked {
-                "已保存到播放器收藏；该平台尚未实现远端红心写入".into()
-            } else {
-                "已从播放器收藏移除（该平台不支持远端红心写入）".into()
-            };
-            cx.notify();
-            return;
-        }
-
-        self.liked_sync_pending.insert(key.clone());
-        self.status = "已保存播放器收藏，正在同步平台红心".into();
+        let wanted = !self.is_online_track_liked(&route, &source);
+        self.status = "正在向原音乐平台更新红心并核实结果".into();
         let task = Tokio::spawn_result(cx, async move {
             let frontend = crate::plugin::frontend::global()
-                .ok_or_else(|| anyhow::anyhow!("插件前端未初始化"))?;
-            frontend.set_liked_for_route(&route, &source, liked).await
+                .ok_or_else(|| anyhow!("插件前端未初始化"))?;
+            let accepted = frontend.set_liked_for_route(&route, &source, wanted).await?;
+            if !accepted {
+                return Ok((route, wanted, false, None));
+            }
+            let mut tracks = super::favorite_sync::read_complete(&route).await?;
+            let mut confirmed = tracks.iter().any(|entry| entry.source == source) == wanted;
+            if !confirmed {
+                // Some provider collection indexes are eventually consistent.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                tracks = super::favorite_sync::read_complete(&route).await?;
+                confirmed = tracks.iter().any(|entry| entry.source == source) == wanted;
+            }
+            Ok((route, wanted, confirmed, Some(tracks)))
         });
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
+            let result = task.await;
             let _ = this.update(cx, |app, cx| {
                 app.liked_sync_pending.remove(&key);
-                // A failed remote mutation must NOT discard player-owned
-                // favorites. The user can still browse them while offline.
-                app.status = match outcome {
-                    Ok(true) if liked => "播放器与平台均已收藏歌曲".into(),
-                    Ok(true) => "已取消播放器与平台收藏".into(),
-                    Ok(false) => "已保存本地收藏，但平台拒绝同步（可检查账号）".into(),
-                    Err(error) => format!("本地收藏已保留；平台同步失败：{error:#}"),
-                };
+                match result {
+                    Ok((route, wanted, confirmed, Some(tracks))) => {
+                        app.accept_verified_online_likes(&route, tracks, cx);
+                        app.status = if confirmed {
+                            if wanted {
+                                "已在原音乐平台收藏，并通过账号读取复查".into()
+                            } else {
+                                "已取消原音乐平台收藏，并通过账号读取复查".into()
+                            }
+                        } else {
+                            "平台写入已接受，但再次读取的红心状态不一致；请检查其他设备".into()
+                        };
+                    }
+                    Ok((_, _, false, None)) => {
+                        app.status = "原音乐平台拒绝红心写入；收藏状态未更改".into();
+                    }
+                    Err(error) => {
+                        // The provider may have applied the write before a
+                        // timeout. Keep previous verified state and allow the
+                        // user to refresh instead of inventing a success.
+                        app.online_like_loaded_accounts.remove(&scope);
+                        app.status = format!("平台红心写入或复查失败，状态待确认：{error:#}");
+                    }
+                    _ => unreachable!(),
+                }
+                app.bump_ui_content_revision();
+                app.notify_online_playlist_surface(cx);
                 cx.notify();
             });
         })
@@ -3376,6 +3487,7 @@ impl MusicApp {
         remote: crate::plugin::abi::RemoteTrack,
         cx: &mut Context<Self>,
     ) {
+        self.refresh_online_likes_for_route(route.clone(), false, cx);
         let title = remote.title.clone();
         let artist = remote.artists.join("/");
         let cover_url = remote.cover_url.clone();
@@ -3899,7 +4011,12 @@ impl MusicApp {
     ) {
         Self::prefetch_online_playlist_images(&data, cx);
         self.focus_online_playlist_on_current(&data);
+        let liked_route = data.route.clone();
+        let is_liked_placeholder = data.title == "我喜欢的音乐" && data.loading;
         self.active_online_playlist = Some(data);
+        if !is_liked_placeholder {
+            self.refresh_online_likes_for_route(liked_route, false, cx);
+        }
         self.online_playlist_request_generation =
             self.online_playlist_request_generation.wrapping_add(1);
         self.online_playlist_view_revision = self.online_playlist_view_revision.wrapping_add(1);
@@ -4026,13 +4143,8 @@ impl MusicApp {
 
     pub(crate) fn load_and_show_user_favorite_playlist(&mut self, cx: &mut Context<Self>) {
         if !self.online_authenticated {
-            self.status = "请先登录网易云音乐以查看我喜欢的音乐".into();
+            self.status = "请先登录相应音乐平台以查看该账号的喜欢歌曲".into();
             self.open_modal(super::components::modal::GlobalModal::ServiceAuth, cx);
-            return;
-        }
-
-        if let Some(cached) = self.online_playlist_cache.get("user_favorite").cloned() {
-            self.show_online_playlist_detail(cached, cx);
             return;
         }
 
@@ -4043,7 +4155,7 @@ impl MusicApp {
         self.show_online_playlist_detail(
             OnlinePlaylistViewData {
                 title: "我喜欢的音乐".into(),
-                subtitle: "云端红心收藏歌曲".into(),
+                subtitle: format!("{} 平台账号收藏", route.provider_id),
                 cover_url: None,
                 tracks: Vec::new(),
                 loading: true,
@@ -4052,67 +4164,37 @@ impl MusicApp {
             cx,
         );
 
+        // Never guess that the first user playlist is a "liked songs"
+        // collection: the host calls the provider's exact liked_tracks API.
+        let failed_route = route.clone();
         let task = Tokio::spawn_result(cx, async move {
-            let frontend =
-                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端尚未初始化"))?;
-            let fanout = frontend
-                .playlists(&crate::plugin::abi::RoutingPolicy::default())
-                .await?;
-            for batch in fanout.batches {
-                if let Some(first_pl) = batch.playlists.first() {
-                    let col = crate::plugin::abi::MediaCollectionRef {
-                        provider_id: batch.route.provider_id.clone(),
-                        kind: crate::plugin::abi::MediaCollectionKind::Playlist,
-                        source_id: first_pl.source_id.clone(),
-                    };
-                    let tracks = frontend
-                        .collection_tracks(&batch.route, &col, 0, 100)
-                        .await?;
-                    return Ok((
-                        batch.route,
-                        first_pl.name.clone(),
-                        first_pl.cover_url.clone(),
-                        tracks,
-                    ));
-                }
-            }
-            Err(anyhow!("未找到用户我喜欢的音乐歌单"))
+            let tracks = super::favorite_sync::read_complete(&route).await?;
+            Ok((route, tracks))
         });
-
-        cx.spawn(async move |this, cx| match task.await {
-            Ok((route, name, cover_url, tracks)) => {
-                let _ = this.update(cx, |app, cx| {
-                    let view_data = OnlinePlaylistViewData {
-                        title: name,
-                        subtitle: format!("共 {} 首歌曲", tracks.len()),
-                        cover_url,
-                        tracks,
-                        loading: false,
-                        route,
-                    };
-                    Self::prefetch_online_playlist_images(&view_data, cx);
-                    app.cache_online_playlist_view("user_favorite".to_string(), view_data.clone());
-                    if app.active_online_playlist.as_ref().is_some_and(|active| {
-                        (active.title == "我喜欢的音乐" || active.title == view_data.title)
-                            && same_online_route(&active.route, &view_data.route)
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |app, cx| match result {
+                Ok((route, tracks)) => {
+                    app.accept_verified_online_likes(&route, tracks, cx);
+                    if let Some(view) = app.active_online_playlist.as_ref().filter(|view| {
+                        same_online_route(&view.route, &route)
+                            && view.title == "我喜欢的音乐"
                     }) {
-                        app.focus_online_playlist_on_current(&view_data);
-                        app.active_online_playlist = Some(view_data);
-                        app.online_playlist_view_revision =
-                            app.online_playlist_view_revision.wrapping_add(1);
+                        app.focus_online_playlist_on_current(view);
                     }
                     cx.notify();
-                });
-            }
-            Err(err) => {
-                let _ = this.update(cx, |app, cx| {
-                    if let Some(data) = &mut app.active_online_playlist {
-                        data.loading = false;
+                }
+                Err(error) => {
+                    if let Some(view) = app.active_online_playlist.as_mut()
+                        && same_online_route(&view.route, &failed_route)
+                        && view.title == "我喜欢的音乐"
+                    {
+                        view.loading = false;
                     }
-                    app.status = format!("获取我喜欢的音乐失败：{err:#}");
+                    app.status = format!("读取当前平台账号红心失败：{error:#}");
                     cx.notify();
-                });
-            }
+                }
+            });
         })
         .detach();
     }

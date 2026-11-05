@@ -413,6 +413,7 @@ mod tests {
                 },
                 auth_methods: Vec::new(),
                 quality_profiles: Vec::new(),
+                liked_tracks_readable: false,
             }],
             network_domains: domains.iter().map(|domain| (*domain).into()).collect(),
         }

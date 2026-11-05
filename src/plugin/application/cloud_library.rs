@@ -86,6 +86,59 @@ impl PluginServiceFrontend {
         .await
     }
 
+    /// Read a single authenticated account's liked-track page without requiring
+    /// write access. QQ exposes its favourites through a read-only collection,
+    /// while NetEase supports both reads and writes through LikeSync.
+    ///
+    /// The Host catalog explicitly opts providers into this API. An unrelated
+    /// MediaCollections plugin must never be probed speculatively.
+    pub async fn liked_tracks_for_route(
+        &self,
+        route: &PluginRoute,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Vec<RemoteTrack>> {
+        validate_page_limit(limit)?;
+        let catalog = super::host::catalog::global()
+            .ok_or_else(|| anyhow!("插件 Host 目录尚未初始化"))?;
+        let readable = catalog.read().map_err(|_| anyhow!("插件目录锁已损坏"))?
+            .catalog()
+            .provider(&route.plugin_id, &route.provider_id)
+            .is_some_and(|provider| provider.liked_tracks_readable);
+        if !readable {
+            bail!("当前音乐插件未声明平台红心只读能力");
+        }
+
+        let can_read = |service| {
+            self.plan(service, &RoutingPolicy::default()).is_ok_and(|plan| {
+                plan.eligible_routes.iter().any(|candidate| {
+                    candidate.plugin_id == route.plugin_id
+                        && candidate.provider_id == route.provider_id
+                        && candidate.account_id == route.account_id
+                })
+            })
+        };
+        if !can_read(ServiceKind::LikeSync) && !can_read(ServiceKind::MediaCollections) {
+            bail!("当前账号不能读取平台红心（未登录、停用或权限不足）");
+        }
+        let client = require_client()?;
+        let runtime = runtime::global().ok_or_else(|| anyhow!("插件运行时尚未初始化"))?;
+        let tracks = runtime
+            .execute_guest_call(
+                PluginCallKey::provider(&route.plugin_id, &route.provider_id),
+                client.liked_tracks(
+                    &route.plugin_id,
+                    &route.provider_id,
+                    &route.account_id,
+                    offset,
+                    limit,
+                ),
+            )
+            .await?;
+        validate_track_page(route, &tracks, limit)?;
+        Ok(tracks)
+    }
+
     /// Mutate one exact authenticated account only. A like/unlike must never be broadcast to every
     /// account merely because the merged library UI happens to display several providers together.
     pub async fn set_liked_for_route(

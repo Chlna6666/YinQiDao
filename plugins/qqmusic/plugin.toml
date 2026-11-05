@@ -27,6 +27,7 @@ network_domains = [
 [[providers]]
 id = "qqmusic"
 display_name = "QQ音乐"
+liked_tracks_readable = true
 capabilities = [
   "authentication",
   "search",
