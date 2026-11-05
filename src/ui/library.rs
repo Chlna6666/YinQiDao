@@ -458,12 +458,16 @@ fn online_search_row<V: 'static>(
     track: &crate::plugin::abi::RemoteTrack,
     route: PluginRoute,
     source_label: Option<String>,
+    is_liked: bool,
     view: &WeakEntity<MusicApp>,
     cx: &gpui::Context<V>,
 ) -> impl IntoElement {
     let remote_track = track.clone();
     let play_track = track.clone();
     let route_clone = route.clone();
+    let route_like = route.clone();
+    let track_like = track.clone();
+    let view_like = view.clone();
     let cover_url = track.cover_url.as_deref();
     let title = track.title.clone();
     let artists = track.artists.join("/");
@@ -555,6 +559,30 @@ fn online_search_row<V: 'static>(
                 .text_xs()
                 .text_color(TEXT_TERTIARY)
                 .child(duration),
+        )
+        .child(
+            div()
+                .w(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme::bg_hover()))
+                .child(themed_icon(
+                    icon!(heart),
+                    14.0,
+                    if is_liked {
+                        ACCENT_RED.into()
+                    } else {
+                        TEXT_TERTIARY.into()
+                    },
+                ))
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    let _ = view_like.update(cx, |app, cx| {
+                        app.toggle_online_track_liked(route_like.clone(), track_like.clone(), cx);
+                    });
+                }),
         )
         .child(
             div()
@@ -745,6 +773,7 @@ fn songs_view<V: 'static>(
                     remote_track,
                     route.clone(),
                     source_label,
+                    app.is_online_track_liked(&route, &remote_track.source),
                     view,
                     cx,
                 ));

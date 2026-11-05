@@ -318,6 +318,17 @@ fn render_songs_table(
                 .min_by_key(|(index, _)| index.abs_diff(preferred_index))
                 .map(|(index, _)| index)
         });
+    let liked_source_ids: std::collections::HashSet<String> = app
+        .config
+        .online_liked_sources
+        .iter()
+        .filter(|key| {
+            key.plugin_id == route.plugin_id
+                && key.provider_id == route.provider_id
+                && key.account_id == route.account_id
+        })
+        .map(|key| key.source_id.clone())
+        .collect();
     let buffering_index = selected_queue.and_then(|queue| {
         queue.tracks.get(queue.current_index).and_then(|selected| {
             (app.online_track_buffering.as_deref() == Some(selected.source.source_id.as_str()))
@@ -358,7 +369,8 @@ fn render_songs_table(
                         .max_w(px(260.0))
                         .child("专辑"),
                 )
-                .child(div().w(px(60.0)).text_right().child("时长")),
+                .child(div().w(px(60.0)).text_right().child("时长"))
+                .child(div().w(px(34.0)).child("喜欢")),
         )
         .child(
             div().flex_1().min_h(px(0.0)).overflow_hidden().child(
@@ -371,6 +383,7 @@ fn render_songs_table(
                             if let Some(track) = tracks.get(idx) {
                                 let is_buffering = buffering_index == Some(idx);
                                 let is_current = current_index == Some(idx);
+                                let is_liked = liked_source_ids.contains(&track.source.source_id);
 
                                 items.push(render_online_song_row(
                                     idx + 1,
@@ -382,6 +395,7 @@ fn render_songs_table(
                                     &view_clone,
                                     is_buffering,
                                     is_current,
+                                    is_liked,
                                     cx,
                                 ));
                             }
@@ -406,6 +420,7 @@ fn render_online_song_row(
     view: &WeakEntity<MusicApp>,
     is_buffering: bool,
     is_current: bool,
+    is_liked: bool,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let track_route = route.clone();
@@ -429,6 +444,9 @@ fn render_online_song_row(
     let menu_route = route.clone();
     let menu_track = track.clone();
     let menu_title = track.title.clone();
+    let heart_route = route.clone();
+    let heart_track = track.clone();
+    let heart_view = view.clone();
 
     let row_bg = if is_current {
         theme::accent_red_muted()
@@ -548,6 +566,35 @@ fn render_online_song_row(
                 .text_xs()
                 .text_color(TEXT_TERTIARY)
                 .child(duration),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("online-playlist-liked-{index}")))
+                .w(px(34.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme::bg_hover()))
+                .child(themed_icon(
+                    icon!(heart),
+                    15.0,
+                    if is_liked {
+                        ACCENT_RED.into()
+                    } else {
+                        TEXT_TERTIARY.into()
+                    },
+                ))
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    let _ = heart_view.update(cx, |app, cx| {
+                        app.toggle_online_track_liked(
+                            heart_route.clone(),
+                            heart_track.clone(),
+                            cx,
+                        );
+                    });
+                }),
         )
         .on_mouse_down(
             gpui::MouseButton::Left,
