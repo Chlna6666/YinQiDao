@@ -44,7 +44,10 @@ pub(super) fn replace_verified(
     route: &PluginRoute,
     tracks: Vec<RemoteTrack>,
 ) -> (usize, usize) {
-    let incoming: HashSet<_> = tracks.iter().map(|track| track.source.source_id.clone()).collect();
+    let incoming: HashSet<_> = tracks
+        .iter()
+        .map(|track| track.source.source_id.clone())
+        .collect();
     let previous: HashSet<_> = config
         .online_liked_sources
         .iter()
@@ -53,10 +56,17 @@ pub(super) fn replace_verified(
         .collect();
     let added = incoming.difference(&previous).count();
     let removed = previous.difference(&incoming).count();
-    config.online_liked_sources.retain(|item| !matches_key(route, item));
-    config.online_liked_tracks.retain(|item| !matches(route, &item.route));
+    config
+        .online_liked_sources
+        .retain(|item| !matches_key(route, item));
+    config
+        .online_liked_tracks
+        .retain(|item| !matches(route, &item.route));
     for track in tracks {
-        if config.online_liked_sources.insert(key(route, &track.source.source_id)) {
+        if config
+            .online_liked_sources
+            .insert(key(route, &track.source.source_id))
+        {
             config.online_liked_tracks.push(SavedOnlineLikedTrack {
                 route: route.clone(),
                 track,
@@ -73,8 +83,7 @@ pub(super) async fn read_complete(route: &PluginRoute) -> anyhow::Result<Vec<Rem
     const PAGE: u16 = 200;
     const MAX_PAGES: usize = 26;
 
-    let frontend = crate::plugin::frontend::global()
-        .ok_or_else(|| anyhow!("插件前端未初始化"))?;
+    let frontend = crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端未初始化"))?;
     for attempt in 0..2 {
         let mut all = Vec::new();
         let mut seen = HashSet::new();
@@ -84,7 +93,10 @@ pub(super) async fn read_complete(route: &PluginRoute) -> anyhow::Result<Vec<Rem
             let offset = page as u32 * u32::from(PAGE);
             let batch = frontend.liked_tracks_for_route(route, offset, PAGE).await?;
             if page == 0 {
-                head = batch.iter().map(|track| track.source.source_id.clone()).collect();
+                head = batch
+                    .iter()
+                    .map(|track| track.source.source_id.clone())
+                    .collect();
             }
             let len = batch.len();
             for track in batch {
@@ -102,7 +114,10 @@ pub(super) async fn read_complete(route: &PluginRoute) -> anyhow::Result<Vec<Rem
             bail!("平台收藏数量超过完整读取上限，未改动缓存");
         }
         let second_head = frontend.liked_tracks_for_route(route, 0, PAGE).await?;
-        let ids: Vec<_> = second_head.iter().map(|track| track.source.source_id.clone()).collect();
+        let ids: Vec<_> = second_head
+            .iter()
+            .map(|track| track.source.source_id.clone())
+            .collect();
         if head == ids {
             return Ok(all);
         }
@@ -145,7 +160,8 @@ mod tests {
         c.local_liked_paths.insert("music/song.flac".into());
         replace_verified(&mut c, &route("alice"), vec![song("a"), song("b")]);
         replace_verified(&mut c, &route("bob"), vec![song("z")]);
-        let (added, removed) = replace_verified(&mut c, &route("alice"), vec![song("b"), song("c")]);
+        let (added, removed) =
+            replace_verified(&mut c, &route("alice"), vec![song("b"), song("c")]);
         assert_eq!((added, removed), (1, 1));
         assert!(!c.online_liked_sources.contains(&key(&route("alice"), "a")));
         assert!(c.online_liked_sources.contains(&key(&route("alice"), "c")));
@@ -158,7 +174,10 @@ mod tests {
     fn repeated_provider_read_is_idempotent() {
         let mut c = AppConfig::default();
         replace_verified(&mut c, &route("alice"), vec![song("a")]);
-        assert_eq!(replace_verified(&mut c, &route("alice"), vec![song("a")]), (0, 0));
+        assert_eq!(
+            replace_verified(&mut c, &route("alice"), vec![song("a")]),
+            (0, 0)
+        );
         assert_eq!(c.online_liked_tracks.len(), 1);
     }
 }

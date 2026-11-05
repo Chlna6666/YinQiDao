@@ -318,17 +318,22 @@ fn render_songs_table(
                 .min_by_key(|(index, _)| index.abs_diff(preferred_index))
                 .map(|(index, _)| index)
         });
-    let liked_source_ids: std::collections::HashSet<String> = app
-        .config
-        .online_liked_sources
-        .iter()
-        .filter(|key| {
-            key.plugin_id == route.plugin_id
-                && key.provider_id == route.provider_id
-                && key.account_id == route.account_id
-        })
-        .map(|key| key.source_id.clone())
-        .collect();
+    // Cached IDs are not authoritative until the provider has returned a
+    // complete snapshot for the current session/account.
+    let liked_source_ids: std::collections::HashSet<String> = if app.platform_likes_ready(route) {
+        app.config
+            .online_liked_sources
+            .iter()
+            .filter(|key| {
+                key.plugin_id == route.plugin_id
+                    && key.provider_id == route.provider_id
+                    && key.account_id == route.account_id
+            })
+            .map(|key| key.source_id.clone())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let buffering_index = selected_queue.and_then(|queue| {
         queue.tracks.get(queue.current_index).and_then(|selected| {
             (app.online_track_buffering.as_deref() == Some(selected.source.source_id.as_str()))

@@ -309,7 +309,10 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 )
             })
         {
-            bail!("provider {} 的只读红心声明缺少 LikeSync/MediaCollections 能力", provider.id);
+            bail!(
+                "provider {} 的只读红心声明缺少 LikeSync/MediaCollections 能力",
+                provider.id
+            );
         }
         if provider.quality_profiles.len() > 16 {
             bail!("provider {} 超过 16 个音质选项", provider.id);

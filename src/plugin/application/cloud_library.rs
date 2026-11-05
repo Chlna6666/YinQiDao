@@ -99,9 +99,11 @@ impl PluginServiceFrontend {
         limit: u16,
     ) -> Result<Vec<RemoteTrack>> {
         validate_page_limit(limit)?;
-        let catalog = super::host::catalog::global()
-            .ok_or_else(|| anyhow!("插件 Host 目录尚未初始化"))?;
-        let readable = catalog.read().map_err(|_| anyhow!("插件目录锁已损坏"))?
+        let catalog =
+            super::host::catalog::global().ok_or_else(|| anyhow!("插件 Host 目录尚未初始化"))?;
+        let readable = catalog
+            .read()
+            .map_err(|_| anyhow!("插件目录锁已损坏"))?
             .catalog()
             .provider(&route.plugin_id, &route.provider_id)
             .is_some_and(|provider| provider.liked_tracks_readable);
@@ -110,13 +112,14 @@ impl PluginServiceFrontend {
         }
 
         let can_read = |service| {
-            self.plan(service, &RoutingPolicy::default()).is_ok_and(|plan| {
-                plan.eligible_routes.iter().any(|candidate| {
-                    candidate.plugin_id == route.plugin_id
-                        && candidate.provider_id == route.provider_id
-                        && candidate.account_id == route.account_id
+            self.plan(service, &RoutingPolicy::default())
+                .is_ok_and(|plan| {
+                    plan.eligible_routes.iter().any(|candidate| {
+                        candidate.plugin_id == route.plugin_id
+                            && candidate.provider_id == route.provider_id
+                            && candidate.account_id == route.account_id
+                    })
                 })
-            })
         };
         if !can_read(ServiceKind::LikeSync) && !can_read(ServiceKind::MediaCollections) {
             bail!("当前账号不能读取平台红心（未登录、停用或权限不足）");

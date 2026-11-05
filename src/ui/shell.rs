@@ -1512,8 +1512,7 @@ impl MusicApp {
             }
             // Invalidate the retained playlist surface even when its track
             // count is unchanged: red hearts must update after Host reads.
-            self.online_playlist_view_revision =
-                self.online_playlist_view_revision.wrapping_add(1);
+            self.online_playlist_view_revision = self.online_playlist_view_revision.wrapping_add(1);
         }
         tracing::debug!(
             plugin = %route.plugin_id,
@@ -1566,15 +1565,20 @@ impl MusicApp {
         .detach();
     }
 
+    pub(crate) fn platform_likes_ready(
+        &self,
+        route: &crate::plugin::abi::PluginRoute,
+    ) -> bool {
+        self.online_like_loaded_accounts
+            .contains(&super::favorite_sync::scope(route))
+    }
+
     pub(crate) fn is_online_track_liked(
         &self,
         route: &crate::plugin::abi::PluginRoute,
         source: &crate::plugin::abi::SourceTrackRef,
     ) -> bool {
-        if !self
-            .online_like_loaded_accounts
-            .contains(&super::favorite_sync::scope(route))
-        {
+        if !self.platform_likes_ready(route) {
             return false;
         }
         self.config
@@ -1603,7 +1607,11 @@ impl MusicApp {
             .online_playback_meta
             .get(&track.id)
             .map(|(route, _, _)| route)
-            .or_else(|| self.online_remote_tracks.get(&track.id).map(|(route, _)| route));
+            .or_else(|| {
+                self.online_remote_tracks
+                    .get(&track.id)
+                    .map(|(route, _)| route)
+            });
         if let Some(route) = route
             && !self
                 .online_like_loaded_accounts
@@ -1688,9 +1696,11 @@ impl MusicApp {
         let wanted = !self.is_online_track_liked(&route, &source);
         self.status = "正在向原音乐平台更新红心并核实结果".into();
         let task = Tokio::spawn_result(cx, async move {
-            let frontend = crate::plugin::frontend::global()
-                .ok_or_else(|| anyhow!("插件前端未初始化"))?;
-            let accepted = frontend.set_liked_for_route(&route, &source, wanted).await?;
+            let frontend =
+                crate::plugin::frontend::global().ok_or_else(|| anyhow!("插件前端未初始化"))?;
+            let accepted = frontend
+                .set_liked_for_route(&route, &source, wanted)
+                .await?;
             if !accepted {
                 return Ok((route, wanted, false, None));
             }
@@ -4177,8 +4187,7 @@ impl MusicApp {
                 Ok((route, tracks)) => {
                     app.accept_verified_online_likes(&route, tracks, cx);
                     if let Some(view) = app.active_online_playlist.as_ref().filter(|view| {
-                        same_online_route(&view.route, &route)
-                            && view.title == "我喜欢的音乐"
+                        same_online_route(&view.route, &route) && view.title == "我喜欢的音乐"
                     }) {
                         app.focus_online_playlist_on_current(view);
                     }
