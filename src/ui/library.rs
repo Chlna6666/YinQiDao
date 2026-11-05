@@ -37,6 +37,7 @@ pub(super) fn render<V: 'static>(
 
     let content = match app.library_tab {
         LibraryTab::Songs => songs_view(app, &query, view, cx).into_any_element(),
+        LibraryTab::Favorites => liked_view(app, &query, view).into_any_element(),
         LibraryTab::Recent => recent_view(app, &query, view).into_any_element(),
         LibraryTab::Albums => {
             albums_view(&app.tracks, &query, app, view, viewport_width).into_any_element()
@@ -50,6 +51,7 @@ pub(super) fn render<V: 'static>(
     let virtualized_tab = matches!(
         app.library_tab,
         LibraryTab::Songs
+            | LibraryTab::Favorites
             | LibraryTab::Recent
             | LibraryTab::Playlists
             | LibraryTab::Albums
@@ -59,6 +61,7 @@ pub(super) fn render<V: 'static>(
         div()
             .id(match app.library_tab {
                 LibraryTab::Songs => "library-songs-container",
+                LibraryTab::Favorites => "library-favorites-container",
                 LibraryTab::Recent => "library-recent-container",
                 LibraryTab::Albums => "library-albums-container",
                 LibraryTab::Artists => "library-artists-container",
@@ -101,6 +104,7 @@ pub(super) fn render<V: 'static>(
 fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
     let tab_title = match app.library_tab {
         LibraryTab::Songs => "本地音乐",
+        LibraryTab::Favorites => "我的收藏",
         LibraryTab::Recent => "最近播放",
         LibraryTab::Albums => "专辑资料库",
         LibraryTab::Artists => "艺术家",
@@ -109,6 +113,11 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
 
     let subtitle = match app.library_tab {
         LibraryTab::Recent => format!("收录最近播放的 {} 首曲目", app.recent_plays.len()),
+        LibraryTab::Favorites => format!(
+            "播放器独立收藏 · {} 首本地曲目 · {} 首在线曲目",
+            app.config.local_liked_paths.len() + app.config.local_liked_tracks.len(),
+            app.config.online_liked_sources.len(),
+        ),
         _ => format!("共收录 {} 首曲目 · 状态: {}", app.tracks.len(), app.status),
     };
 
@@ -325,6 +334,14 @@ fn header(app: &MusicApp, view: &WeakEntity<MusicApp>) -> impl IntoElement {
                     }),
                 ))
                 .child(segmented_tab_item(
+                    "我的收藏",
+                    icon!(heart),
+                    app.library_tab == LibraryTab::Favorites,
+                    app_listener(view, |this, _, _, cx| {
+                        this.show_library_tab(LibraryTab::Favorites, cx)
+                    }),
+                ))
+                .child(segmented_tab_item(
                     "最近播放",
                     icon!(history),
                     app.library_tab == LibraryTab::Recent,
@@ -425,7 +442,7 @@ fn track_table_header(title_label: &'static str, artist_label: &'static str) -> 
         .child(div().flex_1().min_w(px(110.0)).max_w(px(240.0)).child(artist_label))
         .child(div().flex_1().min_w(px(110.0)).max_w(px(260.0)).child("专辑"))
         .child(div().w(px(64.0)).child("时长"))
-        .child(div().w(px(48.0)).child("操作"))
+        .child(div().w(px(80.0)).child("操作"))
 }
 
 fn song_table_header() -> impl IntoElement {
@@ -675,6 +692,7 @@ fn songs_view<V: 'static>(
                         track,
                         is_current,
                         artwork,
+                        app.track_liked_state(track),
                         view,
                     ));
                 }
@@ -818,6 +836,7 @@ fn songs_view<V: 'static>(
                                             track,
                                             is_current,
                                             artwork,
+                                            this.track_liked_state(track),
                                             &view_clone,
                                         ));
                                     }
@@ -830,6 +849,301 @@ fn songs_view<V: 'static>(
                 .track_scroll(app.library_scroll_handle.clone())
                 .size_full(),
             ),
+        )
+        .into_any_element()
+}
+
+/// A player-owned collection. Local favorites use stable file paths; online
+/// favorites retain metadata + exact provider/account identity across restarts.
+/// The list does not require any provider to be online just to render.
+#[derive(Clone)]
+enum LikedEntry {
+    Local(Track),
+    Online(crate::settings::SavedOnlineLikedTrack),
+}
+
+fn liked_view(
+    app: &MusicApp,
+    query: &str,
+    view: &WeakEntity<MusicApp>,
+) -> impl IntoElement {
+    let mut liked = Vec::new();
+    for track in &app.tracks {
+        if app.is_local_track_liked(track) && track_matches_query(track, query) {
+            liked.push(LikedEntry::Local(track.clone()));
+        }
+    }
+    for entry in &app.config.online_liked_tracks {
+        if !app.is_online_track_liked(&entry.route, &entry.track.source) {
+            continue;
+        }
+        let remote = &entry.track;
+        let matches = query.is_empty()
+            || remote.title.to_lowercase().contains(query)
+            || remote.album.to_lowercase().contains(query)
+            || remote
+                .artists
+                .iter()
+                .any(|artist| artist.to_lowercase().contains(query));
+        if matches {
+            liked.push(LikedEntry::Online(entry.clone()));
+        }
+    }
+
+    if liked.is_empty() {
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(48.0))
+                    .rounded_full()
+                    .bg(theme::BG_CANVAS)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(themed_icon(icon!(heart), 22.0, TEXT_TERTIARY.into())),
+            )
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(TEXT_PRIMARY)
+                    .child("还没有收藏歌曲"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(TEXT_TERTIARY)
+                    .child("在播放栏或曲目列表点击红心，歌曲将保存在播放器收藏中"),
+            )
+            .into_any_element();
+    }
+
+    let entries = Arc::new(liked);
+    let count = entries.len();
+    let view_clone = view.clone();
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .overflow_hidden()
+        .child(song_table_header())
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .child(
+                    uniform_list(
+                        "library-liked-table-vlist",
+                        count,
+                        move |range: Range<usize>, _window, cx| {
+                            let entries = Arc::clone(&entries);
+                            view_clone
+                                .update(cx, |app, _cx| {
+                                    let mut rows = Vec::with_capacity(range.end - range.start);
+                                    for index in range {
+                                        match entries.get(index) {
+                                            Some(LikedEntry::Local(track)) => {
+                                                let active = app.snapshot.current_track.as_ref()
+                                                    .is_some_and(|current| current.id == track.id);
+                                                rows.push(song_table_row(
+                                                    index + 1,
+                                                    track,
+                                                    active,
+                                                    app.artwork_display_bytes(track.id),
+                                                    app.track_liked_state(track),
+                                                    &view_clone,
+                                                ));
+                                            }
+                                            Some(LikedEntry::Online(entry)) => {
+                                                let active = app
+                                                    .current_online_source_for_route(&entry.route)
+                                                    .is_some_and(|source| source == &entry.track.source);
+                                                rows.push(liked_online_row(
+                                                    index + 1,
+                                                    entry,
+                                                    active,
+                                                    &view_clone,
+                                                ));
+                                            }
+                                            None => {
+                                                rows.push(div().h(px(52.0)).into_any_element());
+                                            }
+                                        }
+                                    }
+                                    rows
+                                })
+                                .unwrap_or_default()
+                        },
+                    )
+                    .size_full(),
+                ),
+        )
+        .into_any_element()
+}
+
+fn liked_online_row(
+    index: usize,
+    entry: &crate::settings::SavedOnlineLikedTrack,
+    active: bool,
+    view: &WeakEntity<MusicApp>,
+) -> gpui::AnyElement {
+    let source = entry.track.clone();
+    let route = entry.route.clone();
+    let view_play = view.clone();
+    let view_like = view.clone();
+    let route_play = route.clone();
+    let route_like = route.clone();
+    let source_play = source.clone();
+    let source_like = source.clone();
+
+    div()
+        .id(SharedString::from(format!(
+            "liked-online-{}-{}-{}",
+            route.plugin_id, route.account_id, source.source.source_id,
+        )))
+        .w_full()
+        .h(px(52.0))
+        .flex()
+        .items_center()
+        .px_4()
+        .py_1p5()
+        .rounded_lg()
+        .cursor_pointer()
+        .bg(if active {
+            theme::accent_red_muted()
+        } else {
+            theme::transparent()
+        })
+        .hover(|style| style.bg(theme::bg_hover()))
+        .transition(press_transition())
+        .child(
+            div()
+                .w(px(36.0))
+                .text_xs()
+                .text_color(if active { ACCENT_RED } else { TEXT_TERTIARY })
+                .child(if active {
+                    String::from("▶")
+                } else {
+                    format!("{index:02}")
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .size(px(38.0))
+                        .rounded_md()
+                        .bg(theme::BG_CANVAS)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(themed_icon(icon!(cloud), 15.0, ACCENT_RED.into())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_sm()
+                        .font_weight(if active {
+                            gpui::FontWeight::BOLD
+                        } else {
+                            gpui::FontWeight::MEDIUM
+                        })
+                        .text_color(if active { ACCENT_RED } else { TEXT_PRIMARY })
+                        .truncate()
+                        .child(source.title.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(110.0))
+                .max_w(px(240.0))
+                .text_sm()
+                .text_color(TEXT_SECONDARY)
+                .truncate()
+                .child(source.artists.join("/")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(110.0))
+                .max_w(px(260.0))
+                .text_sm()
+                .text_color(TEXT_SECONDARY)
+                .truncate()
+                .child(source.album.clone()),
+        )
+        .child(
+            div()
+                .w(px(64.0))
+                .text_xs()
+                .text_color(TEXT_TERTIARY)
+                .child(format_time(source.duration_ms.unwrap_or(0))),
+        )
+        .child(
+            div()
+                .w(px(80.0))
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("liked-online-heart-{index}")))
+                        .size(px(26.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme::bg_hover()))
+                        .child(themed_icon(icon!(heart), 14.0, ACCENT_RED.into()))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = view_like.update(cx, |app, cx| {
+                                app.toggle_online_track_liked(
+                                    route_like.clone(),
+                                    source_like.clone(),
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("liked-online-play-{index}")))
+                        .size(px(26.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme::bg_hover()))
+                        .child(themed_icon(icon!(play), 14.0, TEXT_SECONDARY.into()))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = view_play.update(cx, |app, cx| {
+                                app.play_online_remote_track(
+                                    route_play.clone(),
+                                    source_play.clone(),
+                                    cx,
+                                );
+                            });
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -951,6 +1265,7 @@ fn recent_view(
                                             track,
                                             is_current,
                                             artwork,
+                                            this.track_liked_state(track),
                                             &view_clone,
                                         ));
                                     }
@@ -971,6 +1286,7 @@ fn song_table_row(
     track: &Track,
     is_current: bool,
     artwork: Option<std::sync::Arc<[u8]>>,
+    liked: Option<bool>,
     view: &gpui::WeakEntity<MusicApp>,
 ) -> gpui::AnyElement {
     let track_id = track.id;
@@ -1003,6 +1319,7 @@ fn song_table_row(
     };
 
     let view_add = view.clone();
+    let view_like = view.clone();
     let view_play = view.clone();
     let view_context = view.clone();
     let track_context = track.clone();
@@ -1089,7 +1406,39 @@ fn song_table_row(
                 .child(format_time(track.duration_ms)),
         )
         .child(
-            div().w(px(48.0)).flex().items_center().child(
+            div().w(px(80.0)).flex().items_center().gap_1()
+            .children(liked.map(|is_liked| {
+                div()
+                    .id(SharedString::from(format!("lib-like-{track_id}")))
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(if is_liked {
+                        theme::accent_red_muted()
+                    } else {
+                        theme::transparent()
+                    })
+                    .hover(|style| style.bg(theme::bg_hover()))
+                    .child(themed_icon(
+                        icon!(heart),
+                        14.0,
+                        if is_liked {
+                            ACCENT_RED.into()
+                        } else {
+                            TEXT_TERTIARY.into()
+                        },
+                    ))
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = view_like.update(cx, |this, cx| {
+                            this.toggle_track_liked_by_id(track_id, cx);
+                        });
+                    })
+            }))
+            .child(
                 div()
                     .id(SharedString::from(format!("lib-add-q-{track_id}")))
                     .size(px(26.0))

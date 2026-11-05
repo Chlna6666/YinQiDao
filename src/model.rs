@@ -306,6 +306,7 @@ impl Default for TrackTransitionSettings {
 pub enum LibraryTab {
     #[default]
     Songs,
+    Favorites,
     Recent,
     Albums,
     Artists,

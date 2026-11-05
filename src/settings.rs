@@ -154,6 +154,14 @@ pub struct SavedLikedSource {
     pub source_id: String,
 }
 
+/// Metadata required to reopen player-owned online favorites after restart.
+/// Does not persist authorization headers, signed URLs or stream credentials.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SavedOnlineLikedTrack {
+    pub route: crate::plugin::abi::PluginRoute,
+    pub track: crate::plugin::abi::RemoteTrack,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SavedOnlineQualityPreference {
     pub plugin_id: String,
@@ -196,6 +204,12 @@ pub struct AppConfig {
     pub online_quality_preferences: Vec<SavedOnlineQualityPreference>,
     #[serde(default)]
     pub online_liked_sources: HashSet<SavedLikedSource>,
+    #[serde(default)]
+    pub online_liked_tracks: Vec<SavedOnlineLikedTrack>,
+    /// Filesystem identity survives a local library database ID reassignment.
+    #[serde(default)]
+    pub local_liked_paths: HashSet<PathBuf>,
+    /// Legacy IDs are readable; newly toggled favorites also persist by path.
     #[serde(default)]
     pub local_liked_tracks: HashSet<TrackId>,
     #[serde(default)]
@@ -313,6 +327,8 @@ impl AppConfigV1 {
             online_playlist_queue: None,
             online_quality_preferences: Vec::new(),
             online_liked_sources: HashSet::new(),
+            online_liked_tracks: Vec::new(),
+            local_liked_paths: HashSet::new(),
             local_liked_tracks: HashSet::new(),
             current_track: self.current_track,
             last_played_track: None,
@@ -384,6 +400,8 @@ impl Default for AppConfig {
             online_playlist_queue: None,
             online_quality_preferences: Vec::new(),
             online_liked_sources: HashSet::new(),
+            online_liked_tracks: Vec::new(),
+            local_liked_paths: HashSet::new(),
             local_liked_tracks: HashSet::new(),
             current_track: None,
             last_played_track: None,
@@ -556,6 +574,59 @@ mod tests {
         assert_eq!(restored.desktop_lyrics.active_color, 0x3a_8d_ff);
         assert_eq!(restored.desktop_lyrics.font_size, 34.0);
         assert!(restored.lyrics_shortcuts.enabled);
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn player_owned_favorites_and_quality_survive_restart() {
+        let path = temp_path("favorites");
+        let store = ConfigStore::from_path(path.clone());
+        let mut config = AppConfig::default();
+        let local_path = PathBuf::from("C:/Music/test-album/song.flac");
+        config.local_liked_paths.insert(local_path.clone());
+        config.online_quality_preferences.push(SavedOnlineQualityPreference {
+            plugin_id: "plugin.qq".into(),
+            provider_id: "qqmusic".into(),
+            account_id: "account".into(),
+            quality: "lossless".into(),
+        });
+        let route = crate::plugin::abi::PluginRoute {
+            plugin_id: "plugin.qq".into(),
+            provider_id: "qqmusic".into(),
+            account_id: "account".into(),
+            priority: 0,
+            is_default: true,
+        };
+        let remote = crate::plugin::abi::RemoteTrack {
+            source: crate::plugin::abi::SourceTrackRef {
+                provider_id: "qqmusic".into(),
+                source_id: "005TrackMid".into(),
+            },
+            title: "远程歌曲".into(),
+            artists: vec!["歌手".into()],
+            ..Default::default()
+        };
+        config.online_liked_sources.insert(SavedLikedSource {
+            plugin_id: route.plugin_id.clone(),
+            provider_id: route.provider_id.clone(),
+            account_id: route.account_id.clone(),
+            source_id: remote.source.source_id.clone(),
+        });
+        config.online_liked_tracks.push(SavedOnlineLikedTrack {
+            route,
+            track: remote,
+        });
+        store.save(&config).expect("save");
+
+        let restored = store.load().expect("load");
+        assert!(restored.local_liked_paths.contains(&local_path));
+        assert_eq!(restored.online_liked_sources.len(), 1);
+        assert_eq!(restored.online_liked_tracks.len(), 1);
+        assert_eq!(restored.online_liked_tracks[0].track.title, "远程歌曲");
+        assert_eq!(
+            restored.online_quality_preferences[0].quality,
+            "lossless"
+        );
         fs::remove_file(path).expect("cleanup");
     }
 

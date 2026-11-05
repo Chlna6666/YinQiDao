@@ -1479,97 +1479,201 @@ impl MusicApp {
         cx.notify();
     }
 
-    pub(crate) fn current_liked_state(&self) -> Option<bool> {
-        let id = self.snapshot.current_track.as_ref()?.id;
-        if let Some((route, source, _)) = self.online_playback_meta.get(&id) {
-            return Some(self.config.online_liked_sources.contains(&
-                crate::settings::SavedLikedSource {
-                    plugin_id: route.plugin_id.clone(),
-                    provider_id: route.provider_id.clone(),
-                    account_id: route.account_id.clone(),
-                    source_id: source.source_id.clone(),
-                },
-            ));
-        }
-        Some(self.config.local_liked_tracks.contains(&id))
+    /// Player-owned local favorites: filesystem path, not ephemeral database ID.
+    pub(crate) fn is_local_track_liked(&self, track: &Track) -> bool {
+        self.config.local_liked_paths.contains(&track.path)
+            || self.config.local_liked_tracks.contains(&track.id)
     }
 
-    pub(crate) fn toggle_current_liked(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.snapshot.current_track.as_ref().map(|track| track.id) else {
-            return;
-        };
-        if let Some((route, source, _)) = self.online_playback_meta.get(&id).cloned() {
-            let key = crate::settings::SavedLikedSource {
+    pub(crate) fn is_online_track_liked(
+        &self,
+        route: &crate::plugin::abi::PluginRoute,
+        source: &crate::plugin::abi::SourceTrackRef,
+    ) -> bool {
+        self.config
+            .online_liked_sources
+            .contains(&crate::settings::SavedLikedSource {
                 plugin_id: route.plugin_id.clone(),
                 provider_id: route.provider_id.clone(),
                 account_id: route.account_id.clone(),
                 source_id: source.source_id.clone(),
-            };
-            if self.liked_sync_pending.contains(&key) {
-                return;
-            }
-            let was_liked = self.config.online_liked_sources.contains(&key);
-            let liked = !was_liked;
-            if liked {
-                self.config.online_liked_sources.insert(key.clone());
-            } else {
-                self.config.online_liked_sources.remove(&key);
-            }
-            self.save_config();
-            if crate::plugin::management::supports_like_sync(
-                &route.plugin_id,
-                &route.provider_id,
-            ) {
-                self.liked_sync_pending.insert(key.clone());
-                self.status = "正在同步喜欢状态到音乐平台".into();
-                let task = Tokio::spawn_result(cx, async move {
-                    let frontend = crate::plugin::frontend::global()
-                        .ok_or_else(|| anyhow::anyhow!("插件前端未初始化"))?;
-                    frontend.set_liked_for_route(&route, &source, liked).await
-                });
-                cx.spawn(async move |this, cx| {
-                    let outcome = task.await;
-                    let _ = this.update(cx, |app, cx| {
-                        app.liked_sync_pending.remove(&key);
-                        if !matches!(outcome, Ok(true)) {
-                            if liked {
-                                app.config.online_liked_sources.remove(&key);
-                            } else {
-                                app.config.online_liked_sources.insert(key);
-                            }
-                            app.save_config();
-                            app.status = match outcome {
-                                Ok(false) => "音乐平台拒绝了喜欢状态写入，已恢复原状态".into(),
-                                Err(error) => format!("喜欢同步失败：{error:#}"),
-                                Ok(true) => unreachable!(),
-                            };
-                        } else {
-                            app.status = if liked {
-                                "已同步喜欢到音乐平台".into()
-                            } else {
-                                "已同步取消喜欢到音乐平台".into()
-                            };
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            } else {
-                self.status = if liked {
-                    "已加入本地喜欢；该平台尚不支持账号红心同步".into()
-                } else {
-                    "已从本地喜欢移除；该平台尚不支持账号红心同步".into()
-                };
-            }
-        } else if !self.config.local_liked_tracks.insert(id) {
-            self.config.local_liked_tracks.remove(&id);
-            self.status = "已从本地喜欢移除".into();
-            self.save_config();
-        } else {
-            self.status = "已加入本地喜欢".into();
-            self.save_config();
+            })
+    }
+
+    pub(crate) fn track_liked_state(&self, track: &Track) -> Option<bool> {
+        if let Some((route, source, _)) = self.online_playback_meta.get(&track.id) {
+            return Some(self.is_online_track_liked(route, source));
         }
+        if let Some((route, remote)) = self.online_remote_tracks.get(&track.id) {
+            return Some(self.is_online_track_liked(route, &remote.source));
+        }
+        (track.id >= 0).then(|| self.is_local_track_liked(track))
+    }
+
+    pub(crate) fn current_liked_state(&self) -> Option<bool> {
+        self.snapshot
+            .current_track
+            .as_ref()
+            .and_then(|track| self.track_liked_state(track))
+    }
+
+    pub(crate) fn toggle_local_track_liked(
+        &mut self,
+        track_id: TrackId,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .track_index_by_id
+            .get(&track_id)
+            .and_then(|index| self.tracks.get(*index))
+            .or_else(|| {
+                self.snapshot.current_track.as_ref().filter(|track| track.id == track_id)
+            })
+            .map(|track| track.path.clone());
+        let Some(path) = path.filter(|_| track_id >= 0) else {
+            return;
+        };
+        let liked = self.config.local_liked_paths.contains(&path)
+            || self.config.local_liked_tracks.contains(&track_id);
+        if liked {
+            self.config.local_liked_paths.remove(&path);
+            self.config.local_liked_tracks.remove(&track_id);
+            self.status = "已从本地收藏移除".into();
+        } else {
+            self.config.local_liked_paths.insert(path);
+            self.config.local_liked_tracks.remove(&track_id);
+            self.status = "已加入本地收藏".into();
+        }
+        self.bump_ui_content_revision();
+        self.save_config();
         cx.notify();
+    }
+
+    /// A single write path for the current song, online playlist rows, and
+    /// saved favorites. The local favorite is authoritative; remote LikeSync
+    /// is an optional account capability, never a prerequisite to saving.
+    pub(crate) fn toggle_online_track_liked(
+        &mut self,
+        route: crate::plugin::abi::PluginRoute,
+        remote: crate::plugin::abi::RemoteTrack,
+        cx: &mut Context<Self>,
+    ) {
+        if route.provider_id != remote.source.provider_id {
+            self.status = "收藏失败：歌曲来源与音乐插件不一致".into();
+            cx.notify();
+            return;
+        }
+        let source = remote.source.clone();
+        let key = crate::settings::SavedLikedSource {
+            plugin_id: route.plugin_id.clone(),
+            provider_id: route.provider_id.clone(),
+            account_id: route.account_id.clone(),
+            source_id: source.source_id.clone(),
+        };
+        if self.liked_sync_pending.contains(&key) {
+            self.status = "该曲目的平台收藏同步尚未完成".into();
+            cx.notify();
+            return;
+        }
+        let liked = !self.config.online_liked_sources.contains(&key);
+        if liked {
+            self.config.online_liked_sources.insert(key.clone());
+            // Update metadata rather than retaining multiple snapshots for
+            // one account/source (including after plugin reauthentication).
+            self.config.online_liked_tracks.retain(|entry| {
+                !same_online_route(&entry.route, &route)
+                    || entry.track.source != source
+            });
+            self.config
+                .online_liked_tracks
+                .push(crate::settings::SavedOnlineLikedTrack {
+                    route: route.clone(),
+                    track: remote,
+                });
+        } else {
+            self.config.online_liked_sources.remove(&key);
+            self.config.online_liked_tracks.retain(|entry| {
+                !same_online_route(&entry.route, &route)
+                    || entry.track.source != source
+            });
+        }
+        self.bump_ui_content_revision();
+        self.save_config();
+
+        if !crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id) {
+            self.status = if liked {
+                "已保存到播放器收藏；该平台尚未实现远端红心写入".into()
+            } else {
+                "已从播放器收藏移除（该平台不支持远端红心写入）".into()
+            };
+            cx.notify();
+            return;
+        }
+
+        self.liked_sync_pending.insert(key.clone());
+        self.status = "已保存播放器收藏，正在同步平台红心".into();
+        let task = Tokio::spawn_result(cx, async move {
+            let frontend = crate::plugin::frontend::global()
+                .ok_or_else(|| anyhow::anyhow!("插件前端未初始化"))?;
+            frontend.set_liked_for_route(&route, &source, liked).await
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |app, cx| {
+                app.liked_sync_pending.remove(&key);
+                // A failed remote mutation must NOT discard player-owned
+                // favorites. The user can still browse them while offline.
+                app.status = match outcome {
+                    Ok(true) if liked => "播放器与平台均已收藏歌曲".into(),
+                    Ok(true) => "已取消播放器与平台收藏".into(),
+                    Ok(false) => "已保存本地收藏，但平台拒绝同步（可检查账号）".into(),
+                    Err(error) => format!("本地收藏已保留；平台同步失败：{error:#}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_track_liked_by_id(
+        &mut self,
+        track_id: TrackId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((route, remote)) = self.online_remote_tracks.get(&track_id).cloned() {
+            self.toggle_online_track_liked(route, remote, cx);
+        } else if let Some((route, source, _)) =
+            self.online_playback_meta.get(&track_id).cloned()
+        {
+            if let Some(track) = self
+                .snapshot
+                .current_track
+                .as_ref()
+                .filter(|track| track.id == track_id)
+            {
+                self.toggle_online_track_liked(
+                    route,
+                    crate::plugin::abi::RemoteTrack {
+                        source,
+                        title: track.title.clone(),
+                        artists: vec![track.artist.clone()],
+                        album: track.album.clone(),
+                        duration_ms: Some(track.duration_ms),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            }
+        } else {
+            self.toggle_local_track_liked(track_id, cx);
+        }
+    }
+
+    pub(crate) fn toggle_current_liked(&mut self, cx: &mut Context<Self>) {
+        if let Some(track_id) = self.snapshot.current_track.as_ref().map(|track| track.id) {
+            self.toggle_track_liked_by_id(track_id, cx);
+        }
     }
 
     pub(crate) fn current_online_source_for_route(
@@ -6398,7 +6502,7 @@ fn sidebar(
             .gap_1()
             .child(sidebar_section_header("我的"))
             .child(sidebar_item(
-                "我喜欢的音乐",
+                "平台喜欢的音乐",
                 icon!(heart),
                 app.page == AppPage::OnlinePlaylist
                     && app
@@ -6407,6 +6511,14 @@ fn sidebar(
                         .is_some_and(|p| p.title == "我喜欢的音乐"),
                 cx.listener(|this, _, _, cx| {
                     this.load_and_show_user_favorite_playlist(cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "播放器收藏",
+                icon!(heart_handshake),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Favorites,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Favorites, cx);
                 }),
             ))
             .child(sidebar_item(
@@ -6437,8 +6549,6 @@ fn sidebar(
                     this.load_and_show_cloud_library(cx);
                 }),
             ));
-        // 本地收藏功能尚未实现，「我的收藏」入口曾与「播放队列」指向同一视图，属错位导航，
-        // 暂时移除；待收藏数据模型落地后恢复独立入口。
 
         let lib_sec = div()
             .flex()
@@ -6485,6 +6595,14 @@ fn sidebar(
                 app.page == AppPage::Library && app.library_tab == LibraryTab::Songs,
                 cx.listener(|this, _, _, cx| {
                     this.show_library_tab(LibraryTab::Songs, cx);
+                }),
+            ))
+            .child(sidebar_item(
+                "播放器收藏",
+                icon!(heart_handshake),
+                app.page == AppPage::Library && app.library_tab == LibraryTab::Favorites,
+                cx.listener(|this, _, _, cx| {
+                    this.show_library_tab(LibraryTab::Favorites, cx);
                 }),
             ))
             .child(sidebar_item(
