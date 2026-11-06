@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
-//! QQ 音乐 Web 协议所需的轻量算法：g_tk 哈希、Base64 解码、设备 guid 派生。
-//!
-//! 第一版插件刻意不引入任何加解密依赖：搜索/播放/歌单/歌词等只读与常规写通道均为明文
-//! musicu.fcg / 老 fcgi；红心写要求的 zzc+ag-1 加密通道留待后续版本（届时以独立模块实现）。
+//! QQ 音乐 Web 协议辅助算法及独立的 ag-1 加密签名模块。
+
+pub(crate) mod ag1;
 
 /// DJB2/hash33 —— QQ 系接口通用字符串哈希（g_tk、ptqrtoken 均由此派生）。
 pub fn hash33(value: &str, mut seed: u32) -> u32 {

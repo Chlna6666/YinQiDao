@@ -1,0 +1,28 @@
+name: QQ crypto lockfile and rustfmt (temporary)
+on:
+  push:
+    paths:
+      - 'plugins/qqmusic/Cargo.toml'
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-wasip2
+      - name: Generate lockfile and formatted sources
+        run: |
+          cargo generate-lockfile --manifest-path plugins/qqmusic/Cargo.toml
+          cargo fmt --manifest-path plugins/qqmusic/Cargo.toml
+          echo 'QQ_LOCK_B64_BEGIN'
+          base64 -w0 plugins/qqmusic/Cargo.lock
+          echo
+          echo 'QQ_LOCK_B64_END'
+          for p in plugins/qqmusic/src/crypto.rs plugins/qqmusic/src/crypto/ag1.rs plugins/qqmusic/src/protocol.rs plugins/qqmusic/src/features.rs plugins/qqmusic/src/api.rs; do
+            echo "QQ_SOURCE_B64_BEGIN $p"
+            base64 -w0 "$p"
+            echo
+            echo "QQ_SOURCE_B64_END $p"
+          done

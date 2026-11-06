@@ -20,6 +20,7 @@ pub const USER_AGENT: &str =
 pub const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 const MUSICU_GATEWAY: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const AG1_GATEWAY: &str = "https://u6.y.qq.com/cgi-bin/musics.fcg";
 const YQQ_REFERER: &str = "https://y.qq.com/";
 
 pub type ProtocolResult<T> = Result<T, String>;
@@ -179,6 +180,85 @@ pub fn musicu(
         }
     }
     Ok(value)
+}
+
+/// Only use the signed and encrypted transport for a provider-owned write.
+/// Never fall back to the plaintext musicu endpoint after a failure.
+pub(crate) fn musics_ag1_write(
+    session: &Session,
+    account_id: &str,
+    request_key: &str,
+    module: &str,
+    method: &str,
+    param: Value,
+    now_ms: u64,
+) -> ProtocolResult<Value> {
+    if session.cookie.is_none() || session.uin != account_id {
+        return Err("QQ ag-1 写入需要匹配的已登录账号".into());
+    }
+    let mut envelope = Map::new();
+    envelope.insert("comm".into(), Value::Object(comm_block(session)));
+    let mut block = Map::new();
+    block.insert("module".into(), Value::from(module));
+    block.insert("method".into(), Value::from(method));
+    block.insert("param".into(), param);
+    envelope.insert(request_key.into(), Value::Object(block));
+    let payload = serde_json::to_vec(&Value::Object(envelope))
+        .map_err(|error| format!("序列化 QQ ag-1 写入失败: {error}"))?;
+    let sign = crypto::ag1::zzc_sign(&payload);
+    let body = crypto::ag1::encode_request(&payload)?;
+    let mut headers = base_headers(session);
+    headers.push(types::KeyValue {
+        key: "Content-Type".into(),
+        value: "application/json".into(),
+    });
+    let response = host::http_request(&host::HttpRequestData {
+        provider_id: PROVIDER_ID.into(),
+        account_id: Some(account_id.into()),
+        method: "POST".into(),
+        url: format!("{AG1_GATEWAY}?_={now_ms}&encoding=ag-1&sign={sign}"),
+        headers,
+        body,
+    })
+    .map_err(|error| format!("QQ ag-1 HTTP 调用失败: {error}"))?;
+    if response.body.len() > MAX_HTTP_BODY_BYTES {
+        return Err("QQ ag-1 响应超限".into());
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(format!("QQ ag-1 HTTP 状态异常: {}", response.status));
+    }
+    crypto::ag1::decode_response(&response.body)
+}
+
+/// Success requires the gateway, module and inner mutation code to be explicit
+/// zeros. Missing code, 80105 or a nonzero subcode must never appear as success.
+pub(crate) fn ag1_write_success(response: &Value, key: &str) -> bool {
+    let Some(block) = response.get(key) else { return false };
+    response.get("code").and_then(Value::as_i64) == Some(0)
+        && block.get("code").and_then(Value::as_i64) == Some(0)
+        && block.pointer("/data/retCode").and_then(Value::as_i64) == Some(0)
+        && block.get("subcode").and_then(Value::as_i64).is_none_or(|code| code == 0)
+        && block.pointer("/data/subcode").and_then(Value::as_i64).is_none_or(|code| code == 0)
+}
+
+#[cfg(test)]
+mod ag1_write_tests {
+    use super::*;
+
+    #[test]
+    fn nested_write_codes_are_required() {
+        let ok = serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0}}});
+        assert!(ag1_write_success(&ok, "like"));
+        for invalid in [
+            serde_json::json!({"code":0,"like":{"code":0,"data":{}}}),
+            serde_json::json!({"code":0,"like":{"code":80105,"data":{"retCode":0}}}),
+            serde_json::json!({"code":2000,"like":{"code":0,"data":{"retCode":0}}}),
+            serde_json::json!({"like":{"code":0,"data":{"retCode":0}}}),
+            serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0,"subcode":99}}}),
+        ] {
+            assert!(!ag1_write_success(&invalid, "like"));
+        }
+    }
 }
 
 /// 搜索专用信封：请求 key = module 名且不带顶层 comm（实测规则）。
