@@ -337,7 +337,10 @@ pub struct MusicApp {
     pub(crate) online_new_tracks: Vec<crate::plugin::abi::RemoteTrack>,
     pub(crate) online_route: Option<crate::plugin::abi::PluginRoute>,
     pub(crate) online_recommendations_loading: bool,
-    pub(crate) online_search_results: Vec<(crate::plugin::abi::PluginRoute, crate::plugin::abi::RemoteTrack)>,
+    pub(crate) online_search_results: Vec<(
+        crate::plugin::abi::PluginRoute,
+        crate::plugin::abi::RemoteTrack,
+    )>,
     pub(crate) online_search_loading: bool,
     pub(crate) online_search_route: Option<crate::plugin::abi::PluginRoute>,
     online_search_generation: u64,
@@ -1591,10 +1594,14 @@ impl MusicApp {
 
     pub(crate) fn track_liked_state(&self, track: &Track) -> Option<bool> {
         if let Some((route, source, _)) = self.online_playback_meta.get(&track.id) {
-            return self.platform_likes_ready(route).then(|| self.is_online_track_liked(route, source));
+            return self
+                .platform_likes_ready(route)
+                .then(|| self.is_online_track_liked(route, source));
         }
         if let Some((route, remote)) = self.online_remote_tracks.get(&track.id) {
-            return self.platform_likes_ready(route).then(|| self.is_online_track_liked(route, &remote.source));
+            return self
+                .platform_likes_ready(route)
+                .then(|| self.is_online_track_liked(route, &remote.source));
         }
         (track.id >= 0).then(|| self.is_local_track_liked(track))
     }
@@ -1629,12 +1636,15 @@ impl MusicApp {
             .online_playback_meta
             .get(&track.id)
             .map(|(route, _, _)| route)
-            .or_else(|| self.online_remote_tracks.get(&track.id).map(|(route, _)| route));
+            .or_else(|| {
+                self.online_remote_tracks
+                    .get(&track.id)
+                    .map(|(route, _)| route)
+            });
         match route {
-            Some(route) => crate::plugin::management::supports_like_sync(
-                &route.plugin_id,
-                &route.provider_id,
-            ),
+            Some(route) => {
+                crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id)
+            }
             None => track.id >= 0,
         }
     }
@@ -4213,25 +4223,25 @@ impl MusicApp {
                     return;
                 }
                 match result {
-                Ok((route, tracks)) => {
-                    app.accept_verified_online_likes(&route, tracks, cx);
-                    if let Some(view) = app.active_online_playlist.as_ref().filter(|view| {
-                        same_online_route(&view.route, &route) && view.title == "我喜欢的音乐"
-                    }) {
-                        app.focus_online_playlist_on_current(view);
+                    Ok((route, tracks)) => {
+                        app.accept_verified_online_likes(&route, tracks, cx);
+                        if let Some(view) = app.active_online_playlist.as_ref().filter(|view| {
+                            same_online_route(&view.route, &route) && view.title == "我喜欢的音乐"
+                        }) {
+                            app.focus_online_playlist_on_current(view);
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-                Err(error) => {
-                    if let Some(view) = app.active_online_playlist.as_mut()
-                        && same_online_route(&view.route, &failed_route)
-                        && view.title == "我喜欢的音乐"
-                    {
-                        view.loading = false;
+                    Err(error) => {
+                        if let Some(view) = app.active_online_playlist.as_mut()
+                            && same_online_route(&view.route, &failed_route)
+                            && view.title == "我喜欢的音乐"
+                        {
+                            view.loading = false;
+                        }
+                        app.status = format!("读取当前平台账号红心失败：{error:#}");
+                        cx.notify();
                     }
-                    app.status = format!("读取当前平台账号红心失败：{error:#}");
-                    cx.notify();
-                }
                 }
             });
         })
@@ -4984,7 +4994,10 @@ impl MusicApp {
                     .into_iter()
                     .flat_map(|batch| {
                         let route = batch.route;
-                        batch.tracks.into_iter().map(move |track| (route.clone(), track))
+                        batch
+                            .tracks
+                            .into_iter()
+                            .map(move |track| (route.clone(), track))
                     })
                     .collect::<Vec<_>>();
                 Ok(Some((route, tracks)))
@@ -5003,7 +5016,8 @@ impl MusicApp {
                             .filter_map(|(_, track)| track.cover_url.clone())
                             .collect();
                         crate::ui::image_cache::prefetch_urls(urls, cx);
-                        let like_routes: Vec<_> = tracks.iter().map(|(route, _)| route.clone()).collect();
+                        let like_routes: Vec<_> =
+                            tracks.iter().map(|(route, _)| route.clone()).collect();
                         app.online_search_route = Some(route);
                         app.online_search_results = tracks;
                         let mut seen = HashSet::new();

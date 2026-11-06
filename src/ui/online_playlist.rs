@@ -320,7 +320,8 @@ fn render_songs_table(
         });
     // Cached IDs are not authoritative until the provider has returned a
     // complete snapshot for the current session/account.
-    let can_like = crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id);
+    let can_like =
+        crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id);
     let liked_source_ids: std::collections::HashSet<String> = if app.platform_likes_ready(route) {
         app.config
             .online_liked_sources
@@ -594,12 +595,17 @@ fn render_online_song_row(
                     },
                 ))
                 .when(can_like, |element| {
-                    element.cursor_pointer()
+                    element
+                        .cursor_pointer()
                         .hover(|style| style.bg(theme::bg_hover()))
                         .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                             cx.stop_propagation();
                             let _ = heart_view.update(cx, |app, cx| {
-                                app.toggle_online_track_liked(heart_route.clone(), heart_track.clone(), cx);
+                                app.toggle_online_track_liked(
+                                    heart_route.clone(),
+                                    heart_track.clone(),
+                                    cx,
+                                );
                             });
                         })
                 }),

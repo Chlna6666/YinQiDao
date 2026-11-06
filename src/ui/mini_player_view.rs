@@ -373,15 +373,18 @@ impl Render for MiniPlayerView {
                                         },
                                     ))
                                     .when(self.key.can_toggle_liked, |element| {
-                                        element.cursor_pointer().on_mouse_down(gpui::MouseButton::Left, {
-                                            let parent = parent.clone();
-                                            move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                let _ = parent.update(cx, |app, app_cx| {
-                                                    app.toggle_current_liked(app_cx);
-                                                });
-                                            }
-                                        })
+                                        element.cursor_pointer().on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            {
+                                                let parent = parent.clone();
+                                                move |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                    let _ = parent.update(cx, |app, app_cx| {
+                                                        app.toggle_current_liked(app_cx);
+                                                    });
+                                                }
+                                            },
+                                        )
                                     }),
                             ),
                     )
