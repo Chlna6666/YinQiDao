@@ -13,14 +13,12 @@ const REQUEST_KEY: [u8; 16] = [
     189, 48, 95, 16, 208, 255, 116, 182, 239, 84, 218, 184, 53, 181, 225, 207,
 ];
 const RESPONSE_KEY: [u8; 21] = [
-    122, 63, 140, 29, 94, 155, 47, 10, 108, 77, 126, 139, 31, 58, 92, 157, 14, 43, 111,
-    74, 129,
+    122, 63, 140, 29, 94, 155, 47, 10, 108, 77, 126, 139, 31, 58, 92, 157, 14, 43, 111, 74, 129,
 ];
 const PART_1: [usize; 8] = [23, 14, 6, 36, 16, 40, 7, 19];
 const PART_2: [usize; 8] = [16, 1, 32, 12, 19, 27, 8, 5];
 const SCRAMBLE: [u8; 20] = [
-    89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161,
-    121, 179,
+    89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179,
 ];
 
 /// The signature MUST cover the exact bytes sent through AES-GCM.
@@ -31,8 +29,14 @@ pub(crate) fn zzc_sign(payload: &[u8]) -> String {
         use std::fmt::Write as _;
         write!(&mut upper, "{byte:02X}").expect("String write");
     }
-    let first: String = PART_1.iter().filter_map(|&i| upper.chars().nth(i)).collect();
-    let second: String = PART_2.iter().filter_map(|&i| upper.chars().nth(i)).collect();
+    let first: String = PART_1
+        .iter()
+        .filter_map(|&i| upper.chars().nth(i))
+        .collect();
+    let second: String = PART_2
+        .iter()
+        .filter_map(|&i| upper.chars().nth(i))
+        .collect();
     let mut scrambled = [0u8; 20];
     for (i, out) in scrambled.iter_mut().enumerate() {
         *out = SCRAMBLE[i] ^ hash[i];
@@ -45,8 +49,8 @@ pub(crate) fn zzc_sign(payload: &[u8]) -> String {
 }
 
 fn encrypt_with_nonce(payload: &[u8], nonce: [u8; 12]) -> Result<Vec<u8>, String> {
-    let cipher = Aes128Gcm::new_from_slice(&REQUEST_KEY)
-        .map_err(|_| "QQ ag-1 AES 初始化失败".to_owned())?;
+    let cipher =
+        Aes128Gcm::new_from_slice(&REQUEST_KEY).map_err(|_| "QQ ag-1 AES 初始化失败".to_owned())?;
     let encrypted = cipher
         .encrypt(Nonce::from_slice(&nonce), payload)
         .map_err(|_| "QQ ag-1 AES-GCM 加密失败".to_owned())?;
@@ -84,18 +88,30 @@ mod tests {
 
     #[test]
     fn zzc_upstream_vectors() {
-        assert_eq!(zzc_sign(b"123"), "zzcec1b555gzqzg7laztguyjl2bu20r6x1w50c55f60");
-        assert_eq!(zzc_sign(b"hello world"), "zzcfb3415bc4nfoxmd9uik71mkomtubjfjp141a1cbbcc");
-        assert_eq!(zzc_sign(b"jixun.uk"), "zzcf47b78apso27mjjbbzgbof0szikfkvyqc7fc3a2b5");
+        assert_eq!(
+            zzc_sign(b"123"),
+            "zzcec1b555gzqzg7laztguyjl2bu20r6x1w50c55f60"
+        );
+        assert_eq!(
+            zzc_sign(b"hello world"),
+            "zzcfb3415bc4nfoxmd9uik71mkomtubjfjp141a1cbbcc"
+        );
+        assert_eq!(
+            zzc_sign(b"jixun.uk"),
+            "zzcf47b78apso27mjjbbzgbof0szikfkvyqc7fc3a2b5"
+        );
     }
 
     #[test]
     fn aes_gcm_upstream_fixture() {
         let bytes = super::super::base64_decode(
-            "UVKyyaPxYeBs+e6kkEeQpwwnsRmO4NI5JTdJvqrvU3w3elv4W1kcb8G35S4="
-        ).unwrap();
+            "UVKyyaPxYeBs+e6kkEeQpwwnsRmO4NI5JTdJvqrvU3w3elv4W1kcb8G35S4=",
+        )
+        .unwrap();
         let cipher = Aes128Gcm::new_from_slice(&REQUEST_KEY).unwrap();
-        let decoded = cipher.decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..]).unwrap();
+        let decoded = cipher
+            .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
+            .unwrap();
         assert_eq!(decoded, b"{\"hello\":\"ag1!\"}");
         let nonce: [u8; 12] = bytes[..12].try_into().unwrap();
         assert_eq!(encrypt_with_nonce(&decoded, nonce).unwrap(), bytes);
@@ -104,8 +120,9 @@ mod tests {
     #[test]
     fn ag1_response_upstream_fixture() {
         let bytes = super::super::base64_decode(
-            "AR3vcjr+DTBcYVz/bBhmrSIJHD7gCEvTaS25FTtcfVKpa0g9/mtCC2i7WFnqezj9SWwKKxjteVw6+2gJEg=="
-        ).unwrap();
+            "AR3vcjr+DTBcYVz/bBhmrSIJHD7gCEvTaS25FTtcfVKpa0g9/mtCC2i7WFnqezj9SWwKKxjteVw6+2gJEg==",
+        )
+        .unwrap();
         assert_eq!(
             decode_response(&bytes).unwrap(),
             serde_json::json!({"code":0,"ts":0,"start_ts":100,"traceid":"ffffffffffffffff"})

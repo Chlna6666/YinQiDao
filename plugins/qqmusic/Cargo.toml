@@ -21,6 +21,7 @@ wit-bindgen = "0.62.0"
 aes-gcm = "0.10.3"
 sha1 = "0.10.6"
 getrandom = "0.4.3"
+# The 12-byte AG1 nonce is filled by WASI/OS CSPRNG, not app time or UUID.
 
 [lints.rust]
 unsafe_code = "warn"

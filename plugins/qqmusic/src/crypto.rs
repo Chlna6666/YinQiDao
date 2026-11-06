@@ -34,8 +34,16 @@ pub fn base64_encode(data: &[u8]) -> String {
         let fourth = chunk.get(2).copied().unwrap_or(0) & 0x3f;
         result.push(BASE64_ALPHABET[first as usize] as char);
         result.push(BASE64_ALPHABET[second as usize] as char);
-        result.push(if chunk.len() >= 2 { BASE64_ALPHABET[third as usize] as char } else { '=' });
-        result.push(if chunk.len() == 3 { BASE64_ALPHABET[fourth as usize] as char } else { '=' });
+        result.push(if chunk.len() >= 2 {
+            BASE64_ALPHABET[third as usize] as char
+        } else {
+            '='
+        });
+        result.push(if chunk.len() == 3 {
+            BASE64_ALPHABET[fourth as usize] as char
+        } else {
+            '='
+        });
     }
     result
 }
@@ -98,7 +106,13 @@ mod tests {
 
     #[test]
     fn base64_decode_round_trips_ascii_and_binary() {
-        for bytes in [&b""[..], &b"x"[..], &b"xy"[..], &b"xyz"[..], &b"\x89PNG\r\n\x1a\n"[..]] {
+        for bytes in [
+            &b""[..],
+            &b"x"[..],
+            &b"xy"[..],
+            &b"xyz"[..],
+            &b"\x89PNG\r\n\x1a\n"[..],
+        ] {
             assert_eq!(base64_decode(&base64_encode(bytes)).as_deref(), Some(bytes));
         }
         assert_eq!(

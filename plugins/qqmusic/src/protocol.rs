@@ -233,12 +233,20 @@ pub(crate) fn musics_ag1_write(
 /// Success requires the gateway, module and inner mutation code to be explicit
 /// zeros. Missing code, 80105 or a nonzero subcode must never appear as success.
 pub(crate) fn ag1_write_success(response: &Value, key: &str) -> bool {
-    let Some(block) = response.get(key) else { return false };
+    let Some(block) = response.get(key) else {
+        return false;
+    };
     response.get("code").and_then(Value::as_i64) == Some(0)
         && block.get("code").and_then(Value::as_i64) == Some(0)
         && block.pointer("/data/retCode").and_then(Value::as_i64) == Some(0)
-        && block.get("subcode").and_then(Value::as_i64).is_none_or(|code| code == 0)
-        && block.pointer("/data/subcode").and_then(Value::as_i64).is_none_or(|code| code == 0)
+        && block
+            .get("subcode")
+            .and_then(Value::as_i64)
+            .is_none_or(|code| code == 0)
+        && block
+            .pointer("/data/subcode")
+            .and_then(Value::as_i64)
+            .is_none_or(|code| code == 0)
 }
 
 #[cfg(test)]
