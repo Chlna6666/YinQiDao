@@ -320,6 +320,7 @@ fn render_songs_table(
         });
     // Cached IDs are not authoritative until the provider has returned a
     // complete snapshot for the current session/account.
+    let can_like = crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id);
     let liked_source_ids: std::collections::HashSet<String> = if app.platform_likes_ready(route) {
         app.config
             .online_liked_sources
@@ -401,6 +402,7 @@ fn render_songs_table(
                                     is_buffering,
                                     is_current,
                                     is_liked,
+                                    can_like,
                                     cx,
                                 ));
                             }
@@ -426,6 +428,7 @@ fn render_online_song_row(
     is_buffering: bool,
     is_current: bool,
     is_liked: bool,
+    can_like: bool,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let track_route = route.clone();
@@ -581,8 +584,6 @@ fn render_online_song_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
-                .hover(|style| style.bg(theme::bg_hover()))
                 .child(themed_icon(
                     icon!(heart),
                     15.0,
@@ -592,11 +593,15 @@ fn render_online_song_row(
                         TEXT_TERTIARY.into()
                     },
                 ))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = heart_view.update(cx, |app, cx| {
-                        app.toggle_online_track_liked(heart_route.clone(), heart_track.clone(), cx);
-                    });
+                .when(can_like, |element| {
+                    element.cursor_pointer()
+                        .hover(|style| style.bg(theme::bg_hover()))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = heart_view.update(cx, |app, cx| {
+                                app.toggle_online_track_liked(heart_route.clone(), heart_track.clone(), cx);
+                            });
+                        })
                 }),
         )
         .on_mouse_down(

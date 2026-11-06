@@ -467,6 +467,7 @@ fn online_search_row<V: 'static>(
     let route_like = route.clone();
     let track_like = track.clone();
     let view_like = view.clone();
+    let can_like = crate::plugin::management::supports_like_sync(&route.plugin_id, &route.provider_id);
     let cover_url = track.cover_url.as_deref();
     let title = track.title.clone();
     let artists = track.artists.join("/");
@@ -565,8 +566,6 @@ fn online_search_row<V: 'static>(
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
-                .hover(|style| style.bg(theme::bg_hover()))
                 .child(themed_icon(
                     icon!(heart),
                     14.0,
@@ -576,11 +575,15 @@ fn online_search_row<V: 'static>(
                         TEXT_TERTIARY.into()
                     },
                 ))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = view_like.update(cx, |app, cx| {
-                        app.toggle_online_track_liked(route_like.clone(), track_like.clone(), cx);
-                    });
+                .when(can_like, |element| {
+                    element.cursor_pointer()
+                        .hover(|style| style.bg(theme::bg_hover()))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = view_like.update(cx, |app, cx| {
+                                app.toggle_online_track_liked(route_like.clone(), track_like.clone(), cx);
+                            });
+                        })
                 }),
         )
         .child(
@@ -677,18 +680,6 @@ fn songs_view<V: 'static>(
     let matching_indices_for_rows = matching_indices.clone();
     let view_clone = view.clone();
 
-    let route = app
-        .online_search_route
-        .clone()
-        .or_else(|| app.online_route.clone())
-        .unwrap_or_else(|| PluginRoute {
-            plugin_id: "netease".to_string(),
-            provider_id: "netease-music".to_string(),
-            account_id: String::new(),
-            priority: 0,
-            is_default: true,
-        });
-
     if has_search {
         let mut search_view = div()
             .id("library-search-results")
@@ -765,14 +756,14 @@ fn songs_view<V: 'static>(
                     ),
             );
         } else {
-            for (idx, remote_track) in app.online_search_results.iter().enumerate() {
+            for (idx, (route, remote_track)) in app.online_search_results.iter().enumerate() {
                 let source_label = crate::ui::components::source_chip::provider_label_for(&provider_labels, &remote_track.source.provider_id);
                 online_list = online_list.child(online_search_row(
                     idx + 1,
                     remote_track,
                     route.clone(),
                     source_label,
-                    app.is_online_track_liked(&route, &remote_track.source),
+                    app.is_online_track_liked(route, &remote_track.source),
                     view,
                     cx,
                 ));

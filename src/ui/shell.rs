@@ -337,7 +337,7 @@ pub struct MusicApp {
     pub(crate) online_new_tracks: Vec<crate::plugin::abi::RemoteTrack>,
     pub(crate) online_route: Option<crate::plugin::abi::PluginRoute>,
     pub(crate) online_recommendations_loading: bool,
-    pub(crate) online_search_results: Vec<crate::plugin::abi::RemoteTrack>,
+    pub(crate) online_search_results: Vec<(crate::plugin::abi::PluginRoute, crate::plugin::abi::RemoteTrack)>,
     pub(crate) online_search_loading: bool,
     pub(crate) online_search_route: Option<crate::plugin::abi::PluginRoute>,
     online_search_generation: u64,
@@ -1151,6 +1151,7 @@ impl MusicApp {
         self.online_like_session_generation = self.online_like_session_generation.wrapping_add(1);
         self.online_like_loaded_accounts.clear();
         self.online_like_loading_accounts.clear();
+        self.liked_sync_pending.clear();
         self.has_online_plugins = has_plugins;
         self.online_authenticated = is_auth;
         // Previously authenticated media must not stay in the in-memory
@@ -1547,10 +1548,10 @@ impl MusicApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |app, cx| {
-                app.online_like_loading_accounts.remove(&scope);
                 if epoch != app.online_like_session_generation {
                     return;
                 }
+                app.online_like_loading_accounts.remove(&scope);
                 match result {
                     Ok((route, tracks)) => {
                         app.accept_verified_online_likes(&route, tracks, cx);
@@ -1590,10 +1591,10 @@ impl MusicApp {
 
     pub(crate) fn track_liked_state(&self, track: &Track) -> Option<bool> {
         if let Some((route, source, _)) = self.online_playback_meta.get(&track.id) {
-            return Some(self.is_online_track_liked(route, source));
+            return self.platform_likes_ready(route).then(|| self.is_online_track_liked(route, source));
         }
         if let Some((route, remote)) = self.online_remote_tracks.get(&track.id) {
-            return Some(self.is_online_track_liked(route, &remote.source));
+            return self.platform_likes_ready(route).then(|| self.is_online_track_liked(route, &remote.source));
         }
         (track.id >= 0).then(|| self.is_local_track_liked(track))
     }
@@ -1617,6 +1618,25 @@ impl MusicApp {
             return None;
         }
         self.track_liked_state(track)
+    }
+
+    /// A remote heart can only be changed by its owning provider's write capability.
+    pub(crate) fn can_toggle_current_liked(&self) -> bool {
+        let Some(track) = self.snapshot.current_track.as_ref() else {
+            return false;
+        };
+        let route = self
+            .online_playback_meta
+            .get(&track.id)
+            .map(|(route, _, _)| route)
+            .or_else(|| self.online_remote_tracks.get(&track.id).map(|(route, _)| route));
+        match route {
+            Some(route) => crate::plugin::management::supports_like_sync(
+                &route.plugin_id,
+                &route.provider_id,
+            ),
+            None => track.id >= 0,
+        }
     }
 
     pub(crate) fn toggle_local_track_liked(&mut self, track_id: TrackId, cx: &mut Context<Self>) {
@@ -1691,6 +1711,7 @@ impl MusicApp {
             return;
         }
         let wanted = !self.is_online_track_liked(&route, &source);
+        let epoch = self.online_like_session_generation;
         self.status = "正在向原音乐平台更新红心并核实结果".into();
         let task = Tokio::spawn_result(cx, async move {
             let frontend =
@@ -1714,6 +1735,9 @@ impl MusicApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |app, cx| {
+                if epoch != app.online_like_session_generation {
+                    return;
+                }
                 app.liked_sync_pending.remove(&key);
                 match result {
                     Ok((route, wanted, confirmed, Some(tracks))) => {
@@ -4173,6 +4197,8 @@ impl MusicApp {
 
         // Never guess that the first user playlist is a "liked songs"
         // collection: the host calls the provider's exact liked_tracks API.
+        let epoch = self.online_like_session_generation;
+        let request_generation = self.online_playlist_request_generation;
         let failed_route = route.clone();
         let task = Tokio::spawn_result(cx, async move {
             let tracks = super::favorite_sync::read_complete(&route).await?;
@@ -4180,7 +4206,13 @@ impl MusicApp {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |app, cx| match result {
+            let _ = this.update(cx, |app, cx| {
+                if epoch != app.online_like_session_generation
+                    || request_generation != app.online_playlist_request_generation
+                {
+                    return;
+                }
+                match result {
                 Ok((route, tracks)) => {
                     app.accept_verified_online_likes(&route, tracks, cx);
                     if let Some(view) = app.active_online_playlist.as_ref().filter(|view| {
@@ -4199,6 +4231,7 @@ impl MusicApp {
                     }
                     app.status = format!("读取当前平台账号红心失败：{error:#}");
                     cx.notify();
+                }
                 }
             });
         })
@@ -4944,10 +4977,15 @@ impl MusicApp {
                 let search_res = frontend
                     .search(&trimmed, 30, &crate::plugin::abi::RoutingPolicy::default())
                     .await?;
+                // Retain the exact provider/account route for every search hit.
+                // A merged result must never use the first batch's route for all songs.
                 let tracks = search_res
                     .batches
                     .into_iter()
-                    .flat_map(|batch| batch.tracks)
+                    .flat_map(|batch| {
+                        let route = batch.route;
+                        batch.tracks.into_iter().map(move |track| (route.clone(), track))
+                    })
                     .collect::<Vec<_>>();
                 Ok(Some((route, tracks)))
             });
@@ -4962,11 +5000,18 @@ impl MusicApp {
                     Ok(Some((route, tracks))) => {
                         let urls = tracks
                             .iter()
-                            .filter_map(|track| track.cover_url.clone())
+                            .filter_map(|(_, track)| track.cover_url.clone())
                             .collect();
                         crate::ui::image_cache::prefetch_urls(urls, cx);
+                        let like_routes: Vec<_> = tracks.iter().map(|(route, _)| route.clone()).collect();
                         app.online_search_route = Some(route);
                         app.online_search_results = tracks;
+                        let mut seen = HashSet::new();
+                        for route in like_routes {
+                            if seen.insert(super::favorite_sync::scope(&route)) {
+                                app.refresh_online_likes_for_route(route, false, cx);
+                            }
+                        }
                     }
                     _ => {
                         app.online_search_route = None;

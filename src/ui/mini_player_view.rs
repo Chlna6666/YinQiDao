@@ -53,6 +53,7 @@ struct MiniPlayerRenderKey {
     desktop_lyrics_visible: bool,
     queue_active: bool,
     liked: bool,
+    can_toggle_liked: bool,
     slider_volume_bits: u32,
     icon_volume_bits: u32,
 }
@@ -119,6 +120,7 @@ pub(super) fn view(
                     desktop_lyrics_visible: false,
                     queue_active: false,
                     liked: false,
+                    can_toggle_liked: false,
                     slider_volume_bits: 1.0_f32.to_bits(),
                     icon_volume_bits: 1.0_f32.to_bits(),
                 },
@@ -165,6 +167,7 @@ pub(super) fn view(
         desktop_lyrics_visible: app.config.desktop_lyrics.visible,
         queue_active: app.queue_drawer_open,
         liked: app.current_liked_state().unwrap_or(false),
+        can_toggle_liked: app.can_toggle_current_liked(),
         slider_volume_bits: slider_volume.to_bits(),
         icon_volume_bits: icon_volume.to_bits(),
     };
@@ -352,7 +355,6 @@ impl Render for MiniPlayerView {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .cursor_pointer()
                                     .bg(if self.key.liked {
                                         theme::accent_red_muted()
                                     } else {
@@ -370,14 +372,16 @@ impl Render for MiniPlayerView {
                                             theme::TEXT_TERTIARY.into()
                                         },
                                     ))
-                                    .on_mouse_down(gpui::MouseButton::Left, {
-                                        let parent = parent.clone();
-                                        move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            let _ = parent.update(cx, |app, app_cx| {
-                                                app.toggle_current_liked(app_cx);
-                                            });
-                                        }
+                                    .when(self.key.can_toggle_liked, |element| {
+                                        element.cursor_pointer().on_mouse_down(gpui::MouseButton::Left, {
+                                            let parent = parent.clone();
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                let _ = parent.update(cx, |app, app_cx| {
+                                                    app.toggle_current_liked(app_cx);
+                                                });
+                                            }
+                                        })
                                     }),
                             ),
                     )
