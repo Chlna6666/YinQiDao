@@ -37,6 +37,7 @@ capabilities = [
   "streaming",
   "playlists",
   "media_collections",
+  "like_sync",
   "recommendations",
   "user_profile",
 ]

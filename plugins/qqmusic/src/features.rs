@@ -2,9 +2,10 @@
 
 //! 能力级特性分发：推荐流、播放上报。
 
-use crate::api::{PROVIDER_ID, require_stored_account};
-use crate::bindings::yinqidao::music_plugin::types;
-use crate::music;
+use crate::api::{PROVIDER_ID, require_stored_account, session_for, song_numeric_id};
+use crate::bindings::yinqidao::music_plugin::{host, types};
+use crate::{music, protocol};
+use serde_json::json;
 
 use super::api::ApiResult;
 
@@ -40,15 +41,35 @@ pub fn recommendations(
         .collect())
 }
 
+/// Change only this source account's liked songs, never a local-file favorite.
+/// The official favorite directory is dirId=201 (not an ordinary user playlist).
 pub fn set_liked(
     provider_id: &str,
-    _account_id: &str,
-    _track: &types::SourceTrackRef,
-    _liked: bool,
+    account_id: &str,
+    track: &types::SourceTrackRef,
+    liked: bool,
 ) -> ApiResult<bool> {
-    // 红心写入依赖 zzc 签名 + ag-1 加密通道（明文 AddSonglist 必定 80105），
-    // 能力清单未声明 LikeSync，宿主 UI 会隐藏对应入口。
-    Err(unsupported(provider_id, "like_sync"))
+    ensure_provider(provider_id)?;
+    if track.provider_id != PROVIDER_ID {
+        return Err("QQ音乐收藏来源不属于该平台账号".into());
+    }
+    if track.source_id.is_empty() || track.source_id.len() > 128 || track.source_id.contains('\0') {
+        return Err("QQ音乐收藏歌曲 MID 非法".into());
+    }
+    let _ = require_stored_account(account_id)?;
+    let now_ms = host::now_ms();
+    let session = session_for(Some(account_id), now_ms)?;
+    let song_id = song_numeric_id(&session, &track.source_id)?;
+    let response = protocol::musics_ag1_write(
+        &session,
+        account_id,
+        "like",
+        "music.musicasset.PlaylistDetailWrite",
+        if liked { "AddSonglist" } else { "DelSonglist" },
+        json!({ "dirId": 201, "v_songInfo": [{ "songId": song_id, "songType": 0 }] }),
+        now_ms,
+    )?;
+    Ok(protocol::ag1_write_success(&response, "like"))
 }
 
 pub fn report_playback(

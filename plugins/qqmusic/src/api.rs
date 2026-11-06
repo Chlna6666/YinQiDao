@@ -73,6 +73,7 @@ fn provider_capabilities() -> Vec<types::Capability> {
         types::Capability::Streaming,
         types::Capability::Playlists,
         types::Capability::MediaCollections,
+        types::Capability::LikeSync,
         types::Capability::Recommendations,
         types::Capability::UserProfile,
     ]
@@ -381,7 +382,7 @@ pub fn resolve_track(
 }
 
 /// 数字歌曲 ID（歌单写接口要求 songId 而非 MID）。
-fn song_numeric_id(session: &Session, mid: &str) -> ApiResult<u64> {
+pub(crate) fn song_numeric_id(session: &Session, mid: &str) -> ApiResult<u64> {
     let mut param = Map::new();
     param.insert("song_mid".into(), Value::from(mid));
     let object = protocol::musicu(
