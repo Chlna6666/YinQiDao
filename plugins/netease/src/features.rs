@@ -290,9 +290,23 @@ fn numeric_source_id(source_id: &str) -> Result<u64, String> {
 }
 
 fn api_code_success(json: &Value) -> bool {
+    // A missing or non-numeric code is NOT proof that a remote mutation succeeded.
     json.get("code")
         .and_then(Value::as_i64)
-        .is_none_or(|code| (200..300).contains(&code))
+        .is_some_and(|code| (200..300).contains(&code))
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+
+    #[test]
+    fn like_write_requires_explicit_provider_success() {
+        assert!(api_code_success(&json!({ "code": 200 })));
+        assert!(!api_code_success(&json!({ "code": 401 })));
+        assert!(!api_code_success(&json!({ "code": "200" })));
+        assert!(!api_code_success(&json!({})));
+    }
 }
 
 fn force_https(url: String) -> String {
