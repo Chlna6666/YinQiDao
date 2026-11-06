@@ -249,26 +249,6 @@ pub(crate) fn ag1_write_success(response: &Value, key: &str) -> bool {
             .is_none_or(|code| code == 0)
 }
 
-#[cfg(test)]
-mod ag1_write_tests {
-    use super::*;
-
-    #[test]
-    fn nested_write_codes_are_required() {
-        let ok = serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0}}});
-        assert!(ag1_write_success(&ok, "like"));
-        for invalid in [
-            serde_json::json!({"code":0,"like":{"code":0,"data":{}}}),
-            serde_json::json!({"code":0,"like":{"code":80105,"data":{"retCode":0}}}),
-            serde_json::json!({"code":2000,"like":{"code":0,"data":{"retCode":0}}}),
-            serde_json::json!({"like":{"code":0,"data":{"retCode":0}}}),
-            serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0,"subcode":99}}}),
-        ] {
-            assert!(!ag1_write_success(&invalid, "like"));
-        }
-    }
-}
-
 /// 搜索专用信封：请求 key = module 名且不带顶层 comm（实测规则）。
 pub fn musicu_search_raw(
     session: &Session,
@@ -349,4 +329,24 @@ pub fn nested_write_success(module_block: &Value) -> bool {
         .or_else(|| module_block.pointer("/data/retcode"))
         .and_then(Value::as_i64);
     outer_ok && ret.is_none_or(|code| code == 0)
+}
+
+#[cfg(test)]
+mod ag1_write_tests {
+    use super::*;
+
+    #[test]
+    fn nested_write_codes_are_required() {
+        let ok = serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0}}});
+        assert!(ag1_write_success(&ok, "like"));
+        for invalid in [
+            serde_json::json!({"code":0,"like":{"code":0,"data":{}}}),
+            serde_json::json!({"code":0,"like":{"code":80105,"data":{"retCode":0}}}),
+            serde_json::json!({"code":2000,"like":{"code":0,"data":{"retCode":0}}}),
+            serde_json::json!({"like":{"code":0,"data":{"retCode":0}}}),
+            serde_json::json!({"code":0,"like":{"code":0,"data":{"retCode":0,"subcode":99}}}),
+        ] {
+            assert!(!ag1_write_success(&invalid, "like"));
+        }
+    }
 }
