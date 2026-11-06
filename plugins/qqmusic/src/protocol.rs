@@ -212,6 +212,12 @@ pub(crate) fn musics_ag1_write(
         key: "Content-Type".into(),
         value: "application/json".into(),
     });
+    // The Host consumes this control header without forwarding it. Do not
+    // follow redirects with a signed body or a provider account cookie.
+    headers.push(types::KeyValue {
+        key: "x-yinqidao-redirect-mode".into(),
+        value: "manual".into(),
+    });
     let response = host::http_request(&host::HttpRequestData {
         provider_id: PROVIDER_ID.into(),
         account_id: Some(account_id.into()),
